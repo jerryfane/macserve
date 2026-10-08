@@ -287,7 +287,10 @@ active attempts are joined. Correlations are durable and capped at 128 per attem
 
 Initial comment intake starts 24 hours before startup with two minutes of overlap, never at repository creation.
 One page of at most 100 comments is processed per poll; page position and scan-start watermark survive restart.
-The watermark advances only after a successful complete scan, and failed relevant admission retains its page.
+The watermark advances after the complete scan; transactional admission/storage errors retain their page.
+An individual comment's PR lookup failure is logged with repository/comment/PR identifiers and skipped,
+so later comments and pages still progress. No failed lookup authorizes work. This also applies to transient
+lookup failures: overlap may revisit them, but there is no guaranteed retry queue for skipped comments.
 Existing cursors are not reset after long downtime. Requests older than the initial window are not enrolled.
 GitHub offset pagination is not a snapshot: historical edits/deletions during a prolonged scan can shift offsets;
 the overlap mitigates recent churn but does not guarantee replay under adversarial historical mutation.

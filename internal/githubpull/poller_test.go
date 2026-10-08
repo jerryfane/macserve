@@ -7,10 +7,12 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -52,6 +54,7 @@ type fakeGitHub struct {
 	checkOps                   int
 	commentPages               []int
 	commentFailPage            int
+	issuePullStatus            int
 }
 
 func (f *fakeGitHub) checkJSON(check githubapi.Check) any {
@@ -100,6 +103,8 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		encode(f.pullJSON())
+	case r.URL.Path == repoPath+"/pulls/8":
+		w.WriteHeader(f.issuePullStatus)
 	case r.URL.Path == repoPath+"/issues/comments":
 		f.commentSince = r.URL.Query().Get("since")
 		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
@@ -716,11 +721,16 @@ func TestHTTPFailedRelevantAdmissionRetainsCommentPage(t *testing.T) {
 	f.finish(t, model.Failed, json.RawMessage(`{}`))
 	f.advance(time.Minute)
 	f.add(f.comment(1, "ensure"), f.comment(2, "ensure"))
-	f.remote.mu.Lock()
-	f.remote.pullFailures, f.remote.pullStatus = 1, http.StatusServiceUnavailable
-	f.remote.mu.Unlock()
-	if err := f.p.Poll(context.Background()); err == nil {
-		t.Fatal("failed relevant admission was hidden")
+	db, err := sql.Open("sqlite", f.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err = db.Exec(`CREATE TRIGGER fail_comment_admission BEFORE INSERT ON github_requests BEGIN SELECT RAISE(ABORT, 'injected admission storage failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.p.Poll(context.Background()); err == nil || !strings.Contains(err.Error(), "injected admission storage failure") {
+		t.Fatalf("failed durable admission was hidden: %v", err)
 	}
 	cursor, err := f.s.GitHubCursor(context.Background(), 123)
 	if err != nil || cursor.CommentsPage != 1 || !cursor.CommentsSince.Equal(f.options.Now().Add(-time.Minute)) {
@@ -731,9 +741,71 @@ func TestHTTPFailedRelevantAdmissionRetainsCommentPage(t *testing.T) {
 		t.Fatalf("failed page skipped ahead to later requests: %+v %v", requests, err)
 	}
 	f.reopen(t)
+	if _, err = db.Exec(`DROP TRIGGER fail_comment_admission`); err != nil {
+		t.Fatal(err)
+	}
 	f.poll(t)
 	requests, err = f.s.GitHubRequests(context.Background(), f.run(t).JobID)
 	if err != nil || len(requests) != 2 || requests[0].CommentID != 1 || requests[1].CommentID != 2 {
 		t.Fatalf("restart lost failed relevant request: %+v %v", requests, err)
+	}
+}
+
+func TestHTTPCommentLookupFailureSkipsAndRecordsWithoutPinningPages(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusServiceUnavailable} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			f := newFixture(t)
+			var recorded bytes.Buffer
+			previousOutput := log.Writer()
+			log.SetOutput(&recorded)
+			defer log.SetOutput(previousOutput)
+			f.remote.issuePullStatus = status
+			bad := f.comment(1, "rerun")
+			bad.PullRequest = 8 // Authorized bot command on an ordinary issue.
+			f.add(bad, f.comment(2, "ensure"))
+			for id := int64(3); id <= 100; id++ {
+				ignored := f.comment(id, "ensure")
+				ignored.AuthorID = 999
+				f.add(ignored)
+			}
+			f.add(f.comment(101, "ensure"))
+			start := f.options.Now()
+			err := f.p.Poll(context.Background())
+			var remote *githubapi.Error
+			if !errors.As(err, &remote) || remote.Status != status {
+				t.Fatalf("lookup failure lost actual remote error: %v", err)
+			}
+			if got := recorded.String(); !strings.Contains(got, "repository="+testRepo) || !strings.Contains(got, "comment=1 pull=8") || !strings.Contains(got, remote.Error()) {
+				t.Fatalf("skipped lookup failure was not recorded: %q", got)
+			}
+			first := f.run(t)
+			requests, err := f.s.GitHubRequests(context.Background(), first.JobID)
+			if err != nil || len(requests) != 1 || requests[0].CommentID != 2 {
+				t.Fatalf("failed lookup admitted work or stopped later comment: %+v %v", requests, err)
+			}
+			cursor, err := f.s.GitHubCursor(context.Background(), 123)
+			if err != nil || cursor.CommentsPage != 2 || !cursor.CommentsSince.Equal(start.Add(-24*time.Hour)) {
+				t.Fatalf("lookup failure pinned page or moved watermark early: %+v %v", cursor, err)
+			}
+			f.reopen(t)
+			f.poll(t)
+			requests, err = f.s.GitHubRequests(context.Background(), first.JobID)
+			if err != nil || len(requests) != 2 || requests[0].CommentID != 2 || requests[1].CommentID != 101 {
+				t.Fatalf("restart lost next page or admitted failed lookup: %+v %v", requests, err)
+			}
+			cursor, err = f.s.GitHubCursor(context.Background(), 123)
+			if err != nil || cursor.CommentsPage != 0 || !cursor.CommentsSince.Equal(start) {
+				t.Fatalf("completed scan did not advance watermark: %+v %v", cursor, err)
+			}
+			if run := f.run(t); run.JobID != first.JobID || run.AttemptID != first.AttemptID {
+				t.Fatalf("skipped rerun changed execution: before=%+v after=%+v", first, run)
+			}
+			f.remote.mu.Lock()
+			pages := append([]int(nil), f.remote.commentPages...)
+			f.remote.mu.Unlock()
+			if len(pages) != 2 || pages[0] != 1 || pages[1] != 2 {
+				t.Fatalf("restart replayed skipped page: %v", pages)
+			}
+		})
 	}
 }

@@ -201,7 +201,7 @@ func (c *Client) Pull(ctx context.Context, repo string, number int) (PullRequest
 }
 
 // CommentsPage returns at most 100 comments and a forward-only continuation.
-// Callers commit the page only after admitting every relevant request.
+// Callers checkpoint complete pages after admitting or explicitly skipping requests.
 func (c *Client) CommentsPage(ctx context.Context, repo string, since time.Time, page int) ([]Comment, int, error) {
 	ctx, cancel := context.WithTimeout(ctx, operationTimeout)
 	defer cancel()

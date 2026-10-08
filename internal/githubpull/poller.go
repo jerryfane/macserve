@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"regexp"
 	"slices"
 	"strconv"
@@ -65,6 +66,12 @@ var requestPattern = regexp.MustCompile(`^/mac-evidence sha=([0-9a-f]{40}) profi
 var shaPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 var profilePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 var ErrIneligible = errors.New("GitHub head is superseded or no longer eligible")
+
+// commentLookupError is remote lookup failure, never durable admission failure.
+type commentLookupError struct{ err error }
+
+func (e *commentLookupError) Error() string { return e.err.Error() }
+func (e *commentLookupError) Unwrap() error { return e.err }
 
 func ParseRequest(body string) (Request, error) {
 	m := requestPattern.FindStringSubmatch(body)
@@ -354,6 +361,14 @@ func (p *Poller) pollRepository(ctx context.Context, policy Policy) error {
 	})
 	for _, comment := range comments {
 		if err = p.acceptComment(ctx, policy, comment, now); err != nil {
+			var lookup *commentLookupError
+			if errors.As(err, &lookup) {
+				// Skip even transient lookup failures: one bad issue/PR must not
+				// pin intake. The normal overlap may revisit it; no retry is owed.
+				log.Printf("GitHub comment skipped: repository=%s comment=%d pull=%d lookup: %v", policy.Repository, comment.ID, comment.PullRequest, lookup)
+				failures = append(failures, err)
+				continue
+			}
 			if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrCorrelationLimit) || errors.Is(err, store.ErrRerunLimit) || errors.Is(err, ErrIneligible) {
 				continue
 			}
@@ -390,7 +405,7 @@ func (p *Poller) acceptComment(ctx context.Context, policy Policy, comment githu
 	}
 	pull, err := p.options.Client.Pull(ctx, policy.Repository, comment.PullRequest)
 	if err != nil {
-		return err
+		return &commentLookupError{err: err}
 	}
 	if !eligible(policy, pull) || pull.Number != comment.PullRequest || pull.HeadSHA != request.SHA {
 		return ErrIneligible
