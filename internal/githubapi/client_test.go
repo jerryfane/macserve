@@ -315,9 +315,13 @@ func TestCommentsAndChecksRealWireAndWrites(t *testing.T) {
 		}
 	})
 	origin = s.URL
-	comments, err := c.Comments(context.Background(), testRepo, testTime)
-	if err != nil || len(comments) != 2 {
-		t.Fatalf("comments = %+v %v", comments, err)
+	comments, next, err := c.CommentsPage(context.Background(), testRepo, testTime, 1)
+	if err != nil || len(comments) != 1 || next != 2 {
+		t.Fatalf("comments = %+v next=%d %v", comments, next, err)
+	}
+	second, next, err := c.CommentsPage(context.Background(), testRepo, testTime, next)
+	if err != nil || len(second) != 1 || second[0].ID != 102 || next != 0 {
+		t.Fatalf("second comments = %+v next=%d %v", second, next, err)
 	}
 	if got := comments[0]; got.ID != 101 || got.AuthorID != 45 || got.AppID != 67 || got.PullRequest != 7 || !got.CreatedAt.Equal(testTime) || !got.UpdatedAt.Equal(testTime) || got.Body != "first" {
 		t.Fatalf("comment decode = %+v", got)
@@ -474,7 +478,7 @@ func TestCommentsRejectForeignOrMalformedIssueURLs(t *testing.T) {
 				writeJSON(t, w, []any{comment})
 			})
 			origin = s.URL
-			if comments, err := c.Comments(context.Background(), testRepo, time.Time{}); err == nil || comments != nil {
+			if comments, _, err := c.CommentsPage(context.Background(), testRepo, testTime, 1); err == nil || comments != nil {
 				t.Fatalf("accepted URL %s: %+v %v", suffix, comments, err)
 			}
 		})
@@ -566,7 +570,7 @@ func TestForeignCommentOriginAndIdentityAreRejected(t *testing.T) {
 				comment["issue_url"] = issueURL
 				writeJSON(t, w, []any{comment})
 			})
-			if comments, err := c.Comments(context.Background(), testRepo, time.Time{}); err == nil || comments != nil {
+			if comments, _, err := c.CommentsPage(context.Background(), testRepo, testTime, 1); err == nil || comments != nil {
 				t.Fatalf("accepted foreign comment: %+v %v", comments, err)
 			}
 		})
@@ -579,6 +583,20 @@ func TestCheckListRejectsMissingEnvelopeAndExcessiveCount(t *testing.T) {
 			c, _ := tokenClient(t, func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, body) })
 			if checks, err := c.Checks(context.Background(), testRepo, testSHA); err == nil || checks != nil {
 				t.Fatalf("accepted invalid check listing: %+v %v", checks, err)
+			}
+		})
+	}
+}
+
+func TestCommentPagesRejectNonForwardContinuations(t *testing.T) {
+	for _, link := range []string{`<?page=1>; rel="next"`, `<?page=0>; rel="next"`, `<?page=3>; rel="next"`, `<?page=invalid>; rel="next"`, `</repos/example-org/other/issues/comments?page=2>; rel="next"`, `<https://foreign.invalid/comments?page=2>; rel="next"`} {
+		t.Run(link, func(t *testing.T) {
+			c, _ := tokenClient(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Link", link)
+				writeJSON(t, w, []any{})
+			})
+			if comments, _, err := c.CommentsPage(context.Background(), testRepo, testTime, 1); err == nil || comments != nil {
+				t.Fatalf("unsafe continuation accepted: %+v %v", comments, err)
 			}
 		})
 	}

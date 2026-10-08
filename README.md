@@ -231,10 +231,13 @@ it is not a success verdict. Verification must also require successful state and
 Container failures cannot count as executed tests. Build receipts explicitly say tests were not run.
 Submodules and Git LFS are unsupported and rejected, not silently omitted.
 
-Canonical receipt bytes remain unchanged through SQLite, HTTP and GitHub. Envelopes over 32 KiB compact to
-signed core evidence plus a full-manifest SHA-256, size and authenticated URL. The manifest route serves only
-the digest committed by the terminal receipt, never an uncommitted cancellation-race candidate. Full manifests
-remain immutable; cancellation during sealing produces a distinct candidate and cannot commit stale success.
+Every public receipt is a compact signed core, regardless of size, with a full-manifest SHA-256, size and
+authenticated URL. Full recipes and command manifests are never included in GitHub check output.
+Canonical compact bytes remain unchanged through SQLite, HTTP and GitHub. The manifest route serves only
+the digest committed by the terminal receipt, never an uncommitted cancellation-race candidate.
+Full manifests remain immutable; cancellation during sealing produces a distinct candidate.
+Legacy committed full receipts remain private and require an explicit rerun before public evidence publication.
+This cutover does not erase check output already published by an older version.
 Normal evidence maintenance removes manifests only after their 90-day job metadata expires. It may relieve
 disk-only pressure, but does not run through manual/owner pause or security-readiness uncertainty.
 Raw logs/artifacts still have their shorter seven-day retention.
@@ -254,14 +257,22 @@ a PR author does not authenticate everyone who can push to their branch.
 Polling automatically enrolls each observed eligible open same-repository head; no comment or Linux workflow
 is required. Forks, unlisted authors, disallowed bases and disabled profiles never execute. A current head is
 eventually reconciled; transient heads overwritten between polls may not be observed. Immediately before source
-preparation, head/policy is rechecked; rejection or network uncertainty cancels without executing. Removing
-GitHub configuration does not turn previously enrolled jobs into private-API work.
+preparation, head/policy is rechecked. Permanent rejection cancels without executing; transient transport,
+server or rate-limit failures retry within the bounded preparation deadline. Active polling revalidates once
+per poll rather than blocking on that retry loop. Removing GitHub configuration does not turn previously
+enrolled jobs into private-API work.
 
 Require `mac-evidence/<profile>` **from the configured App**. Checks target the PR head, never the synthetic
 merge commit. Only the current attempt may update the stable check; publication retry/restart reconciles
 `external_id=job-id` rather than rerunning work. Failure, timeout, cancellation, missing evidence and policy
 rejection cannot publish success; policy rejection uses `action_required`, not passing `neutral`/`skipped`.
 This does not implement merge-queue `merge_group` evidence.
+
+Periodic repair considers only current eligible heads, including their terminal results, not historical or
+currently ineligible fork heads. Each publication pass handles at most ten entries under one minute of network
+deadline, prioritizing job-bound evidence. Jobless rejection checks are best-effort once; a missing required
+check remains nonpassing. Obsolete blocked rows retire when no publisher lease is held. Obsolete terminal
+publication retries drain for at most 24 hours; job-linked provenance/correlations remain until jobs are pruned.
 
 Machine comments have exactly this grammar:
 
@@ -273,6 +284,13 @@ Only the configured numeric Actions bot is accepted; when an App identity is pre
 Actions App. Edited comments are rejected. `ensure` joins the same logical run, including terminal results.
 Explicit `mode=rerun` starts a new attempt only after termination, at most twice per head/profile per hour;
 active attempts are joined. Correlations are durable and capped at 128 per attempt.
+
+Initial comment intake starts 24 hours before startup with two minutes of overlap, never at repository creation.
+One page of at most 100 comments is processed per poll; page position and scan-start watermark survive restart.
+The watermark advances only after a successful complete scan, and failed relevant admission retains its page.
+Existing cursors are not reset after long downtime. Requests older than the initial window are not enrolled.
+GitHub offset pagination is not a snapshot: historical edits/deletions during a prolonged scan can shift offsets;
+the overlap mitigates recent churn but does not guarantee replay under adversarial historical mutation.
 
 ### Linux workflow waiter
 

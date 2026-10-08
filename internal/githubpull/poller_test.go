@@ -46,6 +46,12 @@ type fakeGitHub struct {
 	conditional, unconditional int
 	commentSince               string
 	force304                   bool
+	pullFailures               int
+	pullStatus                 int
+	pullReads                  int
+	checkOps                   int
+	commentPages               []int
+	commentFailPage            int
 }
 
 func (f *fakeGitHub) checkJSON(check githubapi.Check) any {
@@ -87,11 +93,35 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 			encode([]any{})
 		}
 	case r.URL.Path == repoPath+"/pulls/7":
+		f.pullReads++
+		if f.pullFailures > 0 {
+			f.pullFailures--
+			w.WriteHeader(f.pullStatus)
+			return
+		}
 		encode(f.pullJSON())
 	case r.URL.Path == repoPath+"/issues/comments":
 		f.commentSince = r.URL.Query().Get("since")
-		comments := make([]any, 0, len(f.comments))
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		f.commentPages = append(f.commentPages, page)
+		if page == f.commentFailPage {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		since, _ := time.Parse(time.RFC3339, f.commentSince)
+		var recent []githubapi.Comment
 		for _, c := range f.comments {
+			if c.UpdatedAt.After(since) {
+				recent = append(recent, c)
+			}
+		}
+		start := min((page-1)*100, len(recent))
+		end := min(start+100, len(recent))
+		if end < len(recent) {
+			w.Header().Set("Link", fmt.Sprintf("<?page=%d>; rel=\"next\"", page+1))
+		}
+		comments := make([]any, 0, end-start)
+		for _, c := range recent[start:end] {
 			row := map[string]any{"id": c.ID, "body": c.Body, "user": map[string]any{"id": c.AuthorID}, "issue_url": f.server.URL + repoPath + "/issues/" + strconv.Itoa(c.PullRequest), "created_at": c.CreatedAt.Format(time.RFC3339), "updated_at": c.UpdatedAt.Format(time.RFC3339)}
 			if c.AppID != 0 {
 				row["performed_via_github_app"] = map[string]any{"id": c.AppID}
@@ -100,6 +130,7 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		encode(comments)
 	case strings.HasPrefix(r.URL.Path, repoPath+"/commits/") && strings.HasSuffix(r.URL.Path, "/check-runs"):
+		f.checkOps++
 		sha := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, repoPath+"/commits/"), "/check-runs")
 		checks := make([]any, 0)
 		for _, c := range f.checks {
@@ -109,6 +140,7 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		encode(map[string]any{"total_count": len(checks), "check_runs": checks})
 	case r.URL.Path == repoPath+"/check-runs" && r.Method == http.MethodPost:
+		f.checkOps++
 		var input githubapi.CheckInput
 		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 			w.WriteHeader(400)
@@ -126,6 +158,7 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(201)
 		encode(f.checkJSON(check))
 	case strings.HasPrefix(r.URL.Path, repoPath+"/check-runs/"):
+		f.checkOps++
 		id, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, repoPath+"/check-runs/"), 10, 64)
 		check, ok := f.checks[id]
 		if err != nil || !ok {
@@ -527,5 +560,180 @@ func TestHTTPSignedSuccessPreservesCanonicalReceiptAndAttempt(t *testing.T) {
 	digest, err := receipt.Digest(raw)
 	if err != nil || packet.ReceiptDigest != digest {
 		t.Fatalf("publication receipt digest mismatch: %s %v", packet.ReceiptDigest, err)
+	}
+}
+
+func TestHTTPObsoleteForkHistoryDoesNotDriveFullPollPublication(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	for i := 1; i <= 200; i++ {
+		pull := f.remote.pull
+		pull.HeadSHA = fmt.Sprintf("%040x", i)
+		input, err := f.p.admission(f.options.Policies[0], pull, testProfile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.s.BlockGitHub(ctx, input.Run, "fork", f.options.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.poll(t)
+	f.finish(t, model.Failed, json.RawMessage(`{}`))
+	f.poll(t)
+	f.remote.mu.Lock()
+	before := f.remote.checkOps
+	f.remote.mu.Unlock()
+	f.advance(16 * time.Minute)
+	f.poll(t)
+	f.remote.mu.Lock()
+	calls := f.remote.checkOps - before
+	f.remote.mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("full poll published historical heads: check calls=%d want current lookup+update", calls)
+	}
+	if run := f.run(t); run.JobID == "" {
+		t.Fatal("history retirement lost current execution")
+	}
+}
+
+func TestHTTPCommentBootstrapAndLargeScanProgressSurviveRestart(t *testing.T) {
+	f := newFixture(t)
+	old := f.comment(1, "ensure")
+	old.CreatedAt = old.CreatedAt.Add(-48 * time.Hour)
+	old.UpdatedAt = old.CreatedAt
+	f.add(old)
+	for i := int64(2); i <= 10101; i++ {
+		comment := f.comment(i, "ensure")
+		comment.AuthorID = 999
+		f.add(comment)
+	}
+	f.add(f.comment(10102, "ensure"))
+	start := f.options.Now()
+	f.poll(t)
+	cursor, err := f.s.GitHubCursor(context.Background(), 123)
+	if err != nil || cursor.CommentsPage != 2 || !cursor.CommentsSince.Equal(start.Add(-24*time.Hour)) {
+		t.Fatalf("bootstrap did not checkpoint page: %+v %v", cursor, err)
+	}
+	f.remote.mu.Lock()
+	since := f.remote.commentSince
+	f.remote.commentFailPage = 2
+	f.remote.mu.Unlock()
+	if since != start.Add(-24*time.Hour-2*time.Minute).Format(time.RFC3339) {
+		t.Fatalf("bootstrap did not use bounded nonzero since: %s", since)
+	}
+	if err := f.p.Poll(context.Background()); err == nil {
+		t.Fatal("injected page failure was hidden")
+	}
+	f.reopen(t)
+	f.remote.mu.Lock()
+	f.remote.commentFailPage = 0
+	f.remote.mu.Unlock()
+	for i := 2; i <= 102; i++ {
+		f.poll(t)
+	}
+	requests, err := f.s.GitHubRequests(context.Background(), f.run(t).JobID)
+	if err != nil || len(requests) != 1 || requests[0].CommentID != 10102 {
+		t.Fatalf("large scan lost recent request or admitted old history: %+v %v", requests, err)
+	}
+	cursor, err = f.s.GitHubCursor(context.Background(), 123)
+	if err != nil || cursor.CommentsPage != 0 || !cursor.CommentsSince.Equal(start) {
+		t.Fatalf("completed scan lost watermark: %+v %v", cursor, err)
+	}
+	f.remote.mu.Lock()
+	defer f.remote.mu.Unlock()
+	if f.remote.commentPages[0] != 1 || f.remote.commentPages[1] != 2 || f.remote.commentPages[2] != 2 || f.remote.commentPages[len(f.remote.commentPages)-1] != 102 {
+		t.Fatalf("restart did not resume failed page: %v", f.remote.commentPages)
+	}
+}
+
+func TestHTTPDispatchTransientRetryAndOneShotPolling(t *testing.T) {
+	f := newFixture(t)
+	f.poll(t)
+	run := f.run(t)
+	job, err := f.s.Get(context.Background(), run.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.p.options.PollInterval = time.Millisecond
+	f.remote.mu.Lock()
+	f.remote.pullFailures, f.remote.pullStatus = 1, http.StatusServiceUnavailable
+	before := f.remote.pullReads
+	f.remote.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err = f.p.BeforeDispatch(ctx, job); err != nil {
+		t.Fatalf("transient dispatch failure became permanent: %v", err)
+	}
+	f.remote.mu.Lock()
+	reads := f.remote.pullReads - before
+	f.remote.pullFailures = 1
+	f.remote.mu.Unlock()
+	if reads != 2 {
+		t.Fatalf("dispatch did not retry once: %d", reads)
+	}
+	if err = f.p.Poll(ctx); err == nil {
+		t.Fatal("one-shot active revalidation unexpectedly retried outage")
+	}
+	stillQueued, err := f.s.Get(ctx, job.ID)
+	if err != nil || stillQueued.State != model.Queued {
+		t.Fatalf("transient active revalidation cancelled eligible work: %+v %v", stillQueued, err)
+	}
+	f.finish(t, model.Failed, json.RawMessage(`{}`))
+	if _, err = f.s.Claim(ctx, "worker-epoch", f.options.Now()); !errors.Is(err, store.ErrNoJob) {
+		t.Fatalf("transient retry duplicated execution: %v", err)
+	}
+}
+
+func TestHTTPDispatchRetryHonorsCancellationAndDeadline(t *testing.T) {
+	for _, deadline := range []bool{false, true} {
+		t.Run(fmt.Sprint(deadline), func(t *testing.T) {
+			f := newFixture(t)
+			f.poll(t)
+			job, err := f.s.Get(context.Background(), f.run(t).JobID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.remote.mu.Lock()
+			f.remote.pullFailures, f.remote.pullStatus = 100, http.StatusServiceUnavailable
+			f.remote.mu.Unlock()
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			want := context.DeadlineExceeded
+			if !deadline {
+				cancel()
+				want = context.Canceled
+			}
+			defer cancel()
+			if err = f.p.BeforeDispatch(ctx, job); !errors.Is(err, want) {
+				t.Fatalf("retry lost context outcome: %v want %v", err, want)
+			}
+		})
+	}
+}
+
+func TestHTTPFailedRelevantAdmissionRetainsCommentPage(t *testing.T) {
+	f := newFixture(t)
+	f.poll(t)
+	f.finish(t, model.Failed, json.RawMessage(`{}`))
+	f.advance(time.Minute)
+	f.add(f.comment(1, "ensure"), f.comment(2, "ensure"))
+	f.remote.mu.Lock()
+	f.remote.pullFailures, f.remote.pullStatus = 1, http.StatusServiceUnavailable
+	f.remote.mu.Unlock()
+	if err := f.p.Poll(context.Background()); err == nil {
+		t.Fatal("failed relevant admission was hidden")
+	}
+	cursor, err := f.s.GitHubCursor(context.Background(), 123)
+	if err != nil || cursor.CommentsPage != 1 || !cursor.CommentsSince.Equal(f.options.Now().Add(-time.Minute)) {
+		t.Fatalf("failed admission advanced cursor: %+v %v", cursor, err)
+	}
+	requests, err := f.s.GitHubRequests(context.Background(), f.run(t).JobID)
+	if err != nil || len(requests) != 0 {
+		t.Fatalf("failed page skipped ahead to later requests: %+v %v", requests, err)
+	}
+	f.reopen(t)
+	f.poll(t)
+	requests, err = f.s.GitHubRequests(context.Background(), f.run(t).JobID)
+	if err != nil || len(requests) != 2 || requests[0].CommentID != 1 || requests[1].CommentID != 2 {
+		t.Fatalf("restart lost failed relevant request: %+v %v", requests, err)
 	}
 }

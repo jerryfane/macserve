@@ -149,7 +149,7 @@ func TestFailurePreservesIncompleteEvidence(t *testing.T) {
 	options, job, _, expected := fixture(t, model.UnitTest)
 	result := worker.Result{State: model.Failed, Reason: "source unavailable"}
 	_, _, p := sealFixture(t, options, job, result)
-	if p.Complete || len(p.Missing) == 0 || p.Details.Result.Source.Commit != "" || p.State != model.Failed || p.Reason != result.Reason {
+	if p.Complete || len(p.Missing) == 0 || p.Source.Commit != "" || p.Details != nil || p.Manifest == nil || p.State != model.Failed || p.Reason != result.Reason {
 		t.Fatal("failed evidence was fabricated")
 	}
 	if ValidateSuccess(p, expected) == nil {

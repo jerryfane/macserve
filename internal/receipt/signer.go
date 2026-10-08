@@ -194,17 +194,12 @@ func (s *Signer) envelope(p Payload) (json.RawMessage, error) {
 	return canonicalValue(Envelope{Payload: raw, Signature: Signature{Algorithm: "Ed25519", KeyID: s.options.KeyID, Encoding: "base64", Value: base64.StdEncoding.EncodeToString(signature)}})
 }
 func (s *Signer) publish(p Payload, full []byte) (json.RawMessage, error) {
-	raw, err := s.envelope(p)
-	if err != nil {
-		return nil, err
-	}
-	if len(raw) <= MaxReceiptBytes {
-		return raw, nil
-	}
+	// Public evidence always excludes private recipes and argv, regardless of size.
+	// Commit to the exact immutable full manifest before signing the compact core.
 	p.Details = nil
 	digest := hashBytes(full)
 	p.Manifest = &ManifestReference{SHA256: digest, SizeBytes: int64(len(full)), URL: manifestURL(p.JobID, digest)}
-	raw, err = s.envelope(p)
+	raw, err := s.envelope(p)
 	if err != nil {
 		return nil, err
 	}

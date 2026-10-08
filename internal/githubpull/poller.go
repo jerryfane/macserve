@@ -252,6 +252,7 @@ func (p *Poller) pollRepository(ctx context.Context, policy Policy) error {
 	}
 	var failures []error
 	eligibleHeads := make(map[string]bool)
+	currentKeys := make(map[string]bool)
 	for _, pull := range pulls {
 		if eligible(policy, pull) {
 			eligibleHeads[pull.HeadSHA] = true
@@ -273,6 +274,7 @@ func (p *Poller) pollRepository(ctx context.Context, policy Policy) error {
 			if err != nil {
 				return err
 			}
+			currentKeys[input.Run.Key] = allowed
 			if allowed {
 				_, err = p.options.Store.AdmitGitHub(ctx, input, now)
 			} else {
@@ -283,9 +285,17 @@ func (p *Poller) pollRepository(ctx context.Context, policy Policy) error {
 			}
 		}
 	}
+	if err = p.options.Store.MaintainGitHub(ctx, policy.RepositoryID, currentKeys, now); err != nil {
+		return err
+	}
+	if full && !unchanged {
+		if err = p.options.Store.ReconcileGitHubPublications(ctx, policy.RepositoryID); err != nil {
+			failures = append(failures, err)
+		}
+	}
 	// Revalidate active jobs even after a 304: list caching must not prolong
 	// execution of a closed, forked or superseded head.
-	runs, err := p.options.Store.GitHubRuns(ctx, policy.RepositoryID)
+	runs, err := p.options.Store.GitHubActiveRuns(ctx, policy.RepositoryID)
 	if err != nil {
 		return err
 	}
@@ -303,7 +313,7 @@ func (p *Poller) pollRepository(ctx context.Context, policy Policy) error {
 		if job.State.Terminal() {
 			continue
 		}
-		err = p.BeforeDispatch(ctx, job)
+		err = p.checkDispatch(ctx, job)
 		if errors.Is(err, ErrIneligible) {
 			_, err = p.options.Store.Cancel(ctx, job.ID, "GitHub head superseded or ineligible", now)
 		}
@@ -311,11 +321,22 @@ func (p *Poller) pollRepository(ctx context.Context, policy Policy) error {
 			failures = append(failures, err)
 		}
 	}
-	since := cursor.CommentsSince
-	if !since.IsZero() {
-		since = since.Add(-2 * time.Minute)
+	// Bootstrap deliberately excludes old machine requests. Persist the lower
+	// bound before fetching so failures/restarts cannot slide it past requests.
+	if cursor.CommentsSince.IsZero() {
+		cursor.CommentsSince = now.Add(-24 * time.Hour)
 	}
-	comments, err := p.options.Client.Comments(ctx, policy.Repository, since)
+	if cursor.CommentsPage == 0 {
+		cursor.CommentsPage = 1
+		cursor.CommentsScanAt = now
+		// Complete pages, not a bounded aggregate scan, are checkpointed. Only
+		// finishing the scan advances its fixed time watermark; ongoing arrivals
+		// are then covered by the next scan and its overlap.
+	}
+	if err = p.options.Store.SaveGitHubCursor(ctx, policy.RepositoryID, cursor); err != nil {
+		return err
+	}
+	comments, nextPage, err := p.options.Client.CommentsPage(ctx, policy.Repository, cursor.CommentsSince.Add(-2*time.Minute), cursor.CommentsPage)
 	if err != nil {
 		return errors.Join(append(failures, err)...)
 	}
@@ -338,14 +359,14 @@ func (p *Poller) pollRepository(ctx context.Context, policy Policy) error {
 			}
 			commentsOK = false
 			failures = append(failures, err)
+			break
 		}
 	}
 	if commentsOK {
-		cursor.CommentsSince = now
-	}
-	if full && !unchanged {
-		if err = p.options.Store.ReconcileGitHubPublications(ctx, policy.RepositoryID); err != nil {
-			failures = append(failures, err)
+		cursor.CommentsPage = nextPage
+		if nextPage == 0 {
+			cursor.CommentsSince = cursor.CommentsScanAt
+			cursor.CommentsScanAt = time.Time{}
 		}
 	}
 	// Failed comment admissions retain their cursor; previously accepted requests
@@ -386,6 +407,42 @@ func (p *Poller) acceptComment(ctx context.Context, policy Policy, comment githu
 }
 
 func (p *Poller) BeforeDispatch(ctx context.Context, job model.Job) error {
+	// Preparation has a finite budget. A transient API outage must not turn an
+	// eligible queued head into a permanent authorization rejection.
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := p.checkDispatch(ctx, job)
+		if err == nil || errors.Is(err, ErrIneligible) {
+			return err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		delay := p.options.PollInterval
+		var remote *githubapi.Error
+		if errors.As(err, &remote) {
+			if remote.Status < 500 && remote.Status != 429 && remote.RetryAfter <= 0 {
+				return err
+			}
+			delay = max(delay, remote.RetryAfter)
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+// checkDispatch is deliberately one-shot: active-job polling must never wait
+// on the preparation retry loop.
+func (p *Poller) checkDispatch(ctx context.Context, job model.Job) error {
 	run, err := p.options.Store.GitHubByJob(ctx, job.ID)
 	if errors.Is(err, store.ErrNotFound) && !strings.HasPrefix(job.Principal, "github:") {
 		return nil

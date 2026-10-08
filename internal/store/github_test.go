@@ -250,6 +250,9 @@ func TestGitHubPublicationRetryDeadlineSurvivesUpdatesAndReopen(t *testing.T) {
 	if _, err = s.AdmitGitHub(ctx, input, testNow); err != nil {
 		t.Fatal(err)
 	}
+	if err = s.MaintainGitHub(ctx, 123, map[string]bool{run.Key: true}, testNow); err != nil {
+		t.Fatal(err)
+	}
 	if err = s.ReconcileGitHubPublications(ctx, 123); err != nil {
 		t.Fatal(err)
 	}

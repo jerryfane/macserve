@@ -169,6 +169,30 @@ func Digest(raw []byte) (string, error) {
 	return hashBytes(c), nil
 }
 
+// PublicDigest accepts only canonical compact envelopes suitable for publication.
+// It does not authenticate the signer; callers must still verify success evidence.
+// Legacy full receipts must be rerun, never rewritten after evidence is committed.
+func PublicDigest(raw []byte) (string, error) {
+	if len(raw) > MaxReceiptBytes {
+		return "", ErrInvalid
+	}
+	c, err := canonical(raw)
+	if err != nil || !bytes.Equal(c, raw) {
+		return "", ErrInvalid
+	}
+	var envelope Envelope
+	var p Payload
+	if strictDecode(raw, &envelope) != nil || strictDecode(envelope.Payload, &p) != nil {
+		return "", ErrInvalid
+	}
+	if p.Schema != 1 || p.Details != nil || p.Manifest == nil || !validJobID(p.JobID) ||
+		!validDigest(p.Manifest.SHA256) || p.Manifest.SizeBytes <= 0 || p.Manifest.SizeBytes > maxManifestBytes ||
+		p.Manifest.URL != manifestURL(p.JobID, p.Manifest.SHA256) {
+		return "", ErrInvalid
+	}
+	return hashBytes(raw), nil
+}
+
 func Verify(raw []byte, keys map[string]ed25519.PublicKey) (Payload, error) {
 	var p Payload
 	if len(raw) > MaxReceiptBytes {

@@ -174,9 +174,14 @@ func (f *wire) serve(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-	if err := json.NewEncoder(w).Encode(response); err != nil {
+	var body bytes.Buffer
+	if err := json.NewEncoder(&body).Encode(response); err != nil {
 		f.t.Error(err)
+		return
 	}
+	// Deadline scenarios intentionally disconnect. Encoding is a fixture
+	// invariant; successful network delivery after client cancellation is not.
+	_, _ = w.Write(body.Bytes())
 }
 
 func TestWaiterPostsExactRequestAndVerifiesPaginatedCurrentEvidence(t *testing.T) {

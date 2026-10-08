@@ -200,35 +200,52 @@ func (c *Client) Pull(ctx context.Context, repo string, number int) (PullRequest
 	return wire.value(), nil
 }
 
-func (c *Client) Comments(ctx context.Context, repo string, since time.Time) ([]Comment, error) {
+// CommentsPage returns at most 100 comments and a forward-only continuation.
+// Callers commit the page only after admitting every relevant request.
+func (c *Client) CommentsPage(ctx context.Context, repo string, since time.Time, page int) ([]Comment, int, error) {
 	ctx, cancel := context.WithTimeout(ctx, operationTimeout)
 	defer cancel()
 	token, err := c.auth(ctx, repo)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	query := url.Values{"per_page": {"100"}, "sort": {"updated"}, "direction": {"asc"}}
-	if !since.IsZero() {
-		query.Set("since", since.UTC().Format(time.RFC3339))
+	if since.IsZero() || page < 1 {
+		return nil, 0, errors.New("invalid GitHub comment cursor")
 	}
-	wire, _, _, err := pages(ctx, c, "/repos/"+repo+"/issues/comments?"+query.Encode(), "",
-		func(ctx context.Context, path, etag string) ([]commentWire, http.Header, bool, error) {
-			var items []commentWire
-			header, unchanged, err := c.request(ctx, http.MethodGet, path, token, etag, nil, &items)
-			return items, header, unchanged, err
-		})
+	query := url.Values{"per_page": {"100"}, "sort": {"updated"}, "direction": {"asc"}, "since": {since.UTC().Format(time.RFC3339)}, "page": {strconv.Itoa(page)}}
+	path := "/repos/" + repo + "/issues/comments?" + query.Encode()
+	var wire []commentWire
+	header, _, err := c.request(ctx, http.MethodGet, path, token, "", nil, &wire)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
+	}
+	if len(wire) > 100 {
+		return nil, 0, errors.New("GitHub comment page exceeds limit")
+	}
+	next, err := c.nextPage(header, path)
+	if err != nil {
+		return nil, 0, err
+	}
+	nextPage := 0
+	if next != "" {
+		u, err := url.Parse(next)
+		if err != nil {
+			return nil, 0, err
+		}
+		nextPage, err = strconv.Atoi(u.Query().Get("page"))
+		if err != nil || nextPage <= page || nextPage-page != 1 {
+			return nil, 0, errors.New("GitHub comment pagination did not advance")
+		}
 	}
 	items := make([]Comment, 0, len(wire))
 	for _, w := range wire {
 		item, err := c.comment(repo, w)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		items = append(items, item)
 	}
-	return items, nil
+	return items, nextPage, nil
 }
 
 func validSHA(sha string) bool {

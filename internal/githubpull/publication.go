@@ -15,8 +15,10 @@ import (
 )
 
 func (p *Poller) publish(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
 	var failures []error
-	for range 100 {
+	for range 10 {
 		publication, err := p.options.Store.NextGitHubPublication(ctx, p.options.Now().UTC())
 		if errors.Is(err, store.ErrNotFound) {
 			break
@@ -24,21 +26,24 @@ func (p *Poller) publish(ctx context.Context) error {
 		if err != nil {
 			return errors.Join(append(failures, err)...)
 		}
-		callCtx, cancel := context.WithTimeout(ctx, time.Minute)
-		checkID, err := p.publishOne(callCtx, publication.Run)
-		cancel()
+		checkID, err := p.publishOne(ctx, publication.Run)
 		var retryAt time.Time
 		if err != nil {
 			failures = append(failures, err)
-			delay := 15 * time.Second * time.Duration(1<<min(publication.Failures, 8))
-			if delay > time.Hour {
-				delay = time.Hour
+			// An ineligible head with no job never gains authority from a check.
+			// Its best-effort rejection must not create endless fork-driven work;
+			// a missing required check remains nonpassing.
+			if publication.Run.JobID != "" || publication.Run.Blocked == "" {
+				delay := 15 * time.Second * time.Duration(1<<min(publication.Failures, 8))
+				if delay > time.Hour {
+					delay = time.Hour
+				}
+				var remote *githubapi.Error
+				if errors.As(err, &remote) && remote.RetryAfter > delay {
+					delay = remote.RetryAfter
+				}
+				retryAt = p.options.Now().UTC().Add(delay)
 			}
-			var remote *githubapi.Error
-			if errors.As(err, &remote) && remote.RetryAfter > delay {
-				delay = remote.RetryAfter
-			}
-			retryAt = p.options.Now().UTC().Add(delay)
 		}
 		// Publication completion is local bookkeeping even when the remote call's
 		// deadline elapsed. Losing this commit is safe: external_id reconciles it.
@@ -103,10 +108,15 @@ func (p *Poller) checkInput(ctx context.Context, run store.GitHubRun) (githubapi
 			Receipt json.RawMessage `json:"receipt"`
 		}
 		if len(job.Result) > 0 && json.Unmarshal(job.Result, &completion) == nil && len(completion.Receipt) > 0 && len(completion.Receipt) <= 32768 {
-			digest, err := receipt.Digest(completion.Receipt)
+			digest, err := receipt.PublicDigest(completion.Receipt)
 			if err == nil {
 				packet.Receipt = completion.Receipt
 				packet.ReceiptDigest = digest
+			} else {
+				// Never redact or re-sign committed evidence. Legacy full receipts
+				// remain private and need a new execution to publish a compact core.
+				input.Conclusion = "action_required"
+				input.Output.Summary = "Receipt is not safe for public publication; rerun execution to produce compact signed evidence."
 			}
 		}
 		if job.State == model.Succeeded {
@@ -126,7 +136,9 @@ func (p *Poller) checkInput(ctx context.Context, run store.GitHubRun) (githubapi
 				}
 			}
 			if input.Conclusion != "success" {
-				input.Output.Summary = "Execution reported success but complete signed evidence could not be verified."
+				if input.Output.Summary == "Controller execution is terminal. Only verified signed evidence may report success." {
+					input.Output.Summary = "Execution reported success but complete signed evidence could not be verified."
+				}
 			}
 		}
 	} else if job.State != "" && job.State != model.Queued {

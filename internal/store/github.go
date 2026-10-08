@@ -37,6 +37,8 @@ type GitHubCursor struct {
 	ETag                  string
 	FullAt, CommentsSince time.Time
 	Pulls                 []byte
+	CommentsScanAt        time.Time
+	CommentsPage          int
 }
 
 type GitHubPublication struct {
@@ -93,6 +95,15 @@ CREATE TABLE IF NOT EXISTS github_cursors (
  repository_id INTEGER PRIMARY KEY, etag TEXT NOT NULL, full_at INTEGER NOT NULL,
  comments_since INTEGER NOT NULL, pulls BLOB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS github_comment_scans (
+ repository_id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL, page INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS github_current_runs (
+ repository_id INTEGER NOT NULL, run_key TEXT NOT NULL, eligible INTEGER NOT NULL,
+ PRIMARY KEY(repository_id,run_key)
+);
+CREATE INDEX IF NOT EXISTS github_runs_repository ON github_runs(repository_id);
+CREATE INDEX IF NOT EXISTS github_attempts_run ON github_attempts(run_key);
 CREATE TABLE IF NOT EXISTS github_observed_heads (
  repository_id INTEGER NOT NULL, pull_request INTEGER NOT NULL, sha TEXT NOT NULL,
  eligible INTEGER NOT NULL, observed_at INTEGER NOT NULL,
@@ -303,6 +314,24 @@ func (s *Store) GitHubRuns(ctx context.Context, repoID int64) ([]GitHubRun, erro
 	return runs, rows.Err()
 }
 
+// GitHubActiveRuns avoids revisiting retained audit history on every poll.
+func (s *Store) GitHubActiveRuns(ctx context.Context, repoID int64) ([]GitHubRun, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT "+githubRunColumns+" FROM github_runs WHERE repository_id=? AND current_job IN (SELECT id FROM jobs WHERE state NOT IN ("+terminalStates+"))", repoID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var runs []GitHubRun
+	for rows.Next() {
+		run, err := scanGitHubRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
 func (s *Store) GitHubRequests(ctx context.Context, jobID string) ([]GitHubRequest, error) {
 	rows, err := s.db.QueryContext(ctx, "SELECT comment_id,request_id,body_sha256 FROM github_requests WHERE job_id=? ORDER BY comment_id", jobID)
 	if err != nil {
@@ -379,6 +408,14 @@ func (s *Store) GitHubCursor(ctx context.Context, repositoryID int64) (GitHubCur
 	if since != 0 {
 		c.CommentsSince = time.Unix(0, since).UTC()
 	}
+	var scanAt int64
+	err = s.db.QueryRowContext(ctx, "SELECT started_at,page FROM github_comment_scans WHERE repository_id=?", repositoryID).Scan(&scanAt, &c.CommentsPage)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return c, err
+	}
+	if scanAt != 0 {
+		c.CommentsScanAt = time.Unix(0, scanAt).UTC()
+	}
 	return c, nil
 }
 func (s *Store) SaveGitHubCursor(ctx context.Context, id int64, c GitHubCursor) error {
@@ -389,8 +426,22 @@ func (s *Store) SaveGitHubCursor(ctx context.Context, id int64, c GitHubCursor) 
 	if !c.CommentsSince.IsZero() {
 		since = c.CommentsSince.UnixNano()
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO github_cursors(repository_id,etag,full_at,comments_since,pulls) VALUES(?,?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET etag=excluded.etag,full_at=excluded.full_at,comments_since=excluded.comments_since,pulls=excluded.pulls`, id, c.ETag, full, since, c.Pulls)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `INSERT INTO github_cursors(repository_id,etag,full_at,comments_since,pulls) VALUES(?,?,?,?,?) ON CONFLICT(repository_id) DO UPDATE SET etag=excluded.etag,full_at=excluded.full_at,comments_since=excluded.comments_since,pulls=excluded.pulls`, id, c.ETag, full, since, c.Pulls); err != nil {
+		return err
+	}
+	var scanAt int64
+	if !c.CommentsScanAt.IsZero() {
+		scanAt = c.CommentsScanAt.UnixNano()
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO github_comment_scans(repository_id,started_at,page) VALUES(?,?,?) ON CONFLICT(repository_id) DO UPDATE SET started_at=excluded.started_at,page=excluded.page`, id, scanAt, c.CommentsPage); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 func (s *Store) ObserveGitHubHead(ctx context.Context, repoID int64, pr int, sha string, eligible bool, now time.Time) error {
 	if !validSHA(sha) || pr <= 0 || repoID <= 0 || !validTime(now) {
@@ -410,7 +461,11 @@ func (s *Store) NextGitHubPublication(ctx context.Context, now time.Time) (GitHu
 	defer tx.Rollback()
 	var p GitHubPublication
 	var key string
-	err = tx.QueryRowContext(ctx, "SELECT run_key,generation,failures FROM github_outbox WHERE next_at<=? AND lease_until<=? ORDER BY next_at,run_key LIMIT 1", now.UnixNano(), now.UnixNano()).Scan(&key, &p.Generation, &p.Failures)
+	// Best-effort policy rejections must never starve admitted-job evidence.
+	err = tx.QueryRowContext(ctx, `SELECT o.run_key,o.generation,o.failures
+ FROM github_outbox o JOIN github_runs r ON r.run_key=o.run_key
+ WHERE o.next_at<=? AND o.lease_until<=?
+ ORDER BY r.current_job='',o.next_at,o.run_key LIMIT 1`, now.UnixNano(), now.UnixNano()).Scan(&key, &p.Generation, &p.Failures)
 	if errors.Is(err, sql.ErrNoRows) {
 		return p, ErrNotFound
 	}
@@ -469,11 +524,56 @@ func (s *Store) FinishGitHubPublication(ctx context.Context, p GitHubPublication
 	return tx.Commit()
 }
 
-// ReconcileGitHubPublications repairs remote deletion/drift even without a
-// local job transition. It preserves an in-flight publisher's generation fence.
+// ReconcileGitHubPublications repairs only current eligible requirements.
+// Ineligible heads fail closed even without a check; their initial rejection is
+// not periodically republished. Retained attempts/correlations are audit history.
 func (s *Store) ReconcileGitHubPublications(ctx context.Context, repositoryID int64) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO github_outbox(run_key)
  SELECT run_key FROM github_runs WHERE repository_id=?
- ON CONFLICT(run_key) DO UPDATE SET generation=generation+1`, repositoryID)
+ AND run_key IN (SELECT run_key FROM github_current_runs WHERE repository_id=? AND eligible=1)
+ ON CONFLICT(run_key) DO UPDATE SET generation=generation+1`, repositoryID, repositoryID)
 	return err
+}
+
+// MaintainGitHub replaces the current-head snapshot (key to eligibility) and retires obsolete work.
+// Active jobs, live publisher leases, and provenance for retained jobs survive.
+// Jobless blocked heads have no audit correlations and are retired immediately;
+// obsolete terminal publications get 24 hours to drain before being retired.
+func (s *Store) MaintainGitHub(ctx context.Context, repositoryID int64, keys map[string]bool, now time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, "DELETE FROM github_current_runs WHERE repository_id=?", repositoryID); err != nil {
+		return err
+	}
+	for key, eligible := range keys {
+		if _, err = tx.ExecContext(ctx, "INSERT INTO github_current_runs(repository_id,run_key,eligible) VALUES(?,?,?)", repositoryID, key, eligible); err != nil {
+			return err
+		}
+	}
+	obsolete := `repository_id=? AND run_key NOT IN (SELECT run_key FROM github_current_runs WHERE repository_id=?)`
+	if _, err = tx.ExecContext(ctx, `DELETE FROM github_outbox WHERE lease_until<=? AND run_key IN
+ (SELECT run_key FROM github_runs WHERE `+obsolete+` AND
+ (current_job='' OR NOT EXISTS(SELECT 1 FROM jobs WHERE id=current_job)
+ OR current_job IN (SELECT id FROM jobs WHERE state IN (`+terminalStates+`) AND finished_at<=?)))`,
+		now.UnixNano(), repositoryID, repositoryID, now.Add(-24*time.Hour).UnixNano()); err != nil {
+		return err
+	}
+	retired := `SELECT run_key FROM github_runs WHERE ` + obsolete + `
+ AND run_key NOT IN (SELECT run_key FROM github_outbox)
+ AND NOT EXISTS(SELECT 1 FROM github_attempts a JOIN jobs j ON j.id=a.job_id WHERE a.run_key=github_runs.run_key)`
+	for _, table := range []string{"github_requests", "github_run_pulls", "github_attempts"} {
+		if _, err = tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE run_key IN ("+retired+")", repositoryID, repositoryID); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.ExecContext(ctx, "DELETE FROM github_runs WHERE run_key IN ("+retired+")", repositoryID, repositoryID); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, "DELETE FROM github_observed_heads WHERE repository_id=? AND observed_at<?", repositoryID, now.Add(-24*time.Hour).UnixNano()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
