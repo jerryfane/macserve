@@ -325,17 +325,38 @@ screenshots/source and full manifests stay behind authenticated downloads; a com
 give an uncredentialed Linux job arbitrary artifact access. Real App authorization, branch protection, target
 recipes and GUI/network qualification still require the approved deployment acceptance window.
 
+## Installation assets and host health
+
+[Installation and qualification runbook](docs/install.md) covers the plan-first account script,
+disabled controller/root-worker/root-maintenance LaunchDaemons, job-UID PF anchor template,
+protected configurations and four future owner-approved deployment sittings. Nothing installs,
+starts services, changes owner ACLs or enables PF automatically. Use a reviewed prebuilt binary;
+the deployed host does not need Go.
+
+`macserve maintenance --config PATH` publishes short-lived root-owned health after checking protected
+qualification/evidence bindings, live PF and interface state, exact GUI baseline identities, profile
+digests, memory pressure and mutable storage including the entire job home. Failed observations publish
+invalid health; startup/shutdown invalidate it. Probe cadence is measured from probe start, not completion.
+`maintenance-observe` collects live inputs without approving the host or writing health. Both require
+macOS root; neither modifies host policy, adopts processes or generates boundary-test evidence.
+
+The observer deliberately supports a narrow PF surface: literal static rules, verifiable loopback
+filtering and empty translation-rule output. Opaque NAT/rdr anchors are refused, not assumed empty.
+Do not remove existing owner policy to pass these checks. Root-protected operator attestations must
+come from actual approved TCP/UDP/canary/delegated-socket/GUI/reboot probes; fixture tests are not host
+qualification. Native deployment remains unqualified until those acceptance checks succeed.
+
 ## Development
 
 Use the Go version declared in `go.mod`. SQLite uses a pure-Go driver; no external database is required.
 
 ```sh
-go vet ./...
-go test ./...
-go run ./cmd/macserve --help
+GOMAXPROCS=2 nice -n 10 go vet -p 2 ./...
+GOMAXPROCS=2 nice -n 10 go test -p 2 ./...
+GOMAXPROCS=2 nice -n 10 go run -p 2 ./cmd/macserve --help
 ```
 
-`macserve --help` and `macserve <command> --help` exit 0. Both service commands require `--config`; invalid or
+`macserve --help` and `macserve <command> --help` exit 0. Service commands require `--config`; invalid or
 missing arguments exit 2. Runtime safety failures exit 1. Help goes to stdout and errors to stderr.
 
 CI pins third-party actions to immutable commit SHAs and runs vet, tests and a CLI build on GitHub-hosted

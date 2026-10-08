@@ -12,6 +12,8 @@ jobs:
   go:
     name: Go (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env:
+      GOMAXPROCS: "2"
     strategy:
       fail-fast: false
       matrix:
@@ -25,8 +27,12 @@ jobs:
           go-version-file: go.mod
           cache: false
       - name: Vet
-        run: go vet ./...
+        run: nice -n 10 go vet -p 2 ./...
       - name: Test
-        run: go test ./...
+        run: nice -n 10 go test -p 2 ./...
       - name: Build CLI
-        run: go build -o "${{ runner.temp }}/macserve" ./cmd/macserve
+        run: nice -n 10 go build -p 2 -o "${{ runner.temp }}/macserve" ./cmd/macserve
+      - name: CLI smoke
+        run: |
+          nice -n 10 "${{ runner.temp }}/macserve" --help
+          nice -n 10 "${{ runner.temp }}/macserve" maintenance --help
