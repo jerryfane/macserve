@@ -107,6 +107,19 @@ func (c *Controller) next(ctx context.Context, epoch string) (*protocol.Lease, e
 
 func (c *Controller) prepare(ctx context.Context, a *execution) {
 	defer c.prep.Done()
+	if c.options.BeforeDispatch != nil {
+		if err := c.options.BeforeDispatch(ctx, a.job); err != nil {
+			a.cancel()
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			if c.active == a {
+				if err := c.options.Store.Fail(context.Background(), a.job.ID, a.job.LeaseToken, model.Cancelled, true, "dispatch admission revalidation failed", c.options.Now()); err == nil {
+					c.active = nil
+				}
+			}
+			return
+		}
+	}
 	descriptor, err := c.options.Source.Prepare(ctx, a.job)
 	if err == nil {
 		err = validateSource(ctx, descriptor, a.job.Request.SHA)
@@ -306,7 +319,13 @@ func (c *Controller) sweep(ctx context.Context) error {
 	if err := c.trimPool(ctx, 0, maxArtifactPoolBytes); err != nil {
 		return err
 	}
-	return errors.Join(cleanupErr, c.options.Store.Prune(ctx, now))
+	if err := c.options.Store.Prune(ctx, now); err != nil {
+		return errors.Join(cleanupErr, err)
+	}
+	if c.options.PruneReceipts != nil {
+		return errors.Join(cleanupErr, c.options.PruneReceipts(ctx))
+	}
+	return cleanupErr
 }
 
 func safeID(value string) bool {

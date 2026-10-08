@@ -27,6 +27,8 @@ type Config struct {
 	PolicySHA256    string            `json:"policy_sha256"`
 	PauseFile       string            `json:"pause_file,omitempty"`
 	OwnerUID        uint32            `json:"owner_uid"`
+	Receipt         ReceiptConfig     `json:"receipt"`
+	GitHub          *GitHubConfig     `json:"github,omitempty"`
 }
 
 func LoadConfig(path string) (Config, error) {
@@ -99,7 +101,7 @@ func (c *Config) validate() error {
 	if !allowed {
 		return errors.New("listener address is outside configured private networks")
 	}
-	return nil
+	return c.validateIntegrations()
 }
 func privatePrefix(p netip.Prefix) bool {
 	for _, text := range []string{"100.64.0.0/10", "fd7a:115c:a1e0::/48"} {

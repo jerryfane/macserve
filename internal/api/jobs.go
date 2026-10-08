@@ -182,7 +182,11 @@ func (h *handler) job(w http.ResponseWriter, r *http.Request, p store.Principal)
 			writeError(w, controller.ErrNotReady)
 			return
 		}
-		writeJSON(w, 200, receipt)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(receipt)
+	case suffix == "receipt/manifest":
+		h.receiptManifest(w, r, job)
 	default:
 		writeError(w, store.ErrNotFound)
 	}

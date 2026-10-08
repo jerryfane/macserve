@@ -110,6 +110,8 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 	if e.closed {
 		return result, ErrClosed
 	}
+	e.recording = &result
+	defer func() { e.recording = nil }()
 	job, err := validateJob(job, source)
 	if err != nil {
 		return result, err
@@ -374,8 +376,7 @@ func (x *execution) invoke(ctx context.Context, command Command, stdout, stderr 
 	if err := ctx.Err(); err != nil {
 		return ProcessResult{}, err
 	}
-	result, err := x.engine.options.Runner.Run(ctx, command, stdout, stderr)
-	x.result.PeakMemoryMiB = max(x.result.PeakMemoryMiB, result.PeakMemoryMiB)
+	result, err := x.engine.run(ctx, command, stdout, stderr)
 	if !result.CleanupOK {
 		err = errors.Join(err, errors.New("process cleanup was not confirmed"))
 	}

@@ -42,6 +42,7 @@ type Engine struct {
 	workspaces *os.Root
 	lock       *os.File
 	closed     bool
+	recording  *Result // guarded by mu; includes finalization and device cleanup
 }
 
 type manifest struct {

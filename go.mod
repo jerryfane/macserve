@@ -3,6 +3,7 @@ module github.com/jerryfane/macserve
 go 1.26.4
 
 require (
+	github.com/gowebpki/jcs v1.0.2
 	golang.org/x/sys v0.48.0
 	modernc.org/sqlite v1.60.1
 )

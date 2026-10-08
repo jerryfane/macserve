@@ -46,7 +46,17 @@ type Result struct {
 	Summary       *evidence.Summary   `json:"summary,omitempty"`
 	Artifacts     []evidence.Artifact `json:"artifacts"`
 	LogsTruncated bool                `json:"logs_truncated"`
+	Commands      []ExecutedCommand   `json:"commands"`
 	PeakMemoryMiB int64               `json:"peak_memory_mib"`
+}
+
+type ExecutedCommand struct {
+	Executable string    `json:"executable"`
+	Args       []string  `json:"args"`
+	StartedAt  time.Time `json:"started_at"`
+	FinishedAt time.Time `json:"finished_at"`
+	ExitCode   int       `json:"exit_code"`
+	Signal     string    `json:"signal,omitempty"`
 }
 
 type Command struct {

@@ -24,12 +24,13 @@ import (
 )
 
 type Options struct {
-	Store    *store.Store
-	Profiles *profiles.Registry
-	Status   func(context.Context) (controller.Status, error)
-	Artifact func(context.Context, string, string) (*os.File, evidence.Artifact, error)
-	Receipt  func(context.Context, string) (json.RawMessage, error)
-	Now      func() time.Time
+	Store           *store.Store
+	Profiles        *profiles.Registry
+	Status          func(context.Context) (controller.Status, error)
+	Artifact        func(context.Context, string, string) (*os.File, evidence.Artifact, error)
+	Receipt         func(context.Context, string) (json.RawMessage, error)
+	ReceiptManifest func(context.Context, string, string) (json.RawMessage, error)
+	Now             func() time.Time
 }
 type handler struct{ Options }
 

@@ -176,7 +176,7 @@ func (e *Engine) stopDevice(ctx context.Context, m *manifest) error {
 			command.Args = []string{"simctl", action, m.DeviceUDID}
 			output := &boundedBuffer{max: 1 << 20}
 			stderr := &boundedBuffer{max: 1 << 20}
-			result, err := e.options.Runner.Run(ctx, command, output, stderr)
+			result, err := e.run(ctx, command, output, stderr)
 			if !result.CleanupOK {
 				return errors.Join(err, ErrRecovery)
 			}
@@ -229,7 +229,7 @@ func (e *Engine) deviceInventory(ctx context.Context, m *manifest) ([]string, er
 	defer cancel()
 	output := &boundedBuffer{max: 16 << 20}
 	stderr := &boundedBuffer{max: 1 << 20}
-	result, err := e.options.Runner.Run(ctx, Command{Executable: "/usr/bin/xcrun", Args: []string{"simctl", "list", "devices", "--json"}, Dir: "/", Env: environment(filepath.Join(e.options.WorkspaceRoot, m.JobID), m.DeveloperDir)}, output, stderr)
+	result, err := e.run(ctx, Command{Executable: "/usr/bin/xcrun", Args: []string{"simctl", "list", "devices", "--json"}, Dir: "/", Env: environment(filepath.Join(e.options.WorkspaceRoot, m.JobID), m.DeveloperDir)}, output, stderr)
 	if err != nil || result.ExitCode != 0 || result.Signal != "" || !result.CleanupOK || output.err != nil || stderr.err != nil {
 		return nil, errors.Join(err, output.err, stderr.err, errors.New("cannot verify recorded simulator inventory"))
 	}

@@ -7,13 +7,13 @@ signed evidence receipt. Jobs run natively on your Mac under a dedicated non-adm
 priority, and you can pause them whenever you need the machine. GitHub integration is pull-based, so your CI never
 needs network credentials for your private network. No VM required.
 
-> Status: early development. The private controller API, durable queue, exact source exporter, native worker
-> and evidence delivery are implemented. GitHub polling, receipt signing and installation assets are next.
+> Status: early development. The private controller API, durable queue, exact source exporter, protected worker,
+> GitHub polling, signed receipts and Linux waiter are implemented. Installation assets are next.
 > The protected root execution broker requires a separate non-admin GUI job account and an explicitly
 > qualified process baseline. Execution stays disabled without fresh root-managed network and toolchain
 > qualification. Privileged deployment and background GUI operation have not been qualified by the suite.
 
-## Planned phase-1 capabilities
+## Phase-1 capabilities
 
 - Runs `build`, `unit_test` and `simulator_ui_test` jobs for a repository at an **exact 40-character commit SHA**.
 - Uses controller-owned, versioned **profiles** (project/workspace, scheme, destination, allowed tests, artifacts);
@@ -35,7 +35,7 @@ needs network credentials for your private network. No VM required.
   share the kernel and hardware with your session. Only run repositories you trust.
 - No VM management, no device farm, no multi-host scheduling.
 
-## Planned architecture
+## Architecture
 
 - `controller` (runs as a dedicated non-login service user): queue (SQLite), GitHub poller, API, receipt signer.
 - `worker` (protected root execution broker): owns leases, control records and exports; executes tools only after
@@ -77,6 +77,14 @@ needs network credentials for your private network. No VM required.
   independently parsed test evidence, immutable artifact storage, bounded retention and fail-closed host guards.
 - `internal/api`: persisted bearer digests, repository/scoped authorization, idempotent admission, status,
   paged/SSE logs, JSON/JUnit results, range downloads and persisted administrative pause/resume.
+- `internal/githubapi`: selected-repository App tokens, fresh repository-ID checks, bounded pagination,
+  deadlines and rate-limit handling. Redirects cannot forward credentials to another origin.
+- `internal/githubpull`: automatic exact-head enrollment, durable request/attempt correlations, explicit bounded
+  reruns, dispatch revalidation and a transactional publication outbox.
+- `internal/receipt`: Ed25519 signatures over RFC 8785 canonical JSON, pinned-key verification, evidence policy
+  validation and immutable digest-addressed full manifests. Actual command records omit environment secrets.
+- `internal/waiter`: token-only machine request/wait protocol; verifies current App, attempt, signature,
+  recipe/toolchain/test pins and a final PR-head reread before returning success.
 
 The store requires a dedicated private directory (mode `0700`) and private database files. Default limits are
 50 outstanding jobs, 10 per principal, 24-hour queue expiry, 90-day terminal metadata retention, 64 MiB per
@@ -161,8 +169,9 @@ before real repository enrollment. These native probes have not been qualified o
 `macserve controller --config /absolute/path/to/controller.json` requires a root-controlled configuration and
 a dedicated non-login, non-admin controller account distinct from the owner and job account. Configuration fields:
 `root`, `socket`, `job_uid`, `owner_uid`, `profiles_file`, `listen`, `tls_certificate`, `tls_key`,
-`principals`, `health_file`, `policy_sha256`, and optional `allowed_networks` and `pause_file`.
-Profiles and the public TLS certificate are root-controlled; the TLS private key is a private controller secret.
+`principals`, `health_file`, `policy_sha256`, `receipt`, and optional `allowed_networks`, `pause_file`, `github`.
+Profiles and the public TLS certificate are root-controlled. TLS, receipt and App private keys are separate
+controller-private files; no secret is supplied through command arguments or a worker lease.
 `job_uid` identifies the unprivileged execution/network-policy account. The private executor socket always
 authenticates peer UID `0` in production, independently of `job_uid`.
 
@@ -176,7 +185,9 @@ high-entropy bearer credentials belong in the caller's private credential storag
 - `POST /v1/jobs` requires `Idempotency-Key` and a profile-matching exact-SHA request.
 - `GET /v1/capabilities` and `/v1/jobs` expose authorized profiles and jobs without controller recipes or paths.
 - `/v1/jobs/{id}` provides status, `/logs`, `/logs/stream`, `/results`, `/results/junit`, `/artifacts`,
-  `/artifacts/{artifact_id}`, `/receipt`, and `POST /cancel`. Missing signed receipts return `409`, not success.
+  `/artifacts/{artifact_id}`, `/receipt`, `/receipt/manifest?sha256=DIGEST`, and `POST /cancel`.
+  Missing signed receipts return `409`, not success. Non-executed cancellation/expiry or interrupted jobs with
+  no collected completion have no execution receipt; GitHub reports non-success, never invented evidence.
 - `PUT /v1/admin/pause` accepts `{"reason":"benchmark","mode":"drain"}` or `cancel_active`.
   Poll `GET /v1/admin/state` until `quiescent=true` before benchmarking; acceptance of pause is not quiescence.
   `DELETE /v1/admin/pause` clears only manual pause. An optional owner-controlled pause marker also blocks dispatch.
@@ -204,6 +215,94 @@ Existing idempotent submissions replay read-only even when admission is unavaila
 a new submission and must pass current readiness and profiles. JSON field names are case-exact.
 Private API callers must independently approve repository-history membership of a SHA: exact-object fetch
 proves identity, not reachability from the allowlisted repository's own heads or tags.
+
+## Signed receipts and GitHub pull mode
+
+The required `receipt` configuration contains `key_id`, `private_key_file`, opaque `service_id` and `host_id`,
+`repositories` (canonical lowercase `owner/repo` to numeric repository ID), and optional `verification_keys`
+(key ID to base64 Ed25519 public key). Every profile repository needs a pinned ID. The running executable's
+actual SHA-256 and build identity are recorded. Use a controller-only Ed25519 PKCS#8 PEM key, raw seed/private
+key, or base64 seed/private key. Pin public keys out of band; retain old verification keys during rotation and
+remove revoked keys deliberately. A key fetched beside an untrusted receipt is not a trust anchor.
+
+Receipts bind the admitted request digest, repository/commit/tree/export, recipe, observed toolchain/runtime,
+actual argv/timing/exit, cleanup, test outcomes and artifact hashes. `complete` describes evidence completeness;
+it is not a success verdict. Verification must also require successful state and the exact expected policy.
+Container failures cannot count as executed tests. Build receipts explicitly say tests were not run.
+Submodules and Git LFS are unsupported and rejected, not silently omitted.
+
+Canonical receipt bytes remain unchanged through SQLite, HTTP and GitHub. Envelopes over 32 KiB compact to
+signed core evidence plus a full-manifest SHA-256, size and authenticated URL. The manifest route serves only
+the digest committed by the terminal receipt, never an uncommitted cancellation-race candidate. Full manifests
+remain immutable; cancellation during sealing produces a distinct candidate and cannot commit stale success.
+Normal evidence maintenance removes manifests only after their 90-day job metadata expires. It may relieve
+disk-only pressure, but does not run through manual/owner pause or security-readiness uncertainty.
+Raw logs/artifacts still have their shorter seven-day retention.
+
+Optional `github` configuration contains `app_id`, `installation_id`, RSA PEM `private_key_file`, `policies`,
+and `poll_seconds` (30–60; default 45). Install the App only on approved repositories, with metadata/contents/
+pull-request read and checks write permissions. The App must cover configured receipt repositories used
+for source fetch; each token is scoped to one numeric repository ID and kept in memory. No App secret or Mac
+API token belongs in Actions. Without App configuration, the private API can fetch public Git repositories;
+numeric receipt repository identities then come from administrator configuration, not a fresh App lookup.
+
+Each policy supplies `repository_id`, `repository`, `author_ids`, `base_branches`, `profiles`,
+`policy_revision`, and optional `actions_bot_id`, `actions_app_id`. Numeric author and repository identity,
+not display names or commit author text, control admission. Repository writers must all be trusted: allowlisting
+a PR author does not authenticate everyone who can push to their branch.
+
+Polling automatically enrolls each observed eligible open same-repository head; no comment or Linux workflow
+is required. Forks, unlisted authors, disallowed bases and disabled profiles never execute. A current head is
+eventually reconciled; transient heads overwritten between polls may not be observed. Immediately before source
+preparation, head/policy is rechecked; rejection or network uncertainty cancels without executing. Removing
+GitHub configuration does not turn previously enrolled jobs into private-API work.
+
+Require `mac-evidence/<profile>` **from the configured App**. Checks target the PR head, never the synthetic
+merge commit. Only the current attempt may update the stable check; publication retry/restart reconciles
+`external_id=job-id` rather than rerunning work. Failure, timeout, cancellation, missing evidence and policy
+rejection cannot publish success; policy rejection uses `action_required`, not passing `neutral`/`skipped`.
+This does not implement merge-queue `merge_group` evidence.
+
+Machine comments have exactly this grammar:
+
+```text
+/mac-evidence sha=<40-lowercase-hex> profile=<approved-id> request=actions:<run-id>:<attempt> mode=ensure
+```
+
+Only the configured numeric Actions bot is accepted; when an App identity is present it must match the pinned
+Actions App. Edited comments are rejected. `ensure` joins the same logical run, including terminal results.
+Explicit `mode=rerun` starts a new attempt only after termination, at most twice per head/profile per hour;
+active attempts are joined. Correlations are durable and capped at 128 per attempt.
+
+### Linux workflow waiter
+
+Install a reviewed, checksummed `macserve` binary and trusted pins without checking out PR code. Give the
+workflow only `GITHUB_TOKEN` permissions `contents: read`, `checks: read`, `pull-requests: write`.
+Do not use `pull_request_target` to execute PR code or transfer App/private-network credentials.
+
+```sh
+macserve wait --pins /absolute/trusted-pins.json \
+  --pr \"$PR_NUMBER\" --sha \"$PR_HEAD_SHA\" \
+  --request \"actions:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT\" --timeout 90m
+```
+
+`PR_HEAD_SHA` must be the event's `pull_request.head.sha`, not `GITHUB_SHA`'s synthetic merge commit.
+The pins JSON contains `repository_id`, `app_id`, `profile_digest`, `required_tests`, `verification_keys`,
+and `request` with `repo`, `profile`, `kind`, `xcode` (version/build), and the exact `simulator` pins when needed.
+An optional pinned `request.sha` must match `--sha`. Use the admitted profile digest, not a hash of hand-edited
+JSON. Public keys are standard base64. Protect this policy independently of the submitted branch.
+
+The waiter posts a machine comment, binds its immutable ID/body to the admitted job/attempt, filters paginated
+checks by exact head/name/App, rereads the selected check, verifies the pinned receipt and rereads the PR head.
+Timeout, supersession, missing/invalid evidence or non-success exits nonzero; it never cancels shared Mac work.
+Success prints JSON and writes `job_id`, `check_url`, `receipt_digest` to `GITHUB_OUTPUT` when supplied, plus
+verified test counts to `GITHUB_STEP_SUMMARY`. Downstream jobs can depend on this waiter job. Offline Mac/network
+outages keep the required check pending or missing; they do not clear a gate.
+
+Native signatures attest recorded observations for trusted code, not host integrity or honest tests. Private
+screenshots/source and full manifests stay behind authenticated downloads; a compact GitHub receipt does not
+give an uncredentialed Linux job arbitrary artifact access. Real App authorization, branch protection, target
+recipes and GUI/network qualification still require the approved deployment acceptance window.
 
 ## Development
 
