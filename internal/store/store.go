@@ -24,14 +24,16 @@ import (
 )
 
 var (
-	ErrNotFound   = errors.New("not found")
-	ErrConflict   = errors.New("idempotency conflict")
-	ErrFull       = errors.New("queue full")
-	ErrNoJob      = errors.New("no claimable job")
-	ErrTransition = errors.New("invalid state transition")
-	ErrLease      = errors.New("invalid lease")
-	ErrInvalid    = errors.New("invalid input")
-	ErrLogLimit   = errors.New("log limit exceeded")
+	ErrNotFound    = errors.New("not found")
+	ErrConflict    = errors.New("idempotency conflict")
+	ErrFull        = errors.New("queue full")
+	ErrNoJob       = errors.New("no claimable job")
+	ErrTransition  = errors.New("invalid state transition")
+	ErrLease       = errors.New("invalid lease")
+	ErrInvalid     = errors.New("invalid input")
+	ErrLogLimit    = errors.New("log limit exceeded")
+	ErrResultLimit = errors.New("result envelope limit exceeded")
+	ErrLogExpired  = errors.New("log bytes expired")
 )
 
 type Options struct {
@@ -40,6 +42,9 @@ type Options struct {
 	QueueTTL          time.Duration
 	Retention         time.Duration
 	MaxLogBytes       int64
+	MaxResultBytes    int64
+	MaxTotalLogBytes  int64
+	LogRetention      time.Duration
 }
 
 type Store struct {
@@ -54,7 +59,7 @@ const terminalStates = "'succeeded','failed','timed_out','cancelled','interrupte
 // dedicated store storage: existing non-private directories are rejected rather
 // than chmodded. Zero option values select defaults; negative values are invalid.
 func Open(path string, options Options) (*Store, error) {
-	if options.QueueLimit < 0 || options.PerPrincipalLimit < 0 || options.QueueTTL < 0 || options.Retention < 0 || options.MaxLogBytes < 0 {
+	if options.QueueLimit < 0 || options.PerPrincipalLimit < 0 || options.QueueTTL < 0 || options.Retention < 0 || options.MaxLogBytes < 0 || options.MaxResultBytes < 0 || options.MaxTotalLogBytes < 0 || options.LogRetention < 0 {
 		return nil, ErrInvalid
 	}
 	if options.QueueLimit == 0 {
@@ -71,6 +76,15 @@ func Open(path string, options Options) (*Store, error) {
 	}
 	if options.MaxLogBytes == 0 {
 		options.MaxLogBytes = 256 << 20
+	}
+	if options.MaxResultBytes == 0 {
+		options.MaxResultBytes = 64 << 20
+	}
+	if options.MaxTotalLogBytes == 0 {
+		options.MaxTotalLogBytes = 1 << 30
+	}
+	if options.LogRetention == 0 {
+		options.LogRetention = 7 * 24 * time.Hour
 	}
 	if path == "" || path == ":memory:" || strings.IndexByte(path, 0) >= 0 {
 		return nil, ErrInvalid
@@ -142,11 +156,16 @@ func (s *Store) initialize(ctx context.Context) error {
 	if err := tx.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version > 1 {
+	if version > 2 {
 		return fmt.Errorf("unsupported store schema version %d", version)
 	}
 	if version == 0 {
 		if _, err := tx.ExecContext(ctx, schema); err != nil {
+			return err
+		}
+	}
+	if version < 2 {
+		if _, err := tx.ExecContext(ctx, reviewSchema); err != nil {
 			return err
 		}
 	}

@@ -16,7 +16,7 @@ const MaxLogPageBytes = 1 << 20
 // AppendLog preserves raw bytes without sanitizing terminal controls. Renderers
 // must escape untrusted output. A rejected oversized record or full log persists
 // the completeness flag separately, so a full byte cap cannot hide truncation.
-func (s *Store) AppendLog(ctx context.Context, id, stream, text string, now time.Time) (int64, error) {
+func (s *Store) AppendLog(ctx context.Context, id, lease, stream, text string, now time.Time) (int64, error) {
 	if stream != "stdout" && stream != "stderr" && stream != "system" || text == "" || !validTime(now) {
 		return 0, ErrInvalid
 	}
@@ -26,14 +26,29 @@ func (s *Store) AppendLog(ctx context.Context, id, stream, text string, now time
 	}
 	defer tx.Rollback()
 	var sequence, bytes int64
-	err = tx.QueryRowContext(ctx, "SELECT log_sequence,log_bytes FROM jobs WHERE id=?", id).Scan(&sequence, &bytes)
+	var state model.State
+	var currentLease string
+	err = tx.QueryRowContext(ctx, "SELECT log_sequence,log_bytes,state,lease_token FROM jobs WHERE id=?", id).Scan(&sequence, &bytes, &state, &currentLease)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, ErrNotFound
 	}
 	if err != nil {
 		return 0, err
 	}
-	if len(text) > MaxLogRecordBytes || int64(len(text)) > s.options.MaxLogBytes-bytes {
+	if !active(state) {
+		return 0, ErrTransition
+	}
+	if lease == "" || lease != currentLease {
+		return 0, ErrLease
+	}
+	fits := len(text) <= MaxLogRecordBytes && int64(len(text)) <= s.options.MaxLogBytes-bytes && int64(len(text)) <= s.options.MaxTotalLogBytes
+	if fits {
+		fits, err = s.reserveLog(ctx, tx, int64(len(text)))
+		if err != nil {
+			return 0, err
+		}
+	}
+	if !fits {
 		if _, err := tx.ExecContext(ctx, "UPDATE jobs SET logs_truncated=1 WHERE id=?", id); err != nil {
 			return 0, err
 		}
@@ -73,13 +88,16 @@ func (s *Store) Logs(ctx context.Context, id string, after int64, maxBytes int) 
 		return nil, after, false, err
 	}
 	defer tx.Rollback()
-	var truncated bool
-	err = tx.QueryRowContext(ctx, "SELECT logs_truncated FROM jobs WHERE id=?", id).Scan(&truncated)
+	var truncated, expired bool
+	err = tx.QueryRowContext(ctx, "SELECT logs_truncated,logs_evicted FROM jobs WHERE id=?", id).Scan(&truncated, &expired)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, after, false, ErrNotFound
 	}
 	if err != nil {
 		return nil, after, false, err
+	}
+	if expired {
+		return nil, after, truncated, ErrLogExpired
 	}
 	rows, err := tx.QueryContext(ctx, "SELECT sequence,time,stream,text FROM logs WHERE job_id=? AND sequence>? ORDER BY sequence", id, after)
 	if err != nil {

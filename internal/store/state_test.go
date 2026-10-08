@@ -214,7 +214,7 @@ func TestRecoveryInterruptsEveryActiveStageAndRetainsEvidence(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if _, err := s.AppendLog(ctx, job.ID, "stderr", "partial evidence\n", testNow); err != nil {
+			if _, err := s.AppendLog(ctx, job.ID, job.LeaseToken, "stderr", "partial evidence\n", testNow); err != nil {
 				t.Fatal(err)
 			}
 			if err := s.Close(); err != nil {

@@ -47,13 +47,18 @@ needs network credentials for your private network. No VM required.
   contain `..`; command placeholders are limited to `CHECKOUT`, `WORKSPACE`, `DERIVED_DATA`, `RESULT_BUNDLE`,
   `SIMULATOR_ID`, `JOB_ID` and `DEVELOPER_DIR`, each written `${NAME}`. Test profiles require explicit test scope.
 - `internal/store`: SQLite WAL queue with principal-scoped idempotency, FIFO admission, database-enforced single
-  active execution, lease-checked transitions, bounded logs, persistent pause/drain, cancellation and retention.
+  active execution, lease-checked transitions and active-execution log writes, persistent pause/drain,
+  cancellation and retention. Terminal logs and results cannot be amended by a late worker.
   Interrupted execution or uncertain cleanup quarantines dispatch. Clearing quarantine requires a caller-proven
-  quiescent worker with a new authenticated epoch; it is not an automatic retry.
+  quiescent worker with a new authenticated epoch; subsequent claims must use that persisted epoch.
 
 The store requires a dedicated private directory (mode `0700`) and private database files. Default limits are
-50 outstanding jobs, 10 per principal, 24-hour queue expiry, 90-day terminal metadata retention and 256 MiB of
-raw logs per job. Artifact-byte cleanup and runtime permission checks belong to the upcoming execution layer.
+50 outstanding jobs, 10 per principal, 24-hour queue expiry, 90-day terminal metadata retention, 64 MiB per
+result envelope, 256 MiB of raw logs per job and 1 GiB of retained raw logs across jobs. Terminal log bytes
+expire after seven days or under pool pressure, oldest completion first; active logs are never evicted.
+`Logs` returns `ErrLogExpired` after eviction, while result envelopes, sequence/completeness metadata and
+idempotency records remain unchanged. Schema upgrades account for existing log bytes. Artifact-byte cleanup
+and runtime permission checks belong to the upcoming execution layer.
 
 ## Development
 

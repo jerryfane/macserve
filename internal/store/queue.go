@@ -188,6 +188,13 @@ func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time) (m
 	if stale {
 		return model.Job{}, ErrLease
 	}
+	var acknowledged string
+	if err := tx.QueryRowContext(ctx, "SELECT acknowledged_epoch FROM service_state WHERE singleton=1").Scan(&acknowledged); err != nil {
+		return model.Job{}, err
+	}
+	if acknowledged != "" && acknowledged != workerEpoch {
+		return model.Job{}, ErrLease
+	}
 	job, err := scanJob(tx.QueryRowContext(ctx, "SELECT "+jobColumns+" FROM jobs WHERE state='queued' ORDER BY sequence LIMIT 1"))
 	if errors.Is(err, ErrNotFound) {
 		if err := tx.Commit(); err != nil {
@@ -211,6 +218,9 @@ func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time) (m
 		if contention(err) || uniqueViolation(err) {
 			return model.Job{}, ErrNoJob
 		}
+		return model.Job{}, err
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE service_state SET acknowledged_epoch=? WHERE singleton=1", workerEpoch); err != nil {
 		return model.Job{}, err
 	}
 	job, err = getTx(ctx, tx, job.ID)
@@ -305,6 +315,9 @@ func (s *Store) Finish(ctx context.Context, id, lease string, state model.State,
 	if !model.Finalizing.CanTransition(state) || state == model.Succeeded && !cleanupOK {
 		return ErrTransition
 	}
+	if int64(len(result)) > s.options.MaxResultBytes {
+		return ErrResultLimit
+	}
 	if result != nil && !json.Valid(result) || !validReason(reason) || !validTime(now) {
 		return ErrInvalid
 	}
@@ -347,7 +360,7 @@ func (s *Store) expire(ctx context.Context, tx *sql.Tx, now time.Time) error {
 // Prune retains terminal metadata and idempotency for Retention after terminal
 // completion. It does not delete artifact bytes, which the caller owns.
 func (s *Store) Prune(ctx context.Context, now time.Time) error {
-	if !validTime(now) || !validTime(now.Add(-s.options.Retention)) {
+	if !validTime(now) || !validTime(now.Add(-s.options.Retention)) || !validTime(now.Add(-s.options.LogRetention)) {
 		return ErrInvalid
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -356,6 +369,9 @@ func (s *Store) Prune(ctx context.Context, now time.Time) error {
 	}
 	defer tx.Rollback()
 	if err := s.expire(ctx, tx, now); err != nil {
+		return err
+	}
+	if err := s.pruneLogs(ctx, tx, now); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM jobs WHERE state IN ("+terminalStates+") AND finished_at<=?", now.Add(-s.options.Retention).UnixNano()); err != nil {

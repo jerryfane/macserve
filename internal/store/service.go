@@ -138,7 +138,16 @@ func (s *Store) AcknowledgeQuiescent(ctx context.Context, workerEpoch string) er
 	if exists {
 		return ErrLease
 	}
-	_, err = tx.ExecContext(ctx, "UPDATE service_state SET quarantined=0,quarantine_reason='',generation=generation+1 WHERE singleton=1 AND quarantined=1")
+	var prior string
+	if err := tx.QueryRowContext(ctx, "SELECT acknowledged_epoch FROM service_state WHERE singleton=1").Scan(&prior); err != nil {
+		return err
+	}
+	if prior != "" && prior != workerEpoch {
+		if _, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO invalid_epochs(epoch) VALUES(?)", prior); err != nil {
+			return err
+		}
+	}
+	_, err = tx.ExecContext(ctx, "UPDATE service_state SET acknowledged_epoch=?,quarantined=0,quarantine_reason='',generation=generation+1 WHERE singleton=1 AND (quarantined=1 OR acknowledged_epoch<>?)", workerEpoch, workerEpoch)
 	if err != nil {
 		return err
 	}

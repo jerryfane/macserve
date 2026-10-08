@@ -13,11 +13,12 @@ import (
 func TestLogsPreserveRawTextAndPaginate(t *testing.T) {
 	ctx := context.Background()
 	s, _ := newStore(t, Options{})
-	job := enqueueJob(t, s, "principal", "key", testNow)
+	enqueueJob(t, s, "principal", "key", testNow)
+	job := claimJob(t, s, "epoch", testNow)
 	texts := []string{"one\n", "\x1b[31mred\x00\xff", "last\n"}
 	streams := []string{"stdout", "stderr", "system"}
 	for i, text := range texts {
-		sequence, err := s.AppendLog(ctx, job.ID, streams[i], text, testNow.Add(time.Duration(i)*time.Second))
+		sequence, err := s.AppendLog(ctx, job.ID, job.LeaseToken, streams[i], text, testNow.Add(time.Duration(i)*time.Second))
 		if err != nil || sequence != int64(i+1) {
 			t.Fatalf("append sequence=%d err=%v", sequence, err)
 		}
@@ -45,11 +46,11 @@ func TestLogsPreserveRawTextAndPaginate(t *testing.T) {
 	}
 	_, _, _, err = s.Logs(ctx, "missing", 0, 0)
 	requireError(t, err, ErrNotFound)
-	_, err = s.AppendLog(ctx, "missing", "stdout", "text", testNow)
+	_, err = s.AppendLog(ctx, "missing", "lease", "stdout", "text", testNow)
 	requireError(t, err, ErrNotFound)
-	_, err = s.AppendLog(ctx, job.ID, "untrusted", "text", testNow)
+	_, err = s.AppendLog(ctx, job.ID, job.LeaseToken, "untrusted", "text", testNow)
 	requireError(t, err, ErrInvalid)
-	_, err = s.AppendLog(ctx, job.ID, "stdout", "", testNow)
+	_, err = s.AppendLog(ctx, job.ID, job.LeaseToken, "stdout", "", testNow)
 	requireError(t, err, ErrInvalid)
 	_, _, _, err = s.Logs(ctx, job.ID, -1, 0)
 	requireError(t, err, ErrInvalid)
@@ -58,20 +59,21 @@ func TestLogsPreserveRawTextAndPaginate(t *testing.T) {
 func TestLogLimitPersistsCompletenessOutsideByteCap(t *testing.T) {
 	ctx := context.Background()
 	s, path := newStore(t, Options{MaxLogBytes: 8})
-	job := enqueueJob(t, s, "principal", "key", testNow)
-	if _, err := s.AppendLog(ctx, job.ID, "stdout", "12345", testNow); err != nil {
+	enqueueJob(t, s, "principal", "key", testNow)
+	job := claimJob(t, s, "epoch", testNow)
+	if _, err := s.AppendLog(ctx, job.ID, job.LeaseToken, "stdout", "12345", testNow); err != nil {
 		t.Fatal(err)
 	}
-	sequence, err := s.AppendLog(ctx, job.ID, "stderr", "oversized", testNow)
+	sequence, err := s.AppendLog(ctx, job.ID, job.LeaseToken, "stderr", "oversized", testNow)
 	requireError(t, err, ErrLogLimit)
 	if sequence != 0 {
 		t.Fatal("rejected record was assigned a sequence")
 	}
-	sequence, err = s.AppendLog(ctx, job.ID, "system", "678", testNow)
+	sequence, err = s.AppendLog(ctx, job.ID, job.LeaseToken, "system", "678", testNow)
 	if err != nil || sequence != 2 {
 		t.Fatalf("exact cap: %d %v", sequence, err)
 	}
-	_, err = s.AppendLog(ctx, job.ID, "stdout", "x", testNow)
+	_, err = s.AppendLog(ctx, job.ID, job.LeaseToken, "stdout", "x", testNow)
 	requireError(t, err, ErrLogLimit)
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
@@ -90,11 +92,12 @@ func TestLogLimitPersistsCompletenessOutsideByteCap(t *testing.T) {
 func TestRecordSizeLimitDoesNotConsumeSequence(t *testing.T) {
 	ctx := context.Background()
 	s, _ := newStore(t, Options{})
-	job := enqueueJob(t, s, "principal", "key", testNow)
-	_, err := s.AppendLog(ctx, job.ID, "stdout", strings.Repeat("x", MaxLogRecordBytes+1), testNow)
+	enqueueJob(t, s, "principal", "key", testNow)
+	job := claimJob(t, s, "epoch", testNow)
+	_, err := s.AppendLog(ctx, job.ID, job.LeaseToken, "stdout", strings.Repeat("x", MaxLogRecordBytes+1), testNow)
 	requireError(t, err, ErrLogLimit)
 	text := strings.Repeat("x", MaxLogRecordBytes)
-	sequence, err := s.AppendLog(ctx, job.ID, "stdout", text, testNow)
+	sequence, err := s.AppendLog(ctx, job.ID, job.LeaseToken, "stdout", text, testNow)
 	if err != nil || sequence != 1 {
 		t.Fatalf("boundary record: %d %v", sequence, err)
 	}
@@ -108,7 +111,8 @@ func TestIndependentLogWritersPreserveEverySequence(t *testing.T) {
 	ctx := context.Background()
 	one, path := newStore(t, Options{})
 	two := openStore(t, path, Options{})
-	job := enqueueJob(t, one, "principal", "key", testNow)
+	enqueueJob(t, one, "principal", "key", testNow)
+	job := claimJob(t, one, "epoch", testNow)
 	var group sync.WaitGroup
 	failures := make(chan error, 2)
 	start := make(chan struct{})
@@ -118,7 +122,7 @@ func TestIndependentLogWritersPreserveEverySequence(t *testing.T) {
 			defer group.Done()
 			<-start
 			for range 10 {
-				if _, err := handle.AppendLog(ctx, job.ID, "stdout", "line\n", testNow); err != nil {
+				if _, err := handle.AppendLog(ctx, job.ID, job.LeaseToken, "stdout", "line\n", testNow); err != nil {
 					failures <- err
 					return
 				}
@@ -196,10 +200,10 @@ func TestExpiryDoesNotInterruptActiveAndRetentionStartsAtFinish(t *testing.T) {
 		t.Fatal("prune failed to expire queued job")
 	}
 	third := enqueueJob(t, s, "principal", "capacity-freed", testNow.Add(2*time.Hour))
-	finishJob(t, s, active, model.Succeeded, true, testNow.Add(2*time.Hour))
-	if _, err := s.AppendLog(ctx, first.ID, "system", "finished", testNow); err != nil {
+	if _, err := s.AppendLog(ctx, first.ID, active.LeaseToken, "system", "final output", testNow); err != nil {
 		t.Fatal(err)
 	}
+	finishJob(t, s, active, model.Succeeded, true, testNow.Add(2*time.Hour))
 	if err := s.Prune(ctx, testNow.Add(3*time.Hour-time.Nanosecond)); err != nil {
 		t.Fatal(err)
 	}

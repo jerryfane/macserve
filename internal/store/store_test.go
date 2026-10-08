@@ -123,7 +123,7 @@ func TestRestartPreservesSnapshotsLeasesAndPause(t *testing.T) {
 	if job.State != model.Preparing || job.LeaseToken == "" || job.WorkerEpoch != "epoch-one" || job.StartedAt == nil || !job.Deadline.Equal(testNow.Add(61*time.Second)) {
 		t.Fatalf("invalid claim: %+v", job)
 	}
-	if _, err := s.AppendLog(ctx, job.ID, "stdout", "partial output\n", testNow); err != nil {
+	if _, err := s.AppendLog(ctx, job.ID, job.LeaseToken, "stdout", "partial output\n", testNow); err != nil {
 		t.Fatal(err)
 	}
 	pause, err := s.Pause(ctx, "owner activity", "drain", testNow)
