@@ -64,7 +64,7 @@ func unixController(t *testing.T, handler http.Handler) (Config, func()) {
 	if err := os.Mkdir(root, 0700); err != nil {
 		t.Fatal(err)
 	}
-	return Config{Socket: socket, ControllerUID: uint32(os.Geteuid()), OwnerUID: uint32(os.Geteuid()), JobUID: uint32(os.Geteuid()) + 10000, JobGID: 502, Root: root, ExportRoot: filepath.Join(dir, "exports"), WorkspaceRoot: filepath.Join(dir, "workspaces"), HelperPath: filepath.Join(dir, "macserve"), BaselinePath: filepath.Join(root, "gui-baseline.json"), PollSeconds: 1, HeartbeatSeconds: 1, RequestTimeoutSeconds: 2}, func() { server.Close() }
+	return Config{Socket: socket, ControllerUID: uint32(os.Geteuid()), OwnerUID: uint32(os.Geteuid()) + 20000, JobUID: uint32(os.Geteuid()) + 10000, JobGID: 502, Root: root, ExportRoot: filepath.Join(dir, "exports"), WorkspaceRoot: filepath.Join(dir, "workspaces"), HelperPath: filepath.Join(dir, "macserve"), BaselinePath: filepath.Join(root, "gui-baseline.json"), PollSeconds: 1, HeartbeatSeconds: 1, RequestTimeoutSeconds: 2}, func() { server.Close() }
 }
 
 func TestWrongControllerPeerCannotRegister(t *testing.T) {

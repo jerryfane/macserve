@@ -23,6 +23,7 @@ func TestProtectedBrokerConfigurationSeparatesIdentityAndStorage(t *testing.T) {
 		"controller-job":     func(c *Config) { c.JobUID = c.ControllerUID },
 		"root-controller":    func(c *Config) { c.ControllerUID = 0 },
 		"missing-owner":      func(c *Config) { c.OwnerUID = 0 },
+		"owner-controller":   func(c *Config) { c.ControllerUID = c.OwnerUID },
 		"missing-baseline":   func(c *Config) { c.BaselinePath = "" },
 		"control-under-job":  func(c *Config) { c.Root = filepath.Join(c.WorkspaceRoot, "control") },
 		"job-under-control":  func(c *Config) { c.WorkspaceRoot = filepath.Join(c.Root, "workspaces") },

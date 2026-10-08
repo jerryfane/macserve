@@ -18,6 +18,7 @@ func TestDedicatedJobIdentityExcludesRootOwnerAndController(t *testing.T) {
 		{"root-group", 502, 0, 503, 501},
 		{"root-controller", 502, 502, 0, 501},
 		{"missing-owner", 502, 502, 503, 0},
+		{"owner-controller", 502, 502, 501, 501},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := DistinctJobIdentity(tc.uid, tc.gid, tc.controller, tc.owner); err == nil {

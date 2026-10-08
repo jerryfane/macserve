@@ -86,6 +86,7 @@ Fields are `socket`, `controller_uid`, `job_uid`, `job_gid`, `owner_uid`, `root`
 the job account must be non-admin. The helper is a protected executable. Control and export roots are disjoint,
 root-private (`0700`); the separate root-owned workspace parent must allow job traversal (for example `0711`),
 but not replacement of other job directories. Only each individual workspace is transferred to the job UID.
+Configuration rejects aliases between any of the three identities before connecting or executing tools.
 
 An actual GUI login must already exist; `launchctl asuser` does not create one. With the broker stopped and no
 unresolved manifests, an administrator explicitly audits trusted GUI process PIDs and runs

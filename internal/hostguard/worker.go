@@ -69,8 +69,8 @@ func BrokerIdentity(jobUID, jobGID, controllerUID, ownerUID uint32) error {
 }
 
 func DistinctJobIdentity(jobUID, jobGID, controllerUID, ownerUID uint32) error {
-	if jobUID < 501 || jobGID == 0 || controllerUID == 0 || ownerUID == 0 || jobUID == controllerUID || jobUID == ownerUID {
-		return errors.New("job UID must be a dedicated non-root account distinct from owner and controller")
+	if jobUID < 501 || jobGID == 0 || controllerUID == 0 || ownerUID == 0 || jobUID == controllerUID || jobUID == ownerUID || controllerUID == ownerUID {
+		return errors.New("job, owner and controller UIDs must be distinct non-root identities; job UID must be a dedicated login account")
 	}
 	return nil
 }
