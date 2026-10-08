@@ -41,6 +41,9 @@ type Options struct {
 	Source           SourceProvider
 	Gate             func(context.Context) (GateState, error)
 	HeartbeatTimeout time.Duration
+	CleanupTimeout   time.Duration
+	DeliveryTimeout  time.Duration
+	SourceTimeout    time.Duration
 	Now              func() time.Time
 	Seal             func(context.Context, model.Job, worker.Result) (json.RawMessage, error)
 }

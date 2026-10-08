@@ -25,35 +25,37 @@ type execution struct {
 	offered         bool
 	heartbeat       time.Time
 	cancellingSince time.Time
+	finalizingSince time.Time
 	cancel          context.CancelFunc
 }
 
 type Controller struct {
-	options     Options
-	mu          sync.Mutex
-	evidenceMu  sync.Mutex
-	poolBytes   int64 // protected by evidenceMu
-	poolKnown   bool
-	root        *os.Root
-	lock        *os.File
-	ctx         context.Context
-	cancel      context.CancelFunc
-	prep        sync.WaitGroup
-	background  sync.WaitGroup
-	active      *execution
-	epoch       string
-	workerIdle  bool
-	lastSeen    time.Time
-	maintaining bool
-	closed      bool
-	running     bool
-	server      *http.Server
-	closeOnce   sync.Once
-	closeErr    error
+	options        Options
+	mu             sync.Mutex
+	evidenceMu     sync.Mutex
+	poolBytes      int64 // protected by evidenceMu
+	poolKnown      bool
+	root           *os.Root
+	lock           *os.File
+	ctx            context.Context
+	cancel         context.CancelFunc
+	prep           sync.WaitGroup
+	background     sync.WaitGroup
+	active         *execution
+	epoch          string
+	workerIdle     bool
+	lastSeen       time.Time
+	maintaining    bool
+	closed         bool
+	running        bool
+	server         *http.Server
+	requestTimeout time.Duration
+	closeOnce      sync.Once
+	closeErr       error
 }
 
 func New(options Options) (*Controller, error) {
-	if options.Root == "" || options.Socket == "" || options.Store == nil || options.Source == nil || options.Gate == nil || options.HeartbeatTimeout < 0 {
+	if options.Root == "" || options.Socket == "" || options.Store == nil || options.Source == nil || options.Gate == nil || options.HeartbeatTimeout < 0 || options.CleanupTimeout < 0 || options.DeliveryTimeout < 0 || options.SourceTimeout < 0 {
 		return nil, errors.New("controller requires private root, socket, authenticated broker peer UID, store, source and readiness gate")
 	}
 	if options.Now == nil {
@@ -61,6 +63,17 @@ func New(options Options) (*Controller, error) {
 	}
 	if options.HeartbeatTimeout == 0 {
 		options.HeartbeatTimeout = 30 * time.Second
+	}
+	// These match the worker's independent cleanup, evidence-delivery and source
+	// read budgets. HeartbeatTimeout also provides bounded transport grace.
+	if options.CleanupTimeout == 0 {
+		options.CleanupTimeout = 2 * time.Minute
+	}
+	if options.DeliveryTimeout == 0 {
+		options.DeliveryTimeout = 2 * time.Minute
+	}
+	if options.SourceTimeout == 0 {
+		options.SourceTimeout = 10 * time.Minute
 	}
 	absolute, err := filepath.Abs(options.Root)
 	if err != nil {
@@ -127,19 +140,36 @@ func New(options Options) (*Controller, error) {
 	if previousErr != nil && !errors.Is(previousErr, store.ErrNotFound) {
 		return fail(previousErr)
 	}
-	if err := options.Store.Recover(context.Background(), options.Now()); err != nil {
-		return fail(err)
-	}
 	if previousErr == nil {
-		if err := options.Source.Remove(previous.ID); err != nil {
+		if err := options.Store.RequireSourceCleanup(context.Background(), previous.ID); err != nil {
 			return fail(err)
 		}
 	}
+	if err := options.Store.Recover(context.Background(), options.Now()); err != nil {
+		return fail(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Controller{options: options, root: root, lock: lock, ctx: ctx, cancel: cancel}, nil
+	c := &Controller{options: options, root: root, lock: lock, ctx: ctx, cancel: cancel, requestTimeout: 2 * time.Minute}
+	service, serviceErr := options.Store.ServiceState(ctx)
+	gate, gateErr := options.Gate(ctx)
+	if serviceErr == nil && gateErr == nil && !service.Paused && cleanupAllowed(gate) {
+		// A failed retry leaves durable controller debt, not a startup loop that
+		// loses the export ID or requires worker registration to clear it.
+		_ = c.retrySourceCleanup(ctx)
+	}
+	return c, nil
 }
 
 type peerKey struct{}
+
+func (c *Controller) newServer() *http.Server {
+	return &http.Server{Handler: c.handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: c.requestTimeout, WriteTimeout: c.requestTimeout, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10,
+		ConnContext: func(ctx context.Context, conn net.Conn) context.Context {
+			uid, err := peercred.UID(conn)
+			return context.WithValue(ctx, peerKey{}, err == nil && uid == c.options.BrokerUID)
+		},
+	}
+}
 
 func (c *Controller) Run(ctx context.Context) error {
 	c.mu.Lock()
@@ -176,12 +206,7 @@ func (c *Controller) Run(ctx context.Context) error {
 		listener.Close()
 		return err
 	}
-	server := &http.Server{Handler: c.handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10,
-		ConnContext: func(ctx context.Context, conn net.Conn) context.Context {
-			uid, err := peercred.UID(conn)
-			return context.WithValue(ctx, peerKey{}, err == nil && uid == c.options.BrokerUID)
-		},
-	}
+	server := c.newServer()
 	c.mu.Lock()
 	c.server = server
 	if c.closed {
@@ -243,10 +268,16 @@ func (c *Controller) Close() error {
 		c.mu.Lock()
 		if c.active != nil {
 			a := c.active
-			c.closeErr = errors.Join(c.closeErr, c.options.Store.Fail(context.Background(), a.job.ID, a.job.LeaseToken, model.Interrupted, !a.offered, "controller shutdown", c.options.Now()))
 			c.active = nil
 			c.mu.Unlock()
-			c.closeErr = errors.Join(c.closeErr, c.options.Source.Remove(a.job.ID))
+			cleanupErr := c.removeSource(a.job.ID)
+			fail := c.options.Store.FailPreparation
+			cleanupOK := cleanupErr == nil
+			if a.offered {
+				fail = c.options.Store.Fail
+				cleanupOK = false
+			}
+			c.closeErr = errors.Join(c.closeErr, cleanupErr, fail(context.Background(), a.job.ID, a.job.LeaseToken, model.Interrupted, cleanupOK, "controller shutdown", c.options.Now()))
 		} else {
 			c.mu.Unlock()
 		}

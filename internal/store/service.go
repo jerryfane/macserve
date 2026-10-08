@@ -9,7 +9,7 @@ import (
 	"github.com/jerryfane/macserve/internal/model"
 )
 
-const serviceColumns = "paused,pause_reason,pause_mode,generation,quarantined,quarantine_reason"
+const serviceColumns = "paused,pause_reason,pause_mode,generation,(quarantined OR " + sourceCleanupPending + "),CASE WHEN " + sourceCleanupPending + " THEN CASE WHEN quarantined=1 THEN quarantine_reason || '; controller source cleanup pending' ELSE 'controller source cleanup pending' END ELSE quarantine_reason END"
 
 func scanService(row scanner) (model.ServiceState, error) {
 	var state model.ServiceState

@@ -73,6 +73,17 @@ func (s *Store) Active(ctx context.Context) (model.Job, error) {
 // Fail atomically ends uncertain or controller-side preparation work. Uncertain
 // cleanup fences its epoch before releasing the global active slot.
 func (s *Store) Fail(ctx context.Context, id, lease string, state model.State, cleanupOK bool, reason string, now time.Time) error {
+	return s.fail(ctx, id, lease, state, cleanupOK, true, reason, now)
+}
+
+// FailPreparation fences an uncertain preparation epoch without claiming the
+// worker left live processes: it has not received this lease. Independent source
+// cleanup debt keeps admission closed until the controller confirms removal.
+func (s *Store) FailPreparation(ctx context.Context, id, lease string, state model.State, cleanupOK bool, reason string, now time.Time) error {
+	return s.fail(ctx, id, lease, state, cleanupOK, false, reason, now)
+}
+
+func (s *Store) fail(ctx context.Context, id, lease string, state model.State, cleanupOK, workerUncertain bool, reason string, now time.Time) error {
 	if !model.Finalizing.CanTransition(state) || state == model.Succeeded || !validReason(reason) || !validTime(now) {
 		return ErrInvalid
 	}
@@ -92,7 +103,12 @@ func (s *Store) Fail(ctx context.Context, id, lease string, state model.State, c
 		return ErrTransition
 	}
 	if !cleanupOK {
-		if err = quarantine(ctx, tx, job.WorkerEpoch, reason); err != nil {
+		if workerUncertain {
+			err = quarantine(ctx, tx, job.WorkerEpoch, reason)
+		} else {
+			_, err = tx.ExecContext(ctx, "INSERT OR IGNORE INTO invalid_epochs(epoch) VALUES(?)", job.WorkerEpoch)
+		}
+		if err != nil {
 			return err
 		}
 	}

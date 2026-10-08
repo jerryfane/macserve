@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/jerryfane/macserve/internal/evidence"
 	"github.com/jerryfane/macserve/internal/model"
@@ -177,6 +178,9 @@ func (c *Controller) stage(w http.ResponseWriter, r *http.Request) {
 		if c.active == nil || c.active.job.ID != job.ID || !c.active.offered {
 			return store.ErrLease
 		}
+		if value.State == model.Finalizing && c.active.finalizingSince.IsZero() {
+			c.active.finalizingSince = c.options.Now()
+		}
 		if job.State == value.State {
 			return nil
 		}
@@ -239,6 +243,12 @@ func (c *Controller) serveSource(w http.ResponseWriter, r *http.Request) {
 	defer file.Close()
 	info, err := privateRegular(file)
 	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	// Source ingestion has a larger bounded budget than ordinary RPCs. Override
+	// the per-connection server deadline only for this authenticated transfer.
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(c.options.SourceTimeout + c.options.HeartbeatTimeout)); err != nil {
 		respond(w, nil, err)
 		return
 	}

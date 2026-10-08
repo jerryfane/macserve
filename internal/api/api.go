@@ -51,14 +51,9 @@ func Submit(ctx context.Context, db *store.Store, registry *profiles.Registry, p
 	if !principal.HasScope("jobs:submit") || !principal.AllowsRepository(request.Repo) {
 		return model.Job{}, false, ErrForbidden
 	}
-	original, err := db.Lookup(ctx, principal.ID, key)
+	original, err := db.Replay(ctx, principal.ID, key, request)
 	if err == nil {
-		request.Repo = strings.ToLower(request.Repo)
-		request.SHA = strings.ToLower(request.SHA)
-		if request.TimeoutSeconds == 0 {
-			request.TimeoutSeconds = original.Profile.DefaultTimeoutSeconds
-		}
-		return db.Enqueue(ctx, principal.ID, key, model.Admission{Request: request, Profile: original.Profile, ProfileDigest: original.ProfileDigest}, now)
+		return original, true, nil
 	}
 	if !errors.Is(err, store.ErrNotFound) {
 		return model.Job{}, false, err
@@ -195,8 +190,8 @@ func writeError(w http.ResponseWriter, err error) {
 
 var errUnavailable = errors.New("unavailable")
 
-// decode rejects unknown fields, duplicate keys, null roots, trailing values and
-// excessive nesting as well as bounding total request bytes.
+// decode rejects unknown fields, case aliases, duplicate keys, null roots,
+// trailing values and excessive nesting, and bounds total request bytes.
 func decode(w http.ResponseWriter, r *http.Request, target any) error {
 	media, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || media != "application/json" {
@@ -247,6 +242,14 @@ func jsonValue(d *json.Decoder, depth int) error {
 			name, ok := key.(string)
 			if !ok || seen[name] {
 				return store.ErrInvalid
+			}
+			// Public request fields use lowercase ASCII snake_case. Reject
+			// aliases before encoding/json's case-insensitive field matching,
+			// including Unicode folds such as long-s in "verſion".
+			for _, c := range name {
+				if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_') {
+					return store.ErrInvalid
+				}
 			}
 			seen[name] = true
 			if err := jsonValue(d, depth+1); err != nil {

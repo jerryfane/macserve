@@ -27,6 +27,8 @@ func completionDigest(result worker.Result) (string, error) {
 }
 
 func (c *Controller) complete(ctx context.Context, job model.Job, result worker.Result) error {
+	ctx, cancel := context.WithTimeout(ctx, c.options.DeliveryTimeout)
+	defer cancel()
 	if result.State != model.Succeeded && result.State != model.Failed && result.State != model.Cancelled && result.State != model.TimedOut || len(result.Reason) > 4096 {
 		return store.ErrInvalid
 	}
@@ -58,19 +60,19 @@ func (c *Controller) complete(ctx context.Context, job model.Job, result worker.
 		c.mu.Unlock()
 		return store.ErrLease
 	}
+	if c.active.finalizingSince.IsZero() {
+		c.active.finalizingSince = c.options.Now()
+	}
 	source := c.active.source.Source
 	c.mu.Unlock()
 	normalized, err := c.verifyResult(ctx, job, result, source)
 	if err != nil {
 		return err
 	}
-	// Source bytes are controller-only and no longer needed once all evidence is
-	// copied. Failure to reclaim them cannot silently unlock more disk-consuming work.
-	if err := c.options.Source.Remove(job.ID); err != nil {
-		normalized.CleanupOK = false
-		normalized.State = model.Failed
-		normalized.Reason = "controller source cleanup failed"
-	}
+	// Source cleanup is controller-owned uncertainty. Keep the worker's result
+	// and cleanup proof intact; independent durable debt closes admission until
+	// a protected removal retry succeeds.
+	_ = c.removeSource(job.ID)
 	for range 2 {
 		c.mu.Lock()
 		current, err := c.options.Store.Get(ctx, job.ID)
@@ -187,7 +189,7 @@ func (c *Controller) verifyResult(ctx context.Context, job model.Job, result wor
 			reject("artifact bytes unavailable")
 			continue
 		}
-		err = verifyBytes(file, artifact.SizeBytes, artifact.SHA256)
+		err = verifyBytes(contextReader{ctx: ctx, reader: file}, artifact.SizeBytes, artifact.SHA256)
 		file.Close()
 		if err != nil {
 			reject("artifact bytes do not match manifest")

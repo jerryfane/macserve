@@ -92,7 +92,11 @@ func (c *Controller) next(ctx context.Context, epoch string) (*protocol.Lease, e
 	if err != nil {
 		return nil, err
 	}
-	duration := min(10*time.Minute, job.Deadline.Sub(c.options.Now()))
+	if err := c.options.Store.RequireSourceCleanup(ctx, job.ID); err != nil {
+		failErr := c.options.Store.FailPreparation(context.Background(), job.ID, job.LeaseToken, model.Failed, true, "source cleanup intent could not be persisted", c.options.Now())
+		return nil, errors.Join(err, failErr)
+	}
+	duration := min(c.options.SourceTimeout, job.Deadline.Sub(c.options.Now()))
 	prepCtx, cancel := context.WithTimeout(c.ctx, duration)
 	a := &execution{job: job, cancel: cancel}
 	c.active = a
@@ -121,7 +125,7 @@ func (c *Controller) prepare(ctx context.Context, a *execution) {
 	}
 	a.cancel()
 	c.mu.Unlock()
-	cleanupErr := c.options.Source.Remove(a.job.ID)
+	cleanupErr := c.removeSource(a.job.ID)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.active != a {
@@ -133,8 +137,11 @@ func (c *Controller) prepare(ctx context.Context, a *execution) {
 	} else if job.CancelRequested || c.closed {
 		state, reason = model.Cancelled, "source preparation cancelled"
 	}
-	if failErr := c.options.Store.Fail(context.Background(), a.job.ID, a.job.LeaseToken, state, cleanupErr == nil, reason, c.options.Now()); failErr == nil {
+	if failErr := c.options.Store.FailPreparation(context.Background(), a.job.ID, a.job.LeaseToken, state, cleanupErr == nil, reason, c.options.Now()); failErr == nil {
 		c.active = nil
+		if cleanupErr != nil {
+			c.epoch = ""
+		}
 	}
 }
 
@@ -183,6 +190,10 @@ func (c *Controller) checkActive(ctx context.Context) {
 	}
 	if job.CancelRequested && a.cancellingSince.IsZero() {
 		a.cancellingSince = now
+		// A late monitor tick must not restart the worker's cleanup budget.
+		if deadline && job.Deadline.Before(a.cancellingSince) {
+			a.cancellingSince = *job.Deadline
+		}
 	}
 	if !a.offered {
 		if job.CancelRequested {
@@ -193,23 +204,37 @@ func (c *Controller) checkActive(ctx context.Context) {
 			return
 		}
 		c.mu.Unlock()
-		cleanupErr := c.options.Source.Remove(job.ID)
+		cleanupErr := c.removeSource(job.ID)
 		c.mu.Lock()
 		if c.active == a {
 			state := model.Cancelled
 			if deadline {
 				state = model.TimedOut
 			}
-			if c.options.Store.Fail(ctx, job.ID, job.LeaseToken, state, cleanupErr == nil, "cancelled before lease delivery", now) == nil {
+			if c.options.Store.FailPreparation(ctx, job.ID, job.LeaseToken, state, cleanupErr == nil, "cancelled before lease delivery", now) == nil {
 				c.active = nil
+				if cleanupErr != nil {
+					c.epoch = ""
+				}
 			}
 		}
 		c.mu.Unlock()
 		return
 	}
-	overdue := deadline && now.Sub(*job.Deadline) > c.options.HeartbeatTimeout
-	cancelledTooLong := !a.cancellingSince.IsZero() && now.Sub(a.cancellingSince) > 2*time.Minute
-	if now.Sub(a.heartbeat) <= c.options.HeartbeatTimeout && !overdue && !cancelledTooLong {
+	// A cancelled execution stops its execution-context heartbeat while the
+	// worker still owns bounded cleanup and evidence-delivery work. Finalizing
+	// is likewise live work, not a lost worker. Neither heartbeats nor repeated
+	// stage requests extend these fixed windows indefinitely.
+	finishing := a.cancellingSince
+	if !a.finalizingSince.IsZero() && (finishing.IsZero() || a.finalizingSince.Before(finishing)) {
+		finishing = a.finalizingSince
+	}
+	if !finishing.IsZero() {
+		if now.Sub(finishing) <= c.options.CleanupTimeout+c.options.DeliveryTimeout+c.options.HeartbeatTimeout {
+			c.mu.Unlock()
+			return
+		}
+	} else if now.Sub(a.heartbeat) <= c.options.HeartbeatTimeout {
 		c.mu.Unlock()
 		return
 	}
@@ -225,7 +250,7 @@ func (c *Controller) checkActive(ctx context.Context) {
 	c.epoch = ""
 	a.cancel()
 	c.mu.Unlock()
-	_ = c.options.Source.Remove(job.ID)
+	_ = c.removeSource(job.ID)
 }
 
 // sweep removes only ID-addressed private exports, then prunes their metadata.
@@ -245,9 +270,10 @@ func (c *Controller) sweep(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if service.Paused || !gate.Ready {
+	if service.Paused || !cleanupAllowed(gate) {
 		return nil
 	}
+	cleanupErr := c.retrySourceCleanup(ctx)
 	c.poolKnown = false
 	dir, err := c.root.Open("artifacts")
 	if err != nil {
@@ -280,7 +306,7 @@ func (c *Controller) sweep(ctx context.Context) error {
 	if err := c.trimPool(ctx, 0, maxArtifactPoolBytes); err != nil {
 		return err
 	}
-	return c.options.Store.Prune(ctx, now)
+	return errors.Join(cleanupErr, c.options.Store.Prune(ctx, now))
 }
 
 func safeID(value string) bool {

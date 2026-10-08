@@ -27,24 +27,25 @@ func (h *handler) submit(w http.ResponseWriter, r *http.Request, p store.Princip
 		writeError(w, ErrForbidden)
 		return
 	}
-	if _, err := h.Store.Lookup(r.Context(), p.ID, keys[0]); errors.Is(err, store.ErrNotFound) {
-		status, err := h.Status(r.Context())
-		if err != nil || !status.Gate.Ready {
+	job, err := h.Store.Replay(r.Context(), p.ID, keys[0], request)
+	status := http.StatusOK
+	if errors.Is(err, store.ErrNotFound) {
+		// Only an absent replay may admit new work. Never carry an old
+		// snapshot across the readiness check into Enqueue.
+		current, statusErr := h.Status(r.Context())
+		if statusErr != nil || !current.Gate.Ready {
 			writeError(w, errUnavailable)
 			return
 		}
-	} else if err != nil {
-		writeError(w, err)
-		return
+		var replay bool
+		job, replay, err = Submit(r.Context(), h.Store, h.Profiles, p, keys[0], request, h.Now())
+		if !replay {
+			status = http.StatusAccepted
+		}
 	}
-	job, replay, err := Submit(r.Context(), h.Store, h.Profiles, p, keys[0], request, h.Now())
 	if err != nil {
 		writeError(w, err)
 		return
-	}
-	status := 202
-	if replay {
-		status = 200
 	}
 	w.Header().Set("Location", "/v1/jobs/"+job.ID)
 	h.renderJob(w, r, status, job)

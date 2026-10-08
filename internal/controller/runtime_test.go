@@ -644,7 +644,7 @@ func TestStartupRecoveryInterruptsPersistedLeaseBeforeRegistration(t *testing.T)
 func TestDeadlineQuarantinesEvenWhenWorkerKeepsHeartbeating(t *testing.T) {
 	f := newRuntime(t)
 	lease := f.lease(t, model.Build)
-	f.offset.Store(int64(631 * time.Second))
+	f.offset.Store(int64(600*time.Second + f.controller.options.CleanupTimeout + f.controller.options.DeliveryTimeout + f.controller.options.HeartbeatTimeout + time.Second))
 	f.controller.mu.Lock()
 	f.controller.active.heartbeat = f.controller.options.Now()
 	f.controller.mu.Unlock()

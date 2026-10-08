@@ -181,7 +181,15 @@ func (e *Exporter) remove(jobID string) error {
 	name := "records/" + jobID + ".json"
 	file, err := e.root.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		// A crash between creating the job directory and recording ownership
+		// leaves an unowned subtree. Preserve it, but never report cleanup
+		// success while its bytes still exist.
+		if _, statErr := e.root.Lstat("jobs/" + jobID); errors.Is(statErr, os.ErrNotExist) {
+			return nil
+		} else if statErr != nil {
+			return statErr
+		}
+		return errors.New("source ownership record missing for existing subtree")
 	}
 	if err != nil {
 		return err

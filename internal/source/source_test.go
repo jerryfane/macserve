@@ -280,11 +280,23 @@ func TestRemoveRefusesUnrecordedReplacedAndInvalidPaths(t *testing.T) {
 	if err := e.root.Mkdir("jobs/unrecorded", 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.Remove("unrecorded"); err != nil {
-		t.Fatal(err)
+	if err := e.Remove("unrecorded"); err == nil {
+		t.Fatal("unrecorded directory falsely reported clean")
 	}
 	if _, err := e.root.Stat("jobs/unrecorded"); err != nil {
 		t.Fatal("unrecorded directory removed")
+	}
+	if err := e.root.Symlink("missing", "jobs/unrecorded-link"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Remove("unrecorded-link"); err == nil {
+		t.Fatal("unrecorded dangling symlink falsely reported clean")
+	}
+	if info, err := e.root.Lstat("jobs/unrecorded-link"); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("unrecorded dangling symlink changed: %v %v", info, err)
+	}
+	if err := e.Remove("absent"); err != nil {
+		t.Fatalf("absent source is not clean: %v", err)
 	}
 	if err := e.root.Mkdir("jobs/recorded", 0700); err != nil {
 		t.Fatal(err)

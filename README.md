@@ -193,6 +193,18 @@ expired downloads, log pages and newly opened log streams return `410`.
 These are monitored application budgets, not filesystem quotas. Controller test parsing uses sealed JSON
 exported by the pinned worker tool; it does not execute repository-provided parsers.
 
+Offered/running workers retain the ordinary 30-second heartbeat-loss fence. Cancellation, deadline or finalizing
+starts a fixed cleanup/delivery grace (two minutes each, plus heartbeat tolerance); repeated heartbeats cannot
+extend it. Source streaming instead receives the ten-minute preparation budget plus heartbeat tolerance.
+Controller source-cleanup debt is durable and independent of worker cleanup: registration cannot erase it,
+and only successful protected source removal clears it. Retention may relieve disk-only pressure, but never
+runs through manual/owner pause or unqualified security readiness.
+
+Existing idempotent submissions replay read-only even when admission is unavailable. Once pruned, the key is
+a new submission and must pass current readiness and profiles. JSON field names are case-exact.
+Private API callers must independently approve repository-history membership of a SHA: exact-object fetch
+proves identity, not reachability from the allowlisted repository's own heads or tags.
+
 ## Development
 
 Use the Go version declared in `go.mod`. SQLite uses a pure-Go driver; no external database is required.
