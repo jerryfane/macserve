@@ -82,11 +82,16 @@ quarantines execution rather than guessing which PIDs to kill. Only recorded sim
 The root worker takes `--config` with a root-owned JSON file under root-controlled, non-writable ancestors.
 Fields are `socket`, `controller_uid`, `job_uid`, `job_gid`, `owner_uid`, `root`, `export_root`,
 `workspace_root`, `helper_path`, `baseline_path`, and optional `poll_seconds`, `heartbeat_seconds`,
-`request_timeout_seconds`. Paths are absolute. Owner, job and controller UIDs must differ and be non-root;
-the job account must be non-admin. The helper is a protected executable. Control and export roots are disjoint,
+`request_timeout_seconds`. Paths are absolute. Owner, job and controller UIDs must differ and be non-root.
+The job account must be non-admin, with a dedicated primary group: no `staff` or group shared with the owner
+or controller, including their supplementary memberships. The helper is a protected executable.
+Control and export roots are disjoint,
 root-private (`0700`); the separate root-owned workspace parent must allow job traversal (for example `0711`),
 but not replacement of other job directories. Only each individual workspace is transferred to the job UID.
 Configuration rejects aliases between any of the three identities before connecting or executing tools.
+Normal root:admin group-writable `/Applications` ancestors are allowed for pinned toolchains only when the
+job account cannot write through that group. Tool executables remain root-owned and non-group-writable.
+This exception does not relax configuration, helper or control-state protection.
 
 An actual GUI login must already exist; `launchctl asuser` does not create one. With the broker stopped and no
 unresolved manifests, an administrator explicitly audits trusted GUI process PIDs and runs
@@ -95,18 +100,33 @@ unresolved manifests, an administrator explicitly audits trusted GUI process PID
 Qualification rejects unlisted job-UID processes and never signals processes or implicitly adopts them.
 Missing/reused baseline processes or a changed boot require explicit requalification.
 
+Before every native job, admission refuses any job-home LaunchAgents entry, nonempty crontab, legacy login
+item, modern background login registration, or process outside the exact qualified baseline. Inspection
+errors also create durable administrator-only quarantine. The fixed probes have deadlines and output bounds.
+Modern registration inspection requires an explicitly empty job-UID section from `sfltool dumpbtm`;
+missing or unfamiliar output is unsupported, not proof of absence. GUI scripting permissions and any
+long-lived probe-created process must be qualified beforehand; inspection never adopts a new process.
+
 Recipe/simulator writers are stopped before pinned `xcresulttool` extraction; another UID barrier precedes
 parsing and sealing. Raw logs and sealed exports are outside job-writable storage. Unproven quiescence blocks
-success, sealing and the next lease. After quiescence, confined directory permission repair permits deletion
-of read-only output without following symlinks or modifying external hardlink targets.
+success, sealing and the next lease. All finalization stages share one two-minute cooperative cleanup budget.
+Confined permission and Darwin user-immutable/append flag repair permits cleanup of read-only output without
+following symlinks or modifying external hardlink targets. System flags and ambiguous hardlinks are not repaired.
 
-Inactive, certain records can reconcile their exact recorded simulator and workspace under a valid baseline.
-Active/uncertain records, or an invalid baseline with unresolved records, remain quarantined until an
-administrator investigates and explicitly reconciles affected devices, workspace/control records and pending
-completion. Do not delete records merely to bypass an unproven cleanup. `worker-qualify` alone is not crash or
-reboot recovery. Native shared-kernel, trusted GUI-service and same-user persistence risks remain; this is not
-a hostile-code sandbox. Root/GUI deployment, network boundaries and background UI operation require separate
-host qualification before real repository enrollment.
+For crash, reboot or GUI baseline drift, stop the broker, investigate and remove persistence, explicitly audit
+all current job-UID processes, then run
+`macserve worker-reconcile --config /absolute/worker.json --pids PID,PID`.
+This root-only operation holds the broker lock, repeats the exact census, replaces the audited baseline,
+and cleans only recorded simulators/workspaces. Failures retain quarantine and unresolved records.
+It preserves pending completions and sealed evidence; startup replays a pending completion before recovery,
+but never registers or claims work before recovery succeeds. `worker-qualify` cannot bypass reconciliation.
+
+**Trusted-native limit:** this service is for trusted repositories, not hostile contributors. A clean census
+is a snapshot, not confinement: a delayed same-UID launchd/cron or other persistence mechanism can start after
+the checks and affect a later job. Native shared-kernel execution and trusted GUI services do not provide VM
+reset isolation. This residual risk is accepted by the operator; preflight checks do not eliminate it.
+Root/GUI deployment, network boundaries and background UI operation require separate host qualification
+before real repository enrollment. These native probes have not been qualified on a deployed host.
 
 ## Development
 

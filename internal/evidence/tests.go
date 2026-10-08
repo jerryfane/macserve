@@ -240,8 +240,12 @@ func (p *testParser) emit(n xcresultNode, id, suite, name string) error {
 	if err != nil {
 		return err
 	}
+	messages := failures(n)
+	if status == "passed" && len(messages) != 0 {
+		status = "failed"
+	}
 	p.attempts[id]++
-	p.summary.Cases = append(p.summary.Cases, TestCase{ID: id, Suite: suite, Name: name, Outcome: status, DurationSeconds: seconds, Failures: failures(n), Attempt: p.attempts[id]})
+	p.summary.Cases = append(p.summary.Cases, TestCase{ID: id, Suite: suite, Name: name, Outcome: status, DurationSeconds: seconds, Failures: messages, Attempt: p.attempts[id]})
 	return nil
 }
 
@@ -378,6 +382,9 @@ func (p *testParser) visit(n xcresultNode, parent string) error {
 			for _, message := range messages {
 				if !seen[message] {
 					p.summary.Cases[target].Failures = append(p.summary.Cases[target].Failures, message)
+					if p.summary.Cases[target].Outcome == "passed" {
+						p.summary.Cases[target].Outcome = "failed"
+					}
 					seen[message] = true
 				}
 			}

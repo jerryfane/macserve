@@ -37,6 +37,9 @@ func walkWorkspace(ctx context.Context, directory *os.File, owner uint32, prepar
 			}
 		}
 		if repair {
+			if err := repairDirectoryFlags(dir, &stat); err != nil {
+				return err
+			}
 			if err := dir.Chmod(os.FileMode(stat.Mode&0777) | 0700); err != nil {
 				return err
 			}
@@ -59,10 +62,12 @@ func walkWorkspace(ctx context.Context, directory *os.File, owner uint32, prepar
 					return err
 				}
 				kind := entry.Mode & unix.S_IFMT
-				// Cleanup only changes directory permissions. Non-directories (including
-				// hardlinks, unreadable files and FIFOs) are safe to unlink without opening
-				// or modifying their targets.
+				// Unlink non-directories without changing their targets. On Darwin,
+				// clear only user unlink-blocking flags on a confined single-link inode.
 				if repair && kind != unix.S_IFDIR {
+					if err := repairEntryFlags(dir, name, &entry, &base, owner); err != nil {
+						return err
+					}
 					continue
 				}
 				if kind == unix.S_IFLNK {

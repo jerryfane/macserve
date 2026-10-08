@@ -69,7 +69,7 @@ func loadBaseline(path string, uid uint32) (GUIBaseline, error) {
 
 func validateBaseline(b GUIBaseline, uid uint32, boot string) error {
 	if b.JobUID != uid || b.Boot == "" || b.Boot != boot || len(b.Processes) == 0 || len(b.Processes) > 4096 {
-		return errors.New("GUI baseline missing or belongs to another UID or boot; explicit requalification required")
+		return errors.New("GUI baseline missing or belongs to another UID or boot; administrator reconciliation required")
 	}
 	seen := make(map[int]bool, len(b.Processes))
 	for _, p := range b.Processes {
@@ -90,7 +90,7 @@ func (s *processScope) residual(samples []processSample) ([]processSample, error
 	for _, p := range samples {
 		if start, ok := trusted[p.pid]; ok {
 			if p.uid != s.uid || p.start != start || p.zombie {
-				return nil, errors.New("GUI baseline process changed; explicit requalification required")
+				return nil, errors.New("GUI baseline process changed; administrator reconciliation required")
 			}
 			delete(trusted, p.pid)
 			continue
@@ -104,7 +104,7 @@ func (s *processScope) residual(samples []processSample) ([]processSample, error
 		residual = append(residual, p)
 	}
 	if len(trusted) != 0 {
-		return nil, errors.New("GUI baseline process disappeared; explicit requalification required")
+		return nil, errors.New("GUI baseline process disappeared; administrator reconciliation required")
 	}
 	return residual, nil
 }
@@ -157,6 +157,9 @@ func (r *nativeRunner) Quiesce(ctx context.Context) error {
 	if r.scope == nil {
 		return errors.New("protected job process scope is required")
 	}
+	if err := r.loadBaseline(); err != nil {
+		return err
+	}
 	return r.scope.quiesce(ctx)
 }
 
@@ -165,7 +168,7 @@ func NewNativeRunner(options Options) (Runner, error) {
 	if err := hostguard.BrokerIdentity(options.JobUID, options.JobGID, options.ControllerUID, options.OwnerUID); err != nil {
 		return nil, err
 	}
-	for _, path := range []string{options.HelperPath, options.BaselinePath} {
+	for _, path := range []string{options.HelperPath} {
 		if err := hostguard.RootConfig(path); err != nil {
 			return nil, err
 		}
@@ -174,10 +177,6 @@ func NewNativeRunner(options Options) (Runner, error) {
 		if err := hostguard.RootDirectory(path); err != nil {
 			return nil, err
 		}
-	}
-	baseline, err := loadBaseline(options.BaselinePath, options.JobUID)
-	if err != nil {
-		return nil, err
 	}
 	runner := newProcessRunner()
 	runner.uid = int(options.JobUID)
@@ -190,7 +189,11 @@ func NewNativeRunner(options Options) (Runner, error) {
 		return exec.Command("/bin/launchctl", args...)
 	}
 	runner.launchDir = "/"
-	runner.scope = &processScope{uid: runner.uid, baseline: baseline, sample: identityProcesses, interval: 50 * time.Millisecond, grace: 500 * time.Millisecond}
+	// Baseline inspection is deliberately deferred: sealed pending evidence must
+	// remain deliverable even when a reboot or GUI restart requires reconciliation.
+	runner.baselinePath = options.BaselinePath
+	runner.persistence = nativePersistenceInspector(options)
+	runner.scope = &processScope{uid: runner.uid, sample: identityProcesses, interval: 50 * time.Millisecond, grace: 500 * time.Millisecond}
 	runner.scope.signal = func(ctx context.Context, p processSample, sig syscall.Signal) error {
 		// The kernel checks the job UID, not root, at the signal operation itself.
 		// A PID reused by the owner/controller/another UID can never be signalled.

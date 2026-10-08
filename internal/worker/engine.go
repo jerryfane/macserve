@@ -236,6 +236,9 @@ func (e *Engine) Recover(ctx context.Context) error {
 	if e.closed {
 		return ErrClosed
 	}
+	if err := e.admission(ctx); err != nil {
+		return err
+	}
 	quietCtx, cancel := context.WithTimeout(ctx, e.options.CleanupTimeout)
 	defer cancel()
 	if err := e.options.Runner.Quiesce(quietCtx); err != nil {

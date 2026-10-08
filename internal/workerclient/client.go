@@ -156,9 +156,6 @@ func wait(ctx context.Context, delay time.Duration) error {
 // Run never executes a new lease while a previous completion is awaiting durable
 // acknowledgement. Losing heartbeat or evidence delivery cancels local work.
 func (c *Client) Run(ctx context.Context) error {
-	if err := c.engine.Recover(ctx); err != nil {
-		return fmt.Errorf("worker recovery: %w", err)
-	}
 	if saved, err := c.loadPending(); err != nil {
 		return err
 	} else if saved != nil {

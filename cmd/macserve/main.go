@@ -19,10 +19,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	switch args[0] {
-	case "_job-exec", "_job-signal":
+	case "_job-exec", "_job-signal", "_job-login-items":
 		var err error
 		if args[0] == "_job-exec" {
 			err = worker.PrivateJobExec(args[1:])
+		} else if args[0] == "_job-login-items" {
+			err = worker.PrivateJobLoginItems(args[1:])
 		} else {
 			err = worker.PrivateJobSignal(args[1:])
 		}
@@ -33,6 +35,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "worker-qualify":
 		return runWorkerQualify(args[1:], stdout, stderr)
+	case "worker-reconcile":
+		return runWorkerBaseline(args[1:], stdout, stderr, true)
 	case "-h", "--help":
 		if len(args) != 1 {
 			fmt.Fprintln(stderr, "macserve: help does not accept arguments")
@@ -67,6 +71,7 @@ Commands:
   controller  Queue, API and evidence service (not implemented yet)
   worker      Protected root execution broker via the private controller socket
   worker-qualify  Record explicitly audited dedicated-UID GUI baseline PIDs
+  worker-reconcile  Reconcile recorded work after explicit administrator audit
 
 Use macserve <command> --help for command help.
 `)

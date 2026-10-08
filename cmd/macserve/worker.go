@@ -86,15 +86,23 @@ func executionOptions(config workerclient.Config) worker.Options {
 }
 
 func runWorkerQualify(args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("worker-qualify", flag.ContinueOnError)
+	return runWorkerBaseline(args, stdout, stderr, false)
+}
+
+func runWorkerBaseline(args []string, stdout, stderr io.Writer, reconcile bool) int {
+	name := "worker-qualify"
+	if reconcile {
+		name = "worker-reconcile"
+	}
+	flags := flag.NewFlagSet(name, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", "", "root-owned broker configuration")
 	explicit := flags.String("pids", "", "comma-separated PIDs explicitly audited as trusted GUI services")
 	flags.Usage = func() {
-		fmt.Fprintln(stderr, "Usage: macserve worker-qualify --config /absolute/worker.json --pids PID,PID")
+		fmt.Fprintf(stderr, "Usage: macserve %s --config /absolute/worker.json --pids PID,PID\n", name)
 	}
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
-		fmt.Fprintln(stdout, "Usage: macserve worker-qualify --config /absolute/worker.json --pids PID,PID")
+		fmt.Fprintf(stdout, "Usage: macserve %s --config /absolute/worker.json --pids PID,PID\n", name)
 		return 0
 	}
 	if err := flags.Parse(args); err != nil {
@@ -122,12 +130,20 @@ func runWorkerQualify(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	if err := worker.QualifyGUIBaseline(ctx, executionOptions(config), pids); err != nil {
+	action := worker.QualifyGUIBaseline
+	if reconcile {
+		action = worker.ReconcileGUIBaseline
+	}
+	if err := action(ctx, executionOptions(config), pids); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	fmt.Fprintln(stdout, "Explicitly audited GUI baseline recorded; no processes were signalled.")
+	if reconcile {
+		fmt.Fprintln(stdout, "Audited GUI baseline reconciled; recorded work cleaned, pending evidence retained. Native delayed persistence remains a trust limit.")
+	} else {
+		fmt.Fprintln(stdout, "Explicitly audited GUI baseline recorded; no processes were signalled.")
+	}
 	return 0
 }

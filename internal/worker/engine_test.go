@@ -397,14 +397,30 @@ func TestCancellationDeadlineAndConcurrentRefusal(t *testing.T) {
 			}
 			done := make(chan Result, 1)
 			go func() { result, _ := engine.Execute(ctx, job, source, bytes.NewReader(data), nil); done <- result }()
-			<-entered
+			select {
+			case <-entered:
+			case result := <-done:
+				// The real deadline may expire during preparation on a slow host.
+				// No recipe means no subprocess termination signal is expected.
+				if !deadline || result.State != model.TimedOut || !result.CleanupOK {
+					t.Fatalf("execution ended before recipe entry: %+v", result)
+				}
+				return
+			case <-time.After(5 * time.Second):
+				t.Fatal("execution neither entered the recipe nor completed")
+			}
 			if _, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil); !errors.Is(err, ErrBusy) {
 				t.Fatalf("concurrent Execute: %v", err)
 			}
 			if !deadline {
 				cancel()
 			}
-			result := <-done
+			var result Result
+			select {
+			case result = <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("execution did not finish after cancellation/deadline")
+			}
 			want := model.Cancelled
 			if deadline {
 				want = model.TimedOut

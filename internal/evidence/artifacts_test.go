@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -55,7 +56,7 @@ func TestCollectCopiesRegularFilesWithContentIdentity(t *testing.T) {
 	artifactFile(t, root, "logs/build.txt", "exact log bytes\n")
 	artifactFile(t, root, "unapproved.txt", "not exported")
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.FixedZone("offset", 3600))
-	artifacts, err := Collect(root, []model.ArtifactRule{{Path: "logs/*.txt", Required: true}}, dest, Limits{}, now)
+	artifacts, err := Collect(context.Background(), root, []model.ArtifactRule{{Path: "logs/*.txt", Required: true}}, dest, Limits{}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +78,7 @@ func TestCollectCopiesRegularFilesWithContentIdentity(t *testing.T) {
 	}
 	// A later call can append/deduplicate without deleting a previous export.
 	artifactFile(t, root, "other.txt", "different")
-	if _, err := Collect(root, []model.ArtifactRule{{Path: "logs/*.txt"}, {Path: "other.txt"}}, dest, Limits{}, now); err != nil {
+	if _, err := Collect(context.Background(), root, []model.ArtifactRule{{Path: "logs/*.txt"}, {Path: "other.txt"}}, dest, Limits{}, now); err != nil {
 		t.Fatal(err)
 	}
 	entries, err := os.ReadDir(dest)
@@ -102,7 +103,7 @@ func TestCollectDeterministicArchiveHasRecoverableSortedContents(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		artifacts, err := Collect(root, []model.ArtifactRule{{Path: "results", Required: true}}, dest, Limits{}, time.Unix(1, 0))
+		artifacts, err := Collect(context.Background(), root, []model.ArtifactRule{{Path: "results", Required: true}}, dest, Limits{}, time.Unix(1, 0))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -164,7 +165,7 @@ func TestCollectRejectsTraversalAndUnsafeExportRoots(t *testing.T) {
 	for _, pattern := range []string{"", "/etc/passwd", "../secret", "a/../secret", "./a", "a//b", "a\\b", "[", "a\x00b"} {
 		t.Run(pattern, func(t *testing.T) {
 			root, dest := t.TempDir(), artifactExportDir(t)
-			if _, err := Collect(root, []model.ArtifactRule{{Path: pattern}}, dest, Limits{}, time.Time{}); !errors.Is(err, ErrArtifact) {
+			if _, err := Collect(context.Background(), root, []model.ArtifactRule{{Path: pattern}}, dest, Limits{}, time.Time{}); !errors.Is(err, ErrArtifact) {
 				t.Fatalf("unsafe pattern accepted: %v", err)
 			}
 			assertNoExports(t, dest)
@@ -173,7 +174,7 @@ func TestCollectRejectsTraversalAndUnsafeExportRoots(t *testing.T) {
 	root := t.TempDir()
 	artifactFile(t, root, "a", "data")
 	for _, dest := range []string{root, filepath.Join(root, "export"), filepath.Dir(root)} {
-		if _, err := Collect(root, []model.ArtifactRule{{Path: "a"}}, dest, Limits{}, time.Time{}); !errors.Is(err, ErrArtifact) {
+		if _, err := Collect(context.Background(), root, []model.ArtifactRule{{Path: "a"}}, dest, Limits{}, time.Time{}); !errors.Is(err, ErrArtifact) {
 			t.Fatalf("overlapping export root accepted: %q %v", dest, err)
 		}
 	}
@@ -181,7 +182,7 @@ func TestCollectRejectsTraversalAndUnsafeExportRoots(t *testing.T) {
 	if err := os.Chmod(dest, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Collect(root, nil, dest, Limits{}, time.Time{}); !errors.Is(err, ErrArtifact) {
+	if _, err := Collect(context.Background(), root, nil, dest, Limits{}, time.Time{}); !errors.Is(err, ErrArtifact) {
 		t.Fatalf("public export directory accepted: %v", err)
 	}
 	private := artifactExportDir(t)
@@ -189,7 +190,7 @@ func TestCollectRejectsTraversalAndUnsafeExportRoots(t *testing.T) {
 	if err := os.Symlink(private, alias); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Collect(root, nil, alias, Limits{}, time.Time{}); !errors.Is(err, ErrArtifact) {
+	if _, err := Collect(context.Background(), root, nil, alias, Limits{}, time.Time{}); !errors.Is(err, ErrArtifact) {
 		t.Fatalf("symlink export root accepted: %v", err)
 	}
 }
@@ -228,7 +229,7 @@ func TestCollectRejectsSymlinksAndSpecialFiles(t *testing.T) {
 				}
 				root = alias
 			}
-			if _, err := Collect(root, []model.ArtifactRule{{Path: pattern}}, dest, Limits{}, time.Time{}); !errors.Is(err, ErrArtifact) {
+			if _, err := Collect(context.Background(), root, []model.ArtifactRule{{Path: pattern}}, dest, Limits{}, time.Time{}); !errors.Is(err, ErrArtifact) {
 				t.Fatalf("unsafe input accepted: %v", err)
 			}
 			assertNoExports(t, dest)
@@ -260,7 +261,7 @@ func TestCollectRequiredAndBudgetsCleanPartialExports(t *testing.T) {
 			if err := os.Mkdir(filepath.Join(root, "empty"), 0700); err != nil {
 				t.Fatal(err)
 			}
-			artifacts, err := Collect(root, tc.rules, dest, tc.limits, time.Time{})
+			artifacts, err := Collect(context.Background(), root, tc.rules, dest, tc.limits, time.Time{})
 			if !errors.Is(err, tc.sentinel) || artifacts != nil {
 				t.Fatalf("budget result: %+v %v", artifacts, err)
 			}
@@ -268,7 +269,7 @@ func TestCollectRequiredAndBudgetsCleanPartialExports(t *testing.T) {
 		})
 	}
 	root, dest := t.TempDir(), artifactExportDir(t)
-	artifacts, err := Collect(root, []model.ArtifactRule{{Path: "optional"}}, dest, Limits{}, time.Time{})
+	artifacts, err := Collect(context.Background(), root, []model.ArtifactRule{{Path: "optional"}}, dest, Limits{}, time.Time{})
 	if err != nil || len(artifacts) != 0 {
 		t.Fatalf("optional missing: %+v %v", artifacts, err)
 	}
@@ -277,7 +278,7 @@ func TestCollectRequiredAndBudgetsCleanPartialExports(t *testing.T) {
 func TestCollectRollbackLeavesPreexistingExportsUntouched(t *testing.T) {
 	root, dest := t.TempDir(), artifactExportDir(t)
 	artifactFile(t, root, "kept.txt", "prior export")
-	prior, err := Collect(root, []model.ArtifactRule{{Path: "kept.txt"}}, dest, Limits{}, time.Time{})
+	prior, err := Collect(context.Background(), root, []model.ArtifactRule{{Path: "kept.txt"}}, dest, Limits{}, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +289,7 @@ func TestCollectRollbackLeavesPreexistingExportsUntouched(t *testing.T) {
 	if err := os.Symlink(filepath.Join(root, "kept.txt"), filepath.Join(root, "zdir/link")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Collect(root, []model.ArtifactRule{{Path: "a.txt"}, {Path: "kept.txt"}, {Path: "zdir"}}, dest, Limits{}, time.Time{}); !errors.Is(err, ErrArtifact) {
+	if _, err := Collect(context.Background(), root, []model.ArtifactRule{{Path: "a.txt"}, {Path: "kept.txt"}, {Path: "zdir"}}, dest, Limits{}, time.Time{}); !errors.Is(err, ErrArtifact) {
 		t.Fatalf("unsafe archive accepted: %v", err)
 	}
 	entries, err := os.ReadDir(dest)
@@ -332,7 +333,7 @@ func TestCopyDetectsConcurrentContentChange(t *testing.T) {
 			t.Fatal(err)
 		}
 	}}
-	collector := artifactCollector{limits: Limits{MaxTotalBytes: 1024, MaxFileBytes: 1024, MaxEntries: 10}, buffer: make([]byte, 128)}
+	collector := artifactCollector{ctx: context.Background(), limits: Limits{MaxTotalBytes: 1024, MaxFileBytes: 1024, MaxEntries: 10}, buffer: make([]byte, 128)}
 	if err := collector.copyFile(writer, file, before); !errors.Is(err, ErrArtifact) {
 		t.Fatalf("concurrent mutation accepted: %v", err)
 	}

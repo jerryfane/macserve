@@ -34,25 +34,9 @@ func BrokerIdentity(jobUID, jobGID, controllerUID, ownerUID uint32) error {
 	if err := DistinctJobIdentity(jobUID, jobGID, controllerUID, ownerUID); err != nil {
 		return err
 	}
-	account, err := user.LookupId(strconv.FormatUint(uint64(jobUID), 10))
+	account, err := nativeJobIdentity(jobUID, jobGID, controllerUID, ownerUID, user.LookupId, user.LookupGroup, (*user.User).GroupIds)
 	if err != nil {
 		return err
-	}
-	if account.Gid != strconv.FormatUint(uint64(jobGID), 10) {
-		return errors.New("job GID must be the dedicated account primary group")
-	}
-	admin, err := user.LookupGroup("admin")
-	if err != nil {
-		return err
-	}
-	groups, err := account.GroupIds()
-	if err != nil {
-		return err
-	}
-	for _, gid := range append(groups, account.Gid) {
-		if gid == admin.Gid || gid == "0" {
-			return errors.New("job account must not belong to privileged groups")
-		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -73,6 +57,54 @@ func DistinctJobIdentity(jobUID, jobGID, controllerUID, ownerUID uint32) error {
 		return errors.New("job, owner and controller UIDs must be distinct non-root identities; job UID must be a dedicated login account")
 	}
 	return nil
+}
+
+// nativeJobIdentity resolves real account memberships only at native admission;
+// configuration validation remains independent of accounts on the parsing host.
+func nativeJobIdentity(jobUID, jobGID, controllerUID, ownerUID uint32, lookup func(string) (*user.User, error), lookupGroup func(string) (*user.Group, error), groupIDs func(*user.User) ([]string, error)) (*user.User, error) {
+	account, err := lookup(strconv.FormatUint(uint64(jobUID), 10))
+	if err != nil {
+		return nil, err
+	}
+	gid := strconv.FormatUint(uint64(jobGID), 10)
+	if account.Gid != gid || gid == "20" || gid == "0" {
+		return nil, errors.New("job primary group must be dedicated, not staff or root")
+	}
+	admin, err := lookupGroup("admin")
+	if err != nil {
+		return nil, err
+	}
+	groups, err := groupIDs(account)
+	if err != nil {
+		return nil, err
+	}
+	if account.Gid == admin.Gid {
+		return nil, errors.New("job account must not belong to privileged groups")
+	}
+	for _, group := range groups {
+		if group == admin.Gid || group == "0" {
+			return nil, errors.New("job account must not belong to privileged groups")
+		}
+	}
+	for _, uid := range []uint32{controllerUID, ownerUID} {
+		other, err := lookup(strconv.FormatUint(uint64(uid), 10))
+		if err != nil {
+			return nil, err
+		}
+		if other.Gid == gid {
+			return nil, errors.New("job primary group must not be shared with owner or controller")
+		}
+		memberships, err := groupIDs(other)
+		if err != nil {
+			return nil, err
+		}
+		for _, group := range memberships {
+			if group == gid {
+				return nil, errors.New("job primary group must not be shared with owner or controller")
+			}
+		}
+	}
+	return account, nil
 }
 
 func RootDirectory(path string) error { return protectedPath(path, true) }

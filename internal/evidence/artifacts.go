@@ -3,6 +3,7 @@ package evidence
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -36,6 +37,7 @@ type artifactCandidate struct {
 }
 
 type artifactCollector struct {
+	ctx         context.Context
 	source      *os.File
 	dest        *os.File
 	limits      Limits
@@ -199,7 +201,7 @@ func directoryNames(dir *os.File, limit int) ([]string, error) {
 	return names, nil
 }
 
-func matchArtifacts(dir *os.File, prefix string, parts []string, candidates map[string]artifactCandidate, seen map[string]bool, limit int) (int, error) {
+func matchArtifacts(ctx context.Context, dir *os.File, prefix string, parts []string, candidates map[string]artifactCandidate, seen map[string]bool, limit int) (int, error) {
 	// Re-open rather than dup: duplicated directory descriptors share offsets.
 	walk, _, err := openArtifactAt(dir, ".")
 	if err != nil {
@@ -208,6 +210,9 @@ func matchArtifacts(dir *os.File, prefix string, parts []string, candidates map[
 	defer walk.Close()
 	matched := 0
 	for {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
 		names, readErr := walk.Readdirnames(128)
 		for _, name := range names {
 			ok, _ := path.Match(parts[0], name)
@@ -232,7 +237,7 @@ func matchArtifacts(dir *os.File, prefix string, parts []string, candidates map[
 				candidates[relative] = artifactCandidate{name: relative, info: info}
 				matched++
 			} else if info.IsDir() {
-				count, err := matchArtifacts(file, relative, parts[1:], candidates, seen, limit)
+				count, err := matchArtifacts(ctx, file, relative, parts[1:], candidates, seen, limit)
 				file.Close()
 				if err != nil {
 					return 0, err
@@ -253,6 +258,9 @@ func matchArtifacts(dir *os.File, prefix string, parts []string, candidates map[
 }
 
 func (c *artifactCollector) accountEntry(info os.FileInfo) error {
+	if err := c.ctx.Err(); err != nil {
+		return err
+	}
 	c.entries++
 	if c.entries > c.limits.MaxEntries {
 		return fmt.Errorf("%w: entry count", ErrArtifactLimit)
@@ -274,7 +282,7 @@ func (c *artifactCollector) copyFile(dst io.Writer, file *os.File, before os.Fil
 	if err != nil {
 		return err
 	}
-	written, err := io.CopyBuffer(dst, io.LimitReader(file, before.Size()), c.buffer)
+	written, err := io.CopyBuffer(dst, io.LimitReader(contextReader{c.ctx, file}, before.Size()), c.buffer)
 	if err != nil {
 		return err
 	}
@@ -371,6 +379,9 @@ type artifactWriter struct {
 }
 
 func (w *artifactWriter) Write(data []byte) (int, error) {
+	if err := w.collector.ctx.Err(); err != nil {
+		return 0, err
+	}
 	count := int64(len(data))
 	if count > w.collector.limits.MaxFileBytes-w.size || count > w.collector.limits.MaxTotalBytes-w.collector.outputBytes {
 		return 0, fmt.Errorf("%w: output size", ErrArtifactLimit)
@@ -405,7 +416,7 @@ func (c *artifactCollector) existingDigest(name string, size int64) error {
 		return artifactError("invalid existing export")
 	}
 	digest := sha256.New()
-	n, err := io.CopyBuffer(digest, io.LimitReader(file, size+1), c.buffer)
+	n, err := io.CopyBuffer(digest, io.LimitReader(contextReader{c.ctx, file}, size+1), c.buffer)
 	if err != nil {
 		return err
 	}
@@ -420,6 +431,9 @@ func (c *artifactCollector) existingDigest(name string, size int64) error {
 }
 
 func (c *artifactCollector) collect(candidate artifactCandidate, now time.Time) (artifact Artifact, resultErr error) {
+	if err := c.ctx.Err(); err != nil {
+		return artifact, err
+	}
 	file, before, err := openArtifactPath(c.source, candidate.name)
 	if err != nil {
 		return artifact, err
@@ -459,6 +473,9 @@ func (c *artifactCollector) collect(candidate artifactCandidate, now time.Time) 
 	if err != nil {
 		return artifact, err
 	}
+	if err := c.ctx.Err(); err != nil {
+		return artifact, err
+	}
 	if err = temp.Sync(); err != nil {
 		return artifact, err
 	}
@@ -482,7 +499,10 @@ func (c *artifactCollector) collect(candidate artifactCandidate, now time.Time) 
 // Collect exports only approved path.Match selections. Both source bytes and
 // sealed bytes are independently bounded. On any failure every export created
 // by this call is removed; pre-existing content-addressed exports are untouched.
-func Collect(root string, rules []model.ArtifactRule, dest string, limits Limits, now time.Time) (artifacts []Artifact, resultErr error) {
+func Collect(ctx context.Context, root string, rules []model.ArtifactRule, dest string, limits Limits, now time.Time) (artifacts []Artifact, resultErr error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	limits, err := normalizeLimits(limits)
 	if err != nil {
 		return nil, err
@@ -526,7 +546,7 @@ func Collect(root string, rules []model.ArtifactRule, dest string, limits Limits
 		return nil, err
 	}
 	defer export.Close()
-	c := artifactCollector{source: source, dest: export, limits: limits, buffer: make([]byte, 128<<10)}
+	c := artifactCollector{ctx: ctx, source: source, dest: export, limits: limits, buffer: make([]byte, 128<<10)}
 	defer func() {
 		if resultErr == nil {
 			return
@@ -541,7 +561,7 @@ func Collect(root string, rules []model.ArtifactRule, dest string, limits Limits
 	candidates := make(map[string]artifactCandidate)
 	seen := make(map[string]bool)
 	for _, rule := range rules {
-		count, err := matchArtifacts(source, "", strings.Split(rule.Path, "/"), candidates, seen, limits.MaxEntries)
+		count, err := matchArtifacts(ctx, source, "", strings.Split(rule.Path, "/"), candidates, seen, limits.MaxEntries)
 		if err != nil {
 			return nil, err
 		}
@@ -562,8 +582,23 @@ func Collect(root string, rules []model.ArtifactRule, dest string, limits Limits
 		}
 		artifacts = append(artifacts, artifact)
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := export.Sync(); err != nil {
 		return nil, err
 	}
 	return artifacts, nil
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(data []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(data)
 }

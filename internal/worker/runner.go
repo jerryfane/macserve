@@ -49,6 +49,8 @@ type nativeRunner struct {
 	launchDir      string
 	scope          *processScope
 	signalProcess  func(context.Context, processSample, syscall.Signal) error
+	baselinePath   string
+	persistence    func(context.Context) error
 }
 
 // newProcessRunner is the process/pipes implementation. Production construction

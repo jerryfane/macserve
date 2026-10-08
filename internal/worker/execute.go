@@ -115,7 +115,7 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 		return result, err
 	}
 	if _, native := e.options.Runner.(*nativeRunner); native {
-		if err := hostguard.RootDirectory(job.Profile.DeveloperDir); err != nil {
+		if err := hostguard.ToolchainDirectory(job.Profile.DeveloperDir, e.options.JobUID); err != nil {
 			return result, err
 		}
 	}
@@ -125,6 +125,9 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 	}
 	if len(names) > 0 {
 		return result, ErrRecovery
+	}
+	if err := e.admission(parent); err != nil {
+		return result, err
 	}
 	if _, err := e.exports.Lstat(job.ID); !os.IsNotExist(err) {
 		return result, errors.New("job export already exists or is inaccessible")
@@ -145,26 +148,24 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 		return result, err
 	}
 	defer func() {
+		finalCtx, finalCancel := context.WithTimeout(context.Background(), e.options.CleanupTimeout)
+		defer finalCancel()
 		if sink != nil {
 			returned = errors.Join(returned, sink.Stage(model.Finalizing))
 		}
 		// Stop simulators and all escaped/orphan job-UID writers before running
 		// the pinned extractor. A second UID barrier follows that subprocess.
-		quietErr := e.stopWriters(context.Background(), &x.manifest)
+		quietErr := e.stopWriters(finalCtx, &x.manifest)
 		returned = errors.Join(returned, quietErr)
 		var evidenceErr error
 		if quietErr == nil && x.root != nil {
-			checkCtx, checkCancel := context.WithTimeout(context.Background(), e.options.CleanupTimeout)
-			evidenceErr = e.workspacePass(checkCtx, job.ID, false, false)
-			checkCancel()
+			evidenceErr = e.workspacePass(finalCtx, job.ID, false, false)
 			returned = errors.Join(returned, evidenceErr)
 		}
 		if quietErr == nil && evidenceErr == nil && x.root != nil {
-			returned = errors.Join(returned, x.checkLockfiles())
+			returned = errors.Join(returned, x.checkLockfiles(finalCtx))
 			if x.ranRecipe && job.Request.Kind != model.Build {
-				evidenceCtx, evidenceCancel := context.WithTimeout(context.Background(), e.options.CleanupTimeout)
-				returned = errors.Join(returned, x.testEvidence(evidenceCtx))
-				evidenceCancel()
+				returned = errors.Join(returned, x.testEvidence(finalCtx))
 			}
 		}
 		if x.stdout != nil {
@@ -176,14 +177,14 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 		x.logs.mu.Unlock()
 		if x.root != nil {
 			if quietErr == nil && evidenceErr == nil && !x.manifest.Active && !x.manifest.ProcessUncertain {
-				returned = errors.Join(returned, x.collect())
+				returned = errors.Join(returned, x.collect(finalCtx))
 			}
 			returned = errors.Join(returned, x.root.Close())
 		}
 		if x.evidenceRoot != nil {
 			returned = errors.Join(returned, x.evidenceRoot.Close())
 		}
-		cleanupErr := e.cleanup(context.Background(), &x.manifest)
+		cleanupErr := e.cleanup(finalCtx, &x.manifest)
 		result.CleanupOK = quietErr == nil && cleanupErr == nil
 		returned = errors.Join(returned, cleanupErr)
 		switch {
@@ -256,7 +257,7 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 		prepareCancel()
 		return result, err
 	}
-	result.Observation.LockfileDigests, err = lockfiles(x.root, uint32(os.Geteuid()))
+	result.Observation.LockfileDigests, err = lockfiles(prepareCtx, x.root, uint32(os.Geteuid()))
 	if err != nil {
 		prepareCancel()
 		return result, err
@@ -298,7 +299,7 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 	if err != nil {
 		return result, err
 	}
-	if err := x.checkLockfiles(); err != nil {
+	if err := x.checkLockfiles(ctx); err != nil {
 		return result, err
 	}
 	if sink != nil {
@@ -508,9 +509,12 @@ func workspaceBudget(root *os.Root, limit int64) error {
 	})
 }
 
-func lockfiles(root *os.Root, owner uint32) (map[string]string, error) {
+func lockfiles(ctx context.Context, root *os.Root, owner uint32) (map[string]string, error) {
 	digests := make(map[string]string)
 	err := fs.WalkDir(root.FS(), "checkout", func(name string, entry fs.DirEntry, err error) error {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return contextErr
+		}
 		if err != nil {
 			return err
 		}
@@ -542,7 +546,7 @@ func lockfiles(root *os.Root, owner uint32) (map[string]string, error) {
 			return errors.New("dependency lockfile has unsafe ownership, links, type or size")
 		}
 		h := sha256.New()
-		n, copyErr := io.Copy(h, io.LimitReader(file, (16<<20)+1))
+		n, copyErr := io.Copy(h, io.LimitReader(&contextReader{ctx: ctx, reader: file}, (16<<20)+1))
 		if n > 16<<20 {
 			copyErr = errors.New("dependency lockfile grew beyond limit")
 		}
@@ -556,12 +560,12 @@ func lockfiles(root *os.Root, owner uint32) (map[string]string, error) {
 	return digests, err
 }
 
-func (x *execution) checkLockfiles() error {
+func (x *execution) checkLockfiles(ctx context.Context) error {
 	owner := x.engine.options.JobUID
 	if _, native := x.engine.options.Runner.(*nativeRunner); !native {
 		owner = uint32(os.Geteuid())
 	}
-	after, err := lockfiles(x.root, owner)
+	after, err := lockfiles(ctx, x.root, owner)
 	for name, digest := range x.result.Observation.LockfileDigests {
 		if after[name] != digest {
 			err = errors.Join(err, fmt.Errorf("tracked dependency lockfile mutated: %s", name))
@@ -578,14 +582,14 @@ func (x *execution) checkLockfiles() error {
 func (x *execution) testEvidence(ctx context.Context) error {
 	tool := filepath.Join(x.job.Profile.DeveloperDir, "usr/bin/xcresulttool")
 	if _, native := x.engine.options.Runner.(*nativeRunner); native {
-		if err := hostguard.RootConfig(tool); err != nil {
+		if err := hostguard.ToolchainExecutable(tool, x.engine.options.JobUID); err != nil {
 			return err
 		}
 	}
 	raw, commandErr := x.capture(ctx, tool, "get", "test-results", "tests", "--schema-version", "0.4.0", "--path", filepath.Join(x.workspace, "results.xcresult"), "--compact")
 	// Extraction can load hostile bundle contents; its descendants are subject
 	// to the same full-UID barrier before parsing or sealing anything.
-	if err := x.engine.stopWriters(context.Background(), &x.manifest); err != nil {
+	if err := x.engine.stopWriters(ctx, &x.manifest); err != nil {
 		return errors.Join(commandErr, err)
 	}
 	if commandErr != nil {
@@ -610,12 +614,10 @@ func (x *execution) writeEvidence(name string, data []byte) error {
 	return errors.Join(writeErr, file.Close())
 }
 
-func (x *execution) collect() error {
+func (x *execution) collect(ctx context.Context) error {
 	if x.manifest.Active || x.manifest.ProcessUncertain {
 		return errors.New("cannot seal evidence while owned work remains uncertain")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), x.engine.options.CleanupTimeout)
-	defer cancel()
 	if err := x.engine.options.Runner.Quiesce(ctx); err != nil {
 		x.manifest.ProcessUncertain = true
 		return errors.Join(err, x.engine.saveManifest(x.manifest))
@@ -631,7 +633,7 @@ func (x *execution) collect() error {
 			failures = append(failures, errors.New("artifact budget exhausted"))
 			return
 		}
-		artifacts, err := evidence.Collect(source, rules, dest, evidence.Limits{MaxTotalBytes: remaining, MaxFileBytes: remaining, MaxEntries: maxArchiveEntries}, x.engine.options.Now())
+		artifacts, err := evidence.Collect(ctx, source, rules, dest, evidence.Limits{MaxTotalBytes: remaining, MaxFileBytes: remaining, MaxEntries: maxArchiveEntries}, x.engine.options.Now())
 		if err != nil {
 			failures = append(failures, err)
 			return
