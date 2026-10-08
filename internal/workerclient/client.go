@@ -527,6 +527,11 @@ func (c *Client) deliver(ctx context.Context, saved pending) error {
 		req.Header.Set("Content-Type", "application/octet-stream")
 		req.Header.Set("Content-Length", strconv.FormatInt(artifact.SizeBytes, 10))
 		req.ContentLength = artifact.SizeBytes
+		// A non-nil body with ContentLength == 0 means unknown length to
+		// net/http, which otherwise sends empty files as chunked uploads.
+		if artifact.SizeBytes == 0 {
+			req.Body = http.NoBody
+		}
 		resp, err := c.http.Do(req)
 		f.Close()
 		if err != nil {

@@ -7,10 +7,11 @@ signed evidence receipt. Jobs run natively on your Mac under a dedicated non-adm
 priority, and you can pause them whenever you need the machine. GitHub integration is pull-based, so your CI never
 needs network credentials for your private network. No VM required.
 
-> Status: early development. Durable admission, queue, native execution, evidence collection and the worker
-> Unix-socket client are implemented. The controller service and installation assets are not yet available.
-> The root execution broker requires a separate non-admin macOS GUI job account and an explicitly qualified
-> process baseline. No privileged deployment or background GUI acceptance has been performed.
+> Status: early development. The private controller API, durable queue, exact source exporter, native worker
+> and evidence delivery are implemented. GitHub polling, receipt signing and installation assets are next.
+> The protected root execution broker requires a separate non-admin GUI job account and an explicitly
+> qualified process baseline. Execution stays disabled without fresh root-managed network and toolchain
+> qualification. Privileged deployment and background GUI operation have not been qualified by the suite.
 
 ## Planned phase-1 capabilities
 
@@ -69,6 +70,13 @@ needs network credentials for your private network. No VM required.
   Test JSON capture and parsing share the same 32 MiB input bound.
 - `internal/workerclient`: authenticated Unix peer credentials, heartbeat cancellation, streamed logs and
   durable completion replay. Retrying delivery does not execute the job again. Uncertain cleanup stops dispatch.
+- `internal/source`: isolated controller-side Git fetch, exact commit/tree verification and bounded deterministic
+  full-tree tar export. Git archive attributes cannot omit or substitute committed bytes. Links, submodules and
+  Git LFS requirements are rejected explicitly. Source exports default to a 2 GiB limit.
+- `internal/controller`: Unix peer-UID authentication, asynchronous preparation, heartbeat/deadline fencing,
+  independently parsed test evidence, immutable artifact storage, bounded retention and fail-closed host guards.
+- `internal/api`: persisted bearer digests, repository/scoped authorization, idempotent admission, status,
+  paged/SSE logs, JSON/JUnit results, range downloads and persisted administrative pause/resume.
 
 The store requires a dedicated private directory (mode `0700`) and private database files. Default limits are
 50 outstanding jobs, 10 per principal, 24-hour queue expiry, 90-day terminal metadata retention, 64 MiB per
@@ -148,6 +156,40 @@ reset isolation. This residual risk is accepted by the operator; preflight check
 Root/GUI deployment, network boundaries and background UI operation require separate host qualification
 before real repository enrollment. These native probes have not been qualified on a deployed host.
 
+## Controller configuration and control
+
+`macserve controller --config /absolute/path/to/controller.json` requires a root-controlled configuration and
+a dedicated non-login, non-admin controller account distinct from the owner and worker. Configuration fields:
+`root`, `socket`, `worker_uid`, `owner_uid`, `profiles_file`, `listen`, `tls_certificate`, `tls_key`,
+`principals`, `health_file`, `policy_sha256`, and optional `allowed_networks` and `pause_file`.
+Profiles and the public TLS certificate are root-controlled; the TLS private key is a private controller secret.
+
+The TLS 1.3 listener requires a literal assigned tailnet address and port. Allowed networks default to
+`100.64.0.0/10` and `fd7a:115c:a1e0::/48`; configuration can narrow these ranges, not enable LAN/public,
+wildcard or loopback listeners. Client authorization is independent of network membership.
+Each principal has `id`, `token_sha256`, `repositories`, `scopes`, and optional `revoked`. Scopes are
+`jobs:submit`, `jobs:read`, `jobs:cancel`, `service:admin`. Only SHA-256 digests are persisted; plaintext
+high-entropy bearer credentials belong in the caller's private credential storage.
+
+- `POST /v1/jobs` requires `Idempotency-Key` and a profile-matching exact-SHA request.
+- `GET /v1/capabilities` and `/v1/jobs` expose authorized profiles and jobs without controller recipes or paths.
+- `/v1/jobs/{id}` provides status, `/logs`, `/logs/stream`, `/results`, `/results/junit`, `/artifacts`,
+  `/artifacts/{artifact_id}`, `/receipt`, and `POST /cancel`. Missing signed receipts return `409`, not success.
+- `PUT /v1/admin/pause` accepts `{"reason":"benchmark","mode":"drain"}` or `cancel_active`.
+  Poll `GET /v1/admin/state` until `quiescent=true` before benchmarking; acceptance of pause is not quiescence.
+  `DELETE /v1/admin/pause` clears only manual pause. An optional owner-controlled pause marker also blocks dispatch.
+
+The controller requires root-owned health attestation bound to the configured PF policy, current interface
+inventory, worker UID and qualified profile digests. Health expires within 45 seconds. Missing, stale or changed
+security qualification stops admission and cancels active work. Merely creating a profile does not qualify it.
+Installation and actual boundary qualification are separate provisioning work; no best-effort first build.
+
+Disk admission reserves 30 GiB while preserving 120 GiB free; below 100 GiB active work is cancelled.
+The total accounted mutable-data budget is 80 GiB. Retained artifact bytes are capped at 15 GiB with seven-day
+expiry/oldest-terminal eviction; metadata persists for 90 days and expired downloads return `410`.
+These are monitored application budgets, not filesystem quotas. Controller test parsing uses sealed JSON
+exported by the pinned worker tool; it does not execute repository-provided parsers.
+
 ## Development
 
 Use the Go version declared in `go.mod`. SQLite uses a pure-Go driver; no external database is required.
@@ -158,9 +200,8 @@ go test ./...
 go run ./cmd/macserve --help
 ```
 
-`macserve --help` and `macserve <command> --help` exit 0. `worker` requires `--config`; invalid or missing
-arguments exit 2. Runtime safety or connection failures exit 1. Help goes to stdout and errors to stderr.
-The controller command remains unavailable until its service implementation lands.
+`macserve --help` and `macserve <command> --help` exit 0. Both service commands require `--config`; invalid or
+missing arguments exit 2. Runtime safety failures exit 1. Help goes to stdout and errors to stderr.
 
 CI pins third-party actions to immutable commit SHAs and runs vet, tests and a CLI build on GitHub-hosted
 `ubuntu-latest` and `macos-latest`. Apple tool execution is faked in tests: no simulator boot or app build is
