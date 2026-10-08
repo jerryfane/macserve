@@ -159,10 +159,12 @@ before real repository enrollment. These native probes have not been qualified o
 ## Controller configuration and control
 
 `macserve controller --config /absolute/path/to/controller.json` requires a root-controlled configuration and
-a dedicated non-login, non-admin controller account distinct from the owner and worker. Configuration fields:
-`root`, `socket`, `worker_uid`, `owner_uid`, `profiles_file`, `listen`, `tls_certificate`, `tls_key`,
+a dedicated non-login, non-admin controller account distinct from the owner and job account. Configuration fields:
+`root`, `socket`, `job_uid`, `owner_uid`, `profiles_file`, `listen`, `tls_certificate`, `tls_key`,
 `principals`, `health_file`, `policy_sha256`, and optional `allowed_networks` and `pause_file`.
 Profiles and the public TLS certificate are root-controlled; the TLS private key is a private controller secret.
+`job_uid` identifies the unprivileged execution/network-policy account. The private executor socket always
+authenticates peer UID `0` in production, independently of `job_uid`.
 
 The TLS 1.3 listener requires a literal assigned tailnet address and port. Allowed networks default to
 `100.64.0.0/10` and `fd7a:115c:a1e0::/48`; configuration can narrow these ranges, not enable LAN/public,
@@ -180,13 +182,14 @@ high-entropy bearer credentials belong in the caller's private credential storag
   `DELETE /v1/admin/pause` clears only manual pause. An optional owner-controlled pause marker also blocks dispatch.
 
 The controller requires root-owned health attestation bound to the configured PF policy, current interface
-inventory, worker UID and qualified profile digests. Health expires within 45 seconds. Missing, stale or changed
+inventory, job UID and qualified profile digests. Health expires within 45 seconds. Missing, stale or changed
 security qualification stops admission and cancels active work. Merely creating a profile does not qualify it.
 Installation and actual boundary qualification are separate provisioning work; no best-effort first build.
 
 Disk admission reserves 30 GiB while preserving 120 GiB free; below 100 GiB active work is cancelled.
-The total accounted mutable-data budget is 80 GiB. Retained artifact bytes are capped at 15 GiB with seven-day
-expiry/oldest-terminal eviction; metadata persists for 90 days and expired downloads return `410`.
+The total accounted mutable-data budget is 80 GiB. The retained evidence pool reserves 1 GiB for store log
+rows and 14 GiB for artifacts, with seven-day expiry/oldest-terminal eviction. Metadata persists for 90 days;
+expired downloads, log pages and newly opened log streams return `410`.
 These are monitored application budgets, not filesystem quotas. Controller test parsing uses sealed JSON
 exported by the pinned worker tool; it does not execute repository-provided parsers.
 

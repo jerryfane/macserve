@@ -53,8 +53,8 @@ type Controller struct {
 }
 
 func New(options Options) (*Controller, error) {
-	if options.Root == "" || options.Socket == "" || options.WorkerUID == 0 || options.Store == nil || options.Source == nil || options.Gate == nil || options.HeartbeatTimeout < 0 {
-		return nil, errors.New("controller requires private root, socket, non-root worker UID, store, source and readiness gate")
+	if options.Root == "" || options.Socket == "" || options.Store == nil || options.Source == nil || options.Gate == nil || options.HeartbeatTimeout < 0 {
+		return nil, errors.New("controller requires private root, socket, authenticated broker peer UID, store, source and readiness gate")
 	}
 	if options.Now == nil {
 		options.Now = time.Now
@@ -179,7 +179,7 @@ func (c *Controller) Run(ctx context.Context) error {
 	server := &http.Server{Handler: c.handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10,
 		ConnContext: func(ctx context.Context, conn net.Conn) context.Context {
 			uid, err := peercred.UID(conn)
-			return context.WithValue(ctx, peerKey{}, err == nil && uid == c.options.WorkerUID)
+			return context.WithValue(ctx, peerKey{}, err == nil && uid == c.options.BrokerUID)
 		},
 	}
 	c.mu.Lock()

@@ -50,7 +50,7 @@ func respond(w http.ResponseWriter, value any, err error) {
 			status = http.StatusConflict
 		case errors.Is(err, store.ErrInvalid), errors.Is(err, evidence.ErrArtifact):
 			status = http.StatusBadRequest
-		case errors.Is(err, evidence.ErrArtifactLimit), errors.Is(err, store.ErrLogLimit):
+		case errors.Is(err, evidence.ErrArtifactLimit), errors.Is(err, store.ErrLogLimit), errors.Is(err, store.ErrResultLimit):
 			status = http.StatusRequestEntityTooLarge
 		case errors.Is(err, ErrNotReady):
 			status = http.StatusServiceUnavailable
@@ -207,7 +207,7 @@ func (c *Controller) logs(w http.ResponseWriter, r *http.Request) {
 		if value.Stream != "stdout" && value.Stream != "stderr" {
 			return store.ErrInvalid
 		}
-		_, err = c.options.Store.AppendLog(r.Context(), job.ID, value.Stream, string(value.Data), c.options.Now())
+		_, err = c.options.Store.AppendLog(r.Context(), job.ID, job.LeaseToken, value.Stream, string(value.Data), c.options.Now())
 		if errors.Is(err, store.ErrLogLimit) {
 			_, _ = c.options.Store.Cancel(r.Context(), job.ID, "log evidence limit exceeded", c.options.Now())
 		}

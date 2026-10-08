@@ -30,7 +30,7 @@ const (
 // controller cannot manufacture readiness from a live worker connection.
 type Health struct {
 	Schema                int               `json:"schema"`
-	WorkerUID             uint32            `json:"worker_uid"`
+	JobUID                uint32            `json:"job_uid"`
 	PolicySHA256          string            `json:"policy_sha256"`
 	InterfacesSHA256      string            `json:"interfaces_sha256"`
 	BoundaryReceiptSHA256 string            `json:"boundary_receipt_sha256"`
@@ -43,7 +43,7 @@ type Health struct {
 }
 type GuardOptions struct {
 	Root, HealthFile, PolicySHA256, PauseFile string
-	WorkerUID, OwnerUID                       uint32
+	JobUID, OwnerUID                          uint32
 	Profiles                                  map[string]string
 	Now                                       func() time.Time
 }
@@ -56,7 +56,7 @@ type Guard struct {
 }
 
 func NewGuard(o GuardOptions) (*Guard, error) {
-	if !cleanAbsolute(o.Root) || !cleanAbsolute(o.HealthFile) || !digestString(o.PolicySHA256) || o.WorkerUID == 0 || o.OwnerUID == 0 || o.WorkerUID == o.OwnerUID {
+	if !cleanAbsolute(o.Root) || !cleanAbsolute(o.HealthFile) || !digestString(o.PolicySHA256) || o.JobUID < 501 || o.OwnerUID == 0 || o.JobUID == o.OwnerUID {
 		return nil, errors.New("invalid readiness guard configuration")
 	}
 	if o.PauseFile != "" && !cleanAbsolute(o.PauseFile) {
@@ -113,7 +113,7 @@ func (g *Guard) Check(ctx context.Context) (GateState, error) {
 	} else {
 		now := g.options.Now()
 		state.UsedBytes = health.AccountedBytes
-		if health.Schema != 1 || health.WorkerUID != g.options.WorkerUID || health.PolicySHA256 != g.options.PolicySHA256 || !health.BoundaryValidated || !digestString(health.BoundaryReceiptSHA256) || health.CheckedAt.After(now.Add(5*time.Second)) || now.Sub(health.CheckedAt) > 45*time.Second || !health.ExpiresAt.After(now) || health.ExpiresAt.Sub(health.CheckedAt) > 45*time.Second || !health.ExpiresAt.After(health.CheckedAt) {
+		if health.Schema != 1 || health.JobUID != g.options.JobUID || health.PolicySHA256 != g.options.PolicySHA256 || !health.BoundaryValidated || !digestString(health.BoundaryReceiptSHA256) || health.CheckedAt.After(now.Add(5*time.Second)) || now.Sub(health.CheckedAt) > 45*time.Second || !health.ExpiresAt.After(now) || health.ExpiresAt.Sub(health.CheckedAt) > 45*time.Second || !health.ExpiresAt.After(health.CheckedAt) {
 			fail("isolation_unavailable", true)
 		}
 		current, err := g.interfaces()

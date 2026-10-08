@@ -16,7 +16,7 @@ import (
 type Config struct {
 	Root            string            `json:"root"`
 	Socket          string            `json:"socket"`
-	WorkerUID       uint32            `json:"worker_uid"`
+	JobUID          uint32            `json:"job_uid"`
 	ProfilesFile    string            `json:"profiles_file"`
 	Listen          string            `json:"listen"`
 	AllowedNetworks []string          `json:"allowed_networks"`
@@ -65,8 +65,8 @@ func (c *Config) validate() error {
 			return errors.New("controller paths must be clean absolute paths")
 		}
 	}
-	if c.WorkerUID == 0 || c.OwnerUID == 0 || c.WorkerUID == c.OwnerUID {
-		return errors.New("worker and owner must be distinct non-root UIDs")
+	if c.JobUID < 501 || c.OwnerUID == 0 || c.JobUID == c.OwnerUID {
+		return errors.New("job UID must be a dedicated login UID distinct from the non-root owner")
 	}
 	if !digestString(c.PolicySHA256) {
 		return errors.New("invalid network policy digest")

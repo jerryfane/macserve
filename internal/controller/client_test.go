@@ -43,18 +43,21 @@ func (e *emptyLogExecutor) Execute(ctx context.Context, job model.Job, source wo
 
 func TestWorkerClientCompletesWithEmptyLogArtifacts(t *testing.T) {
 	if os.Geteuid() == 0 {
-		t.Skip("worker protocol requires a non-root peer")
+		t.Skip("controller identity must be non-root")
 	}
 	f := newRuntime(t)
 	runUnix(t, f.controller)
 	job := f.enqueue(t, "empty-log-job", model.Build)
 	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "control"), 0700); err != nil {
+		t.Fatal(err)
+	}
 	file := filepath.Join(root, "empty")
 	if err := os.WriteFile(file, nil, 0600); err != nil {
 		t.Fatal(err)
 	}
 	engine := &emptyLogExecutor{file: file, acknowledged: make(chan struct{})}
-	client, err := workerclient.New(workerclient.Config{Root: root, ExportRoot: filepath.Join(root, "exports"), Socket: f.controller.options.Socket, ControllerUID: uint32(os.Geteuid()), PollSeconds: 1, HeartbeatSeconds: 1}, engine)
+	client, err := workerclient.New(workerclient.Config{Root: filepath.Join(root, "control"), ExportRoot: filepath.Join(root, "exports"), WorkspaceRoot: filepath.Join(root, "workspaces"), HelperPath: filepath.Join(root, "helper"), BaselinePath: filepath.Join(root, "baseline.json"), JobUID: uint32(os.Geteuid()) + 1000, JobGID: uint32(os.Getegid()) + 1000, OwnerUID: uint32(os.Geteuid()) + 2000, Socket: f.controller.options.Socket, ControllerUID: uint32(os.Geteuid()), PollSeconds: 1, HeartbeatSeconds: 1}, engine)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -13,7 +13,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const maxArtifactPoolBytes int64 = 15 << 30
+// The store reserves 1 GiB for raw log rows; artifacts use the rest of the 15 GiB evidence pool.
+const maxArtifactPoolBytes int64 = 14 << 30
 
 type retainedExport struct {
 	id       string

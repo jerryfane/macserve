@@ -37,8 +37,8 @@ func runController(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "macserve controller: %v\n", err)
 		return 1
 	}
-	if config.WorkerUID == uint32(os.Geteuid()) || config.OwnerUID == uint32(os.Geteuid()) {
-		fmt.Fprintln(stderr, "macserve controller: owner, worker and controller UIDs must differ")
+	if config.JobUID == uint32(os.Geteuid()) || config.OwnerUID == uint32(os.Geteuid()) {
+		fmt.Fprintln(stderr, "macserve controller: owner, job and controller UIDs must differ")
 		return 1
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -75,7 +75,7 @@ func serveController(parent context.Context, config controller.Config) error {
 	if err != nil {
 		return err
 	}
-	guard, err := controller.NewGuard(controller.GuardOptions{Root: config.Root, HealthFile: config.HealthFile, PolicySHA256: config.PolicySHA256, PauseFile: config.PauseFile, WorkerUID: config.WorkerUID, OwnerUID: config.OwnerUID, Profiles: qualified})
+	guard, err := controller.NewGuard(controller.GuardOptions{Root: config.Root, HealthFile: config.HealthFile, PolicySHA256: config.PolicySHA256, PauseFile: config.PauseFile, JobUID: config.JobUID, OwnerUID: config.OwnerUID, Profiles: qualified})
 	if err != nil {
 		return err
 	}
@@ -95,7 +95,7 @@ func serveController(parent context.Context, config controller.Config) error {
 		return err
 	}
 	defer exporter.Close()
-	runtime, err := controller.New(controller.Options{Root: config.Root, Socket: config.Socket, WorkerUID: config.WorkerUID, Store: db, Source: exporter, Gate: guard.Check})
+	runtime, err := controller.New(controller.Options{Root: config.Root, Socket: config.Socket, BrokerUID: 0, Store: db, Source: exporter, Gate: guard.Check})
 	if err != nil {
 		return err
 	}

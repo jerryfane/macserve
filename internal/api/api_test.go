@@ -210,8 +210,12 @@ func TestLogsPagingTerminalAndStreamResume(t *testing.T) {
 	f := setup(t)
 	job := f.submit(t, "logs")
 	ctx := context.Background()
+	job, err := f.db.Claim(ctx, "api-test", testTime)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, text := range []string{"first\n", "\x1b[31msecond\x1b[0m\n"} {
-		if _, err := f.db.AppendLog(ctx, job.ID, "stdout", text, testTime); err != nil {
+		if _, err := f.db.AppendLog(ctx, job.ID, job.LeaseToken, "stdout", text, testTime); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -228,6 +232,12 @@ func TestLogsPagingTerminalAndStreamResume(t *testing.T) {
 		t.Fatalf("page: %s", w.Body.String())
 	}
 	if _, err := f.db.Cancel(ctx, job.ID, "stop", testTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.Transition(ctx, job.ID, job.LeaseToken, model.Cancelling, model.Finalizing, "stop", testTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.Finish(ctx, job.ID, job.LeaseToken, model.Cancelled, nil, true, "stop", testTime); err != nil {
 		t.Fatal(err)
 	}
 	w = perform(f.handler, "GET", "/v1/jobs/"+job.ID+"/logs?cursor="+page.Next, testToken, "", "")
@@ -367,5 +377,37 @@ func TestResultsRangesReceiptAndControl(t *testing.T) {
 	after, err := f.db.Get(ctx, job.ID)
 	if err != nil || string(after.Result) != string(result) || after.State != model.Failed {
 		t.Fatalf("terminal evidence changed: %+v %v", after, err)
+	}
+}
+
+func TestExpiredLogPagesAndStreamsReturnGoneWithoutLosingJob(t *testing.T) {
+	f := setup(t)
+	f.submit(t, "expired-logs")
+	ctx := context.Background()
+	job, err := f.db.Claim(ctx, "api-test", testTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.AppendLog(ctx, job.ID, job.LeaseToken, "stdout", "retained output", testTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.Transition(ctx, job.ID, job.LeaseToken, model.Preparing, model.Finalizing, "", testTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.Finish(ctx, job.ID, job.LeaseToken, model.Succeeded, json.RawMessage(`{"sealed":true}`), true, "", testTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.Prune(ctx, testTime.Add(7*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"/logs", "/logs/stream"} {
+		response := perform(f.handler, "GET", "/v1/jobs/"+job.ID+suffix, testToken, "", "")
+		if response.Code != http.StatusGone || !strings.Contains(response.Body.String(), `"code":"expired"`) {
+			t.Fatalf("%s: %d %s", suffix, response.Code, response.Body.String())
+		}
+	}
+	response := perform(f.handler, "GET", "/v1/jobs/"+job.ID, testToken, "", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("expired raw logs removed job metadata: %d %s", response.Code, response.Body.String())
 	}
 }

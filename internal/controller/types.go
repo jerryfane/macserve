@@ -36,7 +36,7 @@ type Status struct {
 }
 type Options struct {
 	Root, Socket     string
-	WorkerUID        uint32
+	BrokerUID        uint32
 	Store            *store.Store
 	Source           SourceProvider
 	Gate             func(context.Context) (GateState, error)

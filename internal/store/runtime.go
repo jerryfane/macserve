@@ -20,8 +20,18 @@ func (s *Store) RegisterWorker(ctx context.Context, epoch string) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS worker_runtime(singleton INTEGER PRIMARY KEY CHECK(singleton=1),epoch TEXT NOT NULL)"); err != nil {
+	// Retire the earlier controller epoch table without reopening its last epoch.
+	var legacy bool
+	if err = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='worker_runtime')").Scan(&legacy); err != nil {
 		return err
+	}
+	if legacy {
+		if _, err = tx.ExecContext(ctx, "INSERT OR IGNORE INTO invalid_epochs(epoch) SELECT epoch FROM worker_runtime WHERE epoch<>?", epoch); err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(ctx, "DROP TABLE worker_runtime"); err != nil {
+			return err
+		}
 	}
 	var invalid bool
 	if err = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM invalid_epochs WHERE epoch=?)", epoch).Scan(&invalid); err != nil {
@@ -41,8 +51,8 @@ func (s *Store) RegisterWorker(ctx context.Context, epoch string) error {
 		return err
 	}
 	var old string
-	err = tx.QueryRowContext(ctx, "SELECT epoch FROM worker_runtime WHERE singleton=1").Scan(&old)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	err = tx.QueryRowContext(ctx, "SELECT acknowledged_epoch FROM service_state WHERE singleton=1").Scan(&old)
+	if err != nil {
 		return err
 	}
 	if old != "" && old != epoch {
@@ -50,10 +60,7 @@ func (s *Store) RegisterWorker(ctx context.Context, epoch string) error {
 			return err
 		}
 	}
-	if _, err = tx.ExecContext(ctx, "INSERT INTO worker_runtime(singleton,epoch) VALUES(1,?) ON CONFLICT(singleton) DO UPDATE SET epoch=excluded.epoch", epoch); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, "UPDATE service_state SET quarantined=0,quarantine_reason='',generation=generation+1 WHERE singleton=1 AND quarantined=1"); err != nil {
+	if _, err = tx.ExecContext(ctx, "UPDATE service_state SET acknowledged_epoch=?,quarantined=0,quarantine_reason='',generation=generation+1 WHERE singleton=1 AND (quarantined=1 OR acknowledged_epoch<>?)", epoch, epoch); err != nil {
 		return err
 	}
 	return tx.Commit()

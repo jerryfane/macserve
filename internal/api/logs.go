@@ -133,15 +133,6 @@ func (h *handler) stream(w http.ResponseWriter, r *http.Request, job model.Job) 
 		}
 	}
 	rc := http.NewResponseController(w)
-	// A stream without transport deadlines cannot guarantee isolation from a slow
-	// reader. Fail closed instead of leaving a goroutine blocked indefinitely.
-	if err := rc.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
-		writeError(w, errUnavailable)
-		return
-	}
-	defer rc.SetWriteDeadline(time.Time{})
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("X-Accel-Buffering", "no")
 	send := func(event string, seq int64, data any) bool {
 		if err := rc.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
 			return false
@@ -160,9 +151,7 @@ func (h *handler) stream(w http.ResponseWriter, r *http.Request, job model.Job) 
 		}
 		return rc.Flush() == nil
 	}
-	if _, err := fmt.Fprint(w, ": connected\n\n"); err != nil || rc.Flush() != nil {
-		return
-	}
+	connected := false
 	poll := time.NewTicker(250 * time.Millisecond)
 	defer poll.Stop()
 	heartbeat := time.NewTicker(15 * time.Second)
@@ -178,7 +167,25 @@ func (h *handler) stream(w http.ResponseWriter, r *http.Request, job model.Job) 
 		}
 		records, next, truncated, err := h.Store.Logs(r.Context(), job.ID, after, store.MaxLogRecordBytes)
 		if err != nil {
+			if !connected {
+				writeError(w, err)
+			}
 			return
+		}
+		if !connected {
+			// Check byte retention before committing the SSE response so expired
+			// evidence has the same HTTP 410 contract as paged logs.
+			if err := rc.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+				writeError(w, errUnavailable)
+				return
+			}
+			defer rc.SetWriteDeadline(time.Time{})
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("X-Accel-Buffering", "no")
+			if _, err := fmt.Fprint(w, ": connected\n\n"); err != nil || rc.Flush() != nil {
+				return
+			}
+			connected = true
 		}
 		for _, record := range records {
 			record.Text = displayText(record.Text)

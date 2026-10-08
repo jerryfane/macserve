@@ -180,7 +180,7 @@ func writeError(w http.ResponseWriter, err error) {
 		status, code, message = 409, "conflict", "request conflicts with existing state"
 	case errors.Is(err, controller.ErrNotReady):
 		status, code, message = 409, "result_not_ready", "result is not ready"
-	case errors.Is(err, controller.ErrExpired):
+	case errors.Is(err, controller.ErrExpired), errors.Is(err, store.ErrLogExpired):
 		status, code, message = 410, "expired", "evidence bytes expired"
 	case errors.Is(err, store.ErrFull):
 		status, code, message, retry = 429, "queue_full", "queue capacity reached", true

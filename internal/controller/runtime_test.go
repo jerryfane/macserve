@@ -85,7 +85,7 @@ func newRuntime(t *testing.T) *runtimeFixture {
 	if uid == 0 {
 		uid = 1
 	}
-	c, err := New(Options{Root: filepath.Join(root, "controller"), Socket: filepath.Join(socketDir, "worker.sock"), Store: db, WorkerUID: uid, Source: f.source, Now: func() time.Time { return f.now.Add(time.Duration(f.offset.Load())) }, Gate: func(context.Context) (GateState, error) { return GateState{Ready: !f.blocked.Load()}, nil }})
+	c, err := New(Options{Root: filepath.Join(root, "controller"), Socket: filepath.Join(socketDir, "worker.sock"), Store: db, BrokerUID: uid, Source: f.source, Now: func() time.Time { return f.now.Add(time.Duration(f.offset.Load())) }, Gate: func(context.Context) (GateState, error) { return GateState{Ready: !f.blocked.Load()}, nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +271,7 @@ func TestUnixPeerBoundaryAsyncDrainAndEpochFencing(t *testing.T) {
 
 func TestUnixKernelUIDMismatchCannotRegister(t *testing.T) {
 	f := newRuntime(t)
-	f.controller.options.WorkerUID = uint32(os.Geteuid() + 1)
+	f.controller.options.BrokerUID = uint32(os.Geteuid() + 1)
 	runUnix(t, f.controller)
 	client := unixClient(t, f.controller)
 	if status, _ := request(t, client, "POST", "/register", "epoch-a", "", protocol.Registration{Epoch: "epoch-a", Quiescent: true}); status != 403 {
