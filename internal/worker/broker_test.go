@@ -50,7 +50,7 @@ func TestScopeTerminatesEscapedAndOrphanProcessesOnly(t *testing.T) {
 	}
 }
 
-func TestScopeQuarantinesUnobservableOrUnkillableProcesses(t *testing.T) {
+func TestScopeDistinguishesResidualProcessesFromInspectionFailure(t *testing.T) {
 	for _, mode := range []string{"sample-error", "signal-error", "residual", "baseline-reused", "baseline-missing", "baseline-foreign"} {
 		t.Run(mode, func(t *testing.T) {
 			s := scopeFixture()
@@ -78,8 +78,8 @@ func TestScopeQuarantinesUnobservableOrUnkillableProcesses(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 			defer cancel()
-			if err := s.quiesce(ctx); !errors.Is(err, ErrCleanup) {
-				t.Fatalf("uncertain scope accepted: %v", err)
+			if err := s.quiesce(ctx); err == nil || errors.Is(err, ErrContamination) != (mode == "residual") {
+				t.Fatalf("incorrect cleanup classification: %v", err)
 			}
 			if (mode == "baseline-reused" || mode == "baseline-missing" || mode == "baseline-foreign" || mode == "sample-error") && calls != 0 {
 				t.Fatal("signalled before validating protected baseline")
@@ -325,5 +325,70 @@ func TestUIDScopeTerminatesOnlyOwnedSetsidHelper(t *testing.T) {
 	status, ok := child.ProcessState.Sys().(syscall.WaitStatus)
 	if !signalled || waitErr == nil || !ok || !status.Signaled() || (status.Signal() != syscall.SIGTERM && status.Signal() != syscall.SIGKILL) {
 		t.Fatalf("escaped helper survived or exited without scope cleanup: signalled=%v state=%v err=%v", signalled, child.ProcessState, waitErr)
+	}
+}
+
+func TestResetAuditsSelectedProcessesAndRemovesOnlyOtherJobUIDs(t *testing.T) {
+	scope := scopeFixture()
+	// The administrator selects a new GUI identity instead of implicitly
+	// trusting the stale protected baseline.
+	selected := processSample{pid: 101, uid: testJobUID, start: "new-gui"}
+	rows := []processSample{selected, {pid: 200, uid: testJobUID, start: "unselected"}, {pid: 300, uid: 999, start: "owner"}}
+	scope.sample = func(context.Context) ([]processSample, error) { return rows, nil }
+	scope.signal = func(_ context.Context, target processSample, _ syscall.Signal) error {
+		if target.pid != 200 || target.uid != testJobUID || target.start != "unselected" {
+			t.Fatalf("reset targeted selected or foreign identity: %+v", target)
+		}
+		rows = []processSample{selected, {pid: 300, uid: 999, start: "owner"}}
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	baseline, err := scope.resetBaseline(ctx, []int{101}, func() (string, error) { return "new-boot", nil }, func(context.Context) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(baseline, GUIBaseline{JobUID: testJobUID, Boot: "new-boot", Processes: []ProcessIdentity{{PID: 101, Start: "new-gui"}}}) {
+		t.Fatalf("reset adopted unselected process or stale baseline: %+v", baseline)
+	}
+	if !reflect.DeepEqual(rows, []processSample{selected, {pid: 300, uid: 999, start: "owner"}}) {
+		t.Fatalf("reset changed selected/foreign processes: %+v", rows)
+	}
+}
+
+func TestResetRefusesUnsafeSelectionsBeforeCleanup(t *testing.T) {
+	for _, pids := range [][]int{nil, {100, 100}, {1}, {200}, {300}} {
+		scope := scopeFixture()
+		scope.sample = func(context.Context) ([]processSample, error) {
+			return []processSample{trustedGUI(), {pid: 300, uid: 999, start: "owner"}}, nil
+		}
+		scope.signal = func(context.Context, processSample, syscall.Signal) error {
+			t.Fatal("unsafe selection reached signal operation")
+			return nil
+		}
+		_, err := scope.resetBaseline(context.Background(), pids, func() (string, error) { return "boot", nil }, func(context.Context) error {
+			t.Fatal("unsafe selection reached persistence cleanup")
+			return nil
+		})
+		if err == nil {
+			t.Fatalf("unsafe audited selection accepted: %v", pids)
+		}
+	}
+}
+
+func TestResetRejectsSelectedIdentityChangeDuringCleanup(t *testing.T) {
+	scope := scopeFixture()
+	row := trustedGUI()
+	scope.sample = func(context.Context) ([]processSample, error) { return []processSample{row}, nil }
+	scope.signal = func(context.Context, processSample, syscall.Signal) error {
+		t.Fatal("changed baseline was treated as an unselected process")
+		return nil
+	}
+	_, err := scope.resetBaseline(context.Background(), []int{100}, func() (string, error) { return "boot", nil }, func(context.Context) error {
+		row.start = "reused-pid"
+		return nil
+	})
+	if err == nil || errors.Is(err, ErrContamination) {
+		t.Fatalf("changed baseline was accepted or classified as contamination: %v", err)
 	}
 }

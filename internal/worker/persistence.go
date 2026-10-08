@@ -17,7 +17,11 @@ import (
 	"time"
 )
 
-const admissionRecord = "admission-quarantine.json"
+// ErrContamination identifies observed nonbaseline state, never an inability to
+// inspect it. Only errors carrying this sentinel may create durable quarantine.
+var ErrContamination = errors.New("job-user contamination observed")
+
+const quarantineRecord = "admission-quarantine.json"
 
 func (r *nativeRunner) loadBaseline() error {
 	if r.baselinePath == "" {
@@ -36,6 +40,9 @@ func (r *nativeRunner) loadBaseline() error {
 func (r *nativeRunner) Admission(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if r.scope == nil || r.persistence == nil {
 		return errors.New("native persistence inspection unavailable")
 	}
@@ -50,6 +57,9 @@ func (r *nativeRunner) Admission(ctx context.Context) error {
 
 func (s *processScope) observeQuiet(ctx context.Context) error {
 	for i := 0; i < 2; i++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		samples, err := s.sample(ctx)
 		if err != nil {
 			return err
@@ -59,7 +69,7 @@ func (s *processScope) observeQuiet(ctx context.Context) error {
 			return err
 		}
 		if len(residual) != 0 {
-			return errors.New("processes outside audited GUI baseline require administrator reconciliation")
+			return fmt.Errorf("%w: processes outside audited GUI baseline", ErrContamination)
 		}
 		if i == 0 {
 			timer := time.NewTimer(s.interval)
@@ -75,17 +85,34 @@ func (s *processScope) observeQuiet(ctx context.Context) error {
 }
 
 func (e *Engine) quarantine(err error) error {
-	return errors.Join(ErrRecovery, err, durableFile(e.root, admissionRecord, []byte(`{"administrator_reconciliation_required":true}`)))
+	if !errors.Is(err, ErrContamination) {
+		return err
+	}
+	return errors.Join(ErrRecovery, err, durableFile(e.root, quarantineRecord, []byte(`{"quarantined":true}`)))
 }
 
 func (e *Engine) admission(ctx context.Context) error {
-	if _, err := e.root.Lstat(admissionRecord); !os.IsNotExist(err) {
-		return errors.Join(ErrRecovery, errors.New("administrator reconciliation required"), err)
+	if err := e.checkQuarantine(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if inspector, ok := e.options.Runner.(interface{ Admission(context.Context) error }); ok {
 		if err := inspector.Admission(ctx); err != nil {
 			return e.quarantine(err)
 		}
+	}
+	return nil
+}
+
+func (e *Engine) checkQuarantine() error {
+	_, err := e.root.Lstat(quarantineRecord)
+	if err == nil {
+		return fmt.Errorf("%w: administrator reset required", ErrRecovery)
+	}
+	if !os.IsNotExist(err) {
+		return err
 	}
 	return nil
 }
@@ -169,7 +196,7 @@ func inspectLaunchAgents(home string) error {
 	defer dir.Close()
 	names, err := dir.Readdirnames(1)
 	if len(names) != 0 {
-		return errors.New("job-user LaunchAgents require administrator removal")
+		return fmt.Errorf("%w: job-user LaunchAgents present", ErrContamination)
 	}
 	if err != nil && !errors.Is(err, io.EOF) {
 		return err
@@ -178,35 +205,44 @@ func inspectLaunchAgents(home string) error {
 }
 
 func inspectLoginItems(out, diagnostic string, commandErr error) error {
-	if commandErr != nil || strings.TrimSpace(out) != "0" || strings.TrimSpace(diagnostic) != "" {
-		return errors.Join(commandErr, errors.New("login items present or inspection unavailable"))
+	if commandErr != nil || strings.TrimSpace(diagnostic) != "" {
+		return errors.Join(commandErr, errors.New("login item inspection unavailable"))
+	}
+	count, err := strconv.ParseUint(strings.TrimSpace(out), 10, 32)
+	if err != nil {
+		return fmt.Errorf("login item census unsupported: %w", err)
+	}
+	if count != 0 {
+		return fmt.Errorf("%w: legacy login items present", ErrContamination)
 	}
 	return nil
 }
 
 func inspectCrontab(out, diagnostic string, commandErr error, username string) error {
-	if out != "" {
-		return errors.New("nonempty job-user crontab requires administrator removal")
-	}
 	if commandErr == nil && strings.TrimSpace(diagnostic) == "" {
+		if out != "" {
+			return fmt.Errorf("%w: nonempty job-user crontab", ErrContamination)
+		}
 		return nil
 	}
 	if errors.Is(commandErr, context.DeadlineExceeded) || errors.Is(commandErr, context.Canceled) {
 		return commandErr
 	}
 	var exit *exec.ExitError
-	if errors.As(commandErr, &exit) && exit.ExitCode() == 1 && strings.TrimSpace(diagnostic) == "crontab: no crontab for "+username {
+	if out == "" && errors.As(commandErr, &exit) && exit.ExitCode() == 1 && strings.TrimSpace(diagnostic) == "crontab: no crontab for "+username {
 		return nil
 	}
 	return errors.Join(commandErr, errors.New("job-user crontab inspection unavailable"))
 }
 
-var backgroundUID = regexp.MustCompile(`^Records for UID ([0-9]+) : [[:xdigit:]-]+$`)
+var (
+	backgroundUID  = regexp.MustCompile(`^Records for UID (-?[0-9]+) : [[:xdigit:]-]+$`)
+	backgroundItem = regexp.MustCompile(`^#[0-9]+:`)
+)
 
-// dumpbtm has no stable machine-readable schema. Only an explicitly present,
-// empty UID section is accepted. Missing sections, records (including disabled
-// registrations) and unknown target-section syntax all fail closed; deployments
-// whose OS cannot provide this census must not enable native execution.
+// dumpbtm has no stable machine-readable schema. Recognized section metadata
+// does not imply a registration; records are positive contamination, whereas
+// missing sections and unsupported target-section syntax are inspection errors.
 func inspectBackgroundItems(output string, uid uint32) error {
 	found, target := false, false
 	for _, line := range strings.Split(output, "\n") {
@@ -221,8 +257,17 @@ func inspectBackgroundItems(output string, uid uint32) error {
 			}
 			continue
 		}
-		if target && line != "" && strings.Trim(line, "=") != "" {
-			return errors.New("background login registrations present or census syntax unsupported")
+		if !target || line == "" || strings.Trim(line, "=") == "" {
+			continue
+		}
+		if backgroundItem.MatchString(line) {
+			return fmt.Errorf("%w: modern background registration remains; resolve it before rerunning worker-reset", ErrContamination)
+		}
+		switch line {
+		case "ServiceManagement migrated: true", "ServiceManagement migrated: false", "Items:", "Items: 0":
+			continue
+		default:
+			return errors.New("background registration census syntax unsupported")
 		}
 	}
 	if !found {

@@ -17,7 +17,8 @@ var (
 	ErrRequiredTests = errors.New("required tests did not execute")
 )
 
-const maxTestsBytes = 32 << 20
+// MaxTestsBytes bounds both xcresulttool capture and parser input.
+const MaxTestsBytes = 32 << 20
 const maxTestDepth = 128
 
 // xcresultNode is the pinned xcresulttool test-results tests schema 0.4.0.
@@ -132,7 +133,7 @@ func nodeDuration(n xcresultNode) (float64, error) {
 func finiteDuration(v float64) bool { return v >= 0 && !math.IsNaN(v) && !math.IsInf(v, 0) }
 
 func boundedTestJSON(data []byte) error {
-	if len(data) > maxTestsBytes {
+	if len(data) > MaxTestsBytes {
 		return fmt.Errorf("%w: report exceeds 32 MiB", ErrInvalidTests)
 	}
 	depth, quoted, escaped := 0, false, false
@@ -410,7 +411,7 @@ func (p *testParser) visit(n xcresultNode, parent string) error {
 }
 
 func requiredMatch(c TestCase, required string) bool {
-	return !c.Container && (c.ID == required || c.Name == required || c.Suite == required || strings.HasPrefix(c.ID, required+"/") || strings.HasPrefix(c.Suite, required+"/"))
+	return !c.Container && (c.ID == required || c.Suite == required || strings.HasPrefix(c.ID, required+"/") || strings.HasPrefix(c.Suite, required+"/"))
 }
 
 // ParseTests parses only schema 0.4.0's test tree, not command exit status.

@@ -29,7 +29,7 @@ func walkWorkspace(ctx context.Context, directory *os.File, owner uint32, prepar
 			return err
 		}
 		if stat.Dev != base.Dev || (stat.Uid != owner && stat.Uid != uint32(os.Geteuid())) {
-			return errors.New("workspace directory ownership or filesystem changed")
+			return fmt.Errorf("%w: workspace directory ownership or filesystem changed", ErrContamination)
 		}
 		if prepare {
 			if err := dir.Chown(int(owner), int(gid)); err != nil {
@@ -77,7 +77,7 @@ func walkWorkspace(ctx context.Context, directory *os.File, owner uint32, prepar
 					continue // unlinking later removes only the link, never its target
 				}
 				if entry.Dev != base.Dev || (entry.Uid != owner && entry.Uid != uint32(os.Geteuid())) {
-					return errors.New("foreign workspace entry")
+					return fmt.Errorf("%w: foreign workspace entry", ErrContamination)
 				}
 				if kind != unix.S_IFDIR && kind != unix.S_IFREG {
 					return errors.New("special file in workspace")

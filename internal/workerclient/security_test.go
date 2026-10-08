@@ -81,9 +81,9 @@ func TestSourceTransferFailureCannotInventSuccessfulCleanup(t *testing.T) {
 			defer client.Close()
 			deadline := time.Now().Add(time.Minute)
 			lease := protocol.Lease{Job: model.Job{ID: "j_source", WorkerEpoch: client.epoch, State: model.Preparing, Deadline: &deadline}, Token: "lease"}
-			err = client.execute(context.Background(), lease)
-			if (err != nil) != uncertain {
-				t.Fatalf("cleanup continuation decision: %v", err)
+			cleanupOK, err := client.execute(context.Background(), lease)
+			if err != nil || cleanupOK == uncertain {
+				t.Fatalf("cleanup continuation decision: clean=%v err=%v", cleanupOK, err)
 			}
 			result := <-completed
 			if result.State != model.Failed || result.CleanupOK == uncertain {

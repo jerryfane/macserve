@@ -22,9 +22,9 @@ func TestCommandExitStatus(t *testing.T) {
 		{name: "unexpected operand", args: []string{"controller", "start"}, want: 2},
 		{name: "extra help argument", args: []string{"--help", "worker"}, want: 2},
 		{name: "extra command help argument", args: []string{"worker", "--help", "start"}, want: 2},
-		{name: "qualification requires explicit pids", args: []string{"worker-qualify", "--config", "/example/worker.json"}, want: 2},
-		{name: "qualification rejects unsafe pid", args: []string{"worker-qualify", "--config", "/example/worker.json", "--pids", "0"}, want: 2},
-		{name: "qualification help", args: []string{"worker-qualify", "--help"}, want: 0},
+		{name: "reset requires explicit pids", args: []string{"worker-reset", "--config", "/example/worker.json"}, want: 2},
+		{name: "reset rejects unsafe pid", args: []string{"worker-reset", "--config", "/example/worker.json", "--pids", "0"}, want: 2},
+		{name: "reset help", args: []string{"worker-reset", "--help"}, want: 0},
 		{name: "private exec rejects incomplete request", args: []string{"_job-exec"}, want: 1},
 		{name: "private signal rejects incomplete request", args: []string{"_job-signal"}, want: 1},
 	}

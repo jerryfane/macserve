@@ -36,7 +36,7 @@ func simpleReport(nodes string) []byte {
 }
 
 func TestParseTestsPreservesNestedAttemptsAndOutcomes(t *testing.T) {
-	summary, err := ParseTests([]byte(nestedTestReport), []string{"ExampleTests/Flow", "testExpected()", "ExampleTests/Flow/testRepeated()"})
+	summary, err := ParseTests([]byte(nestedTestReport), []string{"ExampleTests/Flow", "ExampleTests/Flow/testExpected()", "ExampleTests/Flow/testRepeated()"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestParseTestsRejectsMalformedAndIncompleteReports(t *testing.T) {
 			}
 		})
 	}
-	oversized := bytes.Repeat([]byte(" "), maxTestsBytes+1)
+	oversized := bytes.Repeat([]byte(" "), MaxTestsBytes+1)
 	if _, err := ParseTests(oversized, nil); !errors.Is(err, ErrInvalidTests) {
 		t.Fatalf("accepted oversized report: %v", err)
 	}

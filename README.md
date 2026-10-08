@@ -65,6 +65,8 @@ needs network credentials for your private network. No VM required.
   tests pass. Diagnostics cannot satisfy required-test selection or count as execution; aggregate record counts
   include them, while elapsed execution time excludes them. Ancestor failure messages are retained without
   counting the same failure repeatedly.
+  Required selectors match canonical test IDs or suite identity/prefix, never a bare display-name fallback.
+  Test JSON capture and parsing share the same 32 MiB input bound.
 - `internal/workerclient`: authenticated Unix peer credentials, heartbeat cancellation, streamed logs and
   durable completion replay. Retrying delivery does not execute the job again. Uncertain cleanup stops dispatch.
 
@@ -76,8 +78,8 @@ expire after seven days or under pool pressure, oldest completion first; active 
 idempotency records remain unchanged. Schema upgrades account for existing log bytes.
 
 Worker defaults are a 30 GiB workspace and 5 GiB artifact budget. Workspace usage is checked
-at stages and every five seconds; it can overshoot between samples. Interrupted or uncertain process ownership
-quarantines execution rather than guessing which PIDs to kill. Only recorded simulator UDIDs are cleaned up.
+at stages and every five seconds; it can overshoot between samples. Unfinished resource cleanup blocks
+execution and retries without inventing process or simulator ownership.
 
 The root worker takes `--config` with a root-owned JSON file under root-controlled, non-writable ancestors.
 Fields are `socket`, `controller_uid`, `job_uid`, `job_gid`, `owner_uid`, `root`, `export_root`,
@@ -89,23 +91,28 @@ Control and export roots are disjoint,
 root-private (`0700`); the separate root-owned workspace parent must allow job traversal (for example `0711`),
 but not replacement of other job directories. Only each individual workspace is transferred to the job UID.
 Configuration rejects aliases between any of the three identities before connecting or executing tools.
-Normal root:admin group-writable `/Applications` ancestors are allowed for pinned toolchains only when the
-job account cannot write through that group. Tool executables remain root-owned and non-group-writable.
+Pinned toolchains and every path ancestor must be root-owned. The root:admin group-write exception
+applies only when the job account is not a member of that group. Tool executables remain non-group-writable.
 This exception does not relax configuration, helper or control-state protection.
 
-An actual GUI login must already exist; `launchctl asuser` does not create one. With the broker stopped and no
-unresolved manifests, an administrator explicitly audits trusted GUI process PIDs and runs
-`macserve worker-qualify --config /absolute/worker.json --pids PID,PID`. The protected baseline records
-`job_uid`, kernel `boot` identity, and `processes` containing `pid` and exact kernel `start` identities.
-Qualification rejects unlisted job-UID processes and never signals processes or implicitly adopts them.
-Missing/reused baseline processes or a changed boot require explicit requalification.
+An actual GUI login must already exist; `launchctl asuser` does not create one. The sole administrator
+initialization/reset command, with the broker stopped, is:
+`macserve worker-reset --config /absolute/worker.json --pids PID,PID`.
+Explicitly audit the current trusted job-UID GUI PIDs before supplying this list: reset terminates other
+job-UID processes, removes job-home LaunchAgents entries, crontab and legacy login items, and rechecks.
+It records `job_uid`, kernel `boot` identity, and each selected `pid` with its exact kernel `start` identity.
+It never adopts unselected processes or signals owner/controller processes. Missing/reused baseline
+processes or changed boot refuse admission without creating quarantine; audit and use the same reset.
 
-Before every native job, admission refuses any job-home LaunchAgents entry, nonempty crontab, legacy login
-item, modern background login registration, or process outside the exact qualified baseline. Inspection
-errors also create durable administrator-only quarantine. The fixed probes have deadlines and output bounds.
-Modern registration inspection requires an explicitly empty job-UID section from `sfltool dumpbtm`;
-missing or unfamiliar output is unsupported, not proof of absence. GUI scripting permissions and any
-long-lived probe-created process must be qualified beforehand; inspection never adopts a new process.
+Before every native job, positive observation of a job-home LaunchAgents entry, nonempty crontab,
+legacy/modern login registration or leftover process outside the audited baseline creates the single
+durable `admission-quarantine.json` marker. Positive residuals after cleanup do likewise. Cancellation,
+deadlines, I/O and inspection-command errors fail admission/job without a marker; the worker logs,
+waits its normal poll interval and retries. Recovery does not run admission on every idle poll.
+The fixed probes have deadlines and output bounds. Modern registration inspection requires an
+explicitly empty job-UID section from `sfltool dumpbtm`; missing/unfamiliar output is a transient refusal,
+not proof of absence. GUI scripting permissions and any long-lived probe-created processes must be
+prepared and explicitly audited beforehand; inspection never adopts a new process.
 
 Recipe/simulator writers are stopped before pinned `xcresulttool` extraction; another UID barrier precedes
 parsing and sealing. Raw logs and sealed exports are outside job-writable storage. Unproven quiescence blocks
@@ -113,13 +120,19 @@ success, sealing and the next lease. All finalization stages share one two-minut
 Confined permission and Darwin user-immutable/append flag repair permits cleanup of read-only output without
 following symlinks or modifying external hardlink targets. System flags and ambiguous hardlinks are not repaired.
 
-For crash, reboot or GUI baseline drift, stop the broker, investigate and remove persistence, explicitly audit
-all current job-UID processes, then run
-`macserve worker-reconcile --config /absolute/worker.json --pids PID,PID`.
-This root-only operation holds the broker lock, repeats the exact census, replaces the audited baseline,
-and cleans only recorded simulators/workspaces. Failures retain quarantine and unresolved records.
-It preserves pending completions and sealed evidence; startup replays a pending completion before recovery,
-but never registers or claims work before recovery succeeds. `worker-qualify` cannot bypass reconciliation.
+Reset holds the exclusive broker lock, updates the audited baseline, retries owned-resource cleanup
+and clears the marker only after full clean verification. It removes recorded simulator UDIDs; for an
+interrupted create, stable job-UID inventory is compared with the protected pre-create inventory and
+only exact added UDIDs are removed. Baseline devices and unrelated workspaces are preserved.
+Unknown legacy ownership is never guessed: a predeployment old record lacking inventory can recover
+only when inspection proves the inventory empty.
+
+Residual modern BTM registrations retain quarantine. The owner must resolve them and rerun the same
+reset; macserve never runs host-wide `sfltool resetbtm` or changes owner registrations. Any failed or
+unknown reset verification retains an existing marker. Pending completions and sealed evidence are
+preserved; startup replays a pending completion before recovery. No registration or lease occurs before
+recovery succeeds. Transient unclean completion fences the old controller epoch; verified recovery
+automatically registers a fresh epoch, without a second administrator clear command.
 
 **Trusted-native limit:** this service is for trusted repositories, not hostile contributors. A clean census
 is a snapshot, not confinement: a delayed same-UID launchd/cron or other persistence mechanism can start after

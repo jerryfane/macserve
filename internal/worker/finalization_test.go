@@ -62,7 +62,7 @@ func TestResidualWritersForbidParsingSealingAndNextLease(t *testing.T) {
 			runner.quiesce = func(context.Context) error {
 				quiet++
 				if quiet >= failAt {
-					return errors.Join(ErrCleanup, errors.New("escaped job-UID writer remains"))
+					return errors.Join(ErrContamination, errors.New("escaped job-UID writer remains"))
 				}
 				return nil
 			}
@@ -85,9 +85,8 @@ func TestResidualWritersForbidParsingSealingAndNextLease(t *testing.T) {
 			if _, err := engine.exports.Lstat(job.ID); !os.IsNotExist(err) {
 				t.Fatalf("sealed export created despite writers: %v", err)
 			}
-			var record manifest
-			if err := readJSON(engine.root, "manifests/"+job.ID+".json", &record); err != nil || !record.ProcessUncertain {
-				t.Fatalf("lost protected quarantine: %+v %v", record, err)
+			if _, err := engine.root.Stat(quarantineRecord); err != nil {
+				t.Fatalf("lost positive contamination quarantine: %v", err)
 			}
 			job.ID = "job-2"
 			if _, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil); !errors.Is(err, ErrRecovery) {

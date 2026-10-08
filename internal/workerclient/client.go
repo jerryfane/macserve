@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -57,8 +58,8 @@ func New(config Config, engine Executor) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	var nonce [32]byte
-	if _, err := rand.Read(nonce[:]); err != nil {
+	epoch, err := newEpoch()
+	if err != nil {
 		root.Close()
 		return nil, err
 	}
@@ -80,10 +81,18 @@ func New(config Config, engine Executor) (*Client, error) {
 			return conn, nil
 		},
 	}
-	return &Client{config: config, engine: engine, root: root, epoch: hex.EncodeToString(nonce[:]), http: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("worker redirects are forbidden") }}}, nil
+	return &Client{config: config, engine: engine, root: root, epoch: epoch, http: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("worker redirects are forbidden") }}}, nil
 }
 
 func (c *Client) Close() error { c.http.CloseIdleConnections(); return c.root.Close() }
+
+func newEpoch() (string, error) {
+	var nonce [32]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(nonce[:]), nil
+}
 
 func (c *Client) request(ctx context.Context, method, path, epoch, lease string, body io.Reader) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, method, "http://controller"+protocol.Prefix+path, body)
@@ -155,7 +164,12 @@ func wait(ctx context.Context, delay time.Duration) error {
 
 // Run never executes a new lease while a previous completion is awaiting durable
 // acknowledgement. Losing heartbeat or evidence delivery cancels local work.
-func (c *Client) Run(ctx context.Context) error {
+func (c *Client) Run(ctx context.Context) (returned error) {
+	defer func() {
+		if ctx.Err() != nil && errors.Is(returned, ctx.Err()) {
+			returned = nil
+		}
+	}()
 	if saved, err := c.loadPending(); err != nil {
 		return err
 	} else if saved != nil {
@@ -169,7 +183,15 @@ func (c *Client) Run(ctx context.Context) error {
 			return err
 		}
 		if err := c.engine.Recover(ctx); err != nil {
-			return fmt.Errorf("worker pre-lease quiescence: %w", err)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			log.Printf("worker recovery refused admission; retrying after poll: %v", err)
+			registered = false
+			if err := wait(ctx, time.Duration(c.config.PollSeconds)*time.Second); err != nil {
+				return err
+			}
+			continue
 		}
 		if !registered {
 			_, err := c.json(ctx, http.MethodPost, "/register", c.epoch, "", protocol.Registration{Epoch: c.epoch, Quiescent: true}, nil)
@@ -200,10 +222,21 @@ func (c *Client) Run(ctx context.Context) error {
 			}
 			registered = false
 		} else if status != http.StatusNoContent {
-			if err := c.execute(ctx, lease); err != nil {
+			cleanupOK, err := c.execute(ctx, lease)
+			if err != nil {
 				return err
 			}
-			continue
+			if !cleanupOK {
+				// Failed cleanup fences the old epoch at the controller. A new
+				// epoch is registered only after Recover verifies quiescence.
+				c.epoch, err = newEpoch()
+				if err != nil {
+					return err
+				}
+				registered = false
+			} else {
+				continue
+			}
 		}
 		if err := wait(ctx, time.Duration(c.config.PollSeconds)*time.Second); err != nil {
 			return err
@@ -229,9 +262,9 @@ func safeID(value string) bool {
 	return true
 }
 
-func (c *Client) execute(parent context.Context, lease protocol.Lease) error {
+func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, error) {
 	if !safeID(lease.Job.ID) || lease.Token == "" || lease.Job.WorkerEpoch != c.epoch || lease.Job.Deadline == nil || lease.Job.State != model.Preparing {
-		return errors.New("invalid controller lease")
+		return false, errors.New("invalid controller lease")
 	}
 	lease.Job.LeaseToken = lease.Token
 	ctx, deadlineCancel := context.WithDeadline(parent, *lease.Job.Deadline)
@@ -296,8 +329,11 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) error {
 			result.Reason = errors.Join(errors.New(result.Reason), cleanupErr).Error()
 		}
 	}
-	if err != nil && result.Reason == "" {
-		result.Reason = err.Error()
+	if err != nil {
+		log.Printf("worker job %s failed: %v", lease.Job.ID, err)
+		if result.Reason == "" {
+			result.Reason = err.Error()
+		}
 	}
 	if result.State == "" {
 		result.State = model.Failed
@@ -319,19 +355,19 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) error {
 	}
 	saved := pending{Epoch: c.epoch, Lease: lease, Result: result}
 	if err := c.savePending(saved); err != nil {
-		return err
+		return false, err
 	}
 	// Finalization gets a separate bounded window after an execution deadline or
 	// shutdown signal, so cancellation does not suppress cleanup evidence.
 	finalCtx, finalCancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer finalCancel()
 	if err := c.deliver(finalCtx, saved); err != nil {
-		return err
+		return false, err
 	}
 	if !result.CleanupOK {
-		return errors.New("worker cleanup failed; refusing another lease")
+		log.Printf("worker job %s cleanup unverified; retrying recovery after poll", lease.Job.ID)
 	}
-	return nil
+	return result.CleanupOK, nil
 }
 
 type remoteSink struct {

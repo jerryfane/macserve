@@ -90,7 +90,7 @@ func (s *processScope) residual(samples []processSample) ([]processSample, error
 	for _, p := range samples {
 		if start, ok := trusted[p.pid]; ok {
 			if p.uid != s.uid || p.start != start || p.zombie {
-				return nil, errors.New("GUI baseline process changed; administrator reconciliation required")
+				return nil, errors.New("GUI baseline process changed; worker-reset required")
 			}
 			delete(trusted, p.pid)
 			continue
@@ -104,7 +104,7 @@ func (s *processScope) residual(samples []processSample) ([]processSample, error
 		residual = append(residual, p)
 	}
 	if len(trusted) != 0 {
-		return nil, errors.New("GUI baseline process disappeared; administrator reconciliation required")
+		return nil, errors.New("GUI baseline process disappeared; worker-reset required")
 	}
 	return residual, nil
 }
@@ -132,6 +132,9 @@ func (s *processScope) quiesce(ctx context.Context) error {
 			}
 			empty = true
 		} else {
+			if !time.Now().Before(termUntil.Add(s.grace)) {
+				return fmt.Errorf("%w: job processes remain after termination", ErrContamination)
+			}
 			empty = false
 			sig := syscall.SIGTERM
 			if !time.Now().Before(termUntil) {

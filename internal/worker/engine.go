@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/jerryfane/macserve/internal/evidence"
+	"github.com/jerryfane/macserve/internal/hostguard"
 	"github.com/jerryfane/macserve/internal/model"
 	"github.com/jerryfane/macserve/internal/profiles"
 )
@@ -43,11 +45,32 @@ type Engine struct {
 }
 
 type manifest struct {
-	JobID            string `json:"job_id"`
-	DeveloperDir     string `json:"developer_dir"`
-	DeviceUDID       string `json:"device_udid,omitempty"`
-	Active           bool   `json:"active"`
-	ProcessUncertain bool   `json:"process_uncertain,omitempty"`
+	JobID               string   `json:"job_id"`
+	DeveloperDir        string   `json:"developer_dir"`
+	DeviceUDID          string   `json:"device_udid,omitempty"`
+	DeviceCreatePending bool     `json:"device_create_pending,omitempty"`
+	DevicesBefore       []string `json:"devices_before"`
+}
+
+// Decode old resource records without retaining their quarantine authority.
+// An unidentified interrupted create requires proving the inventory empty.
+func (m *manifest) UnmarshalJSON(data []byte) error {
+	type resourceLedger manifest
+	var record struct {
+		resourceLedger
+		LegacyActive    bool `json:"active"`
+		LegacyUncertain bool `json:"process_uncertain"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&record); err != nil {
+		return err
+	}
+	*m = manifest(record.resourceLedger)
+	if record.LegacyUncertain && m.DeviceUDID == "" {
+		m.DeviceCreatePending = true
+	}
+	return nil
 }
 
 type exportManifest struct {
@@ -172,10 +195,15 @@ func (e *Engine) saveManifest(m manifest) error {
 }
 
 func durableFile(root *os.Root, name string, data []byte) error {
+	// The broker lock serializes writers. A crashed write is never authoritative.
+	if err := root.Remove(name + ".new"); err != nil && !os.IsNotExist(err) {
+		return err
+	}
 	file, err := root.OpenFile(name+".new", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return err
 	}
+	defer root.Remove(name + ".new")
 	_, writeErr := file.Write(data)
 	syncErr := file.Sync()
 	closeErr := file.Close()
@@ -226,8 +254,7 @@ func (e *Engine) registryNames() ([]string, error) {
 	return dir.Readdirnames(-1)
 }
 
-// Recover acts only on durable worker-owned records. A process whose termination
-// was not observed remains quarantined: recovery never guesses from a reused PID.
+// Recover retries only recorded resources; admission runs when executing work.
 func (e *Engine) Recover(ctx context.Context) error {
 	if !e.mu.TryLock() {
 		return ErrBusy
@@ -236,14 +263,13 @@ func (e *Engine) Recover(ctx context.Context) error {
 	if e.closed {
 		return ErrClosed
 	}
-	if err := e.admission(ctx); err != nil {
+	if err := e.checkQuarantine(); err != nil {
 		return err
 	}
-	quietCtx, cancel := context.WithTimeout(ctx, e.options.CleanupTimeout)
-	defer cancel()
-	if err := e.options.Runner.Quiesce(quietCtx); err != nil {
-		return errors.Join(ErrRecovery, err)
-	}
+	return e.recoverOwned(ctx, false)
+}
+
+func (e *Engine) recoverOwned(ctx context.Context, reset bool) error {
 	names, err := e.registryNames()
 	if err != nil {
 		return err
@@ -262,22 +288,31 @@ func (e *Engine) Recover(ctx context.Context) error {
 			failures = append(failures, ErrRecovery)
 			continue
 		}
-		if m.Active || m.ProcessUncertain {
-			failures = append(failures, fmt.Errorf("%w: unresolved recorded work %s", ErrRecovery, m.JobID))
-			continue
-		}
-		if m.DeviceUDID != "" {
-			if err := e.reconcileDevice(ctx, &m); err != nil {
+		if _, native := e.options.Runner.(*nativeRunner); native {
+			if err := hostguard.ToolchainDirectory(m.DeveloperDir, e.options.JobUID); err != nil {
 				failures = append(failures, err)
 				continue
 			}
 		}
+		quietCtx, cancel := context.WithTimeout(ctx, e.options.CleanupTimeout)
+		quietErr := e.options.Runner.Quiesce(quietCtx)
+		cancel()
+		if quietErr != nil {
+			failures = append(failures, e.quarantine(quietErr))
+			continue
+		}
+		if reset {
+			if err := e.resetDeviceCreation(ctx, &m); err != nil {
+				failures = append(failures, e.quarantine(err))
+				continue
+			}
+		}
 		if err := e.stopWriters(ctx, &m); err != nil {
-			failures = append(failures, err)
+			failures = append(failures, e.quarantine(err))
 			continue
 		}
 		if err := e.cleanup(ctx, &m); err != nil {
-			failures = append(failures, err)
+			failures = append(failures, e.quarantine(err))
 		}
 	}
 	return errors.Join(failures...)

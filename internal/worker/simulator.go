@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
+	"time"
 )
 
 func (x *execution) observe(ctx context.Context) error {
@@ -106,9 +108,14 @@ func (x *execution) simulator(ctx context.Context) error {
 	if !matched {
 		return errors.New("pinned simulator runtime missing")
 	}
-	// Mark uncertainty before creation: a crash between simctl returning and the
-	// durable UDID write must quarantine, never infer ownership from device names.
-	x.manifest.ProcessUncertain = true
+	// Record the inventory before creation. An interrupted create must never
+	// infer ownership from a device name or delete an unrecorded UDID.
+	before, err := x.engine.deviceInventory(ctx, &x.manifest)
+	if err != nil {
+		return err
+	}
+	x.manifest.DevicesBefore = before
+	x.manifest.DeviceCreatePending = true
 	if err := x.engine.saveManifest(x.manifest); err != nil {
 		return err
 	}
@@ -118,7 +125,8 @@ func (x *execution) simulator(ctx context.Context) error {
 		return errors.Join(err, errors.New("simulator creation did not return a valid owned UDID"))
 	}
 	x.manifest.DeviceUDID = id
-	x.manifest.ProcessUncertain = false
+	x.manifest.DeviceCreatePending = false
+	x.manifest.DevicesBefore = nil
 	x.result.Observation.DeviceUDID = id
 	if saveErr := x.engine.saveManifest(x.manifest); saveErr != nil {
 		return errors.Join(err, saveErr)
@@ -141,13 +149,18 @@ func (e *Engine) stopWriters(ctx context.Context, m *manifest) error {
 	ctx, cancel := context.WithTimeout(ctx, e.options.CleanupTimeout)
 	defer cancel()
 	var simulatorErr error
-	if !m.Active && !m.ProcessUncertain && m.DeviceUDID != "" {
+	if err := e.verifyDeviceCreation(ctx, m); err != nil {
+		return err
+	}
+	if m.DeviceUDID != "" {
+		if err := e.reconcileDevice(ctx, m); err != nil {
+			return err
+		}
 		simulatorErr = e.stopDevice(ctx, m)
 	}
 	quietErr := e.options.Runner.Quiesce(ctx)
-	if m.Active || m.ProcessUncertain || quietErr != nil {
-		m.ProcessUncertain = true
-		return errors.Join(ErrRecovery, simulatorErr, quietErr, e.saveManifest(*m))
+	if quietErr != nil {
+		return errors.Join(ErrRecovery, simulatorErr, quietErr)
 	}
 	return simulatorErr
 }
@@ -161,18 +174,10 @@ func (e *Engine) stopDevice(ctx context.Context, m *manifest) error {
 		var failures []error
 		for _, action := range []string{"shutdown", "delete"} {
 			command.Args = []string{"simctl", action, m.DeviceUDID}
-			m.Active = true
-			if err := e.saveManifest(*m); err != nil {
-				return err
-			}
 			output := &boundedBuffer{max: 1 << 20}
 			stderr := &boundedBuffer{max: 1 << 20}
 			result, err := e.options.Runner.Run(ctx, command, output, stderr)
-			m.Active = !result.CleanupOK
-			if saveErr := e.saveManifest(*m); saveErr != nil {
-				return errors.Join(err, saveErr)
-			}
-			if m.Active {
+			if !result.CleanupOK {
 				return errors.Join(err, ErrRecovery)
 			}
 			if err != nil || result.ExitCode != 0 || result.Signal != "" || output.err != nil || stderr.err != nil {
@@ -182,9 +187,11 @@ func (e *Engine) stopDevice(ctx context.Context, m *manifest) error {
 		if len(failures) != 0 {
 			return errors.Join(failures...)
 		}
-		m.DeviceUDID = ""
-		if err := e.saveManifest(*m); err != nil {
+		if err := e.reconcileDevice(ctx, m); err != nil {
 			return err
+		}
+		if m.DeviceUDID != "" {
+			return fmt.Errorf("%w: recorded simulator remains after deletion", ErrContamination)
 		}
 	}
 	return nil
@@ -193,8 +200,8 @@ func (e *Engine) stopDevice(ctx context.Context, m *manifest) error {
 func (e *Engine) cleanup(ctx context.Context, m *manifest) error {
 	ctx, cancel := context.WithTimeout(ctx, e.options.CleanupTimeout)
 	defer cancel()
-	if m.Active || m.ProcessUncertain || m.DeviceUDID != "" {
-		return fmt.Errorf("%w: uncertain process or simulator ownership", ErrRecovery)
+	if m.DeviceCreatePending || m.DeviceUDID != "" {
+		return fmt.Errorf("%w: unresolved simulator ownership", ErrRecovery)
 	}
 	if err := e.workspacePass(ctx, m.JobID, false, true); err != nil {
 		return err
@@ -217,22 +224,14 @@ func (e *Engine) cleanup(ctx context.Context, m *manifest) error {
 // A prior delete may have succeeded just before a crash or registry write
 // failure. Recovery proves that exact UDID absent, without matching device names
 // or touching any unrecorded simulator.
-func (e *Engine) reconcileDevice(ctx context.Context, m *manifest) error {
+func (e *Engine) deviceInventory(ctx context.Context, m *manifest) ([]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, e.options.CleanupTimeout)
 	defer cancel()
 	output := &boundedBuffer{max: 16 << 20}
 	stderr := &boundedBuffer{max: 1 << 20}
-	m.Active = true
-	if err := e.saveManifest(*m); err != nil {
-		return err
-	}
 	result, err := e.options.Runner.Run(ctx, Command{Executable: "/usr/bin/xcrun", Args: []string{"simctl", "list", "devices", "--json"}, Dir: "/", Env: environment(filepath.Join(e.options.WorkspaceRoot, m.JobID), m.DeveloperDir)}, output, stderr)
-	m.Active = !result.CleanupOK
-	if saveErr := e.saveManifest(*m); saveErr != nil {
-		return errors.Join(err, saveErr)
-	}
 	if err != nil || result.ExitCode != 0 || result.Signal != "" || !result.CleanupOK || output.err != nil || stderr.err != nil {
-		return errors.Join(err, output.err, stderr.err, errors.New("cannot verify recorded simulator inventory"))
+		return nil, errors.Join(err, output.err, stderr.err, errors.New("cannot verify recorded simulator inventory"))
 	}
 	var listing struct {
 		Devices map[string][]struct {
@@ -240,18 +239,109 @@ func (e *Engine) reconcileDevice(ctx context.Context, m *manifest) error {
 		} `json:"devices"`
 	}
 	if err := json.Unmarshal(output.Bytes(), &listing); err != nil {
-		return err
+		return nil, err
 	}
 	if listing.Devices == nil {
-		return errors.New("simulator inventory has no devices object")
+		return nil, errors.New("simulator inventory has no devices object")
 	}
+	ids := make([]string, 0)
 	for _, devices := range listing.Devices {
 		for _, device := range devices {
-			if device.UDID == m.DeviceUDID {
-				return nil
+			if !udidPattern.MatchString(device.UDID) {
+				return nil, errors.New("simulator inventory contains an invalid UDID")
 			}
+			ids = append(ids, device.UDID)
+		}
+	}
+	return ids, nil
+}
+
+func (e *Engine) reconcileDevice(ctx context.Context, m *manifest) error {
+	ids, err := e.deviceInventory(ctx, m)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if id == m.DeviceUDID {
+			return nil
 		}
 	}
 	m.DeviceUDID = ""
 	return e.saveManifest(*m)
+}
+
+func (e *Engine) verifyDeviceCreation(ctx context.Context, m *manifest) error {
+	if !m.DeviceCreatePending {
+		return nil
+	}
+	ids, err := e.deviceInventory(ctx, m)
+	if err != nil {
+		return err
+	}
+	if m.DevicesBefore == nil && len(ids) != 0 {
+		return errors.New("interrupted legacy create lacks a protected baseline inventory")
+	}
+	before := make(map[string]bool, len(m.DevicesBefore))
+	for _, id := range m.DevicesBefore {
+		before[id] = true
+	}
+	for _, id := range ids {
+		if !before[id] {
+			return fmt.Errorf("%w: unrecorded simulator after interrupted creation: %s; worker-reset required", ErrContamination, id)
+		}
+	}
+	m.DeviceCreatePending = false
+	m.DevicesBefore = nil
+	return e.saveManifest(*m)
+}
+
+// Reset can remove only exact job-UID inventory additions to the protected
+// pre-create snapshot. Ordinary recovery never adopts these identities.
+func (e *Engine) resetDeviceCreation(ctx context.Context, m *manifest) error {
+	if !m.DeviceCreatePending {
+		return nil
+	}
+	first, err := e.deviceInventory(ctx, m)
+	if err != nil {
+		return err
+	}
+	if m.DevicesBefore == nil && len(first) != 0 {
+		return errors.New("interrupted legacy create lacks a protected baseline inventory")
+	}
+	timer := time.NewTimer(100 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+	}
+	second, err := e.deviceInventory(ctx, m)
+	if err != nil {
+		return err
+	}
+	slices.Sort(first)
+	slices.Sort(second)
+	if !slices.Equal(first, second) {
+		return errors.New("simulator inventory changed during reset inspection")
+	}
+	before := make(map[string]bool, len(m.DevicesBefore))
+	for _, id := range m.DevicesBefore {
+		if !udidPattern.MatchString(id) {
+			return errors.New("invalid protected simulator baseline")
+		}
+		before[id] = true
+	}
+	for _, id := range second {
+		if before[id] {
+			continue
+		}
+		m.DeviceUDID = id
+		if err := e.saveManifest(*m); err != nil {
+			return err
+		}
+		if err := e.stopDevice(ctx, m); err != nil {
+			return err
+		}
+	}
+	return e.verifyDeviceCreation(ctx, m)
 }

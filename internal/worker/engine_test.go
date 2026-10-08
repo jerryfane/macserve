@@ -33,6 +33,7 @@ type fakeRunner struct {
 	runtimeBuild string
 	tests        string
 	quiesce      func(context.Context) error
+	deviceExists bool
 }
 
 func (f *fakeRunner) Quiesce(ctx context.Context) error {
@@ -82,9 +83,21 @@ func (f *fakeRunner) Run(ctx context.Context, c Command, out, stderr io.Writer) 
 		}
 		text = fmt.Sprintf(`{"runtimes":[{"identifier":"com.apple.CoreSimulator.SimRuntime.iOS-18-0","version":"18.0","buildversion":%q,"isAvailable":true,"supportedDeviceTypes":[{"identifier":"com.apple.CoreSimulator.SimDeviceType.iPhone-16"}]}]}`, build)
 	case args == "simctl list devices --json":
-		text = `{"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-18-0":[{"udid":"` + ownedUDID + `","state":"Shutdown"}]}}`
+		f.mu.Lock()
+		text = `{"devices":{"runtime":[]}}`
+		if f.deviceExists {
+			text = `{"devices":{"runtime":[{"udid":"` + ownedUDID + `","state":"Shutdown"}]}}`
+		}
+		f.mu.Unlock()
 	case strings.HasPrefix(args, "simctl create "):
+		f.mu.Lock()
+		f.deviceExists = true
+		f.mu.Unlock()
 		text = ownedUDID + "\n"
+	case args == "simctl delete "+ownedUDID:
+		f.mu.Lock()
+		f.deviceExists = false
+		f.mu.Unlock()
 	case strings.HasPrefix(args, "simctl "):
 	case filepath.Base(c.Executable) == "xcresulttool":
 		text = f.tests
@@ -402,8 +415,11 @@ func TestCancellationDeadlineAndConcurrentRefusal(t *testing.T) {
 			case result := <-done:
 				// The real deadline may expire during preparation on a slow host.
 				// No recipe means no subprocess termination signal is expected.
-				if !deadline || result.State != model.TimedOut || !result.CleanupOK {
+				if !deadline || result.State != model.TimedOut {
 					t.Fatalf("execution ended before recipe entry: %+v", result)
+				}
+				if err := engine.Recover(context.Background()); err != nil {
+					t.Fatalf("deadline cleanup did not recover: %v", err)
 				}
 				return
 			case <-time.After(5 * time.Second):
@@ -433,21 +449,29 @@ func TestCancellationDeadlineAndConcurrentRefusal(t *testing.T) {
 	}
 }
 
-func TestWorkerLockAndUnresolvedRecovery(t *testing.T) {
-	runner := &fakeRunner{}
+func TestWorkerLockAndTransientRecovery(t *testing.T) {
+	failure := errors.New("process census temporarily unavailable")
+	runner := &fakeRunner{quiesce: func(context.Context) error { return failure }}
 	engine := engineFixture(t, runner)
 	if other, err := New(engine.options); err == nil {
 		other.Close()
 		t.Fatal("second worker acquired root")
 	}
-	if err := engine.saveManifest(manifest{JobID: "old-job", DeveloperDir: "/Applications/Xcode.app/Contents/Developer", Active: true, DeviceUDID: ownedUDID}); err != nil {
+	if err := engine.saveManifest(manifest{JobID: "old-job", DeveloperDir: "/Applications/Xcode.app/Contents/Developer"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := engine.Recover(context.Background()); !errors.Is(err, ErrRecovery) {
-		t.Fatalf("recovery accepted live uncertainty: %v", err)
+	if err := engine.Recover(context.Background()); !errors.Is(err, failure) {
+		t.Fatalf("recovery accepted unknown cleanup: %v", err)
 	}
-	if len(runner.commands) != 0 {
-		t.Fatal("recovery touched unproven live work")
+	if _, err := engine.root.Stat(quarantineRecord); !os.IsNotExist(err) {
+		t.Fatalf("transient failure persisted quarantine: %v", err)
+	}
+	runner.quiesce = nil
+	if err := engine.Recover(context.Background()); err != nil {
+		t.Fatalf("transient recovery did not retry: %v", err)
+	}
+	if names, err := engine.registryNames(); err != nil || len(names) != 0 {
+		t.Fatalf("cleanup ledger remains: %v %v", names, err)
 	}
 }
 
@@ -578,13 +602,21 @@ func TestWorkspaceBudgetAndBadArchivePreventSuccess(t *testing.T) {
 	}
 }
 
-func TestLostProcessCleanupIsQuarantined(t *testing.T) {
+func TestVerifiedLiveProcessCleanupIsQuarantined(t *testing.T) {
+	live := false
 	runner := &fakeRunner{hook: func(_ context.Context, c Command, _, _ io.Writer) (bool, ProcessResult, error) {
 		if len(c.Args) > 0 && c.Args[0] == "build" {
+			live = true
 			return true, ProcessResult{ExitCode: -1, CleanupOK: false}, errors.New("process remains live")
 		}
 		return false, ProcessResult{}, nil
 	}}
+	runner.quiesce = func(context.Context) error {
+		if live {
+			return ErrContamination
+		}
+		return nil
+	}
 	engine := engineFixture(t, runner)
 	source, data := sourceFixture(t)
 	result, err := engine.Execute(context.Background(), fixtureJob(t, model.Build), source, bytes.NewReader(data), nil)
@@ -640,5 +672,152 @@ func TestUnregisteredWorkspaceIsNeverDeleted(t *testing.T) {
 	}
 	if err := engine.RemoveExport("missing-job"); err != nil {
 		t.Fatalf("absent export acknowledgement: %v", err)
+	}
+}
+
+func TestInterruptedSimulatorCreationNeverAdoptsInventory(t *testing.T) {
+	for _, dirty := range []bool{false, true} {
+		t.Run(fmt.Sprint(dirty), func(t *testing.T) {
+			runner := &fakeRunner{deviceExists: dirty}
+			engine := engineFixture(t, runner)
+			m := manifest{JobID: "interrupted", DeveloperDir: "/Applications/Xcode.app/Contents/Developer", DeviceCreatePending: true, DevicesBefore: []string{}}
+			if err := engine.saveManifest(m); err != nil {
+				t.Fatal(err)
+			}
+			err := engine.Recover(context.Background())
+			if dirty {
+				if !errors.Is(err, ErrContamination) {
+					t.Fatalf("unrecorded device was accepted: %v", err)
+				}
+				if _, err := engine.root.Stat(quarantineRecord); err != nil {
+					t.Fatalf("positive residual not quarantined: %v", err)
+				}
+			} else if err != nil {
+				t.Fatalf("unchanged inventory did not recover: %v", err)
+			}
+			assertExactCleanup(t, runner, false)
+		})
+	}
+}
+
+func TestRecordedSimulatorInspectionRetriesWithoutQuarantine(t *testing.T) {
+	failure := errors.New("simulator inspection unavailable")
+	runner := &fakeRunner{deviceExists: true}
+	runner.hook = func(_ context.Context, command Command, _, _ io.Writer) (bool, ProcessResult, error) {
+		if strings.Join(command.Args, " ") == "simctl list devices --json" {
+			return true, ProcessResult{CleanupOK: true}, failure
+		}
+		return false, ProcessResult{}, nil
+	}
+	engine := engineFixture(t, runner)
+	m := manifest{JobID: "recorded", DeveloperDir: "/Applications/Xcode.app/Contents/Developer", DeviceUDID: ownedUDID}
+	if err := engine.saveManifest(m); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Recover(context.Background()); !errors.Is(err, failure) {
+		t.Fatalf("unknown device cleanup accepted: %v", err)
+	}
+	if _, err := engine.root.Stat(quarantineRecord); !os.IsNotExist(err) {
+		t.Fatalf("inspection failure persisted quarantine: %v", err)
+	}
+	var retained manifest
+	if err := readJSON(engine.root, "manifests/recorded.json", &retained); err != nil || retained.DeviceUDID != ownedUDID {
+		t.Fatalf("lost exact ownership: %+v %v", retained, err)
+	}
+	runner.hook = nil
+	if err := engine.Recover(context.Background()); err != nil {
+		t.Fatalf("inventory retry failed: %v", err)
+	}
+	assertExactCleanup(t, runner, true)
+}
+
+func TestDurableFileReplacesAbandonedTempWithoutChangingOtherFiles(t *testing.T) {
+	engine := engineFixture(t, &fakeRunner{})
+	outside := filepath.Join(t.TempDir(), "keep")
+	if err := os.WriteFile(outside, []byte("unchanged"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(engine.options.Root, quarantineRecord+".new")); err != nil {
+		t.Fatal(err)
+	}
+	if err := durableFile(engine.root, quarantineRecord, []byte("committed")); err != nil {
+		t.Fatal(err)
+	}
+	data, err := engine.root.ReadFile(quarantineRecord)
+	if err != nil || string(data) != "committed" {
+		t.Fatalf("atomic replacement failed: %q %v", data, err)
+	}
+	data, err = os.ReadFile(outside)
+	if err != nil || string(data) != "unchanged" {
+		t.Fatalf("stale temp followed external link: %q %v", data, err)
+	}
+}
+
+func TestResetInterruptedCreationPreservesBaselineDevices(t *testing.T) {
+	const baseline = "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA"
+	added := true
+	runner := &fakeRunner{}
+	runner.hook = func(_ context.Context, command Command, out, _ io.Writer) (bool, ProcessResult, error) {
+		args := strings.Join(command.Args, " ")
+		switch {
+		case args == "simctl list devices --json":
+			devices := []map[string]string{{"udid": baseline}}
+			if added {
+				devices = append(devices, map[string]string{"udid": ownedUDID})
+			}
+			data, err := json.Marshal(map[string]any{"devices": map[string]any{"runtime": devices}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = out.Write(data)
+			return true, ProcessResult{CleanupOK: true}, err
+		case args == "simctl delete "+ownedUDID:
+			added = false
+			return true, ProcessResult{CleanupOK: true}, nil
+		case strings.Contains(args, baseline):
+			t.Fatalf("reset touched baseline device: %s", args)
+		}
+		return false, ProcessResult{}, nil
+	}
+	engine := engineFixture(t, runner)
+	m := manifest{JobID: "interrupted", DeveloperDir: "/Applications/Xcode.app/Contents/Developer", DeviceCreatePending: true, DevicesBefore: []string{baseline}}
+	if err := engine.saveManifest(m); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Recover(context.Background()); !errors.Is(err, ErrContamination) {
+		t.Fatalf("ordinary recovery adopted extra device: %v", err)
+	}
+	if !added {
+		t.Fatal("ordinary recovery deleted unrecorded device")
+	}
+	if err := engine.recoverOwned(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	if added {
+		t.Fatal("administrator reset left exact added device")
+	}
+	if _, err := engine.root.Stat(quarantineRecord); err != nil {
+		t.Fatalf("resource cleanup cleared marker without full reset recheck: %v", err)
+	}
+}
+
+func TestLegacyUnknownInventoryIsTransientAndNeverDeleted(t *testing.T) {
+	runner := &fakeRunner{deviceExists: true}
+	engine := engineFixture(t, runner)
+	if err := durableFile(engine.root, "manifests/legacy.json", []byte(`{"job_id":"legacy","developer_dir":"/Applications/Xcode.app/Contents/Developer","active":true,"process_uncertain":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	for _, reset := range []bool{false, true} {
+		if err := engine.recoverOwned(context.Background(), reset); err == nil || errors.Is(err, ErrContamination) {
+			t.Fatalf("unknown legacy ownership treated as confirmed: %v", err)
+		}
+	}
+	assertExactCleanup(t, runner, false)
+	if _, err := engine.root.Stat(quarantineRecord); !os.IsNotExist(err) {
+		t.Fatalf("legacy inspection uncertainty persisted quarantine: %v", err)
+	}
+	runner.deviceExists = false
+	if err := engine.recoverOwned(context.Background(), true); err != nil {
+		t.Fatalf("empty legacy inventory failed clean reset: %v", err)
 	}
 }

@@ -176,7 +176,7 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 		returned = errors.Join(returned, x.logs.err)
 		x.logs.mu.Unlock()
 		if x.root != nil {
-			if quietErr == nil && evidenceErr == nil && !x.manifest.Active && !x.manifest.ProcessUncertain {
+			if quietErr == nil && evidenceErr == nil {
 				returned = errors.Join(returned, x.collect(finalCtx))
 			}
 			returned = errors.Join(returned, x.root.Close())
@@ -184,9 +184,18 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 		if x.evidenceRoot != nil {
 			returned = errors.Join(returned, x.evidenceRoot.Close())
 		}
-		cleanupErr := e.cleanup(finalCtx, &x.manifest)
-		result.CleanupOK = quietErr == nil && cleanupErr == nil
-		returned = errors.Join(returned, cleanupErr)
+		quietErr = errors.Join(quietErr, e.options.Runner.Quiesce(finalCtx))
+		if quietErr == nil {
+			if inspector, ok := e.options.Runner.(interface{ Admission(context.Context) error }); ok {
+				quietErr = inspector.Admission(finalCtx)
+			}
+		}
+		var cleanupErr error
+		if quietErr == nil {
+			cleanupErr = e.cleanup(finalCtx, &x.manifest)
+		}
+		returned = e.quarantine(errors.Join(returned, quietErr, cleanupErr))
+		result.CleanupOK = quietErr == nil && cleanupErr == nil && !errors.Is(returned, ErrContamination)
 		switch {
 		case parent.Err() == context.Canceled || job.CancelRequested:
 			result.State = model.Cancelled
@@ -206,8 +215,7 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 	preflightErr := e.options.Runner.Quiesce(preflightCtx)
 	preflightCancel()
 	if preflightErr != nil {
-		x.manifest.ProcessUncertain = true
-		return result, errors.Join(preflightErr, e.saveManifest(x.manifest))
+		return result, e.quarantine(preflightErr)
 	}
 	if job.CancelRequested {
 		return result, context.Canceled
@@ -366,22 +374,15 @@ func (x *execution) invoke(ctx context.Context, command Command, stdout, stderr 
 	if err := ctx.Err(); err != nil {
 		return ProcessResult{}, err
 	}
-	x.manifest.Active = true
-	if err := x.engine.saveManifest(x.manifest); err != nil {
-		return ProcessResult{}, err
-	}
 	result, err := x.engine.options.Runner.Run(ctx, command, stdout, stderr)
 	x.result.PeakMemoryMiB = max(x.result.PeakMemoryMiB, result.PeakMemoryMiB)
-	x.manifest.Active = !result.CleanupOK
-	persistErr := x.engine.saveManifest(x.manifest)
 	if !result.CleanupOK {
-		x.manifest.ProcessUncertain = true
 		err = errors.Join(err, errors.New("process cleanup was not confirmed"))
 	}
 	if result.ExitCode != 0 || result.Signal != "" {
 		err = errors.Join(err, fmt.Errorf("command failed: exit %d signal %s", result.ExitCode, result.Signal))
 	}
-	return result, errors.Join(err, persistErr)
+	return result, x.engine.quarantine(err)
 }
 
 func (x *execution) command(executable string, args []string) Command {
@@ -389,7 +390,7 @@ func (x *execution) command(executable string, args []string) Command {
 }
 
 func (x *execution) capture(ctx context.Context, executable string, args ...string) ([]byte, error) {
-	output := &boundedBuffer{max: 16 << 20}
+	output := &boundedBuffer{max: evidence.MaxTestsBytes}
 	_, err := x.invoke(ctx, x.command(executable, args), io.MultiWriter(output, x.stdout), x.stderr)
 	return output.Bytes(), errors.Join(err, output.err)
 }
@@ -615,12 +616,8 @@ func (x *execution) writeEvidence(name string, data []byte) error {
 }
 
 func (x *execution) collect(ctx context.Context) error {
-	if x.manifest.Active || x.manifest.ProcessUncertain {
-		return errors.New("cannot seal evidence while owned work remains uncertain")
-	}
 	if err := x.engine.options.Runner.Quiesce(ctx); err != nil {
-		x.manifest.ProcessUncertain = true
-		return errors.Join(err, x.engine.saveManifest(x.manifest))
+		return x.engine.quarantine(err)
 	}
 	if err := x.engine.workspacePass(ctx, x.job.ID, false, false); err != nil {
 		return err

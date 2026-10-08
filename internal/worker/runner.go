@@ -343,6 +343,11 @@ func (r *nativeRunner) cleanupGroup(group, uid int, reap func(), reaped, waitFai
 		signal(syscall.SIGKILL)
 		clean = wait(r.killGrace)
 	}
+	if !clean && failures == nil {
+		if live, inspected := inspect(); inspected && live {
+			return errors.Join(ErrCleanup, ErrContamination)
+		}
+	}
 	if !clean || failures != nil {
 		return errors.Join(ErrCleanup, failures)
 	}
@@ -368,11 +373,11 @@ func (r *nativeRunner) cleanupProtectedGroup(group, uid int, reap func(), reaped
 			}
 			live = true
 			if p.uid != uid {
-				return errors.Join(ErrCleanup, errors.New("job group contains a foreign UID"))
+				return errors.Join(ErrCleanup, ErrContamination, errors.New("job group contains a foreign UID"))
 			}
 			for _, trusted := range r.scope.baseline.Processes {
 				if trusted.PID == p.pid {
-					return errors.Join(ErrCleanup, errors.New("refusing to signal a GUI baseline PID"))
+					return errors.Join(ErrCleanup, ErrContamination, errors.New("refusing to signal a GUI baseline PID"))
 				}
 			}
 			sig := syscall.SIGTERM
@@ -388,6 +393,17 @@ func (r *nativeRunner) cleanupProtectedGroup(group, uid int, reap func(), reaped
 		}
 		select {
 		case <-ctx.Done():
+			samples, err := r.snapshot(r.scope.sample)
+			if err != nil {
+				return errors.Join(ErrCleanup, err)
+			}
+			live, err := ownedGroup(samples, group, uid)
+			if err != nil {
+				return errors.Join(ErrCleanup, ErrContamination, err)
+			}
+			if live {
+				return errors.Join(ErrCleanup, ErrContamination)
+			}
 			return errors.Join(ErrCleanup, ctx.Err())
 		case <-time.After(r.pollInterval):
 		}

@@ -33,10 +33,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		return 0
-	case "worker-qualify":
-		return runWorkerQualify(args[1:], stdout, stderr)
-	case "worker-reconcile":
-		return runWorkerBaseline(args[1:], stdout, stderr, true)
+	case "worker-reset":
+		return runWorkerReset(args[1:], stdout, stderr)
 	case "-h", "--help":
 		if len(args) != 1 {
 			fmt.Fprintln(stderr, "macserve: help does not accept arguments")
@@ -70,8 +68,7 @@ func usage(w io.Writer) {
 Commands:
   controller  Queue, API and evidence service (not implemented yet)
   worker      Protected root execution broker via the private controller socket
-  worker-qualify  Record explicitly audited dedicated-UID GUI baseline PIDs
-  worker-reconcile  Reconcile recorded work after explicit administrator audit
+  worker-reset  Reset job-user persistence and record audited GUI baseline PIDs
 
 Use macserve <command> --help for command help.
 `)

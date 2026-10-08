@@ -27,9 +27,15 @@ type fakeExecutor struct {
 	artifacts  map[string]string
 	removed    []string
 	recoverErr error
+	recover    func(context.Context) error
 }
 
-func (e *fakeExecutor) Recover(context.Context) error { return e.recoverErr }
+func (e *fakeExecutor) Recover(ctx context.Context) error {
+	if e.recover != nil {
+		return e.recover(ctx)
+	}
+	return e.recoverErr
+}
 func (e *fakeExecutor) Execute(ctx context.Context, job model.Job, source worker.Source, r io.Reader, sink worker.Sink) (worker.Result, error) {
 	return e.execute(ctx, job, source, r, sink)
 }
@@ -137,7 +143,7 @@ func TestHeartbeatCancellationCompletesWithoutAnotherExecution(t *testing.T) {
 	defer client.Close()
 	deadline := time.Now().Add(10 * time.Second)
 	lease := protocol.Lease{Job: model.Job{ID: "j_test", WorkerEpoch: client.epoch, State: model.Preparing, Deadline: &deadline}, Token: "lease"}
-	if err := client.execute(context.Background(), lease); err != nil {
+	if _, err := client.execute(context.Background(), lease); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -205,7 +211,7 @@ func TestCompletionRetryDoesNotRerunJob(t *testing.T) {
 	}
 	deadline := time.Now().Add(time.Minute)
 	lease := protocol.Lease{Job: model.Job{ID: "j_retry", WorkerEpoch: client.epoch, State: model.Preparing, Deadline: &deadline}, Token: "lease"}
-	if err := client.execute(context.Background(), lease); err == nil {
+	if _, err := client.execute(context.Background(), lease); err == nil {
 		t.Fatal("failed completion acknowledged")
 	}
 	client.Close()
@@ -237,19 +243,31 @@ func TestCompletionRetryDoesNotRerunJob(t *testing.T) {
 	}
 }
 
-func TestRecoveryFailurePreventsRegistration(t *testing.T) {
+func TestRecoveryFailureRetriesWithoutRegistrationUntilCancellation(t *testing.T) {
 	cfg, _ := unixController(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("registered before recovery succeeded")
 		w.WriteHeader(204)
 	}))
-	failure := errors.New("live old process")
-	client, err := New(cfg, &fakeExecutor{recoverErr: failure})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	attempts := 0
+	client, err := New(cfg, &fakeExecutor{recover: func(context.Context) error {
+		attempts++
+		if attempts == 2 {
+			cancel()
+			return context.Canceled
+		}
+		return errors.New("temporary census command failure")
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer client.Close()
-	if err := client.Run(context.Background()); !errors.Is(err, failure) {
-		t.Fatalf("recovery error lost: %v", err)
+	if err := client.Run(ctx); err != nil {
+		t.Fatalf("cancellation did not exit cleanly: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("recovery did not retry: attempts=%d", attempts)
 	}
 }
 

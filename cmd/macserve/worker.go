@@ -85,15 +85,8 @@ func executionOptions(config workerclient.Config) worker.Options {
 	return worker.Options{Root: config.Root, ExportRoot: config.ExportRoot, WorkspaceRoot: config.WorkspaceRoot, JobUID: config.JobUID, JobGID: config.JobGID, OwnerUID: config.OwnerUID, ControllerUID: config.ControllerUID, HelperPath: config.HelperPath, BaselinePath: config.BaselinePath}
 }
 
-func runWorkerQualify(args []string, stdout, stderr io.Writer) int {
-	return runWorkerBaseline(args, stdout, stderr, false)
-}
-
-func runWorkerBaseline(args []string, stdout, stderr io.Writer, reconcile bool) int {
-	name := "worker-qualify"
-	if reconcile {
-		name = "worker-reconcile"
-	}
+func runWorkerReset(args []string, stdout, stderr io.Writer) int {
+	const name = "worker-reset"
 	flags := flag.NewFlagSet(name, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", "", "root-owned broker configuration")
@@ -132,18 +125,10 @@ func runWorkerBaseline(args []string, stdout, stderr io.Writer, reconcile bool) 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	action := worker.QualifyGUIBaseline
-	if reconcile {
-		action = worker.ReconcileGUIBaseline
-	}
-	if err := action(ctx, executionOptions(config), pids); err != nil {
+	if err := worker.ResetGUIBaseline(ctx, executionOptions(config), pids); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	if reconcile {
-		fmt.Fprintln(stdout, "Audited GUI baseline reconciled; recorded work cleaned, pending evidence retained. Native delayed persistence remains a trust limit.")
-	} else {
-		fmt.Fprintln(stdout, "Explicitly audited GUI baseline recorded; no processes were signalled.")
-	}
+	fmt.Fprintln(stdout, "Audited GUI baseline reset; scoped cleanup verified, quarantine cleared, pending evidence retained. Native delayed persistence remains a trust limit.")
 	return 0
 }
