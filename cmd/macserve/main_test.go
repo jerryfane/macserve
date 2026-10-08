@@ -14,7 +14,7 @@ func TestCommandExitStatus(t *testing.T) {
 		{name: "missing command", want: 2},
 		{name: "help", args: []string{"--help"}, want: 0},
 		{name: "controller unavailable", args: []string{"controller"}, want: 1},
-		{name: "worker unavailable", args: []string{"worker"}, want: 1},
+		{name: "worker missing config", args: []string{"worker"}, want: 2},
 		{name: "controller help", args: []string{"controller", "--help"}, want: 0},
 		{name: "worker short help", args: []string{"worker", "-h"}, want: 0},
 		{name: "unsupported command", args: []string{"archive"}, want: 2},

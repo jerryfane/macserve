@@ -24,7 +24,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		usage(stdout)
 		return 0
-	case "controller", "worker":
+	case "worker":
+		return runWorker(args[1:], stdout, stderr)
+	case "controller":
 		if len(args) == 2 && (args[1] == "-h" || args[1] == "--help") {
 			fmt.Fprintf(stdout, "Usage: macserve %s\n\nThis command is not implemented yet; no service is started.\n", args[0])
 			return 0
@@ -47,7 +49,7 @@ func usage(w io.Writer) {
 
 Commands:
   controller  Queue, API and evidence service (not implemented yet)
-  worker      Native build and test execution (not implemented yet)
+  worker      Native build and test execution via the private controller socket
 
 Use macserve <command> --help for command help.
 `)

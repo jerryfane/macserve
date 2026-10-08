@@ -7,9 +7,9 @@ signed evidence receipt. Jobs run natively on your Mac under a dedicated non-adm
 priority, and you can pause them whenever you need the machine. GitHub integration is pull-based, so your CI never
 needs network credentials for your private network. No VM required.
 
-> Status: early development. Durable queue and profile-admission packages are implemented, but the `controller`
-> and `worker` commands are not yet connected to services and exit nonzero. No listener, job execution,
-> account setup or system changes occur when invoking them. The full phase-1 service below is still planned.
+> Status: early development. Durable admission, queue, native execution, evidence collection and the worker
+> Unix-socket client are implemented. The controller service and installation assets are not yet available.
+> Starting the worker requires an explicitly configured, separate non-admin macOS GUI account.
 
 ## Planned phase-1 capabilities
 
@@ -51,18 +51,33 @@ needs network credentials for your private network. No VM required.
   cancellation and retention. Terminal logs and results cannot be amended by a late worker.
   Interrupted execution or uncertain cleanup quarantines dispatch. Clearing quarantine requires a caller-proven
   quiescent worker with a new authenticated epoch; subsequent claims must use that persisted epoch.
+- `internal/worker`: exclusive execution, verified full-tree source extraction, pinned toolchain/runtime checks,
+  per-job environments and owned simulators, background scheduling, process-group cancellation and cleanup.
+  Whole-worker-UID RSS is monitored; this is not a kernel memory cap and excludes other-UID system daemons.
+- `internal/evidence`: bounded xcresult test parsing, required-test execution checks, JUnit, deterministic
+  artifact archives and content-addressed exports. Missing or incomplete test evidence cannot report success.
+- `internal/workerclient`: authenticated Unix peer credentials, heartbeat cancellation, streamed logs and
+  durable completion replay. Retrying delivery does not execute the job again. Uncertain cleanup stops dispatch.
 
 The store requires a dedicated private directory (mode `0700`) and private database files. Default limits are
 50 outstanding jobs, 10 per principal, 24-hour queue expiry, 90-day terminal metadata retention, 64 MiB per
 result envelope, 256 MiB of raw logs per job and 1 GiB of retained raw logs across jobs. Terminal log bytes
 expire after seven days or under pool pressure, oldest completion first; active logs are never evicted.
 `Logs` returns `ErrLogExpired` after eviction, while result envelopes, sequence/completeness metadata and
-idempotency records remain unchanged. Schema upgrades account for existing log bytes. Artifact-byte cleanup
-and runtime permission checks belong to the upcoming execution layer.
+idempotency records remain unchanged. Schema upgrades account for existing log bytes.
+
+Worker defaults are a 30 GiB workspace and 5 GiB artifact budget. Workspace usage is checked
+at stages and every five seconds; it can overshoot between samples. Interrupted or uncertain process ownership
+quarantines execution rather than guessing which PIDs to kill. Only recorded simulator UDIDs are cleaned up.
+
+The worker takes `--config` with a root-owned JSON file under root-controlled, non-writable ancestors.
+Fields are `socket`, `controller_uid`, `root`, `export_root`, and optional `poll_seconds`,
+`heartbeat_seconds`, `request_timeout_seconds`. Paths are absolute. Worker and controller UIDs must differ.
+The worker refuses root/admin execution and requires an Aqua login session. It never receives GitHub credentials.
 
 ## Development
 
-Use the Go version declared in `go.mod`. The command-line package currently uses only the standard library.
+Use the Go version declared in `go.mod`. SQLite uses a pure-Go driver; no external database is required.
 
 ```sh
 go vet ./...
@@ -70,13 +85,13 @@ go test ./...
 go run ./cmd/macserve --help
 ```
 
-`macserve --help` and `macserve <command> --help` exit 0. Invoking `controller` or `worker` without help
-exits 1 until those services are implemented; invalid or missing arguments exit 2. Help goes to stdout,
-errors to stderr. These commands do not start services or require administrator privileges.
+`macserve --help` and `macserve <command> --help` exit 0. `worker` requires `--config`; invalid or missing
+arguments exit 2. Runtime safety or connection failures exit 1. Help goes to stdout and errors to stderr.
+The controller command remains unavailable until its service implementation lands.
 
-CI runs vet, tests and a CLI build on GitHub-hosted `ubuntu-latest` and `macos-latest`. Future macOS-only
-implementation files must use Darwin build constraints so portable packages remain testable on Linux.
-No simulator or app build is part of this initial CI workflow.
+CI runs vet, tests and a CLI build on GitHub-hosted `ubuntu-latest` and `macos-latest`. Apple tool execution
+is faked in tests: no simulator boot or app build is performed. Native process tests use harmless Go helper
+subprocesses. Linux exercises portable behavior but is not a supported Apple worker host.
 
 ## License
 
