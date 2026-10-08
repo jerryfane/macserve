@@ -7,9 +7,9 @@ signed evidence receipt. Jobs run natively on your Mac under a dedicated non-adm
 priority, and you can pause them whenever you need the machine. GitHub integration is pull-based, so your CI never
 needs network credentials for your private network. No VM required.
 
-> Status: early development. Only command-line wiring is implemented: `controller` and `worker` report that they
-> are unavailable and exit nonzero. No listener, queue, job execution, account setup or system changes occur.
-> The phase-1 capabilities and architecture below describe the planned service, not currently available behavior.
+> Status: early development. Durable queue and profile-admission packages are implemented, but the `controller`
+> and `worker` commands are not yet connected to services and exit nonzero. No listener, job execution,
+> account setup or system changes occur when invoking them. The full phase-1 service below is still planned.
 
 ## Planned phase-1 capabilities
 
@@ -38,6 +38,22 @@ needs network credentials for your private network. No VM required.
 - `controller` (runs as a dedicated non-login service user): queue (SQLite), GitHub poller, API, receipt signer.
 - `worker` (runs as a dedicated non-admin GUI user via a LaunchAgent): executes one job, reports over a Unix socket.
 - Build user has no access to your home directory, your keychain, or service credentials.
+
+## Implemented packages
+
+- `internal/model`: job states, exact toolchain pins and controller-owned argv recipes.
+- `internal/profiles`: strict JSON loading (`{"profiles": [...]}`), immutable recipe snapshots, exact-SHA
+  admission, pinned Xcode/runtime matching, timeout limits and SHA-256 recipe digests. Relative paths cannot
+  contain `..`; command placeholders are limited to `CHECKOUT`, `WORKSPACE`, `DERIVED_DATA`, `RESULT_BUNDLE`,
+  `SIMULATOR_ID`, `JOB_ID` and `DEVELOPER_DIR`, each written `${NAME}`. Test profiles require explicit test scope.
+- `internal/store`: SQLite WAL queue with principal-scoped idempotency, FIFO admission, database-enforced single
+  active execution, lease-checked transitions, bounded logs, persistent pause/drain, cancellation and retention.
+  Interrupted execution or uncertain cleanup quarantines dispatch. Clearing quarantine requires a caller-proven
+  quiescent worker with a new authenticated epoch; it is not an automatic retry.
+
+The store requires a dedicated private directory (mode `0700`) and private database files. Default limits are
+50 outstanding jobs, 10 per principal, 24-hour queue expiry, 90-day terminal metadata retention and 256 MiB of
+raw logs per job. Artifact-byte cleanup and runtime permission checks belong to the upcoming execution layer.
 
 ## Development
 
