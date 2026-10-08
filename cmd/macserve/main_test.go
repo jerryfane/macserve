@@ -22,6 +22,11 @@ func TestCommandExitStatus(t *testing.T) {
 		{name: "unexpected operand", args: []string{"controller", "start"}, want: 2},
 		{name: "extra help argument", args: []string{"--help", "worker"}, want: 2},
 		{name: "extra command help argument", args: []string{"worker", "--help", "start"}, want: 2},
+		{name: "qualification requires explicit pids", args: []string{"worker-qualify", "--config", "/example/worker.json"}, want: 2},
+		{name: "qualification rejects unsafe pid", args: []string{"worker-qualify", "--config", "/example/worker.json", "--pids", "0"}, want: 2},
+		{name: "qualification help", args: []string{"worker-qualify", "--help"}, want: 0},
+		{name: "private exec rejects incomplete request", args: []string{"_job-exec"}, want: 1},
+		{name: "private signal rejects incomplete request", args: []string{"_job-signal"}, want: 1},
 	}
 
 	for _, tt := range tests {

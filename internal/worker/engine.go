@@ -33,12 +33,13 @@ var (
 )
 
 type Engine struct {
-	mu      sync.Mutex
-	options Options
-	root    *os.Root
-	exports *os.Root
-	lock    *os.File
-	closed  bool
+	mu         sync.Mutex
+	options    Options
+	root       *os.Root
+	exports    *os.Root
+	workspaces *os.Root
+	lock       *os.File
+	closed     bool
 }
 
 type manifest struct {
@@ -54,8 +55,8 @@ type exportManifest struct {
 }
 
 func New(options Options) (*Engine, error) {
-	if options.Root == "" || options.ExportRoot == "" {
-		return nil, errors.New("worker and export roots are required")
+	if options.Root == "" || options.ExportRoot == "" || options.WorkspaceRoot == "" {
+		return nil, errors.New("control, export and workspace roots are required")
 	}
 	if options.CleanupTimeout < 0 || options.CleanupTimeout > 2*time.Minute || options.MaxWorkspaceBytes < 0 || options.MaxArtifactBytes < 0 {
 		return nil, errors.New("invalid worker limits")
@@ -72,11 +73,14 @@ func New(options Options) (*Engine, error) {
 	if options.Now == nil {
 		options.Now = time.Now
 	}
-	if options.Runner == nil {
-		options.Runner = NewNativeRunner()
-	}
 	var err error
-	for _, target := range []*string{&options.Root, &options.ExportRoot} {
+	if options.Runner == nil {
+		options.Runner, err = NewNativeRunner(options)
+		if err != nil {
+			return nil, err
+		}
+	}
+	for _, target := range []*string{&options.Root, &options.ExportRoot, &options.WorkspaceRoot} {
 		*target, err = filepath.Abs(*target)
 		if err != nil {
 			return nil, err
@@ -89,9 +93,24 @@ func New(options Options) (*Engine, error) {
 			return nil, err
 		}
 	}
-	jobsPath := filepath.Join(options.Root, "jobs")
-	if options.ExportRoot == options.Root || within(jobsPath, options.ExportRoot) || within(filepath.Join(options.Root, "manifests"), options.ExportRoot) || within(options.ExportRoot, options.Root) {
-		return nil, errors.New("worker and export roots overlap unsafely")
+	roots := []string{options.Root, options.ExportRoot, options.WorkspaceRoot}
+	for i, a := range roots {
+		for _, b := range roots[i+1:] {
+			if within(a, b) || within(b, a) {
+				return nil, errors.New("control, export and workspace roots must not overlap")
+			}
+		}
+	}
+	if _, native := options.Runner.(*nativeRunner); native {
+		for _, target := range []string{options.Root, options.ExportRoot} {
+			info, err := os.Stat(target)
+			if err != nil {
+				return nil, err
+			}
+			if info.Mode().Perm()&0077 != 0 {
+				return nil, errors.New("control and export roots must be root-private")
+			}
+		}
 	}
 	root, err := os.OpenRoot(options.Root)
 	if err != nil {
@@ -108,20 +127,23 @@ func New(options Options) (*Engine, error) {
 		return nil, fmt.Errorf("exclusive worker lock: %w", err)
 	}
 	fail := func(err error) (*Engine, error) { lock.Close(); root.Close(); return nil, err }
-	for _, name := range []string{"jobs", "manifests"} {
-		if err := root.MkdirAll(name, 0700); err != nil {
-			return fail(err)
-		}
-		info, err := root.Lstat(name)
-		if err != nil || !info.IsDir() {
-			return fail(errors.New("worker directory is not a real directory"))
-		}
+	if err := root.MkdirAll("manifests", 0700); err != nil {
+		return fail(err)
+	}
+	info, err := root.Lstat("manifests")
+	if err != nil || !info.IsDir() {
+		return fail(errors.New("worker manifest directory is not a real directory"))
 	}
 	exports, err := os.OpenRoot(options.ExportRoot)
 	if err != nil {
 		return fail(err)
 	}
-	return &Engine{options: options, root: root, exports: exports, lock: lock}, nil
+	workspaces, err := os.OpenRoot(options.WorkspaceRoot)
+	if err != nil {
+		exports.Close()
+		return fail(err)
+	}
+	return &Engine{options: options, root: root, exports: exports, workspaces: workspaces, lock: lock}, nil
 }
 
 func within(parent, child string) bool {
@@ -138,7 +160,7 @@ func (e *Engine) Close() error {
 		return nil
 	}
 	e.closed = true
-	return errors.Join(e.exports.Close(), e.root.Close(), e.lock.Close())
+	return errors.Join(e.workspaces.Close(), e.exports.Close(), e.root.Close(), e.lock.Close())
 }
 
 func (e *Engine) saveManifest(m manifest) error {
@@ -214,6 +236,11 @@ func (e *Engine) Recover(ctx context.Context) error {
 	if e.closed {
 		return ErrClosed
 	}
+	quietCtx, cancel := context.WithTimeout(ctx, e.options.CleanupTimeout)
+	defer cancel()
+	if err := e.options.Runner.Quiesce(quietCtx); err != nil {
+		return errors.Join(ErrRecovery, err)
+	}
 	names, err := e.registryNames()
 	if err != nil {
 		return err
@@ -241,6 +268,10 @@ func (e *Engine) Recover(ctx context.Context) error {
 				failures = append(failures, err)
 				continue
 			}
+		}
+		if err := e.stopWriters(ctx, &m); err != nil {
+			failures = append(failures, err)
+			continue
 		}
 		if err := e.cleanup(ctx, &m); err != nil {
 			failures = append(failures, err)

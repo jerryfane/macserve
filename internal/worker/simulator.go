@@ -137,17 +137,27 @@ func environment(workspace, developer string) []string {
 	return []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "DEVELOPER_DIR=" + developer, "HOME=" + filepath.Join(workspace, "home"), "TMPDIR=" + filepath.Join(workspace, "tmp"), "TMP=" + filepath.Join(workspace, "tmp"), "TEMP=" + filepath.Join(workspace, "tmp"), "CFFIXED_USER_HOME=" + filepath.Join(workspace, "home"), "XDG_CACHE_HOME=" + filepath.Join(workspace, "caches"), "CLANG_MODULE_CACHE_PATH=" + filepath.Join(workspace, "caches", "clang"), "SWIFT_MODULECACHE_PATH=" + filepath.Join(workspace, "caches", "swift"), "LANG=en_US.UTF-8", "LC_ALL=en_US.UTF-8"}
 }
 
-func (e *Engine) cleanup(ctx context.Context, m *manifest) error {
+func (e *Engine) stopWriters(ctx context.Context, m *manifest) error {
 	ctx, cancel := context.WithTimeout(ctx, e.options.CleanupTimeout)
 	defer cancel()
-	if m.Active || m.ProcessUncertain {
-		return fmt.Errorf("%w: uncertain process or simulator ownership", ErrRecovery)
+	var simulatorErr error
+	if !m.Active && !m.ProcessUncertain && m.DeviceUDID != "" {
+		simulatorErr = e.stopDevice(ctx, m)
 	}
+	quietErr := e.options.Runner.Quiesce(ctx)
+	if m.Active || m.ProcessUncertain || quietErr != nil {
+		m.ProcessUncertain = true
+		return errors.Join(ErrRecovery, simulatorErr, quietErr, e.saveManifest(*m))
+	}
+	return simulatorErr
+}
+
+func (e *Engine) stopDevice(ctx context.Context, m *manifest) error {
 	if m.DeviceUDID != "" {
 		if !udidPattern.MatchString(m.DeviceUDID) {
 			return ErrRecovery
 		}
-		command := Command{Executable: "/usr/bin/xcrun", Dir: e.options.Root, Env: environment(filepath.Join(e.options.Root, "jobs", m.JobID), m.DeveloperDir)}
+		command := Command{Executable: "/usr/bin/xcrun", Dir: "/", Env: environment(filepath.Join(e.options.WorkspaceRoot, m.JobID), m.DeveloperDir)}
 		var failures []error
 		for _, action := range []string{"shutdown", "delete"} {
 			command.Args = []string{"simctl", action, m.DeviceUDID}
@@ -177,10 +187,25 @@ func (e *Engine) cleanup(ctx context.Context, m *manifest) error {
 			return err
 		}
 	}
+	return nil
+}
+
+func (e *Engine) cleanup(ctx context.Context, m *manifest) error {
+	ctx, cancel := context.WithTimeout(ctx, e.options.CleanupTimeout)
+	defer cancel()
+	if m.Active || m.ProcessUncertain || m.DeviceUDID != "" {
+		return fmt.Errorf("%w: uncertain process or simulator ownership", ErrRecovery)
+	}
+	if err := e.workspacePass(ctx, m.JobID, false, true); err != nil {
+		return err
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := e.root.RemoveAll("jobs/" + m.JobID); err != nil {
+	if err := e.workspaces.RemoveAll(m.JobID); err != nil {
+		return err
+	}
+	if err := e.root.RemoveAll("evidence/" + m.JobID); err != nil {
 		return err
 	}
 	if err := e.root.Remove("manifests/" + m.JobID + ".json"); err != nil && !os.IsNotExist(err) {
@@ -201,7 +226,7 @@ func (e *Engine) reconcileDevice(ctx context.Context, m *manifest) error {
 	if err := e.saveManifest(*m); err != nil {
 		return err
 	}
-	result, err := e.options.Runner.Run(ctx, Command{Executable: "/usr/bin/xcrun", Args: []string{"simctl", "list", "devices", "--json"}, Dir: e.options.Root, Env: environment(filepath.Join(e.options.Root, "jobs", m.JobID), m.DeveloperDir)}, output, stderr)
+	result, err := e.options.Runner.Run(ctx, Command{Executable: "/usr/bin/xcrun", Args: []string{"simctl", "list", "devices", "--json"}, Dir: "/", Env: environment(filepath.Join(e.options.WorkspaceRoot, m.JobID), m.DeveloperDir)}, output, stderr)
 	m.Active = !result.CleanupOK
 	if saveErr := e.saveManifest(*m); saveErr != nil {
 		return errors.Join(err, saveErr)

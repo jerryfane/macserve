@@ -18,7 +18,9 @@ import (
 	"time"
 
 	"github.com/jerryfane/macserve/internal/evidence"
+	"github.com/jerryfane/macserve/internal/hostguard"
 	"github.com/jerryfane/macserve/internal/model"
+	"golang.org/x/sys/unix"
 )
 
 const maxLogBytes = 256 << 20
@@ -31,6 +33,8 @@ type execution struct {
 	workspace      string
 	root           *os.Root
 	sink           Sink
+	evidenceRoot   *os.Root
+	ranRecipe      bool
 	stdout, stderr *logWriter
 	cancel         context.CancelFunc
 	logs           *logState
@@ -110,6 +114,11 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 	if err != nil {
 		return result, err
 	}
+	if _, native := e.options.Runner.(*nativeRunner); native {
+		if err := hostguard.RootDirectory(job.Profile.DeveloperDir); err != nil {
+			return result, err
+		}
+	}
 	names, err := e.registryNames()
 	if err != nil {
 		return result, err
@@ -120,7 +129,7 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 	if _, err := e.exports.Lstat(job.ID); !os.IsNotExist(err) {
 		return result, errors.New("job export already exists or is inaccessible")
 	}
-	if _, err := e.root.Lstat("jobs/" + job.ID); !os.IsNotExist(err) {
+	if _, err := e.workspaces.Lstat(job.ID); !os.IsNotExist(err) {
 		return result, errors.New("job workspace already exists or is inaccessible")
 	}
 	deadline := time.Now().Add(time.Duration(job.Request.TimeoutSeconds) * time.Second)
@@ -131,13 +140,32 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 	defer deadlineCancel()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	x := &execution{engine: e, job: job, result: &result, workspace: filepath.Join(e.options.Root, "jobs", job.ID), sink: sink, cancel: cancel, logs: &logState{}, manifest: manifest{JobID: job.ID, DeveloperDir: job.Profile.DeveloperDir}}
+	x := &execution{engine: e, job: job, result: &result, workspace: filepath.Join(e.options.WorkspaceRoot, job.ID), sink: sink, cancel: cancel, logs: &logState{}, manifest: manifest{JobID: job.ID, DeveloperDir: job.Profile.DeveloperDir}}
 	if err := e.saveManifest(x.manifest); err != nil {
 		return result, err
 	}
 	defer func() {
 		if sink != nil {
 			returned = errors.Join(returned, sink.Stage(model.Finalizing))
+		}
+		// Stop simulators and all escaped/orphan job-UID writers before running
+		// the pinned extractor. A second UID barrier follows that subprocess.
+		quietErr := e.stopWriters(context.Background(), &x.manifest)
+		returned = errors.Join(returned, quietErr)
+		var evidenceErr error
+		if quietErr == nil && x.root != nil {
+			checkCtx, checkCancel := context.WithTimeout(context.Background(), e.options.CleanupTimeout)
+			evidenceErr = e.workspacePass(checkCtx, job.ID, false, false)
+			checkCancel()
+			returned = errors.Join(returned, evidenceErr)
+		}
+		if quietErr == nil && evidenceErr == nil && x.root != nil {
+			returned = errors.Join(returned, x.checkLockfiles())
+			if x.ranRecipe && job.Request.Kind != model.Build {
+				evidenceCtx, evidenceCancel := context.WithTimeout(context.Background(), e.options.CleanupTimeout)
+				returned = errors.Join(returned, x.testEvidence(evidenceCtx))
+				evidenceCancel()
+			}
 		}
 		if x.stdout != nil {
 			returned = errors.Join(returned, x.stdout.file.Close(), x.stderr.file.Close())
@@ -147,11 +175,16 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 		returned = errors.Join(returned, x.logs.err)
 		x.logs.mu.Unlock()
 		if x.root != nil {
-			returned = errors.Join(returned, x.collect())
+			if quietErr == nil && evidenceErr == nil && !x.manifest.Active && !x.manifest.ProcessUncertain {
+				returned = errors.Join(returned, x.collect())
+			}
 			returned = errors.Join(returned, x.root.Close())
 		}
+		if x.evidenceRoot != nil {
+			returned = errors.Join(returned, x.evidenceRoot.Close())
+		}
 		cleanupErr := e.cleanup(context.Background(), &x.manifest)
-		result.CleanupOK = cleanupErr == nil
+		result.CleanupOK = quietErr == nil && cleanupErr == nil
 		returned = errors.Join(returned, cleanupErr)
 		switch {
 		case parent.Err() == context.Canceled || job.CancelRequested:
@@ -168,29 +201,43 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 		}
 		result.FinishedAt = e.options.Now()
 	}()
+	preflightCtx, preflightCancel := context.WithTimeout(context.Background(), e.options.CleanupTimeout)
+	preflightErr := e.options.Runner.Quiesce(preflightCtx)
+	preflightCancel()
+	if preflightErr != nil {
+		x.manifest.ProcessUncertain = true
+		return result, errors.Join(preflightErr, e.saveManifest(x.manifest))
+	}
 	if job.CancelRequested {
 		return result, context.Canceled
 	}
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
-	if err := e.root.Mkdir("jobs/"+job.ID, 0700); err != nil {
+	if err := e.workspaces.Mkdir(job.ID, 0700); err != nil {
 		return result, err
 	}
-	x.root, err = e.root.OpenRoot("jobs/" + job.ID)
+	x.root, err = e.workspaces.OpenRoot(job.ID)
 	if err != nil {
 		return result, err
 	}
-	for _, dir := range []string{"checkout", "home", "tmp", "caches", "derived-data", "evidence"} {
+	for _, dir := range []string{"checkout", "home", "tmp", "caches", "derived-data"} {
 		if err := x.root.Mkdir(dir, 0700); err != nil {
 			return result, err
 		}
 	}
-	stdout, err := x.root.OpenFile("evidence/stdout.log", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err := e.root.MkdirAll("evidence/"+job.ID+"/evidence", 0700); err != nil {
+		return result, err
+	}
+	x.evidenceRoot, err = e.root.OpenRoot("evidence/" + job.ID)
 	if err != nil {
 		return result, err
 	}
-	stderr, err := x.root.OpenFile("evidence/stderr.log", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	stdout, err := x.evidenceRoot.OpenFile("evidence/stdout.log", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return result, err
+	}
+	stderr, err := x.evidenceRoot.OpenFile("evidence/stderr.log", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		stdout.Close()
 		return result, err
@@ -209,7 +256,7 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 		prepareCancel()
 		return result, err
 	}
-	result.Observation.LockfileDigests, err = lockfiles(x.root)
+	result.Observation.LockfileDigests, err = lockfiles(x.root, uint32(os.Geteuid()))
 	if err != nil {
 		prepareCancel()
 		return result, err
@@ -260,21 +307,12 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 			return result, err
 		}
 	}
-	runErr := x.recipe(ctx, job.Profile.Run)
-	returned = errors.Join(runErr, x.checkLockfiles())
-	if job.Request.Kind != model.Build {
-		returned = errors.Join(returned, x.testEvidence(ctx))
-	}
+	x.ranRecipe = true
+	returned = x.recipe(ctx, job.Profile.Run)
 	return result, returned
 }
 
 func (x *execution) prepare(ctx context.Context) error {
-	if err := x.observe(ctx); err != nil {
-		return err
-	}
-	if err := x.simulator(ctx); err != nil {
-		return err
-	}
 	x.result.Observation.GeneratedDigests = make(map[string]string, len(x.job.Profile.GeneratedFiles))
 	for _, generated := range x.job.Profile.GeneratedFiles {
 		name := "checkout/" + generated.Path
@@ -303,6 +341,15 @@ func (x *execution) prepare(ctx context.Context) error {
 		digest := sha256.Sum256([]byte(generated.Content))
 		x.result.Observation.GeneratedDigests[generated.Path] = hex.EncodeToString(digest[:])
 	}
+	if err := x.engine.workspacePass(ctx, x.job.ID, true, false); err != nil {
+		return err
+	}
+	if err := x.observe(ctx); err != nil {
+		return err
+	}
+	if err := x.simulator(ctx); err != nil {
+		return err
+	}
 	for _, command := range x.job.Profile.Prepare {
 		if err := x.recipe(ctx, command); err != nil {
 			return err
@@ -327,6 +374,7 @@ func (x *execution) invoke(ctx context.Context, command Command, stdout, stderr 
 	x.manifest.Active = !result.CleanupOK
 	persistErr := x.engine.saveManifest(x.manifest)
 	if !result.CleanupOK {
+		x.manifest.ProcessUncertain = true
 		err = errors.Join(err, errors.New("process cleanup was not confirmed"))
 	}
 	if result.ExitCode != 0 || result.Signal != "" {
@@ -460,7 +508,7 @@ func workspaceBudget(root *os.Root, limit int64) error {
 	})
 }
 
-func lockfiles(root *os.Root) (map[string]string, error) {
+func lockfiles(root *os.Root, owner uint32) (map[string]string, error) {
 	digests := make(map[string]string)
 	err := fs.WalkDir(root.FS(), "checkout", func(name string, entry fs.DirEntry, err error) error {
 		if err != nil {
@@ -480,12 +528,24 @@ func lockfiles(root *os.Root) (map[string]string, error) {
 		if err := noSymlinkPath(root, name); err != nil {
 			return err
 		}
-		file, err := root.Open(name)
+		file, err := root.OpenFile(name, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 		if err != nil {
 			return err
 		}
+		var stat unix.Stat_t
+		if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
+			file.Close()
+			return err
+		}
+		if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != owner || stat.Nlink != 1 || stat.Size > 16<<20 {
+			file.Close()
+			return errors.New("dependency lockfile has unsafe ownership, links, type or size")
+		}
 		h := sha256.New()
-		_, copyErr := io.Copy(h, file)
+		n, copyErr := io.Copy(h, io.LimitReader(file, (16<<20)+1))
+		if n > 16<<20 {
+			copyErr = errors.New("dependency lockfile grew beyond limit")
+		}
 		closeErr := file.Close()
 		if err := errors.Join(copyErr, closeErr); err != nil {
 			return err
@@ -497,7 +557,11 @@ func lockfiles(root *os.Root) (map[string]string, error) {
 }
 
 func (x *execution) checkLockfiles() error {
-	after, err := lockfiles(x.root)
+	owner := x.engine.options.JobUID
+	if _, native := x.engine.options.Runner.(*nativeRunner); !native {
+		owner = uint32(os.Geteuid())
+	}
+	after, err := lockfiles(x.root, owner)
 	for name, digest := range x.result.Observation.LockfileDigests {
 		if after[name] != digest {
 			err = errors.Join(err, fmt.Errorf("tracked dependency lockfile mutated: %s", name))
@@ -512,7 +576,21 @@ func (x *execution) checkLockfiles() error {
 }
 
 func (x *execution) testEvidence(ctx context.Context) error {
-	raw, commandErr := x.capture(ctx, "/usr/bin/xcrun", "xcresulttool", "get", "test-results", "tests", "--schema-version", "0.4.0", "--path", filepath.Join(x.workspace, "results.xcresult"), "--compact")
+	tool := filepath.Join(x.job.Profile.DeveloperDir, "usr/bin/xcresulttool")
+	if _, native := x.engine.options.Runner.(*nativeRunner); native {
+		if err := hostguard.RootConfig(tool); err != nil {
+			return err
+		}
+	}
+	raw, commandErr := x.capture(ctx, tool, "get", "test-results", "tests", "--schema-version", "0.4.0", "--path", filepath.Join(x.workspace, "results.xcresult"), "--compact")
+	// Extraction can load hostile bundle contents; its descendants are subject
+	// to the same full-UID barrier before parsing or sealing anything.
+	if err := x.engine.stopWriters(context.Background(), &x.manifest); err != nil {
+		return errors.Join(commandErr, err)
+	}
+	if commandErr != nil {
+		return commandErr
+	}
 	writeErr := x.writeEvidence("tests.json", raw)
 	summary, parseErr := evidence.ParseTests(raw, x.job.Profile.RequiredTests)
 	x.result.Summary = &summary
@@ -520,11 +598,11 @@ func (x *execution) testEvidence(ctx context.Context) error {
 	if summary.Failed > 0 {
 		failed = errors.New("test evidence contains failed tests")
 	}
-	return errors.Join(commandErr, writeErr, parseErr, failed)
+	return errors.Join(writeErr, parseErr, failed)
 }
 
 func (x *execution) writeEvidence(name string, data []byte) error {
-	file, err := x.root.OpenFile("evidence/"+name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	file, err := x.evidenceRoot.OpenFile("evidence/"+name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
 	}
@@ -536,15 +614,24 @@ func (x *execution) collect() error {
 	if x.manifest.Active || x.manifest.ProcessUncertain {
 		return errors.New("cannot seal evidence while owned work remains uncertain")
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), x.engine.options.CleanupTimeout)
+	defer cancel()
+	if err := x.engine.options.Runner.Quiesce(ctx); err != nil {
+		x.manifest.ProcessUncertain = true
+		return errors.Join(err, x.engine.saveManifest(x.manifest))
+	}
+	if err := x.engine.workspacePass(ctx, x.job.ID, false, false); err != nil {
+		return err
+	}
 	dest := filepath.Join(x.engine.options.ExportRoot, x.job.ID)
 	remaining := x.engine.options.MaxArtifactBytes
 	var failures []error
-	collect := func(rules []model.ArtifactRule) {
+	collect := func(source string, rules []model.ArtifactRule) {
 		if remaining <= 0 {
 			failures = append(failures, errors.New("artifact budget exhausted"))
 			return
 		}
-		artifacts, err := evidence.Collect(x.workspace, rules, dest, evidence.Limits{MaxTotalBytes: remaining, MaxFileBytes: remaining, MaxEntries: maxArchiveEntries}, x.engine.options.Now())
+		artifacts, err := evidence.Collect(source, rules, dest, evidence.Limits{MaxTotalBytes: remaining, MaxFileBytes: remaining, MaxEntries: maxArchiveEntries}, x.engine.options.Now())
 		if err != nil {
 			failures = append(failures, err)
 			return
@@ -555,9 +642,10 @@ func (x *execution) collect() error {
 		x.result.Artifacts = append(x.result.Artifacts, artifacts...)
 	}
 	// Preserve raw logs even when required test or profile evidence is missing.
-	collect([]model.ArtifactRule{{Path: "evidence/stdout.log", Required: true}, {Path: "evidence/stderr.log", Required: true}})
+	protectedEvidence := filepath.Join(x.engine.options.Root, "evidence", x.job.ID)
+	collect(protectedEvidence, []model.ArtifactRule{{Path: "evidence/stdout.log", Required: true}, {Path: "evidence/stderr.log", Required: true}})
 	if x.result.Summary != nil {
-		collect([]model.ArtifactRule{{Path: "results.xcresult", Required: true}})
+		collect(x.workspace, []model.ArtifactRule{{Path: "results.xcresult", Required: true}})
 		for _, artifact := range x.result.Artifacts {
 			if artifact.Name == "results.xcresult.tar.gz" {
 				x.result.Summary.XCResultSHA256 = artifact.SHA256
@@ -570,11 +658,11 @@ func (x *execution) collect() error {
 		failures = append(failures, err, x.writeEvidence("summary.json", normalized))
 		junit, err := evidence.JUnit(*x.result.Summary)
 		failures = append(failures, err, x.writeEvidence("junit.xml", junit))
-		collect([]model.ArtifactRule{{Path: "evidence/tests.json", Required: true}, {Path: "evidence/summary.json", Required: true}, {Path: "evidence/junit.xml", Required: true}})
+		collect(protectedEvidence, []model.ArtifactRule{{Path: "evidence/tests.json", Required: true}, {Path: "evidence/summary.json", Required: true}, {Path: "evidence/junit.xml", Required: true}})
 	}
 	// Artifact rules are workspace-relative, including explicit checkout/... paths.
 	if len(x.job.Profile.Artifacts) > 0 {
-		collect(x.job.Profile.Artifacts)
+		collect(x.workspace, x.job.Profile.Artifacts)
 	}
 	if len(x.result.Artifacts) > 0 {
 		data, err := json.Marshal(exportManifest{Artifacts: x.result.Artifacts})

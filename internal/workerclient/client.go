@@ -171,6 +171,9 @@ func (c *Client) Run(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if err := c.engine.Recover(ctx); err != nil {
+			return fmt.Errorf("worker pre-lease quiescence: %w", err)
+		}
 		if !registered {
 			_, err := c.json(ctx, http.MethodPost, "/register", c.epoch, "", protocol.Registration{Epoch: c.epoch, Quiescent: true}, nil)
 			if err != nil {
@@ -270,7 +273,8 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) error {
 	}()
 	defer func() { close(stopHeartbeat); <-heartbeatDone }()
 	sink := &remoteSink{client: c, ctx: ctx, jobID: lease.Job.ID, lease: lease.Token, cancel: cancel}
-	result := worker.Result{State: model.Failed, Reason: "source transfer failed", Source: lease.Source, StartedAt: time.Now().UTC(), CleanupOK: true}
+	result := worker.Result{State: model.Failed, Reason: "source transfer failed", Source: lease.Source, StartedAt: time.Now().UTC()}
+	executed := false
 	req, err := c.request(ctx, http.MethodGet, "/jobs/"+lease.Job.ID+"/source", c.epoch, lease.Token, nil)
 	if err == nil {
 		var resp *http.Response
@@ -279,9 +283,20 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) error {
 			if resp.StatusCode != http.StatusOK {
 				err = &HTTPError{resp.StatusCode}
 			} else {
+				executed = true
 				result, err = c.engine.Execute(ctx, lease.Job, lease.Source, resp.Body, sink)
 			}
 			resp.Body.Close()
+		}
+	}
+	if !executed {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		cleanupErr := c.engine.Recover(cleanupCtx)
+		cleanupCancel()
+		result.CleanupOK = cleanupErr == nil
+		err = errors.Join(err, cleanupErr)
+		if cleanupErr != nil {
+			result.Reason = errors.Join(errors.New(result.Reason), cleanupErr).Error()
 		}
 	}
 	if err != nil && result.Reason == "" {

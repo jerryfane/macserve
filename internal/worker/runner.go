@@ -30,6 +30,7 @@ type processSample struct {
 	uid    int
 	rssKiB int64
 	zombie bool
+	start  string
 }
 
 type processSampler func(context.Context) ([]processSample, error)
@@ -44,17 +45,17 @@ type nativeRunner struct {
 	termGrace      time.Duration
 	killGrace      time.Duration
 	drainTimeout   time.Duration
+	uid            int
+	launchDir      string
+	scope          *processScope
+	signalProcess  func(context.Context, processSample, syscall.Signal) error
 }
 
-// NewNativeRunner uses background scheduling and an isolated process group.
-// Memory accounting samples all RSS belonging to the dedicated worker UID,
-// including simulator processes outside the command's process group. This is
-// monitored enforcement, not a hard aggregate cap; allocations in system
-// daemons under other UIDs cannot be attributed to the worker. Only this
-// command's verified same-UID process group is ever signalled.
-func NewNativeRunner() Runner {
+// newProcessRunner is the process/pipes implementation. Production construction
+// is exclusively through NewNativeRunner, which binds the protected UID scope.
+func newProcessRunner() *nativeRunner {
 	return &nativeRunner{
-		command:        nativeCommand,
+		uid:            os.Geteuid(),
 		sample:         sampleProcesses,
 		inspect:        sampleProcesses,
 		pollInterval:   20 * time.Millisecond,
@@ -64,11 +65,6 @@ func NewNativeRunner() Runner {
 		killGrace:      time.Second,
 		drainTimeout:   250 * time.Millisecond,
 	}
-}
-
-func nativeCommand(command Command) *exec.Cmd {
-	executable, args := backgroundCommand(command.Executable, command.Args)
-	return exec.Command(executable, args...)
 }
 
 type pipeResult struct {
@@ -100,6 +96,9 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
+	if r.command == nil {
+		return result, errors.New("protected command launcher is required")
+	}
 	if !filepath.IsAbs(command.Executable) || !filepath.IsAbs(command.Dir) {
 		return result, errors.New("worker command executable and directory must be absolute")
 	}
@@ -127,6 +126,9 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 
 	cmd := r.command(command)
 	cmd.Dir = command.Dir
+	if r.launchDir != "" {
+		cmd.Dir = r.launchDir
+	}
 	cmd.Env = append([]string{}, command.Env...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout, cmd.Stderr = outWrite, errWrite
@@ -137,7 +139,7 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 	_ = outWrite.Close()
 	_ = errWrite.Close()
 	pid := cmd.Process.Pid
-	uid := os.Geteuid()
+	uid := r.uid
 	defer cmd.Process.Release()
 
 	pipes := make(chan pipeResult, 2)
@@ -279,6 +281,9 @@ func (r *nativeRunner) snapshot(sample processSampler) ([]processSample, error) 
 }
 
 func (r *nativeRunner) cleanupGroup(group, uid int, reap func(), reaped, waitFailed func() bool) error {
+	if r.signalProcess != nil {
+		return r.cleanupProtectedGroup(group, uid, reap, reaped)
+	}
 	if group <= 1 || group == syscall.Getpgrp() {
 		return fmt.Errorf("%w: refusing to signal the owner process group", ErrCleanup)
 	}
@@ -342,6 +347,51 @@ func (r *nativeRunner) cleanupGroup(group, uid int, reap func(), reaped, waitFai
 	return nil
 }
 
+// No root kill(2) operation is permitted, even after inspecting a group: a
+// member can change UID or a PID can be reused between inspection and signal.
+func (r *nativeRunner) cleanupProtectedGroup(group, uid int, reap func(), reaped func() bool) error {
+	ctx, cancel := context.WithTimeout(context.Background(), r.termGrace+r.killGrace)
+	defer cancel()
+	termUntil := time.Now().Add(r.termGrace)
+	for {
+		reap()
+		samples, err := r.scope.sample(ctx)
+		if err != nil {
+			return errors.Join(ErrCleanup, err)
+		}
+		live := false
+		for _, p := range samples {
+			if p.group != group || p.zombie {
+				continue
+			}
+			live = true
+			if p.uid != uid {
+				return errors.Join(ErrCleanup, errors.New("job group contains a foreign UID"))
+			}
+			for _, trusted := range r.scope.baseline.Processes {
+				if trusted.PID == p.pid {
+					return errors.Join(ErrCleanup, errors.New("refusing to signal a GUI baseline PID"))
+				}
+			}
+			sig := syscall.SIGTERM
+			if !time.Now().Before(termUntil) {
+				sig = syscall.SIGKILL
+			}
+			if err := r.signalProcess(ctx, p, sig); err != nil {
+				return errors.Join(ErrCleanup, err)
+			}
+		}
+		if !live && reaped() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return errors.Join(ErrCleanup, ctx.Err())
+		case <-time.After(r.pollInterval):
+		}
+	}
+}
+
 func ownedGroup(samples []processSample, group, uid int) (bool, error) {
 	live := false
 	for _, p := range samples {
@@ -370,7 +420,14 @@ func kibToMiB(kib int64) int64 {
 // ps exposes only numeric identity, RSS and state; command lines, paths and
 // environment data are deliberately neither requested nor retained.
 func sampleProcesses(ctx context.Context) ([]processSample, error) {
+	return sampleProcessesAs(ctx, nil)
+}
+
+func sampleProcessesAs(ctx context.Context, credential *syscall.Credential) ([]processSample, error) {
 	cmd := exec.CommandContext(ctx, "/bin/ps", "-axo", "pid=,pgid=,uid=,rss=,stat=")
+	if credential != nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: credential}
+	}
 	cmd.Env = []string{"LC_ALL=C"}
 	cmd.Dir = "/"
 	cmd.WaitDelay = 100 * time.Millisecond

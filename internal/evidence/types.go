@@ -11,6 +11,8 @@ type TestCase struct {
 	DurationSeconds float64  `json:"duration_seconds"`
 	Failures        []string `json:"failures,omitempty"`
 	Attempt         int      `json:"attempt"`
+	// Container marks a failed container diagnostic, not an executed test.
+	Container bool `json:"container,omitempty"`
 }
 
 type Summary struct {

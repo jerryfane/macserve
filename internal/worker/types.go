@@ -67,6 +67,9 @@ type ProcessResult struct {
 // Runner abstracts process execution only; production uses the native runner.
 type Runner interface {
 	Run(context.Context, Command, io.Writer, io.Writer) (ProcessResult, error)
+	// Quiesce terminates every job-UID process outside the protected GUI baseline.
+	// Failure forbids evidence sealing and another lease.
+	Quiesce(context.Context) error
 }
 
 // Sink streams bounded evidence to the controller. An error cancels execution,
@@ -79,6 +82,13 @@ type Sink interface {
 type Options struct {
 	Root              string
 	ExportRoot        string
+	WorkspaceRoot     string
+	JobUID            uint32
+	JobGID            uint32
+	OwnerUID          uint32
+	ControllerUID     uint32
+	HelperPath        string
+	BaselinePath      string
 	Runner            Runner
 	CleanupTimeout    time.Duration
 	MaxWorkspaceBytes int64

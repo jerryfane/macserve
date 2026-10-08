@@ -8,6 +8,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
+
+	"github.com/jerryfane/macserve/internal/hostguard"
 )
 
 type Config struct {
@@ -15,6 +18,12 @@ type Config struct {
 	ControllerUID         uint32 `json:"controller_uid"`
 	Root                  string `json:"root"`
 	ExportRoot            string `json:"export_root"`
+	WorkspaceRoot         string `json:"workspace_root"`
+	JobUID                uint32 `json:"job_uid"`
+	JobGID                uint32 `json:"job_gid"`
+	OwnerUID              uint32 `json:"owner_uid"`
+	HelperPath            string `json:"helper_path"`
+	BaselinePath          string `json:"baseline_path"`
 	PollSeconds           int    `json:"poll_seconds"`
 	HeartbeatSeconds      int    `json:"heartbeat_seconds"`
 	RequestTimeoutSeconds int    `json:"request_timeout_seconds"`
@@ -46,16 +55,30 @@ func LoadConfig(path string) (Config, error) {
 }
 
 func normalize(cfg Config) (Config, error) {
-	for _, path := range []string{cfg.Socket, cfg.Root, cfg.ExportRoot} {
+	for _, path := range []string{cfg.Socket, cfg.Root, cfg.ExportRoot, cfg.WorkspaceRoot, cfg.HelperPath, cfg.BaselinePath} {
 		if !filepath.IsAbs(path) || filepath.Clean(path) != path || path == string(filepath.Separator) {
 			return cfg, fmt.Errorf("worker paths must be explicit clean absolute paths")
 		}
 	}
-	if cfg.Root == cfg.ExportRoot {
-		return cfg, errors.New("worker and export roots must differ")
+	inside := func(parent, child string) bool {
+		rel, err := filepath.Rel(parent, child)
+		return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 	}
-	if cfg.ControllerUID == 0 {
-		return cfg, errors.New("controller must use a non-root UID")
+	roots := []string{cfg.Root, cfg.ExportRoot, cfg.WorkspaceRoot}
+	for i, a := range roots {
+		for _, b := range roots[i+1:] {
+			if inside(a, b) || inside(b, a) {
+				return cfg, errors.New("worker control, export and workspace roots must not overlap")
+			}
+		}
+	}
+	for _, path := range []string{cfg.Socket, cfg.HelperPath, cfg.BaselinePath} {
+		if inside(cfg.WorkspaceRoot, path) {
+			return cfg, errors.New("broker control path must not be inside workspace storage")
+		}
+	}
+	if err := hostguard.DistinctJobIdentity(cfg.JobUID, cfg.JobGID, cfg.ControllerUID, cfg.OwnerUID); err != nil {
+		return cfg, err
 	}
 	if cfg.PollSeconds == 0 {
 		cfg.PollSeconds = 2

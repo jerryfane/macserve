@@ -107,6 +107,7 @@ func TestParseTestsRejectsMalformedAndIncompleteReports(t *testing.T) {
 		"missing name":                simpleReport(`{"nodeType":"Test Case","result":"Passed"}`),
 		"unknown type":                simpleReport(`{"nodeType":"Mystery","name":"case","result":"Passed"}`),
 		"unknown result":              simpleReport(`{"nodeType":"Test Case","name":"case","result":"unknown"}`),
+		"unknown container result":    simpleReport(`{"nodeType":"Test Suite","name":"suite","result":"unknown","children":[{"nodeType":"Test Case","name":"case","result":"Passed"}]}`),
 		"missing result":              simpleReport(`{"nodeType":"Test Case","name":"case"}`),
 		"negative duration":           simpleReport(`{"nodeType":"Test Case","name":"case","result":"Passed","durationInSeconds":-1}`),
 		"overflow duration":           simpleReport(`{"nodeType":"Test Case","name":"case","result":"Passed","durationInSeconds":1e999}`),
@@ -203,6 +204,7 @@ func TestJUnitRejectsInvalidNormalizedCases(t *testing.T) {
 		{ID: "case", Name: "case", Attempt: 1, Outcome: "unknown"},
 		{ID: "case", Name: "case", Attempt: 1, Outcome: "passed", DurationSeconds: math.Inf(1)},
 		{ID: "case", Name: "case", Attempt: 1, Outcome: "passed", DurationSeconds: -1},
+		{ID: "suite", Name: "suite", Attempt: 1, Outcome: "passed", Container: true},
 	} {
 		if _, err := JUnit(Summary{Cases: []TestCase{c}}); !errors.Is(err, ErrInvalidTests) {
 			t.Fatalf("invalid JUnit case accepted: %v", err)
@@ -220,5 +222,176 @@ func TestParseTestsKeepsAggregateFailureDetailsWithoutDoubleCounting(t *testing.
 	}
 	if summary.Tests != 1 || summary.Failed != 1 || len(summary.Cases[0].Failures) != 2 || summary.Cases[0].Failures[0] != "run detail" || summary.Cases[0].Failures[1] != "aggregate detail" {
 		t.Fatalf("aggregate failure evidence lost: %+v", summary)
+	}
+}
+
+func TestParseTestsPreservesFailedContainers(t *testing.T) {
+	for _, kind := range []string{"Test Plan", "Unit test bundle", "UI test bundle", "Test Suite"} {
+		for _, child := range []struct {
+			name     string
+			nodes    string
+			tests    int
+			passed   int
+			skipped  int
+			executed bool
+		}{
+			{name: "passing child", nodes: `,{"nodeType":"Test Case","name":"case","result":"Passed","durationInSeconds":0.25}`, tests: 2, passed: 1, executed: true},
+			{name: "no executions", tests: 1},
+			{name: "skipped child", nodes: `,{"nodeType":"Test Case","name":"case","result":"Skipped"}`, tests: 2, skipped: 1},
+		} {
+			t.Run(kind+"/"+child.name, func(t *testing.T) {
+				data := simpleReport(`{"nodeType":"` + kind + `","name":"Container","result":"Failed","durationInSeconds":99,"children":[
+					{"nodeType":"Failure Message","name":"teardown <failed> & stopped"}` + child.nodes + `
+				]}`)
+				summary, err := ParseTests(data, nil)
+				if child.executed {
+					if err != nil || summary.ParseStatus != "parsed" {
+						t.Fatalf("executed report: %+v, %v", summary, err)
+					}
+				} else if !errors.Is(err, ErrInvalidTests) || summary.ParseStatus != "incomplete" {
+					t.Fatalf("container diagnostic counted as execution: %+v, %v", summary, err)
+				}
+				if summary.Tests != child.tests || summary.Passed != child.passed || summary.Skipped != child.skipped || summary.Failed != 1 {
+					t.Fatalf("container counts: %+v", summary)
+				}
+				if summary.DurationSeconds != float64(child.passed)*0.25 {
+					t.Fatalf("container duration counted as execution: %+v", summary)
+				}
+				diagnostic := summary.Cases[len(summary.Cases)-1]
+				if !diagnostic.Container || diagnostic.Outcome != "failed" || diagnostic.ID != "Container" ||
+					!strings.Contains(strings.Join(diagnostic.Failures, "\n"), "teardown <failed> & stopped") {
+					t.Fatalf("missing container diagnostic: %+v", diagnostic)
+				}
+				junit, err := JUnit(summary)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var report junitReport
+				if err := xml.Unmarshal(junit, &report); err != nil {
+					t.Fatal(err)
+				}
+				if report.Tests != child.tests || report.Errors != 1 || report.Failures != 0 || report.Skipped != child.skipped {
+					t.Fatalf("JUnit container counts: %s", junit)
+				}
+				found := false
+				for _, suite := range report.Suites {
+					for _, c := range suite.Cases {
+						if c.Error != nil {
+							found = c.ID == "Container" && c.Error.Type == "container-failure" &&
+								strings.Contains(c.Error.Text, "teardown <failed> & stopped") && suite.Errors == 1
+						}
+					}
+				}
+				if !found {
+					t.Fatalf("JUnit dropped container diagnostic: %s", junit)
+				}
+			})
+		}
+	}
+}
+
+const failedContainerTree = `{"nodeType":"Test Plan","name":"Plan","result":"Failed","children":[
+	{"nodeType":"Failure Message","name":"plan detail"},
+	{"nodeType":"Unit test bundle","name":"Bundle","result":"Failed","children":[
+		{"nodeType":"Failure Message","name":"bundle detail"},
+		{"nodeType":"Test Suite","name":"Suite","result":"Failed","children":[
+			{"nodeType":"Failure Message","name":"suite detail"},
+			{"nodeType":"Failure Message","name":"shared detail"},
+			{"nodeType":"Test Case","name":"case","result":"Passed"}
+		]}
+	]}
+]}`
+
+func TestParseTestsDoesNotDoubleCountNestedContainerFailures(t *testing.T) {
+	for _, failedChild := range []bool{false, true} {
+		name, nodes, tests, passed, junitFailures, junitErrors := "passing child", failedContainerTree, 2, 1, 0, 1
+		if failedChild {
+			name, tests, passed, junitFailures, junitErrors = "failing child", 1, 0, 1, 0
+			nodes = strings.Replace(nodes, `"result":"Passed"`, `"result":"Failed","children":[
+				{"nodeType":"Failure Message","name":"case detail"},
+				{"nodeType":"Failure Message","name":"shared detail"}
+			]`, 1)
+		}
+		t.Run(name, func(t *testing.T) {
+			summary, err := ParseTests(simpleReport(nodes), []string{"Plan/Bundle/Suite/case"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if summary.Tests != tests || summary.Passed != passed || summary.Failed != 1 {
+				t.Fatalf("ancestor failure counted twice: %+v", summary)
+			}
+			diagnostic := summary.Cases[len(summary.Cases)-1]
+			messages := strings.Join(diagnostic.Failures, "\n")
+			for _, detail := range []string{"plan detail", "bundle detail", "suite detail", "shared detail"} {
+				if strings.Count(messages, detail) != 1 {
+					t.Fatalf("ancestor diagnostic lost or duplicated: %+v", diagnostic)
+				}
+			}
+			if failedChild && !strings.Contains(messages, "case detail") {
+				t.Fatalf("child diagnostic lost: %+v", diagnostic)
+			}
+			junit, err := JUnit(summary)
+			if err != nil {
+				t.Fatal(err)
+			}
+			again, err := JUnit(summary)
+			if err != nil || !bytes.Equal(junit, again) {
+				t.Fatal("container JUnit is not deterministic")
+			}
+			var report junitReport
+			if err := xml.Unmarshal(junit, &report); err != nil {
+				t.Fatal(err)
+			}
+			if report.Tests != tests || report.Failures != junitFailures || report.Errors != junitErrors {
+				t.Fatalf("JUnit ancestor failure counted twice: %s", junit)
+			}
+			var text string
+			for _, suite := range report.Suites {
+				for _, c := range suite.Cases {
+					if c.Failure != nil {
+						text += c.Failure.Text
+					}
+					if c.Error != nil {
+						text += c.Error.Text
+					}
+				}
+			}
+			if text != messages {
+				t.Fatalf("JUnit lost distinct ancestor diagnostics: %q != %q", text, messages)
+			}
+		})
+	}
+}
+
+func TestParseTestsContainerDiagnosticsCannotSatisfyRequiredTests(t *testing.T) {
+	summary, err := ParseTests(simpleReport(`
+		{"nodeType":"Test Case","name":"unrelated","result":"Passed"},
+		{"nodeType":"Test Suite","name":"required","result":"Failed","children":[
+			{"nodeType":"Failure Message","name":"setup failed"}
+		]}`), []string{"required"})
+	if !errors.Is(err, ErrRequiredTests) || summary.ParseStatus != "incomplete" || summary.Failed != 1 || summary.Passed != 1 {
+		t.Fatalf("container diagnostic satisfied required execution: %+v, %v", summary, err)
+	}
+}
+
+func TestParseTestsFailedContainerWithoutMessageRemainsDiagnostic(t *testing.T) {
+	summary, err := ParseTests(simpleReport(`{"nodeType":"Test Suite","name":"Setup","result":"Failed"}`), nil)
+	if !errors.Is(err, ErrInvalidTests) || summary.ParseStatus != "incomplete" || summary.Passed != 0 || summary.Failed != 1 {
+		t.Fatalf("empty failed container lost: %+v, %v", summary, err)
+	}
+	junit, err := JUnit(summary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report junitReport
+	if err := xml.Unmarshal(junit, &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Errors != 1 || len(report.Suites) != 1 || len(report.Suites[0].Cases) != 1 {
+		t.Fatalf("empty failed container omitted from JUnit: %s", junit)
+	}
+	diagnostic := report.Suites[0].Cases[0].Error
+	if diagnostic == nil || !strings.Contains(diagnostic.Text, "Setup") || !strings.Contains(diagnostic.Text, "failed") {
+		t.Fatalf("container failure lacks identifying diagnostic: %s", junit)
 	}
 }

@@ -8,7 +8,10 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/jerryfane/macserve/internal/hostguard"
 	"github.com/jerryfane/macserve/internal/worker"
@@ -57,11 +60,7 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "macserve worker: %v\n", err)
 		return 1
 	}
-	if config.ControllerUID == uint32(os.Geteuid()) {
-		fmt.Fprintln(stderr, "macserve worker: controller and worker UIDs must differ")
-		return 1
-	}
-	engine, err := worker.New(worker.Options{Root: config.Root, ExportRoot: config.ExportRoot})
+	engine, err := worker.New(executionOptions(config))
 	if err != nil {
 		fmt.Fprintf(stderr, "macserve worker: %v\n", err)
 		return 1
@@ -79,5 +78,56 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "macserve worker: %v\n", err)
 		return 1
 	}
+	return 0
+}
+
+func executionOptions(config workerclient.Config) worker.Options {
+	return worker.Options{Root: config.Root, ExportRoot: config.ExportRoot, WorkspaceRoot: config.WorkspaceRoot, JobUID: config.JobUID, JobGID: config.JobGID, OwnerUID: config.OwnerUID, ControllerUID: config.ControllerUID, HelperPath: config.HelperPath, BaselinePath: config.BaselinePath}
+}
+
+func runWorkerQualify(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("worker-qualify", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	configPath := flags.String("config", "", "root-owned broker configuration")
+	explicit := flags.String("pids", "", "comma-separated PIDs explicitly audited as trusted GUI services")
+	flags.Usage = func() {
+		fmt.Fprintln(stderr, "Usage: macserve worker-qualify --config /absolute/worker.json --pids PID,PID")
+	}
+	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
+		fmt.Fprintln(stdout, "Usage: macserve worker-qualify --config /absolute/worker.json --pids PID,PID")
+		return 0
+	}
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if *configPath == "" || *explicit == "" || flags.NArg() != 0 {
+		flags.Usage()
+		return 2
+	}
+	var pids []int
+	for _, value := range strings.Split(*explicit, ",") {
+		pid, err := strconv.Atoi(value)
+		if err != nil || pid <= 1 {
+			fmt.Fprintln(stderr, "invalid audited GUI PID")
+			return 2
+		}
+		pids = append(pids, pid)
+	}
+	if err := hostguard.Worker(*configPath); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	config, err := workerclient.LoadConfig(*configPath)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := worker.QualifyGUIBaseline(ctx, executionOptions(config), pids); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	fmt.Fprintln(stdout, "Explicitly audited GUI baseline recorded; no processes were signalled.")
 	return 0
 }

@@ -73,7 +73,7 @@ func helperRunner(t *testing.T, mode string) (*nativeRunner, Command) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner := NewNativeRunner().(*nativeRunner)
+	runner := newProcessRunner()
 	runner.command = func(command Command) *exec.Cmd {
 		return exec.Command(command.Executable, command.Args...)
 	}

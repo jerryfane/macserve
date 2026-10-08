@@ -32,6 +32,14 @@ type fakeRunner struct {
 	xcode        string
 	runtimeBuild string
 	tests        string
+	quiesce      func(context.Context) error
+}
+
+func (f *fakeRunner) Quiesce(ctx context.Context) error {
+	if f.quiesce != nil {
+		return f.quiesce(ctx)
+	}
+	return ctx.Err()
 }
 
 func (f *fakeRunner) Run(ctx context.Context, c Command, out, stderr io.Writer) (ProcessResult, error) {
@@ -78,7 +86,7 @@ func (f *fakeRunner) Run(ctx context.Context, c Command, out, stderr io.Writer) 
 	case strings.HasPrefix(args, "simctl create "):
 		text = ownedUDID + "\n"
 	case strings.HasPrefix(args, "simctl "):
-	case strings.HasPrefix(args, "xcresulttool "):
+	case filepath.Base(c.Executable) == "xcresulttool":
 		text = f.tests
 		if text == "" {
 			text = passedTests
@@ -159,7 +167,7 @@ func sourceFixture(t *testing.T) (Source, []byte) {
 func engineFixture(t *testing.T, runner Runner) *Engine {
 	t.Helper()
 	base := t.TempDir()
-	engine, err := New(Options{Root: filepath.Join(base, "worker"), ExportRoot: filepath.Join(base, "exports"), Runner: runner})
+	engine, err := New(Options{Root: filepath.Join(base, "worker"), ExportRoot: filepath.Join(base, "exports"), WorkspaceRoot: filepath.Join(base, "workspaces"), Runner: runner})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +189,7 @@ func TestBuildExportsSurviveCleanupUntilAcknowledged(t *testing.T) {
 	if err != nil || result.State != model.Succeeded || !result.CleanupOK || result.Summary != nil || result.ExitCode == nil || *result.ExitCode != 0 || result.PeakMemoryMiB != 123 {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
-	if _, err := os.Stat(filepath.Join(engine.options.Root, "jobs", job.ID)); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(engine.options.WorkspaceRoot, job.ID)); !os.IsNotExist(err) {
 		t.Fatalf("workspace remains: %v", err)
 	}
 	var logID string
@@ -308,7 +316,7 @@ func TestRecipeFailuresAlwaysCleanOwnedSimulator(t *testing.T) {
 			if err == nil || result.State != model.Failed || !result.CleanupOK {
 				t.Fatalf("result=%+v err=%v", result, err)
 			}
-			assertExactCleanup(t, runner, true)
+			assertExactCleanup(t, runner, stage != "generate")
 		})
 	}
 }
@@ -350,7 +358,7 @@ func TestCleanupFailureRetainsOwnershipAndBlocksNextJob(t *testing.T) {
 	if m.DeviceUDID != ownedUDID {
 		t.Fatal("owned UDID was lost")
 	}
-	if _, err := os.Stat(filepath.Join(engine.options.Root, "jobs", job.ID)); err != nil {
+	if _, err := os.Stat(filepath.Join(engine.options.WorkspaceRoot, job.ID)); err != nil {
 		t.Fatal("uncertain workspace removed", err)
 	}
 	job.ID = "job-2"
@@ -361,7 +369,7 @@ func TestCleanupFailureRetainsOwnershipAndBlocksNextJob(t *testing.T) {
 	if err := engine.Recover(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(engine.options.Root, "jobs", "job-1")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(engine.options.WorkspaceRoot, "job-1")); !os.IsNotExist(err) {
 		t.Fatal("recovered workspace remains")
 	}
 }
@@ -597,10 +605,10 @@ func TestRawLogBoundaryCancelsWithoutWritingBeyondLimit(t *testing.T) {
 func TestUnregisteredWorkspaceIsNeverDeleted(t *testing.T) {
 	engine := engineFixture(t, &fakeRunner{})
 	job := fixtureJob(t, model.Build)
-	if err := engine.root.MkdirAll("jobs/"+job.ID, 0700); err != nil {
+	if err := engine.workspaces.MkdirAll(job.ID, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := engine.root.WriteFile("jobs/"+job.ID+"/owner-data", []byte("preserve"), 0600); err != nil {
+	if err := engine.workspaces.WriteFile(job.ID+"/owner-data", []byte("preserve"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	source, data := sourceFixture(t)
@@ -610,7 +618,7 @@ func TestUnregisteredWorkspaceIsNeverDeleted(t *testing.T) {
 	if err := engine.Recover(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	contents, err := engine.root.ReadFile("jobs/" + job.ID + "/owner-data")
+	contents, err := engine.workspaces.ReadFile(job.ID + "/owner-data")
 	if err != nil || string(contents) != "preserve" {
 		t.Fatalf("unregistered data changed: %q %v", contents, err)
 	}

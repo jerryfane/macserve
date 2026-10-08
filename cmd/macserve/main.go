@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/jerryfane/macserve/internal/worker"
 )
 
 func main() {
@@ -17,6 +19,20 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	switch args[0] {
+	case "_job-exec", "_job-signal":
+		var err error
+		if args[0] == "_job-exec" {
+			err = worker.PrivateJobExec(args[1:])
+		} else {
+			err = worker.PrivateJobSignal(args[1:])
+		}
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		return 0
+	case "worker-qualify":
+		return runWorkerQualify(args[1:], stdout, stderr)
 	case "-h", "--help":
 		if len(args) != 1 {
 			fmt.Fprintln(stderr, "macserve: help does not accept arguments")
@@ -49,7 +65,8 @@ func usage(w io.Writer) {
 
 Commands:
   controller  Queue, API and evidence service (not implemented yet)
-  worker      Native build and test execution via the private controller socket
+  worker      Protected root execution broker via the private controller socket
+  worker-qualify  Record explicitly audited dedicated-UID GUI baseline PIDs
 
 Use macserve <command> --help for command help.
 `)
