@@ -263,6 +263,8 @@ func TestAccountInputRefusals(t *testing.T) {
 		value string
 	}{
 		{"shared-uid", 9, "1501"}, {"shared-gid", 11, "1601"}, {"owner-uid", 15, "1502"}, {"privileged-gid", 11, "20"},
+		{"controller-job-name", 7, "servicecontrol"}, {"controller-owner-name", 13, "servicecontrol"}, {"job-owner-name", 13, "servicejob"},
+		{"controller-owner-uid", 15, "1501"},
 		{"privileged-name", 7, "admin"}, {"injected-name", 1, "evil/../root"}, {"leading-zero", 9, "01502"}, {"non-numeric", 9, "1502;id"},
 	}
 	for _, tc := range cases {
@@ -290,5 +292,86 @@ func TestApplyRefusesUnsupportedHostOrPrivilege(t *testing.T) {
 	out, err := runScript(t, append(scriptArgs(), "--apply"))
 	if err == nil {
 		t.Fatalf("apply accepted unsupported host or privilege: %s", out)
+	}
+}
+
+func TestCreatedAccountSupplementaryGroups(t *testing.T) {
+	script, err := filepath.Abs("create-users.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, role := range []struct {
+		name, primary, other string
+	}{
+		{"servicecontrol", "1601", "1602"},
+		{"servicejob", "1602", "1601"},
+	} {
+		for _, tc := range []struct {
+			name, extra string
+			refuse      bool
+		}{
+			{"dedicated-only", "", false},
+			{"unprivileged-extra", "1700", false},
+			{"root", "0", true},
+			{"staff", "20", true},
+			{"admin", "80", true},
+			{"other-primary", role.other, true},
+		} {
+			t.Run(role.name+"/"+tc.name, func(t *testing.T) {
+				cmd := exec.Command("/bin/bash", "-c", `source "$1"; validate_account_groups "$2" "$3" "$4"; printf 'membership accepted\n'`, "membership-test", script, role.name, role.other, role.primary+" "+tc.extra)
+				cmd.Dir = t.TempDir()
+				cmd.Env = []string{"PATH=/nonexistent", "HOME=" + cmd.Dir}
+				out, err := cmd.CombinedOutput()
+				if tc.refuse {
+					want := "REFUSED: privileged/shared supplementary group for " + role.name + "; keep services disabled and reconcile manually\n"
+					if err == nil || string(out) != want {
+						t.Fatalf("unsafe membership was not refused: err=%v output=%q", err, out)
+					}
+				} else if err != nil || string(out) != "membership accepted\n" {
+					t.Fatalf("safe membership rejected: err=%v output=%q", err, out)
+				}
+			})
+		}
+	}
+}
+
+func TestInstallerEarlyRefusals(t *testing.T) {
+	script, err := filepath.Abs("install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "binary")
+	if err := os.WriteFile(binary, []byte("must not execute"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(binary, link); err != nil {
+		t.Fatal(err)
+	}
+	digest := strings.Repeat("a", 64)
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"help-followed-by-option", []string{"--help", "--env", "unused"}, "REFUSED: help must be used alone"},
+		{"help-after-option", []string{"--env", "unused", "--help"}, "REFUSED: help must be used alone"},
+		{"missing-env", []string{"--binary", binary, "--sha256", digest}, "Usage:"},
+		{"missing-binary", []string{"--env", "unused", "--sha256", digest}, "Usage:"},
+		{"missing-digest", []string{"--env", "unused", "--binary", binary}, "Usage:"},
+		{"absent-file", []string{"--env", "unused", "--binary", filepath.Join(dir, "absent"), "--sha256", digest}, "REFUSED: binary must be a nonsymlink regular file"},
+		{"directory", []string{"--env", "unused", "--binary", dir, "--sha256", digest}, "REFUSED: binary must be a nonsymlink regular file"},
+		{"symlink", []string{"--env", "unused", "--binary", link, "--sha256", digest}, "REFUSED: binary must be a nonsymlink regular file"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command("/bin/bash", append([]string{script}, tc.args...)...)
+			cmd.Dir = dir
+			cmd.Env = []string{"PATH=/nonexistent", "HOME=" + dir}
+			out, err := cmd.CombinedOutput()
+			if err == nil || !strings.HasPrefix(string(out), tc.want) {
+				t.Fatalf("invalid installer input was not refused: err=%v output=%q", err, out)
+			}
+		})
 	}
 }

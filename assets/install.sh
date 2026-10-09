@@ -13,7 +13,11 @@ seen=' '
 while [ "$#" -gt 0 ]; do
     flag=$1; shift
     case "$flag" in
-        --help|-h) [ "$#" -eq 0 ] && [ "$seen" = ' ' ] || fail 'help must be used alone'; usage; exit 0 ;;
+        --help|-h)
+            if [ "$#" -ne 0 ] || [ "$seen" != ' ' ]; then
+                fail 'help must be used alone'
+            fi
+            usage; exit 0 ;;
         --apply) [ "$apply" = false ] || fail 'duplicate --apply'; apply=true; continue ;;
         --env|--binary|--sha256|--assets) ;;
         *) fail "unknown option: $flag" ;;
@@ -28,24 +32,33 @@ while [ "$#" -gt 0 ]; do
         --sha256) sha=$value ;; --assets) assets=$value ;;
     esac
 done
-[ -n "$env_file" ] && [ -n "$binary" ] && [ -n "$sha" ] || { usage >&2; exit 2; }
+if [ -z "$env_file" ] || [ -z "$binary" ] || [ -z "$sha" ]; then
+    usage >&2
+    exit 2
+fi
 [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || fail 'SHA256 must be 64 lowercase hexadecimal characters'
 if [ "$apply" = true ]; then
     [ "$(/usr/bin/uname -s)" = Darwin ] || fail '--apply requires Darwin'
-    [ "$EUID" -eq 0 ] && [ "$(/usr/bin/id -ru)" -eq 0 ] || fail '--apply requires real/effective root'
+    if [ "$EUID" -ne 0 ] || [ "$(/usr/bin/id -ru)" -ne 0 ]; then
+        fail '--apply requires real/effective root'
+    fi
 fi
 [ -n "$assets" ] || assets=$(CDPATH='' cd -- "$(/usr/bin/dirname -- "$0")" && pwd -P)
 case "$env_file" in /*) ;; *) env_file="$PWD/$env_file" ;; esac
 case "$binary" in /*) ;; *) binary="$PWD/$binary" ;; esac
 case "$assets" in /*) ;; *) assets="$PWD/$assets" ;; esac
-[ -f "$binary" ] && [ ! -L "$binary" ] || fail 'binary must be a nonsymlink regular file'
+if [ ! -f "$binary" ] || [ -L "$binary" ]; then
+    fail 'binary must be a nonsymlink regular file'
+fi
 [ -x /usr/bin/shasum ] || fail 'required /usr/bin/shasum unavailable'
 if [ "$EUID" -eq 0 ]; then
     [ "$(/usr/bin/uname -s)" = Darwin ] || fail 'run non-Darwin plans without root'
     [ "$(/usr/bin/id -ru)" -eq 0 ] || fail 'root planning requires real/effective root'
     # Root plans also execute the verified binary: never trust a user's TMPDIR.
     for parent in / /private /private/var /private/var/root; do
-        [ -d "$parent" ] && [ ! -L "$parent" ] || fail 'unsafe root staging parent'
+        if [ ! -d "$parent" ] || [ -L "$parent" ]; then
+            fail 'unsafe root staging parent'
+        fi
         [ "$(/usr/bin/stat -f %u "$parent")" = 0 ] || fail 'staging parent not root-owned'
         mode=$(/usr/bin/stat -f %Lp "$parent")
         (( (8#$mode & 0022) == 0 )) || fail 'staging parent writable by non-root'
