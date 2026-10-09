@@ -118,6 +118,24 @@ func (s *Store) Replay(ctx context.Context, principal, key string, request model
 // Enqueue checks idempotency before capacity and current profile validation. A
 // retry keeps its first profile snapshot even when the supplied profile changed.
 func (s *Store) Enqueue(ctx context.Context, principal, key string, admission model.Admission, now time.Time) (model.Job, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Job{}, false, err
+	}
+	defer tx.Rollback()
+	job, replay, err := s.enqueueTx(ctx, tx, principal, key, admission, now)
+	if err != nil && !errors.Is(err, ErrFull) {
+		return model.Job{}, false, err
+	}
+	if commitErr := tx.Commit(); commitErr != nil {
+		return model.Job{}, false, commitErr
+	}
+	return job, replay, err
+}
+
+// enqueueTx is shared by private API and GitHub admissions. The caller owns
+// the commit, including any intake provenance that must precede worker claims.
+func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, principal, key string, admission model.Admission, now time.Time) (model.Job, bool, error) {
 	if !validOpaque(principal, 256) || !validOpaque(key, 256) || !validTime(now) {
 		return model.Job{}, false, ErrInvalid
 	}
@@ -125,11 +143,6 @@ func (s *Store) Enqueue(ctx context.Context, principal, key string, admission mo
 	if err != nil {
 		return model.Job{}, false, err
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return model.Job{}, false, err
-	}
-	defer tx.Rollback()
 	original, err := scanJob(tx.QueryRowContext(ctx, "SELECT "+jobColumns+" FROM jobs WHERE principal=? AND idempotency_key=?", principal, key))
 	if err == nil {
 		if original.RequestDigest != digest {
@@ -152,10 +165,7 @@ func (s *Store) Enqueue(ctx context.Context, principal, key string, admission mo
 		return model.Job{}, false, err
 	}
 	if total >= s.options.QueueLimit || own >= s.options.PerPrincipalLimit {
-		// Expiry remains durable even when another outstanding job fills capacity.
-		if err := tx.Commit(); err != nil {
-			return model.Job{}, false, err
-		}
+		// The caller commits expiry even when outstanding work fills capacity.
 		return model.Job{}, false, ErrFull
 	}
 	id, err := randomToken("j_")
@@ -168,9 +178,6 @@ func (s *Store) Enqueue(ctx context.Context, principal, key string, admission mo
 	}
 	job, err := getTx(ctx, tx, id)
 	if err != nil {
-		return model.Job{}, false, err
-	}
-	if err := tx.Commit(); err != nil {
 		return model.Job{}, false, err
 	}
 	return job, false, nil

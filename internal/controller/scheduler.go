@@ -92,10 +92,6 @@ func (c *Controller) next(ctx context.Context, epoch string) (*protocol.Lease, e
 	if err != nil {
 		return nil, err
 	}
-	if err := c.options.Store.RequireSourceCleanup(ctx, job.ID); err != nil {
-		failErr := c.options.Store.FailPreparation(context.Background(), job.ID, job.LeaseToken, model.Failed, true, "source cleanup intent could not be persisted", c.options.Now())
-		return nil, errors.Join(err, failErr)
-	}
 	duration := min(c.options.SourceTimeout, job.Deadline.Sub(c.options.Now()))
 	prepCtx, cancel := context.WithTimeout(c.ctx, duration)
 	a := &execution{job: job, cancel: cancel}
@@ -107,6 +103,36 @@ func (c *Controller) next(ctx context.Context, epoch string) (*protocol.Lease, e
 
 func (c *Controller) prepare(ctx context.Context, a *execution) {
 	defer c.prep.Done()
+	if c.options.BeforeDispatch != nil {
+		if err := c.options.BeforeDispatch(ctx, a.job); err != nil {
+			state, reason := model.Cancelled, "dispatch admission revalidation failed"
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				state, reason = model.TimedOut, "dispatch admission revalidation deadline exceeded"
+			}
+			a.cancel()
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			if c.active == a {
+				if err := c.options.Store.FailPreparation(context.Background(), a.job.ID, a.job.LeaseToken, state, true, reason, c.options.Now()); err == nil {
+					c.active = nil
+				}
+			}
+			return
+		}
+	}
+	// Authorize before recording source debt, but persist the intent before
+	// Prepare can create anything. Recovery therefore still covers crashes.
+	if err := c.options.Store.RequireSourceCleanup(ctx, a.job.ID); err != nil {
+		a.cancel()
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.active == a {
+			if failErr := c.options.Store.FailPreparation(context.Background(), a.job.ID, a.job.LeaseToken, model.Failed, true, "source cleanup intent could not be persisted", c.options.Now()); failErr == nil {
+				c.active = nil
+			}
+		}
+		return
+	}
 	descriptor, err := c.options.Source.Prepare(ctx, a.job)
 	if err == nil {
 		err = validateSource(ctx, descriptor, a.job.Request.SHA)
@@ -306,7 +332,13 @@ func (c *Controller) sweep(ctx context.Context) error {
 	if err := c.trimPool(ctx, 0, maxArtifactPoolBytes); err != nil {
 		return err
 	}
-	return errors.Join(cleanupErr, c.options.Store.Prune(ctx, now))
+	if err := c.options.Store.Prune(ctx, now); err != nil {
+		return errors.Join(cleanupErr, err)
+	}
+	if c.options.PruneReceipts != nil {
+		return errors.Join(cleanupErr, c.options.PruneReceipts(ctx))
+	}
+	return cleanupErr
 }
 
 func safeID(value string) bool {

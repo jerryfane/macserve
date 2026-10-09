@@ -90,12 +90,21 @@ func serveController(parent context.Context, config controller.Config) error {
 		return err
 	}
 	defer db.Close()
-	exporter, err := source.New(source.Options{Root: filepath.Join(config.Root, "source")})
+	integrations, err := newIntegrations(parent, config, db, registry)
+	if err != nil {
+		return err
+	}
+	defer integrations.signer.Close()
+	sourceOptions := source.Options{Root: filepath.Join(config.Root, "source")}
+	if integrations.app != nil {
+		sourceOptions.Token = integrations.app.SourceToken
+	}
+	exporter, err := source.New(sourceOptions)
 	if err != nil {
 		return err
 	}
 	defer exporter.Close()
-	runtime, err := controller.New(controller.Options{Root: config.Root, Socket: config.Socket, BrokerUID: 0, Store: db, Source: exporter, Gate: guard.Check})
+	runtime, err := controller.New(controller.Options{Root: config.Root, Socket: config.Socket, BrokerUID: 0, Store: db, Source: exporter, Gate: guard.Check, BeforeDispatch: integrations.beforeDispatch, Seal: integrations.signer.Seal, PruneReceipts: integrations.pruneReceipts})
 	if err != nil {
 		return err
 	}
@@ -103,7 +112,7 @@ func serveController(parent context.Context, config controller.Config) error {
 	if err := db.ReplacePrincipals(parent, config.Principals); err != nil {
 		return err
 	}
-	handler, err := api.New(api.Options{Store: db, Profiles: registry, Status: runtime.Status, Artifact: runtime.Artifact, Receipt: runtime.Receipt})
+	handler, err := api.New(api.Options{Store: db, Profiles: registry, Status: runtime.Status, Artifact: runtime.Artifact, Receipt: runtime.Receipt, ReceiptManifest: integrations.signer.Manifest})
 	if err != nil {
 		return err
 	}
@@ -119,14 +128,21 @@ func serveController(parent context.Context, config controller.Config) error {
 	workerDone, httpDone := make(chan error, 1), make(chan error, 1)
 	go func() { workerDone <- runtime.Run(ctx) }()
 	go func() { httpDone <- server.Serve(secure) }()
+	var pollDone chan error
+	if integrations.poller != nil {
+		pollDone = make(chan error, 1)
+		go func() { pollDone <- integrations.poller.Run(ctx) }()
+	}
 	var runErr error
-	workerStopped, httpStopped := false, false
+	workerStopped, httpStopped, pollStopped := false, false, false
 	select {
 	case <-parent.Done():
 	case runErr = <-workerDone:
 		workerStopped = true
 	case runErr = <-httpDone:
 		httpStopped = true
+	case runErr = <-pollDone:
+		pollStopped = true
 	}
 	cancel()
 	shutdown, stop := context.WithTimeout(context.Background(), 10*time.Second)
@@ -143,6 +159,9 @@ func serveController(parent context.Context, config controller.Config) error {
 		if !errors.Is(err, http.ErrServerClosed) {
 			runErr = errors.Join(runErr, err)
 		}
+	}
+	if pollDone != nil && !pollStopped {
+		runErr = errors.Join(runErr, <-pollDone)
 	}
 	if errors.Is(runErr, context.Canceled) && parent.Err() != nil {
 		return shutdownErr

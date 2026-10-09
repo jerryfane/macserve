@@ -85,6 +85,7 @@ func TestOwnerPauseDoesNotCancelDrainingWork(t *testing.T) {
 }
 func TestPrivateListenerPolicyRejectsPublicWildcardAndMappedAddresses(t *testing.T) {
 	base := Config{Root: "/service/data", Socket: "/service/run/worker.sock", JobUID: 502, OwnerUID: 501, ProfilesFile: "/service/config/profiles.json", TLSCertificate: "/service/config/tls.crt", TLSKey: "/service/secrets/tls.key", HealthFile: "/service/config/health.json", PolicySHA256: strings.Repeat("a", 64)}
+	base.Receipt = ReceiptConfig{KeyID: "test", PrivateKeyFile: "/service/secrets/receipt.key", ServiceID: "test", HostID: "test", Repositories: map[string]int64{"example-org/example-app": 123}}
 	for _, address := range []string{"0.0.0.0:9443", "[::]:9443", "127.0.0.1:9443", "localhost:9443", "8.8.8.8:9443", "[::ffff:100.64.0.1]:9443", "100.64.0.1:0", "192.168.1.1:9443"} {
 		c := base
 		c.Listen = address

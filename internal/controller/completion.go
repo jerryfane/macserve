@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -98,12 +99,14 @@ func (c *Controller) complete(ctx context.Context, job model.Job, result worker.
 			}
 			completion.Receipt = receipt
 		}
-		encoded, err := json.Marshal(completion)
-		if err != nil {
+		var encoded bytes.Buffer
+		encoder := json.NewEncoder(&encoded)
+		encoder.SetEscapeHTML(false)
+		if err := encoder.Encode(completion); err != nil {
 			return err
 		}
 		c.mu.Lock()
-		err = c.options.Store.Finish(ctx, job.ID, job.LeaseToken, normalized.State, encoded, normalized.CleanupOK, normalized.Reason, c.options.Now())
+		err = c.options.Store.Finish(ctx, job.ID, job.LeaseToken, normalized.State, encoded.Bytes(), normalized.CleanupOK, normalized.Reason, c.options.Now())
 		if err == nil && c.active != nil && c.active.job.ID == job.ID {
 			c.active.cancel()
 			c.active = nil

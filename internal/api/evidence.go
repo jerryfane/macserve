@@ -9,6 +9,7 @@ import (
 	"github.com/jerryfane/macserve/internal/controller"
 	"github.com/jerryfane/macserve/internal/evidence"
 	"github.com/jerryfane/macserve/internal/model"
+	"github.com/jerryfane/macserve/internal/receipt"
 	"github.com/jerryfane/macserve/internal/store"
 )
 
@@ -137,4 +138,33 @@ func (w *contentResponse) Write(data []byte) (int, error) {
 		return len(data), nil
 	}
 	return w.ResponseWriter.Write(data)
+}
+
+func (h *handler) receiptManifest(w http.ResponseWriter, r *http.Request, job model.Job) {
+	completed, err := completion(job)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	var envelope receipt.Envelope
+	var payload receipt.Payload
+	if h.ReceiptManifest == nil || json.Unmarshal(completed.Receipt, &envelope) != nil || json.Unmarshal(envelope.Payload, &payload) != nil || payload.Manifest == nil {
+		writeError(w, store.ErrNotFound)
+		return
+	}
+	digests := r.URL.Query()["sha256"]
+	if len(digests) != 1 || digests[0] != payload.Manifest.SHA256 {
+		writeError(w, store.ErrNotFound)
+		return
+	}
+	data, err := h.ReceiptManifest(r.Context(), job.ID, digests[0])
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.Header().Set("ETag", strconv.Quote(digests[0]))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
 }

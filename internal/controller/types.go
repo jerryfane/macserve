@@ -40,12 +40,14 @@ type Options struct {
 	Store            *store.Store
 	Source           SourceProvider
 	Gate             func(context.Context) (GateState, error)
+	BeforeDispatch   func(context.Context, model.Job) error
 	HeartbeatTimeout time.Duration
 	CleanupTimeout   time.Duration
 	DeliveryTimeout  time.Duration
 	SourceTimeout    time.Duration
 	Now              func() time.Time
 	Seal             func(context.Context, model.Job, worker.Result) (json.RawMessage, error)
+	PruneReceipts    func(context.Context) error
 }
 type Completion struct {
 	InputDigest string          `json:"input_digest"`

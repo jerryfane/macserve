@@ -46,6 +46,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runWorker(args[1:], stdout, stderr)
 	case "controller":
 		return runController(args[1:], stdout, stderr)
+	case "wait":
+		return runWait(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "macserve: unknown command %q\n", args[0])
 		usage(stderr)
@@ -60,6 +62,7 @@ Commands:
   controller  Private API, durable queue and worker coordination
   worker      Protected root execution broker via the private controller socket
   worker-reset  Reset job-user persistence and record audited GUI baseline PIDs
+  wait        Request exact-head GitHub evidence and verify pinned receipts
 
 Use macserve <command> --help for command help.
 `)
