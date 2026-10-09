@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -97,6 +98,80 @@ func TestEnvironmentRejectsAmbiguousAndExecutableData(t *testing.T) {
 		t.Fatal("accepted symlink environment")
 	}
 }
+
+func TestEnvironmentRetainsLinkLocalProbeTargets(t *testing.T) {
+	base, _ := fixture(t)
+	for _, hosts := range []string{
+		"169.254.0.0,169.254.255.255",
+		"fe80::1,febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+		"fe80::1%en0,fe80::1%en1,fe80::1%12",
+		"fe80::1%bridge_test-0.1,fe80::2%" + strings.Repeat("a", 63),
+	} {
+		t.Run(hosts, func(t *testing.T) {
+			data := strings.Replace(reviewedEnvironment, "192.0.2.10\n", "192.0.2.10,"+hosts+"\n", 1)
+			e, err := ParseEnvironment([]byte(data))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := append(slices.Clone(base.HostAddresses), strings.Split(hosts, ",")...)
+			if !slices.Equal(e.HostAddresses, want) {
+				t.Fatalf("informational targets changed: got %v want %v", e.HostAddresses, want)
+			}
+		})
+	}
+}
+
+func TestEnvironmentRejectsUnsafeHostScopes(t *testing.T) {
+	for _, host := range []string{
+		"fe80::1%", "fe80::1%en0%en1", "fe80::1%en 0", "fe80::1%en/0",
+		"fe80::1%en:0", "fe80::1%é", "fe80::1%" + strings.Repeat("a", 64),
+		"2001:db8::1%en0", "fd7a:115c:a1e0::1%en0", "::1%lo0",
+		"169.254.1.1%en0", "::ffff:169.254.1.1", "FE80::1%en0",
+		"fe80:0:0:0:0:0:0:1", "fe80::1/64", "fe80::1,fe80::1",
+		"192.0.2.10", "not-an-address",
+	} {
+		t.Run(host, func(t *testing.T) {
+			data := strings.Replace(reviewedEnvironment, "192.0.2.10\n", "192.0.2.10,"+host+"\n", 1)
+			if _, err := ParseEnvironment([]byte(data)); err == nil {
+				t.Fatal("accepted unsafe, noncanonical or repeated host")
+			}
+		})
+	}
+	for _, listener := range []string{"fe80::1", "fe80::1%en0", "169.254.1.1", "fd7a:115c:a1e0::1%en0"} {
+		data := strings.Replace(reviewedEnvironment, "TAILNET_IP=100.64.0.10", "TAILNET_IP="+listener, 1)
+		if _, err := ParseEnvironment([]byte(data)); err == nil {
+			t.Fatalf("accepted unsafe tailnet listener %s", listener)
+		}
+	}
+}
+
+func TestEnvironmentCoexistenceTargets(t *testing.T) {
+	options := "COEXISTING_ANCHORS=com.apple/guest-b,com.apple/guest-a\nCOEXISTING_SERVICES=com.example.router-b,com.example.router-a\n"
+	e, err := ParseEnvironment([]byte(reviewedEnvironment + options))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(e.CoexistingAnchors, []string{"com.apple/guest-a", "com.apple/guest-b"}) ||
+		!slices.Equal(e.CoexistingServices, []string{"com.example.router-a", "com.example.router-b"}) {
+		t.Fatalf("noncanonical coexistence targets: %+v", e)
+	}
+	for _, suffix := range []string{
+		"COEXISTING_ANCHORS=com.apple/*\n",
+		"COEXISTING_ANCHORS=com.apple/peer,com.apple/peer\n",
+		"COEXISTING_SERVICES=system/com.example.router\n",
+		"COEXISTING_SERVICES=com.example.router,\n",
+		"PF_ANCHOR=\n",
+		"PF_ANCHOR=com.apple/macserve\n",
+		"TOLERATED_TRANSLATION_ANCHORS=\n",
+		"TOLERATED_TRANSLATION_ANCHORS=com.apple/guest-a\n",
+		"APPROVED_GUEST_SUBNETS=\n",
+		"APPROVED_GUEST_SUBNETS=172.20.40.128/25\n",
+	} {
+		if _, err := ParseEnvironment([]byte(reviewedEnvironment + suffix)); err == nil {
+			t.Fatalf("unsafe or obsolete configuration accepted: %q", suffix)
+		}
+	}
+}
 func TestRenderRejectsStaleMarkersAndActivation(t *testing.T) {
 	e, assets := fixture(t)
 	if _, err := renderAssets(e, assets); err != nil {
@@ -155,21 +230,19 @@ func TestMaterialHasValidCryptoConsumerConfigsAndPrivateIntent(t *testing.T) {
 	if c.GitHub != nil || c.Principals[0].TokenSHA256 != digest([]byte(m.Token)) || c.Receipt.Repositories["example-org/example-app"] != 12345 {
 		t.Fatal("incorrect API staging policy")
 	}
-	if c.PolicySHA256 != digest(files[Prefix+"/config/pf-anchor.conf"].Data) {
-		t.Fatal("policy hash does not bind rendered PF")
-	}
 	if _, err := workerclient.LoadConfig(filepath.Join(stage, "worker.json")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := profiles.Load(filepath.Join(stage, "profiles.json")); err != nil {
 		t.Fatal(err)
 	}
+	// The native loader requires root-protected ancestors; this unprivileged
+	// material test decodes the consumer type without claiming protected staging.
 	var mc maintenance.Config
-	if err := json.Unmarshal(files[Prefix+"/config/maintenance.json"].Data, &mc); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(files[Prefix+"/config/maintenance.json"].Data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&mc); err != nil {
 		t.Fatal(err)
-	}
-	if mc.PFPolicyFile != Prefix+"/config/pf-anchor.conf" || mc.ControllerConfig != Prefix+"/config/controller.json" {
-		t.Fatal("maintenance observes different deployment")
 	}
 	certData := files[Prefix+"/config/tls-cert.pem"].Data
 	tlsData := files[c.TLSKey].Data

@@ -52,7 +52,7 @@ func verifyArtifacts(dir string, v Candidate) error {
 	return nil
 }
 func readyAutomatic(v Candidate) error {
-	for _, name := range []string{"tcp_denial", "udp_denial", "approved_allow", "unix_socket_boundary", "owner_unaffected", "owner_home_denial"} {
+	for _, name := range []string{"unix_socket_boundary", "owner_unaffected", "owner_home_denial"} {
 		if v.Categories[name].Status != "pass" {
 			return fmt.Errorf("%s failed or incomplete; collect a fresh sitting", name)
 		}
@@ -63,7 +63,7 @@ func readyAutomatic(v Candidate) error {
 	return nil
 }
 func compatibleSitting(a, b Challenge) bool {
-	return a.EnvironmentSHA256 == b.EnvironmentSHA256 && a.Observation.JobUID == b.Observation.JobUID && a.Observation.PolicySHA256 == b.Observation.PolicySHA256 && a.Observation.RootRulesSHA256 == b.Observation.RootRulesSHA256 && a.Observation.AnchorRulesSHA256 == b.Observation.AnchorRulesSHA256 && a.Observation.InterfacesSHA256 == b.Observation.InterfacesSHA256 && maps.Equal(a.Observation.Profiles, b.Observation.Profiles) && slices.Equal(a.TCP, b.TCP) && slices.Equal(a.UDP, b.UDP) && slices.Equal(a.Allow, b.Allow) && a.OwnerCanary == b.OwnerCanary && slices.Equal(a.PrivatePaths, b.PrivatePaths)
+	return a.EnvironmentSHA256 == b.EnvironmentSHA256 && a.Observation.JobUID == b.Observation.JobUID && a.Observation.InterfacesSHA256 == b.Observation.InterfacesSHA256 && maps.Equal(a.Observation.Profiles, b.Observation.Profiles) && slices.Equal(a.TCP, b.TCP) && slices.Equal(a.UDP, b.UDP) && slices.Equal(a.Allow, b.Allow) && a.OwnerCanary == b.OwnerCanary && slices.Equal(a.PrivatePaths, b.PrivatePaths)
 }
 
 // Lifecycle evidence cannot be supplied by an arbitrary old artifact alone. A
@@ -99,7 +99,7 @@ func lifecycle(dir string, current Challenge, category string) error {
 		if e = decode(raw, &prior); e != nil {
 			return e
 		}
-		if previous.ChallengeSHA256 != digest(raw) || !compatibleSitting(current, prior) || !sameObservation(prior.Observation, previous.Observation) || previous.Collected.After(next.Created) || current.Created.Sub(previous.Collected) > 7*24*time.Hour {
+		if prior.Schema != 2 || previous.ChallengeSHA256 != digest(raw) || !compatibleSitting(current, prior) || !sameObservation(prior.Observation, previous.Observation) || previous.Collected.After(next.Created) || current.Created.Sub(previous.Collected) > 7*24*time.Hour {
 			return errors.New("previous sitting deployment/time/observation mismatch")
 		}
 		if category == "fast_switch" {
@@ -122,8 +122,8 @@ func Attest(ctx context.Context, dir, category, artifact, reason string) error {
 	if e := rootOnly(); e != nil {
 		return e
 	}
-	if !slices.Contains([]string{"delegated_boundary", "tool_profiles", "fast_switch", "reboot"}, category) {
-		return errors.New("only delegated_boundary, tool_profiles, fast_switch and reboot permit manual review")
+	if !slices.Contains([]string{"tool_profiles", "fast_switch", "reboot"}, category) {
+		return errors.New("only tool_profiles, fast_switch and reboot permit manual review")
 	}
 	if len(strings.TrimSpace(reason)) < 20 || len(reason) > 4096 {
 		return errors.New("explicit provenance and review reason required (20..4096 bytes)")
@@ -183,7 +183,7 @@ func Attest(ctx context.Context, dir, category, artifact, reason string) error {
 	if e = preserve(dir, name, b, v.Artifacts); e != nil {
 		return e
 	}
-	a := Attestation{Schema: 1, ChallengeSHA256: digest(raw), Category: category, Recorded: time.Now().UTC(), ReviewerUID: 0, Reason: reason, Artifact: name, ArtifactSHA256: digest(b), Profiles: maps.Clone(v.Observation.Profiles)}
+	a := Attestation{Schema: 2, ChallengeSHA256: digest(raw), Category: category, Recorded: time.Now().UTC(), ReviewerUID: 0, Reason: reason, Artifact: name, ArtifactSHA256: digest(b), Profiles: maps.Clone(v.Observation.Profiles)}
 	ab, _ := encode(a)
 	aname := "attestation-" + category + ".json"
 	if e = preserve(dir, aname, ab, v.Artifacts); e != nil {
@@ -192,7 +192,7 @@ func Attest(ctx context.Context, dir, category, artifact, reason string) error {
 	cat.Status = "pass"
 	cat.Reason = "explicit root approval of owner-reviewed existing artifacts: " + reason
 	cat.Evidence = append(cat.Evidence, name, aname)
-	cat.Probe.Passed = true
+	cat.Probe.Status = "passed"
 	if cat.Probe.Attempts == 0 {
 		cat.Probe.Attempts = 1
 	}
@@ -222,10 +222,8 @@ func Approve(ctx context.Context, dir string) error {
 	if e = verifyArtifacts(dir, v); e != nil {
 		return e
 	}
-	for _, name := range categories {
-		if v.Categories[name].Status != "pass" {
-			return fmt.Errorf("approval blocked: %s is %s (%s)", name, v.Categories[name].Status, v.Categories[name].Reason)
-		}
+	if e = readyApproval(v); e != nil {
+		return e
 	}
 	env, e := protectedRead("/Library/macserve/config/deploy.env")
 	if e != nil {
@@ -273,6 +271,43 @@ func Approve(ctx context.Context, dir string) error {
 	if q.BoundaryEvidenceSHA256 != digest(boundaryRaw) {
 		return errors.New("boundary digest mismatch")
 	}
+	beforeRaw, e := protectedRead(filepath.Join(dir, "before.json"))
+	if e != nil {
+		return e
+	}
+	var before Snapshot
+	if e = decode(beforeRaw, &before); e != nil {
+		return e
+	}
+	collected, e := coexistenceWindow(before.Observation, v.Observation)
+	if e != nil {
+		return e
+	}
+	if _, e = coexistenceWindow(v.Observation, current.Observation); e != nil {
+		return e
+	}
+	coexistence, e := coexistenceWindow(before.Observation, current.Observation)
+	if e != nil {
+		return e
+	}
+	expected, e := encode(collected)
+	if e != nil {
+		return e
+	}
+	for _, recorded := range []*maintenance.CoexistenceEvidence{v.Coexistence, boundary.Coexistence} {
+		actual, err := encode(recorded)
+		if err != nil || digest(actual) != digest(expected) {
+			return errors.New("collected coexistence evidence differs from preserved before/after observations")
+		}
+	}
+	// Preserve candidate/predecessor bytes. Approval binds the fresh after state.
+	boundary.Coexistence = &coexistence
+	boundary.RecordedAt = coexistence.After.RecordedAt
+	boundaryRaw, e = encode(boundary)
+	if e != nil {
+		return e
+	}
+	q.BoundaryEvidenceSHA256 = digest(boundaryRaw)
 	q.ApprovedAt = time.Now().UTC()
 	current.Observation.BoundaryEvidenceSHA256 = digest(boundaryRaw)
 	if e = fresh(c, q.ApprovedAt); e != nil {
@@ -294,6 +329,9 @@ func Approve(ctx context.Context, dir string) error {
 	}{q, current}, 0600); e != nil {
 		return fmt.Errorf("approval already attempted or intent could not be preserved: %w", e)
 	}
+	if e = saveNew(filepath.Join(dir, "approved-boundary-evidence.json"), boundaryRaw, 0600); e != nil {
+		return e
+	}
 	// Write evidence first, then the matching qualification commit. A crash or
 	// error between writes leaves any old approval mismatched and failclosed.
 	if e = replace(config.BoundaryEvidenceFile, boundaryRaw); e != nil {
@@ -307,4 +345,17 @@ func Approve(ctx context.Context, dir string) error {
 		Qualification maintenance.Qualification `json:"qualification"`
 		Notice        string                    `json:"notice"`
 	}{q.ApprovedAt, q, "No health refresh, service activation, pause clearing, PF or owner changes performed."}, 0600)
+}
+
+func readyApproval(v Candidate) error {
+	for _, name := range categories {
+		want := "pass"
+		if name == "network_reachability" {
+			want = networkStatus
+		}
+		if v.Categories[name].Status != want {
+			return fmt.Errorf("approval blocked: %s is %s (%s)", name, v.Categories[name].Status, v.Categories[name].Reason)
+		}
+	}
+	return nil
 }

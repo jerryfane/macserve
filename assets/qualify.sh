@@ -13,6 +13,13 @@ if [[ "${1:-}" == "--binary" ]]; then
   binary=$2
   shift 2
 fi
+case "${1:-}" in
+  plan|begin|probe|canary|collect|attest|approve) ;;
+  *)
+    printf '%s\n' 'qualify.sh: expected a recognized qualification subcommand; raw commands are refused' >&2
+    exit 2
+    ;;
+esac
 if [[ "$binary" != /* || ! -f "$binary" || ! -x "$binary" || -L "$binary" ]]; then
   printf '%s\n' 'qualify.sh: expected a reviewed absolute executable (installed adjacent macserve by default)' >&2
   exit 1

@@ -16,39 +16,40 @@ import (
 
 const qualifyUsage = `Usage: macserve qualify COMMAND [options]
 
-All privileged commands require macOS root. No command changes PF, launchd,
-accounts, GUI baselines, owner state or health. Reuse the installed deploy.env.
+All privileged commands require macOS root. Network reachability is informational:
+not enforced in phase 1. No command writes or loads PF.
+No command changes launchd, accounts, GUI baselines, owner state or health.
+Reuse the installed deploy.env.
 
 plan --env PATH
-  Print required TCP target matrix and mandatory categories without probes.
-stage-policy --file ROOT_PROTECTED_REVIEWED_PF
-  Explicit root staging only: archive prior policy/controller config privately,
-  install reviewed PF bytes and update only controller policy_sha256. Print the
-  new digest. Does NOT load PF; owner must separately review/apply native policy.
+  Print network target matrix and evidence categories without probes.
 begin --session /Library/macserve/var/qualification/NAME
-  --env /Library/macserve/config/deploy.env --allow IP:PORT[,IP:PORT...]
-  --udp-canary IP:PORT[,IP:PORT...] --owner-canary /Users/OWNER/private/canary
+  --env /Library/macserve/config/deploy.env --owner-canary /Users/OWNER/private/canary
+  [--allow IP:PORT[,IP:PORT...]] [--udp-canary IP:PORT[,IP:PORT...]]
   [--private-path PATH[,PATH...]] [--previous PROTECTED_PREVIOUS_SESSION]
-  Root creates an immutable two-hour challenge and initial PF/live observations.
-  Every protected port on loopback, host and tailnet addresses is required.
-canary --session DIR --transport udp|tcp --listen IP:PORT[,IP:PORT...]
-  --out NEW_FILE [--duration 120s]
-  Actual owner GUI account: controlled receiver, never a service API. TCP accepts
-  and closes only. UDP records/echoes challenge nonces. Refuses occupied ports.
-  For multiple listeners writes NEW_FILE.1.json, NEW_FILE.2.json, etc.
-  Start BEFORE either probe; leave running until BOTH probes finish.
+  Root creates an immutable two-hour challenge and initial live observations.
+  Protected ports on loopback, host and tailnet addresses are observed, not gated.
+  Records available main/peer rule digests and configured running service PIDs.
+  Observed rule changes or PID changes refuse the sitting; unreadable PF does not.
+canary --session DIR --transport udp|tcp|owner-home --out NEW_FILE
+  [--listen IP:PORT[,IP:PORT...]] [--duration 120s]
+  Actual owner GUI account: owner-home only reads the owner canary before/after
+  the bounded interval, without any network listener. Start BEFORE either probe
+  and leave running until BOTH finish to provide mandatory owner-home controls.
+  Optional TCP accepts/closes only; UDP records/echoes challenge nonces.
+  Multiple network listeners write NEW_FILE.1.json, NEW_FILE.2.json, etc.
 probe --session DIR --role job|owner --out NEW_FILE
   Run directly in that actual account's existing GUI login with full memberships.
   Preserves non-root target/attempt/refusal evidence; no sudo/su impersonation.
   Real or effective UID 0 refuses before session access or any --out write.
 collect --session DIR --job JOB_REPORT --owner OWNER_REPORT
-  --receipts UDP_RECEIPT[,UDP_RECEIPT...]
-  Root snapshots bounded reports, receiver evidence, PF counters and current
-  observations into candidate.json, boundary-evidence.json and qualification.json.
-  Inspect ALL categories; failures never become success by manual attestation.
+  --receipts OWNER_HOME_RECEIPT[,UDP_RECEIPT...]
+  Root snapshots bounded reports, owner-home controls, optional receiver evidence
+  and current observations into schema2 candidate and qualification artifacts.
+  Network results never gate; non-network failures cannot be manually attested.
   Incomplete attempts retain separate snapshots and can retry before expiry.
   Once candidate.json exists, begin a new session rather than recollecting.
-attest --session DIR --category delegated_boundary|tool_profiles|fast_switch|reboot
+attest --session DIR --category tool_profiles|fast_switch|reboot
   --artifact EXISTING_FILE --reason 'Owner-reviewed provenance and conclusions'
   Explicit root review of real owner/root artifacts only. Enabled profiles need
   genuine recipe/UI evidence for EVERY profile; tool inspection alone is not it.
@@ -58,6 +59,7 @@ approve --session DIR
   One explicit root command checks all mandatory categories, artifacts, freshness,
   exact current maintenance bindings and maintenance.Evaluate before installing
   protected approval records. Does not clear owner.pause or activate services.
+  Rechecks coexistence rules and same running service PIDs after qualification.
 `
 
 func runQualify(args []string, stdout, stderr io.Writer) int {
@@ -69,15 +71,15 @@ func runQualify(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("qualify "+command, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	session := fs.String("session", "", "protected sitting directory")
-	var env, allow, udp, ownerCanary, private, previous, role, out, listen, transport, job, owner, receipts, category, artifact, reason, file *string
+	var env, allow, udp, ownerCanary, private, previous, role, out, listen, transport, job, owner, receipts, category, artifact, reason *string
 	var duration *time.Duration
 	switch command {
 	case "plan":
 		env = fs.String("env", "/Library/macserve/config/deploy.env", "reviewed environment")
 	case "begin":
 		env = fs.String("env", "/Library/macserve/config/deploy.env", "reviewed installed environment")
-		allow = fs.String("allow", "", "explicit allowed TCP endpoints")
-		udp = fs.String("udp-canary", "", "controlled UDP endpoints")
+		allow = fs.String("allow", "", "optional authorized TCP observation endpoints")
+		udp = fs.String("udp-canary", "", "optional controlled UDP observation endpoints")
 		ownerCanary = fs.String("owner-canary", "", "existing private owner file")
 		private = fs.String("private-path", "", "additional private paths")
 		previous = fs.String("previous", "", "protected previous sitting")
@@ -86,15 +88,13 @@ func runQualify(args []string, stdout, stderr io.Writer) int {
 		out = fs.String("out", "", "new report file")
 	case "canary":
 		listen = fs.String("listen", "", "explicit reviewed endpoints")
-		transport = fs.String("transport", "udp", "tcp or udp")
+		transport = fs.String("transport", "udp", "tcp, udp or owner-home")
 		out = fs.String("out", "", "new receipt file")
 		duration = fs.Duration("duration", 120*time.Second, "bounded receiver lifetime")
-	case "stage-policy":
-		file = fs.String("file", "", "root-protected reviewed PF file")
 	case "collect":
 		job = fs.String("job", "", "job report")
 		owner = fs.String("owner", "", "owner report")
-		receipts = fs.String("receipts", "", "UDP receiver reports")
+		receipts = fs.String("receipts", "", "owner-home control and optional UDP receiver reports")
 	case "attest":
 		category = fs.String("category", "", "manual category")
 		artifact = fs.String("artifact", "", "existing genuine artifact")
@@ -115,7 +115,7 @@ func runQualify(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "unexpected positional arguments")
 		return 2
 	}
-	if command != "plan" && command != "stage-policy" && *session == "" {
+	if command != "plan" && *session == "" {
 		fmt.Fprintln(stderr, "--session is required")
 		return 2
 	}
@@ -141,12 +141,6 @@ func runQualify(args []string, stdout, stderr io.Writer) int {
 		err = qualification.Collect(ctx, *session, *job, *owner, *receipts)
 	case "attest":
 		err = qualification.Attest(ctx, *session, *category, *artifact, *reason)
-	case "stage-policy":
-		var hash string
-		hash, err = qualification.StagePolicy(*file)
-		if err == nil {
-			fmt.Fprintf(stdout, "policy_sha256=%s\n", hash)
-		}
 	case "approve":
 		err = qualification.Approve(ctx, *session)
 	}

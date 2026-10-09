@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/jerryfane/macserve/internal/maintenance"
 )
 
 const MaxEnvironment = 64 << 10
@@ -29,11 +31,14 @@ type Environment struct {
 	HostAddresses                []string
 	DeveloperDir                 string
 	Repositories                 map[string]int64
+	CoexistingAnchors            []string
+	CoexistingServices           []string
 }
 
 var accountName = regexp.MustCompile(`^[a-z][a-z0-9_]{0,30}$`)
 var repositoryName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9._-]*$`)
 var developerPath = regexp.MustCompile(`^/[A-Za-z0-9 /_.+-]+$`)
+var interfaceZone = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,63}$`)
 
 // ParseEnvironment accepts data, not shell syntax. Quotes and expansions are rejected.
 func ParseEnvironment(data []byte) (Environment, error) {
@@ -47,12 +52,16 @@ func ParseEnvironment(data []byte) (Environment, error) {
 	for _, k := range keys {
 		allowed[k] = true
 	}
+	for _, k := range strings.Fields("COEXISTING_ANCHORS COEXISTING_SERVICES") {
+		allowed[k] = true
+	}
 	for n, line := range strings.Split(string(data), "\n") {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		k, v, ok := strings.Cut(line, "=")
-		if !ok || !allowed[k] || values[k] != "" || v == "" || strings.TrimSpace(v) != v || strings.ContainsAny(v, "\t\"'`$\\{};<>!\n") {
+		_, duplicate := values[k]
+		if !ok || !allowed[k] || duplicate || strings.TrimSpace(v) != v || strings.ContainsAny(v, "\t\"'`$\\{};<>!\n") {
 			return e, fmt.Errorf("invalid, duplicate or unknown environment entry on line %d", n+1)
 		}
 		values[k] = v
@@ -106,7 +115,8 @@ func ParseEnvironment(data []byte) (Environment, error) {
 	}
 	seenAddresses := map[string]bool{}
 	for _, s := range strings.Split(values["HOST_ADDRESSES"], ",") {
-		if _, err := canonicalAddress(s); err != nil || seenAddresses[s] {
+		_, err := canonicalHostAddress(s)
+		if err != nil || seenAddresses[s] {
 			return e, errors.New("invalid or repeated host address")
 		}
 		seenAddresses[s] = true
@@ -131,6 +141,20 @@ func ParseEnvironment(data []byte) (Environment, error) {
 		e.Repositories[name] = int64(n)
 		seenIDs[n] = true
 	}
+	list := func(key string) []string {
+		if values[key] == "" {
+			return nil
+		}
+		return strings.Split(values[key], ",")
+	}
+	coexistence := maintenance.Config{
+		CoexistingAnchors:  list("COEXISTING_ANCHORS"),
+		CoexistingServices: list("COEXISTING_SERVICES"),
+	}
+	if err := maintenance.ValidateCoexistenceConfig(&coexistence); err != nil {
+		return e, fmt.Errorf("deploy coexistence configuration: %w", err)
+	}
+	e.CoexistingAnchors, e.CoexistingServices = coexistence.CoexistingAnchors, coexistence.CoexistingServices
 	return e, nil
 }
 func canonicalNumber(s string, max uint64) (uint64, error) {
@@ -146,6 +170,16 @@ func canonicalAddress(s string) (netip.Addr, error) {
 		return netip.Addr{}, errors.New("noncanonical or unsafe address")
 	}
 	return a, nil
+}
+
+func canonicalHostAddress(s string) (netip.Addr, error) {
+	a, err := netip.ParseAddr(s)
+	if err == nil && a.String() == s && a.IsLinkLocalUnicast() && !a.Is4In6() {
+		if a.Zone() == "" || (a.Is6() && interfaceZone.MatchString(a.Zone())) {
+			return a, nil
+		}
+	}
+	return canonicalAddress(s)
 }
 func LoadEnvironment(path string) (Environment, error) {
 	data, err := readRegular(path, MaxEnvironment)

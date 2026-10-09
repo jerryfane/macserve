@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -20,10 +21,39 @@ func runMaintenance(args []string, stdout, stderr io.Writer, observe bool) int {
 	if observe {
 		name = "maintenance-observe"
 	}
-	path, done, status := parseConfigArgs(name, args, stdout, stderr)
-	if done {
-		return status
+	printUsage := func(w io.Writer) {
+		extra := ""
+		if observe {
+			extra = " [--coexistence-only]"
+		}
+		fmt.Fprintf(w, "Usage: macserve %s --config /absolute/path/to/maintenance.json%s\n", name, extra)
 	}
+	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
+		printUsage(stdout)
+		return 0
+	}
+	for _, arg := range args {
+		if arg == "-h" || arg == "--help" {
+			fmt.Fprintln(stderr, "help must be used without other arguments")
+			return 2
+		}
+	}
+	flags := flag.NewFlagSet(name, flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	flags.Usage = func() { printUsage(stderr) }
+	configPath := flags.String("config", "", "root-owned service configuration")
+	var coexistenceOnly bool
+	if observe {
+		flags.BoolVar(&coexistenceOnly, "coexistence-only", false, "observe configured peers without qualification prerequisites")
+	}
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if *configPath == "" || flags.NArg() != 0 {
+		printUsage(stderr)
+		return 2
+	}
+	path := *configPath
 	if os.Geteuid() != 0 {
 		fmt.Fprintln(stderr, "macserve maintenance: observer must run as root")
 		return 1
@@ -44,7 +74,13 @@ func runMaintenance(args []string, stdout, stderr io.Writer, observe bool) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if observe {
-		observation, err := maintenance.Inspect(ctx, config)
+		var observation any
+		var err error
+		if coexistenceOnly {
+			observation, err = maintenance.ObserveCoexistence(ctx, config)
+		} else {
+			observation, err = maintenance.Inspect(ctx, config)
+		}
 		if err == nil {
 			err = json.NewEncoder(stdout).Encode(observation)
 		}

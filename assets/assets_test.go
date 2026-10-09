@@ -3,12 +3,9 @@ package assets_test
 import (
 	"bytes"
 	"encoding/xml"
-	"fmt"
-	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -29,8 +26,7 @@ func render(t *testing.T, path string) []byte {
 	var out bytes.Buffer
 	err = tmpl.Execute(&out, map[string]any{
 		"ControllerUser": "servicecontrol", "ControllerGroup": "servicecontrol",
-		"JobUID": 1502, "ProtectedPorts": "12345, 12346",
-		"HostAddresses": "192.0.2.10, 2001:db8::10",
+		"JobUID": 1502,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -114,129 +110,6 @@ func TestLaunchDaemonsRemainDisabledAndSeparated(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// This deliberately small parser evaluates the shipped PF subset, not the host
-// firewall. Native parsing and real effective-UID probes remain deployment gates.
-type pfRule struct {
-	destination, label string
-	protected          bool
-}
-type pfPolicy struct {
-	uid       int
-	ports     map[int]bool
-	addresses map[string][]netip.Prefix
-	rules     []pfRule
-}
-
-var rulePattern = regexp.MustCompile(`^block drop out log quick proto \{ tcp udp \} from any to (any|\$[a-z_]+)( port \$protected_ports)? user \$job_uid label "([a-z-]+)"$`)
-var addressPattern = regexp.MustCompile(`^([a-z_]+_addresses) = "\{ (.+) \}"$`)
-
-func parsePF(data []byte) (pfPolicy, error) {
-	p := pfPolicy{ports: map[int]bool{}, addresses: map[string][]netip.Prefix{}}
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		switch {
-		case strings.HasPrefix(line, "job_uid = "):
-			value, err := strconv.Unquote(strings.TrimPrefix(line, "job_uid = "))
-			if err != nil {
-				return p, err
-			}
-			p.uid, err = strconv.Atoi(value)
-			if err != nil || p.uid < 501 {
-				return p, fmt.Errorf("invalid UID")
-			}
-		case strings.HasPrefix(line, "protected_ports = "):
-			value, err := strconv.Unquote(strings.TrimPrefix(line, "protected_ports = "))
-			if err != nil {
-				return p, err
-			}
-			if !strings.HasPrefix(value, "{ ") || !strings.HasSuffix(value, " }") {
-				return p, fmt.Errorf("invalid port set")
-			}
-			for _, port := range strings.Split(value[2:len(value)-2], ",") {
-				n, err := strconv.Atoi(strings.TrimSpace(port))
-				if err != nil || n < 1 || n > 65535 {
-					return p, fmt.Errorf("invalid port")
-				}
-				p.ports[n] = true
-			}
-		case addressPattern.MatchString(line):
-			match := addressPattern.FindStringSubmatch(line)
-			for _, item := range strings.Split(match[2], ",") {
-				item = strings.TrimSpace(item)
-				prefix, err := netip.ParsePrefix(item)
-				if err != nil {
-					address, e := netip.ParseAddr(item)
-					if e != nil {
-						return p, e
-					}
-					prefix = netip.PrefixFrom(address, address.BitLen())
-				}
-				p.addresses[match[1]] = append(p.addresses[match[1]], prefix)
-			}
-		case rulePattern.MatchString(line):
-			match := rulePattern.FindStringSubmatch(line)
-			p.rules = append(p.rules, pfRule{destination: match[1], protected: match[2] != "", label: match[3]})
-		default:
-			return p, fmt.Errorf("unsupported PF syntax: %s", line)
-		}
-	}
-	if p.uid == 0 || len(p.ports) == 0 {
-		return p, fmt.Errorf("missing identity/ports")
-	}
-	return p, nil
-}
-
-func (p pfPolicy) decision(uid int, protocol, address string, port int) string {
-	if uid != p.uid || (protocol != "tcp" && protocol != "udp") {
-		return "outside-anchor"
-	}
-	ip := netip.MustParseAddr(address)
-	for _, rule := range p.rules {
-		if rule.protected && !p.ports[port] {
-			continue
-		}
-		matches := rule.destination == "any"
-		for _, prefix := range p.addresses[strings.TrimPrefix(rule.destination, "$")] {
-			matches = matches || prefix.Contains(ip)
-		}
-		if matches {
-			return rule.label
-		}
-	}
-	return "unmatched"
-}
-
-func TestPFRenderedDenyPrecedenceAndOwnerIsolation(t *testing.T) {
-	policy, err := parsePF(render(t, "pf/org.macserve.conf.tmpl"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, protocol := range []string{"tcp", "udp"} {
-		for _, address := range []string{"127.0.0.1", "::1", "10.20.30.40", "100.64.1.2", "169.254.2.3", "fc00::1", "fe80::1", "192.0.2.10", "2001:db8::10", "203.0.113.90"} {
-			for _, port := range []int{12345, 12346} {
-				if got := policy.decision(1502, protocol, address, port); got != "macserve-protected" {
-					t.Fatalf("protected %s %s:%d = %s", protocol, address, port, got)
-				}
-			}
-			if got := policy.decision(1501, protocol, address, 12345); got != "outside-anchor" {
-				t.Fatalf("owner affected: %s", got)
-			}
-		}
-		for address, want := range map[string]string{
-			"10.20.30.40": "macserve-private", "172.16.1.2": "macserve-private", "192.168.1.2": "macserve-private", "100.64.1.2": "macserve-private", "fc00::1": "macserve-private", "fe80::1": "macserve-private",
-			"192.0.2.10": "macserve-host", "2001:db8::10": "macserve-host",
-			"127.0.0.1": "macserve-default-deny", "::1": "macserve-default-deny", "203.0.113.90": "macserve-default-deny",
-		} {
-			if got := policy.decision(1502, protocol, address, 443); got != want {
-				t.Fatalf("%s %s = %s, want %s", protocol, address, got, want)
-			}
-		}
 	}
 }
 
@@ -373,5 +246,38 @@ func TestInstallerEarlyRefusals(t *testing.T) {
 				t.Fatalf("invalid installer input was not refused: err=%v output=%q", err, out)
 			}
 		})
+	}
+}
+
+func TestQualificationWrapperRejectsRawCommandsBeforeBinary(t *testing.T) {
+	script, err := filepath.Abs("qualify.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "macserve-fixture")
+	marker := filepath.Join(dir, "executed")
+	if err := os.WriteFile(binary, []byte("#!/bin/bash\nprintf executed > \"$MARKER\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"pfctl", "-f", "/policy"},
+		{"/sbin/pfctl", "-a", "org.example/peer", "-f", "/policy"},
+		{"-a", "org.example/service", "-f", "/policy"},
+		{"sh", "-c", "pfctl -F all"},
+		{"exec", "/sbin/pfctl", "-d"},
+		{"begin;pfctl", "-d"},
+		{"unknown"},
+	} {
+		cmd := exec.Command("/bin/bash", append([]string{script, "--binary", binary}, args...)...)
+		cmd.Dir = dir
+		cmd.Env = []string{"PATH=/nonexistent", "HOME=" + dir, "MARKER=" + marker}
+		out, err := cmd.CombinedOutput()
+		if err == nil || !strings.Contains(string(out), "raw commands are refused") {
+			t.Fatalf("raw qualification command was not refused: args=%q err=%v output=%q", args, err, out)
+		}
+		if _, err := os.Stat(marker); !os.IsNotExist(err) {
+			t.Fatalf("raw command executed supplied binary: %v", err)
+		}
 	}
 }

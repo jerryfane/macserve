@@ -131,22 +131,14 @@ func actualIdentity(ctx context.Context, c Challenge, role string) ([]int, error
 	}
 	return groups, nil
 }
-func tcpProbe(ctx context.Context, target string, denied bool) (bool, string) {
-	start := time.Now()
+func tcpProbe(ctx context.Context, target string) (bool, string) {
 	d := net.Dialer{Timeout: 2 * time.Second}
 	conn, e := d.DialContext(ctx, "tcp", target)
-	if e == nil {
-		conn.Close()
-		return !denied, "TCP connected"
+	if e != nil {
+		return false, e.Error()
 	}
-	if ctx.Err() != nil {
-		return false, ctx.Err().Error()
-	}
-	// Refused/unreachable is not proof of PF denial. A fresh socket must exhaust
-	// its two-second deadline; authorized controls and labeled deltas are separate.
-	var ne net.Error
-	blocked := errors.As(e, &ne) && ne.Timeout() && time.Since(start) >= 1900*time.Millisecond
-	return denied && blocked, e.Error()
+	conn.Close()
+	return true, "TCP connected"
 }
 func udpProbe(ctx context.Context, target string, p Packet) (bool, string) {
 	d := net.Dialer{Timeout: 2 * time.Second}
@@ -162,10 +154,6 @@ func udpProbe(ctx context.Context, target string, p Packet) (bool, string) {
 	}
 	reply := make([]byte, 2048)
 	n, e := conn.Read(reply)
-	if p.Role == "job" {
-		var ne net.Error
-		return errors.As(e, &ne) && ne.Timeout(), fmt.Sprintf("UDP reply bytes=%d error=%v", n, e)
-	}
 	if e != nil {
 		return false, e.Error()
 	}
@@ -223,7 +211,7 @@ func probe(ctx context.Context, dir, role, out string, uid, euid int) error {
 	}
 	ctx, cancel := context.WithDeadline(ctx, c.Expires)
 	defer cancel()
-	r := Report{Schema: 1, ChallengeSHA256: digest(raw), Role: role, UID: os.Getuid(), Started: time.Now().UTC()}
+	r := Report{Schema: 2, ChallengeSHA256: digest(raw), Role: role, UID: os.Getuid(), Started: time.Now().UTC()}
 	groups, e := actualIdentity(ctx, c, role)
 	if e != nil {
 		r.Refusal = e.Error()
@@ -242,8 +230,8 @@ func probe(ctx context.Context, dir, role, out string, uid, euid int) error {
 	}
 	for _, target := range c.TCP {
 		for attempt := 1; attempt <= 3; attempt++ {
-			ok, detail := tcpProbe(ctx, target, role == "job")
-			add("tcp_denial", target, attempt, ok, detail, "")
+			ok, detail := tcpProbe(ctx, target)
+			add("network_reachability", target, attempt, ok, "TCP: "+detail, "")
 		}
 	}
 	for _, target := range c.UDP {
@@ -254,12 +242,12 @@ func probe(ctx context.Context, dir, role, out string, uid, euid int) error {
 			}
 			p := Packet{digest(raw), role, attempt, nonce}
 			ok, detail := udpProbe(ctx, target, p)
-			add("udp_denial", target, attempt, ok, detail, nonce)
+			add("network_reachability", target, attempt, ok, "UDP: "+detail, nonce)
 		}
 	}
 	for _, target := range c.Allow {
-		ok, detail := tcpProbe(ctx, target, false)
-		add("approved_allow", target, 1, ok, detail, "")
+		ok, detail := tcpProbe(ctx, target)
+		add("network_reachability", target, 1, ok, "authorized TCP endpoint: "+detail, "")
 	}
 	if role == "job" {
 		d := net.Dialer{Timeout: 2 * time.Second}
@@ -324,7 +312,7 @@ func probe(ctx context.Context, dir, role, out string, uid, euid int) error {
 		return e
 	}
 	for _, row := range r.Results {
-		if !row.Success {
+		if !row.Success && row.Category != "network_reachability" {
 			return errors.New("one or more probes failed; complete report preserved")
 		}
 	}
@@ -343,6 +331,20 @@ func Canary(ctx context.Context, dir, listen, transport, out string, duration ti
 	}
 	if duration < time.Second || duration > lifetime {
 		return errors.New("duration must be 1s..2h")
+	}
+	if transport == "owner-home" {
+		if listen != "" {
+			return errors.New("owner-home controls do not accept a network listener")
+		}
+		r := Receipts{Schema: 2, ChallengeSHA256: digest(raw), UID: os.Getuid(), Started: time.Now().UTC()}
+		r.OwnerBefore = ownerCanaryRead(c.OwnerCanary)
+		end := minTime(time.Now().Add(duration), c.Expires)
+		controlCtx, cancel := context.WithDeadline(ctx, end)
+		defer cancel()
+		<-controlCtx.Done()
+		r.OwnerAfter = ownerCanaryRead(c.OwnerCanary)
+		r.Finished = time.Now().UTC()
+		return saveJSON(out, r, 0600)
 	}
 	targets, e := endpoints(listen)
 	if e != nil {
@@ -378,7 +380,7 @@ func Canary(ctx context.Context, dir, listen, transport, out string, duration ti
 		wg.Wait()
 	}()
 	for index, target := range targets {
-		r := Receipts{Schema: 1, ChallengeSHA256: digest(raw), UID: os.Getuid(), Listen: target, Started: time.Now().UTC()}
+		r := Receipts{Schema: 2, ChallengeSHA256: digest(raw), UID: os.Getuid(), Listen: target, Started: time.Now().UTC()}
 		var udp *net.UDPConn
 		var tcp net.Listener
 		if transport == "udp" {
@@ -397,9 +399,6 @@ func Canary(ctx context.Context, dir, listen, transport, out string, duration ti
 				return e
 			}
 			listeners = append(listeners, tcp)
-		}
-		if udp != nil {
-			r.OwnerBefore = ownerCanaryRead(c.OwnerCanary)
 		}
 		wg.Add(1)
 		go func(index int, r Receipts, udp *net.UDPConn, tcp net.Listener) {
@@ -425,9 +424,6 @@ func Canary(ctx context.Context, dir, listen, transport, out string, duration ti
 					conn.Close()
 				}
 			}
-			if udp != nil {
-				r.OwnerAfter = ownerCanaryRead(c.OwnerCanary)
-			}
 			r.Finished = time.Now().UTC()
 			path := out
 			if len(targets) > 1 {
@@ -446,4 +442,11 @@ func Canary(ctx context.Context, dir, listen, transport, out string, duration ti
 	}
 	wg.Wait()
 	return first
+}
+
+func minTime(a, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
 }

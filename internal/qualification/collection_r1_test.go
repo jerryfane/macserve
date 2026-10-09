@@ -43,7 +43,7 @@ func TestCollectionRetryPreservesFailedAttempt(t *testing.T) {
 	if !bytes.Equal(originals[first+"receipts-000.json"], bad) {
 		t.Fatal("failed receipt evidence not retained")
 	}
-	valid := Receipts{Schema: 1, ChallengeSHA256: failed.ChallengeSHA256, UID: os.Getuid(), Listen: c.UDP[0], Started: c.Created, Finished: now}
+	valid := Receipts{Schema: 2, ChallengeSHA256: failed.ChallengeSHA256, UID: os.Getuid(), Listen: c.UDP[0], Started: c.Created, Finished: now}
 	b, err := encode(valid)
 	if err != nil {
 		t.Fatal(err)
@@ -81,7 +81,7 @@ func TestCollectionRetryPreservesFailedAttempt(t *testing.T) {
 			t.Fatalf("retry hash does not bind current artifact: %s", name)
 		}
 	}
-	committed := []byte(`{"schema":1}`)
+	committed := []byte(`{"schema":2}`)
 	if err := os.WriteFile(filepath.Join(dir, "candidate.json"), committed, 0600); err != nil {
 		t.Fatal(err)
 	}

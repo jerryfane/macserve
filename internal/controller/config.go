@@ -24,7 +24,6 @@ type Config struct {
 	TLSKey          string            `json:"tls_key"`
 	Principals      []store.Principal `json:"principals"`
 	HealthFile      string            `json:"health_file"`
-	PolicySHA256    string            `json:"policy_sha256"`
 	PauseFile       string            `json:"pause_file,omitempty"`
 	OwnerUID        uint32            `json:"owner_uid"`
 	Receipt         ReceiptConfig     `json:"receipt"`
@@ -69,9 +68,6 @@ func (c *Config) validate() error {
 	}
 	if c.JobUID < 501 || c.OwnerUID == 0 || c.JobUID == c.OwnerUID {
 		return errors.New("job UID must be a dedicated login UID distinct from the non-root owner")
-	}
-	if !digestString(c.PolicySHA256) {
-		return errors.New("invalid network policy digest")
 	}
 	if c.PauseFile != "" && !cleanAbsolute(c.PauseFile) {
 		return errors.New("invalid owner pause path")

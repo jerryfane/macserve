@@ -6,10 +6,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/jerryfane/macserve/internal/hostguard"
 	"golang.org/x/sys/unix"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
@@ -26,12 +28,11 @@ const (
 )
 
 // Health is written atomically by the root-managed maintenance helper. Boundary
-// qualification is bound to the current PF policy and interface inventory. The
-// controller cannot manufacture readiness from a live worker connection.
+// qualification is bound to the current interface inventory and non-network
+// protections. The controller cannot manufacture readiness from a live worker.
 type Health struct {
 	Schema                int               `json:"schema"`
 	JobUID                uint32            `json:"job_uid"`
-	PolicySHA256          string            `json:"policy_sha256"`
 	InterfacesSHA256      string            `json:"interfaces_sha256"`
 	BoundaryReceiptSHA256 string            `json:"boundary_receipt_sha256"`
 	BoundaryValidated     bool              `json:"boundary_validated"`
@@ -42,10 +43,10 @@ type Health struct {
 	QualifiedProfiles     map[string]string `json:"qualified_profiles"`
 }
 type GuardOptions struct {
-	Root, HealthFile, PolicySHA256, PauseFile string
-	JobUID, OwnerUID                          uint32
-	Profiles                                  map[string]string
-	Now                                       func() time.Time
+	Root, HealthFile, PauseFile string
+	JobUID, OwnerUID            uint32
+	Profiles                    map[string]string
+	Now                         func() time.Time
 }
 type Guard struct {
 	options    GuardOptions
@@ -56,7 +57,7 @@ type Guard struct {
 }
 
 func NewGuard(o GuardOptions) (*Guard, error) {
-	if !cleanAbsolute(o.Root) || !cleanAbsolute(o.HealthFile) || !digestString(o.PolicySHA256) || o.JobUID < 501 || o.OwnerUID == 0 || o.JobUID == o.OwnerUID {
+	if !cleanAbsolute(o.Root) || !cleanAbsolute(o.HealthFile) || o.JobUID < 501 || o.OwnerUID == 0 || o.JobUID == o.OwnerUID {
 		return nil, errors.New("invalid readiness guard configuration")
 	}
 	if o.PauseFile != "" && !cleanAbsolute(o.PauseFile) {
@@ -113,7 +114,7 @@ func (g *Guard) Check(ctx context.Context) (GateState, error) {
 	} else {
 		now := g.options.Now()
 		state.UsedBytes = health.AccountedBytes
-		if health.Schema != 1 || health.JobUID != g.options.JobUID || health.PolicySHA256 != g.options.PolicySHA256 || !health.BoundaryValidated || !digestString(health.BoundaryReceiptSHA256) || health.CheckedAt.After(now.Add(5*time.Second)) || now.Sub(health.CheckedAt) > 45*time.Second || !health.ExpiresAt.After(now) || health.ExpiresAt.Sub(health.CheckedAt) > 45*time.Second || !health.ExpiresAt.After(health.CheckedAt) {
+		if health.Schema != 2 || health.JobUID != g.options.JobUID || !health.BoundaryValidated || !digestString(health.BoundaryReceiptSHA256) || health.CheckedAt.After(now.Add(5*time.Second)) || now.Sub(health.CheckedAt) > 45*time.Second || !health.ExpiresAt.After(now) || health.ExpiresAt.Sub(health.CheckedAt) > 45*time.Second || !health.ExpiresAt.After(health.CheckedAt) {
 			fail("isolation_unavailable", true)
 		}
 		current, err := g.interfaces()
@@ -184,27 +185,62 @@ func availableBytes(path string) (int64, error) {
 	return int64(stat.Bavail) * int64(stat.Bsize), nil
 }
 
-// InterfaceDigest invalidates qualification after address/interface changes. It
-// reads public interface metadata only, never traffic or another user's files.
+// InterfaceDigest invalidates qualification after relevant address/interface
+// changes. Link-local ranges are fixed-denied and do not affect qualification.
 func InterfaceDigest() (string, error) {
+	digest, _, err := observeInterfaces(false)
+	return digest, err
+}
+
+// InterfaceSnapshot returns the digest and host addresses from the same public
+// interface inventory, including loopback, aliases, and VM bridge gateways but
+// excluding fixed-denied link-local ranges.
+func InterfaceSnapshot() (string, []netip.Addr, error) {
+	return observeInterfaces(true)
+}
+
+func observeInterfaces(includeAddresses bool) (string, []netip.Addr, error) {
 	interfaces, err := net.Interfaces()
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
+	return interfaceInventory(interfaces, (*net.Interface).Addrs, includeAddresses)
+}
+
+// interfaceInventory accepts the public interface metadata reader separately so
+// qualification drift can be exercised without mutating host interfaces.
+func interfaceInventory(interfaces []net.Interface, addrs func(*net.Interface) ([]net.Addr, error), includeAddresses bool) (string, []netip.Addr, error) {
 	var inventory []string
+	var hosts []netip.Addr
 	for _, iface := range interfaces {
-		addresses, err := iface.Addrs()
+		addresses, err := addrs(&iface)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
-		inventory = append(inventory, iface.Name+" flags="+iface.Flags.String())
+		relevant := false
 		for _, address := range addresses {
-			inventory = append(inventory, iface.Name+" "+address.String())
+			text := address.String()
+			prefix, err := netip.ParsePrefix(text)
+			if err != nil {
+				return "", nil, fmt.Errorf("unrecognized interface address: %w", err)
+			}
+			host := prefix.Addr().Unmap()
+			if host.IsLinkLocalUnicast() {
+				continue
+			}
+			relevant = true
+			inventory = append(inventory, iface.Name+" "+text)
+			if includeAddresses {
+				hosts = append(hosts, host)
+			}
+		}
+		if relevant {
+			inventory = append(inventory, iface.Name+" flags="+iface.Flags.String())
 		}
 	}
 	sort.Strings(inventory)
 	sum := sha256.Sum256([]byte(strings.Join(inventory, "\n")))
-	return hex.EncodeToString(sum[:]), nil
+	return hex.EncodeToString(sum[:]), hosts, nil
 }
 func ownerPause(path string, owner uint32) (bool, error) {
 	present := false

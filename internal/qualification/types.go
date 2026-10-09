@@ -1,5 +1,6 @@
-// Package qualification collects bounded operator-reviewed boundary evidence. It
-// never changes PF, launchd, account state, GUI baselines, or health records.
+// Package qualification collects bounded operator-reviewed boundary evidence.
+// Network probes are informational; PF is never changed.
+// It never changes launchd, accounts, GUI baselines, owner state, or health.
 package qualification
 
 import (
@@ -23,6 +24,7 @@ import (
 	"time"
 
 	"github.com/jerryfane/macserve/internal/deploy"
+	"github.com/jerryfane/macserve/internal/hostguard"
 	"github.com/jerryfane/macserve/internal/maintenance"
 	"github.com/jerryfane/macserve/internal/model"
 )
@@ -31,7 +33,9 @@ const maxArtifact = 4 << 20
 const lifetime = 2 * time.Hour
 const maintenancePath = "/Library/macserve/config/maintenance.json"
 
-var categories = []string{"tcp_denial", "udp_denial", "approved_allow", "delegated_boundary", "unix_socket_boundary", "owner_unaffected", "owner_home_denial", "fast_switch", "reboot", "tool_profiles"}
+const networkStatus = "not enforced in phase 1"
+
+var categories = []string{"network_reachability", "unix_socket_boundary", "owner_unaffected", "owner_home_denial", "fast_switch", "reboot", "tool_profiles"}
 
 type Challenge struct {
 	Schema            int                     `json:"schema"`
@@ -100,13 +104,8 @@ type Receipts struct {
 	Error           string             `json:"error,omitempty"`
 }
 type Snapshot struct {
-	At               time.Time               `json:"at"`
-	Observation      maintenance.Observation `json:"observation"`
-	Counters         map[string]uint64       `json:"counters"`
-	ProtocolCounters map[string]uint64       `json:"protocol_counters"`
-	PFRules          string                  `json:"pf_rules_with_counters"`
-	PFOutput         string                  `json:"pf_output"`
-	PFStderr         string                  `json:"pf_stderr"`
+	At          time.Time               `json:"at"`
+	Observation maintenance.Observation `json:"observation"`
 }
 type Category struct {
 	Status   string            `json:"status"`
@@ -115,12 +114,13 @@ type Category struct {
 	Probe    maintenance.Probe `json:"probe"`
 }
 type Candidate struct {
-	Schema          int                     `json:"schema"`
-	ChallengeSHA256 string                  `json:"challenge_sha256"`
-	Collected       time.Time               `json:"collected"`
-	Observation     maintenance.Observation `json:"observation"`
-	Artifacts       map[string]string       `json:"artifacts"`
-	Categories      map[string]Category     `json:"categories"`
+	Schema          int                              `json:"schema"`
+	ChallengeSHA256 string                           `json:"challenge_sha256"`
+	Collected       time.Time                        `json:"collected"`
+	Observation     maintenance.Observation          `json:"observation"`
+	Artifacts       map[string]string                `json:"artifacts"`
+	Categories      map[string]Category              `json:"categories"`
+	Coexistence     *maintenance.CoexistenceEvidence `json:"coexistence"`
 }
 type Attestation struct {
 	Schema          int               `json:"schema"`
@@ -154,13 +154,13 @@ func decode(b []byte, v any) error {
 	return nil
 }
 func fresh(c Challenge, now time.Time) error {
-	if c.Schema != 1 || len(c.ID) != 64 || c.Created.IsZero() || now.Before(c.Created) || !now.Before(c.Expires) || c.Expires.Sub(c.Created) != lifetime {
+	if c.Schema != 2 || len(c.ID) != 64 || c.Created.IsZero() || now.Before(c.Created) || !now.Before(c.Expires) || c.Expires.Sub(c.Created) != lifetime {
 		return errors.New("invalid or expired challenge; begin a fresh sitting")
 	}
 	return nil
 }
 func sameObservation(a, b maintenance.Observation) bool {
-	return a.JobUID == b.JobUID && a.Boot == b.Boot && a.InterfacesSHA256 == b.InterfacesSHA256 && a.PolicySHA256 == b.PolicySHA256 && a.RootRulesSHA256 == b.RootRulesSHA256 && a.AnchorRulesSHA256 == b.AnchorRulesSHA256 && a.BaselineSHA256 == b.BaselineSHA256 && maps.Equal(a.Profiles, b.Profiles) && b.PFEnabled && b.LoopbackFiltered && b.IdentityValid && b.BaselineValid
+	return a.JobUID == b.JobUID && a.Boot == b.Boot && a.InterfacesSHA256 == b.InterfacesSHA256 && a.BaselineSHA256 == b.BaselineSHA256 && maps.Equal(a.Profiles, b.Profiles) && b.IdentityValid && b.BaselineValid
 }
 func rootOnly() error {
 	if runtime.GOOS != "darwin" || os.Getuid() != 0 || os.Geteuid() != 0 {
@@ -175,7 +175,7 @@ func protectedDirectory(p string) error {
 	if !cleanPath(p) {
 		return errors.New("expected clean absolute protected directory")
 	}
-	return deploy.CheckProtectedPath(p, true)
+	return hostguard.CheckProtectedPath(p, true)
 }
 
 // readArtifact opens only bounded regular files, never follows the final symlink,
@@ -221,7 +221,7 @@ func readArtifact(p string, uid int) ([]byte, error) {
 	return b, nil
 }
 func protectedRead(p string) ([]byte, error) {
-	if e := deploy.CheckProtectedPath(p, false); e != nil {
+	if e := hostguard.CheckProtectedPath(p, false); e != nil {
 		return nil, e
 	}
 	return readArtifact(p, 0)

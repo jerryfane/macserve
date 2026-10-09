@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
-
-	"github.com/jerryfane/macserve/internal/controller"
 )
 
 func TestReviewStrictJSONRejectsFoldedAliasesBeforeDecoding(t *testing.T) {
@@ -58,44 +56,6 @@ func TestReviewStrictJSONUsesUnicodeSimpleFold(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatal("unambiguous keys or values changed")
-	}
-}
-
-func TestReviewPolicyConfigRejectsAliasesInsteadOfReorderingTheirMeaning(t *testing.T) {
-	for name, raw := range map[string]string{
-		"policy alias":              `{"policy_sha256":"old","Policy_SHA256":"other"}`,
-		"policy Unicode alias":      `{"policy_sha256":"old","policy_\u017fha256":"other"}`,
-		"noncanonical policy alone": `{"Policy_SHA256":"old","job_uid":502}`,
-		"job UID alias":             `{"policy_sha256":"old","job_uid":502,"Job_UID":503}`,
-		"socket Unicode alias":      `{"policy_sha256":"old","socket":"/service/a","soc\u212aet":"/service/b"}`,
-		"nested controller alias":   `{"policy_sha256":"old","receipt":{"key_id":"a","Key_ID":"b"}}`,
-	} {
-		t.Run(name, func(t *testing.T) {
-			updated, err := policyConfig([]byte(raw), "new")
-			if err == nil || updated != nil {
-				t.Fatal("ambiguous or noncanonical policy input produced staged bytes")
-			}
-		})
-	}
-}
-
-func TestReviewPolicyConfigPreservesControllerMeaningWithUniqueCaseVariants(t *testing.T) {
-	raw := []byte(`{"policy_sha256":"old","Job_UID":502,"Owner_UID":501,"soc\u212aet":"/service/run/job.sock","Allowed_Networks":["192.0.2.0/24"],"Receipt":{"Key_ID":"reviewed"}}`)
-	var before controller.Config
-	if err := json.Unmarshal(raw, &before); err != nil {
-		t.Fatal(err)
-	}
-	updated, err := policyConfig(raw, "new")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var after controller.Config
-	if err := json.Unmarshal(updated, &after); err != nil {
-		t.Fatal(err)
-	}
-	before.PolicySHA256 = "new"
-	if !reflect.DeepEqual(before, after) {
-		t.Fatal("policy update reinterpreted an unrelated controller field")
 	}
 }
 

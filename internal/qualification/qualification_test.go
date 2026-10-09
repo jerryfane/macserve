@@ -7,7 +7,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"strings"
 	"syscall"
@@ -19,7 +18,7 @@ import (
 	"github.com/jerryfane/macserve/internal/model"
 )
 
-func TestCompleteTCPMatrixAndMissingRows(t *testing.T) {
+func TestCompleteTCPMatrix(t *testing.T) {
 	e := deploy.Environment{TailnetIP: "100.64.0.7", HostAddresses: []string{"100.64.0.7", "192.0.2.5"}, ProtectedPorts: []uint16{8080, 9000}}
 	targets, err := tcpTargets(e)
 	if err != nil {
@@ -30,23 +29,6 @@ func TestCompleteTCPMatrixAndMissingRows(t *testing.T) {
 	slices.Sort(want)
 	if !slices.Equal(targets, want) {
 		t.Fatalf("target coverage: %v", targets)
-	}
-	var r Report
-	for _, target := range targets {
-		for attempt := 1; attempt <= 3; attempt++ {
-			r.Results = append(r.Results, Result{Category: "tcp_denial", Target: target, Attempt: attempt, Success: true})
-		}
-	}
-	if ok, _ := rows(r, "tcp_denial", targets, 3); !ok {
-		t.Fatal("complete matrix rejected")
-	}
-	r.Results = r.Results[:len(r.Results)-1]
-	if ok, _ := rows(r, "tcp_denial", targets, 3); ok {
-		t.Fatal("missing IPv6/host attempt accepted")
-	}
-	r.Results = append(r.Results, r.Results[0])
-	if ok, _ := rows(r, "tcp_denial", targets, 3); ok {
-		t.Fatal("duplicate substituted for missing attempt")
 	}
 }
 func TestEndpointListsAreExplicitLiteralAndUnique(t *testing.T) {
@@ -59,7 +41,7 @@ func TestEndpointListsAreExplicitLiteralAndUnique(t *testing.T) {
 		t.Fatal(e)
 	}
 }
-func TestTCPRefusalIsNotDenialAndLiveServiceFailsDenial(t *testing.T) {
+func TestTCPObservesConnectionsAndRefusals(t *testing.T) {
 	listener, e := net.Listen("tcp", "127.0.0.1:0")
 	if e != nil {
 		t.Fatal(e)
@@ -68,15 +50,12 @@ func TestTCPRefusalIsNotDenialAndLiveServiceFailsDenial(t *testing.T) {
 	defer listener.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if ok, detail := tcpProbe(ctx, address, false); !ok {
+	if ok, detail := tcpProbe(ctx, address); !ok {
 		t.Fatalf("live authorized control: %s", detail)
 	}
-	if ok, _ := tcpProbe(ctx, address, true); ok {
-		t.Fatal("live service accepted as denied")
-	}
 	listener.Close()
-	if ok, _ := tcpProbe(ctx, address, true); ok {
-		t.Fatal("connection refused accepted as PF denial")
+	if ok, _ := tcpProbe(ctx, address); ok {
+		t.Fatal("connection refused reported as reachable")
 	}
 }
 func TestActualUDPReceiverObservesOwnerAndJobNonces(t *testing.T) {
@@ -95,8 +74,8 @@ func TestActualUDPReceiverObservesOwnerAndJobNonces(t *testing.T) {
 		t.Fatalf("owner controlled receiver: %s", detail)
 	}
 	job := Packet{Challenge: r.ChallengeSHA256, Role: "job", Attempt: 1, Nonce: strings.Repeat("c", 64)}
-	if ok, _ := udpProbe(ctx, conn.LocalAddr().String(), job); ok {
-		t.Fatal("delivered job datagram accepted as denial")
+	if ok, _ := udpProbe(ctx, conn.LocalAddr().String(), job); !ok {
+		t.Fatal("delivered job datagram not reported as reachable")
 	}
 	cancel()
 	<-done
@@ -145,59 +124,16 @@ func receiptFixture() (Challenge, Report, Report, []Receipts) {
 	for n := 1; n <= 3; n++ {
 		jn := fmt.Sprintf("%064x", n)
 		on := fmt.Sprintf("%064x", n+100)
-		j.Results = append(j.Results, Result{Category: "udp_denial", Target: c.UDP[0], Attempt: n, Success: true, Nonce: jn})
-		o.Results = append(o.Results, Result{Category: "udp_denial", Target: c.UDP[0], Attempt: n, Success: true, Nonce: on})
+		j.Results = append(j.Results, Result{Category: "network_reachability", Target: c.UDP[0], Attempt: n, Success: true, Nonce: jn})
+		o.Results = append(o.Results, Result{Category: "network_reachability", Target: c.UDP[0], Attempt: n, Success: true, Nonce: on})
 		r.Packets = append(r.Packets, Received{Packet: Packet{Challenge: hash, Role: "owner", Attempt: n, Nonce: on}, At: now.Add(time.Second), Peer: "127.0.0.1:1234"})
 	}
 	return c, j, o, []Receipts{r}
 }
-func TestReceiptsRequireCoverageFreshnessAndNoDelivery(t *testing.T) {
-	c, j, o, r := receiptFixture()
-	if ok, n := validateReceipts(c, j, o, r); !ok || n != 0 {
-		t.Fatal("valid controlled observations rejected")
-	}
-	tests := map[string]func(*Challenge, *Report, *Report, *[]Receipts){
-		"missing receiver": func(_ *Challenge, _ *Report, _ *Report, r *[]Receipts) { *r = nil },
-		"missing nonce":    func(_ *Challenge, _ *Report, _ *Report, r *[]Receipts) { (*r)[0].Packets = (*r)[0].Packets[:2] },
-		"replayed nonce":   func(_ *Challenge, _ *Report, _ *Report, r *[]Receipts) { (*r)[0].Packets[1] = (*r)[0].Packets[0] },
-		"wrong challenge":  func(_ *Challenge, _ *Report, _ *Report, r *[]Receipts) { (*r)[0].Packets[0].Packet.Challenge = "old" },
-		"wrong attempt":    func(_ *Challenge, _ *Report, _ *Report, r *[]Receipts) { (*r)[0].Packets[0].Packet.Attempt = 3 },
-		"late receiver":    func(_ *Challenge, j *Report, _ *Report, r *[]Receipts) { (*r)[0].Started = j.Started.Add(time.Second) },
-		"delivered job nonce": func(_ *Challenge, j *Report, _ *Report, r *[]Receipts) {
-			(*r)[0].Packets = append((*r)[0].Packets, Received{Packet: Packet{Challenge: j.ChallengeSHA256, Role: "job", Attempt: 1, Nonce: j.Results[0].Nonce}, At: j.Started})
-		},
-	}
-	for name, mutate := range tests {
-		t.Run(name, func(t *testing.T) {
-			c, j, o, r := receiptFixture()
-			mutate(&c, &j, &o, &r)
-			ok, n := validateReceipts(c, j, o, r)
-			if ok && n == 0 {
-				t.Fatal("unsafe evidence accepted")
-			}
-		})
-	}
-}
-func TestPFLabelCoverage(t *testing.T) {
-	text := "macserve-protected 10 3 192 0 0 3 192\nmacserve-private 1 0 0 0 0 0 0\nmacserve-host 1 0 0 0 0 0 0\nmacserve-default-deny 1 0 0 0 0 0 0\n"
-	counters, e := parseCounters(text)
-	if e != nil {
-		t.Fatal(e)
-	}
-	if counters["macserve-protected"] != 3 {
-		t.Fatal("packet counter not selected")
-	}
-	if _, e = parseCounters(strings.Replace(text, "macserve-host", "other", 1)); e == nil {
-		t.Fatal("missing mandatory PF label accepted")
-	}
-	if _, e = parseCounters("macserve-protected 3\n"); e == nil {
-		t.Fatal("unknown format accepted")
-	}
-}
 func TestReportBindingAndExpiration(t *testing.T) {
 	now := time.Now().UTC().Add(-time.Minute)
-	c := Challenge{Schema: 1, ID: strings.Repeat("a", 64), Created: now, Expires: now.Add(lifetime), Environment: deploy.Environment{JobUID: 502, OwnerUID: 501}}
-	r := Report{Schema: 1, ChallengeSHA256: "current", Role: "job", UID: 502, Groups: []int{502}, Started: now.Add(time.Second), Finished: now.Add(2 * time.Second)}
+	c := Challenge{Schema: 2, ID: strings.Repeat("a", 64), Created: now, Expires: now.Add(lifetime), Environment: deploy.Environment{JobUID: 502, OwnerUID: 501}}
+	r := Report{Schema: 2, ChallengeSHA256: "current", Role: "job", UID: 502, Groups: []int{502}, Started: now.Add(time.Second), Finished: now.Add(2 * time.Second)}
 	if e := checkReport(r, c, "current", "job"); e != nil {
 		t.Fatal(e)
 	}
@@ -217,13 +153,13 @@ func TestReportBindingAndExpiration(t *testing.T) {
 }
 func TestMissingAutomaticAndLifecycleCategoriesNeverPass(t *testing.T) {
 	c := Challenge{Environment: deploy.Environment{OwnerUser: "example-owner", DeveloperDir: "/Applications/Xcode.app/Contents/Developer"}, OwnerCanary: "/Users/example-owner/private/canary", TCP: []string{"127.0.0.1:8080"}, UDP: []string{"127.0.0.1:9000"}, Allow: []string{"192.0.2.1:443"}, Socket: "/private/worker.sock", PrivatePaths: []string{"/private/store"}}
-	categories := aggregate(c, Report{}, Report{}, nil, Snapshot{}, Snapshot{})
+	categories := aggregate(c, Report{}, Report{}, nil)
 	for name, cat := range categories {
 		if cat.Status == "pass" {
 			t.Errorf("missing %s passed", name)
 		}
 	}
-	for _, name := range []string{"fast_switch", "reboot", "delegated_boundary"} {
+	for _, name := range []string{"fast_switch", "reboot"} {
 		if categories[name].Status != "pending" {
 			t.Errorf("%s is not pending", name)
 		}
@@ -271,33 +207,6 @@ func TestStrictJSONRejectsAmbiguityAndUnknownData(t *testing.T) {
 		}
 	}
 }
-func TestPolicyStageChangesOnlyPolicyDigest(t *testing.T) {
-	raw := []byte(`{"policy_sha256":"old","job_uid":502,"principals":[{"opaque":"keep"}],"github":null}`)
-	updated, e := policyConfig(raw, "new")
-	if e != nil {
-		t.Fatal(e)
-	}
-	var before, after map[string]json.RawMessage
-	if e = json.Unmarshal(raw, &before); e != nil {
-		t.Fatal(e)
-	}
-	if e = json.Unmarshal(updated, &after); e != nil {
-		t.Fatal(e)
-	}
-	delete(before, "policy_sha256")
-	delete(after, "policy_sha256")
-	var a, b any
-	x, _ := json.Marshal(before)
-	y, _ := json.Marshal(after)
-	json.Unmarshal(x, &a)
-	json.Unmarshal(y, &b)
-	if !reflect.DeepEqual(a, b) {
-		t.Fatal("unrelated controller setting changed")
-	}
-	if _, e = policyConfig([]byte(`{"job_uid":502}`), "new"); e == nil {
-		t.Fatal("missing old policy accepted")
-	}
-}
 func TestRuntimePinsRejectUnavailableOrWrongBuild(t *testing.T) {
 	raw := []byte(`{"runtimes":[{"identifier":"runtime","buildversion":"23A1","isAvailable":true,"supportedDeviceTypes":[{"identifier":"phone"}]}]}`)
 	pins := []model.Simulator{{Runtime: "runtime", RuntimeBuild: "23A1", DeviceType: "phone"}}
@@ -330,46 +239,8 @@ func TestUnapprovedCandidateCannotProduceHealthyMaintenance(t *testing.T) {
 		t.Fatal("candidate accepted as healthy")
 	}
 }
-func TestTCPPacketsCannotSatisfyUDPDenyEvidence(t *testing.T) {
-	var text strings.Builder
-	index := 0
-	for _, proto := range []string{"tcp", "udp"} {
-		for _, label := range denyLabels {
-			packets := 0
-			if proto == "tcp" {
-				packets = 12
-			}
-			fmt.Fprintf(&text, "@%d block drop out log quick inet proto %s from any to any user = 502 label %q\n  [ Evaluations: 24 Packets: %d Bytes: 100 States: 0 ]\n", index, proto, label, packets)
-			index++
-		}
-	}
-	counters, e := protocolCounters(text.String())
-	if e != nil {
-		t.Fatal(e)
-	}
-	before := Snapshot{ProtocolCounters: map[string]uint64{}}
-	after := Snapshot{ProtocolCounters: counters}
-	for key := range counters {
-		before.ProtocolCounters[key] = 0
-	}
-	if delta, ok := protocolDelta(before, after, "tcp"); !ok || delta != 48 {
-		t.Fatalf("TCP delta %d %v", delta, ok)
-	}
-	if delta, ok := protocolDelta(before, after, "udp"); !ok || delta != 0 {
-		t.Fatalf("TCP traffic credited to UDP: %d %v", delta, ok)
-	}
-	malformed := strings.Replace(text.String(), "proto udp", "proto icmp", 1)
-	if _, e = protocolCounters(malformed); e == nil {
-		t.Fatal("unattributable protocol accepted")
-	}
-	after.ProtocolCounters["tcp/macserve-protected"] = 0
-	before.ProtocolCounters["tcp/macserve-protected"] = 1
-	if _, ok := protocolDelta(before, after, "tcp"); ok {
-		t.Fatal("reset protocol counter accepted")
-	}
-}
 func TestSittingBindingsRejectDeploymentOrProfileChanges(t *testing.T) {
-	c := Challenge{EnvironmentSHA256: "reviewed", Observation: maintenance.Observation{JobUID: 502, PolicySHA256: "policy", Profiles: map[string]string{"profile": "pin"}}, TCP: []string{"127.0.0.1:8080"}, UDP: []string{"127.0.0.1:9000"}, Allow: []string{"192.0.2.1:443"}}
+	c := Challenge{EnvironmentSHA256: "reviewed", Observation: maintenance.Observation{JobUID: 502, Profiles: map[string]string{"profile": "pin"}}, TCP: []string{"127.0.0.1:8080"}, UDP: []string{"127.0.0.1:9000"}, Allow: []string{"192.0.2.1:443"}}
 	other := c
 	other.EnvironmentSHA256 = "different"
 	if compatibleSitting(c, other) {
@@ -400,6 +271,7 @@ func TestTCPMatrixCapacityRefusesRatherThanTruncates(t *testing.T) {
 func TestOwnerCanaryControlsRequireBeforeAndAfter(t *testing.T) {
 	c, j, o, receipts := receiptFixture()
 	c.OwnerCanary = "/Users/exampleowner/canary"
+	receipts[0].Listen = ""
 	receipts[0].OwnerBefore = OwnerCanaryControl{Path: c.OwnerCanary, At: receipts[0].Started, Readable: true}
 	receipts[0].OwnerAfter = OwnerCanaryControl{Path: c.OwnerCanary, At: receipts[0].Finished, Readable: true}
 	if ok, n := ownerCanaryControls(c, j, o, receipts); !ok || n != 2 {
@@ -407,12 +279,13 @@ func TestOwnerCanaryControlsRequireBeforeAndAfter(t *testing.T) {
 	}
 	original := receipts[0]
 	cases := map[string]func(*Receipts){
-		"before too late":   func(r *Receipts) { r.OwnerBefore.At = j.Started.Add(time.Second) },
-		"after too early":   func(r *Receipts) { r.OwnerAfter.At = j.Finished.Add(-time.Second) },
-		"before unreadable": func(r *Receipts) { r.OwnerBefore.Readable = false },
-		"after unreadable":  func(r *Receipts) { r.OwnerAfter.Readable = false },
-		"different canary":  func(r *Receipts) { r.OwnerAfter.Path = "/Users/exampleowner/other" },
-		"outside receiver":  func(r *Receipts) { r.OwnerBefore.At = r.Started.Add(-time.Second) },
+		"network-bound controls": func(r *Receipts) { r.Listen = c.UDP[0] },
+		"before too late":        func(r *Receipts) { r.OwnerBefore.At = j.Started.Add(time.Second) },
+		"after too early":        func(r *Receipts) { r.OwnerAfter.At = j.Finished.Add(-time.Second) },
+		"before unreadable":      func(r *Receipts) { r.OwnerBefore.Readable = false },
+		"after unreadable":       func(r *Receipts) { r.OwnerAfter.Readable = false },
+		"different canary":       func(r *Receipts) { r.OwnerAfter.Path = "/Users/exampleowner/other" },
+		"outside receiver":       func(r *Receipts) { r.OwnerBefore.At = r.Started.Add(-time.Second) },
 	}
 	for name, change := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -504,5 +377,141 @@ func TestFilesystemProbesDistinguishDenialFromMissingAndReadablePaths(t *testing
 		if ok, detail := deniedRead(item.path, item.list); !ok {
 			t.Fatal(detail)
 		}
+	}
+}
+
+func phaseOneFixture() (Challenge, Report, Report, []Receipts) {
+	now := time.Now().UTC()
+	c := Challenge{
+		Environment: deploy.Environment{OwnerUser: "example-owner", DeveloperDir: "/Applications/Xcode.app/Contents/Developer"},
+		OwnerCanary: "/Users/example-owner/private/canary",
+		Socket:      "/private/worker.sock", PrivatePaths: []string{"/private/store"},
+		TCP: []string{"127.0.0.1:8080", "[::1]:8080", "100.64.0.7:8080", "192.0.2.5:8080"},
+	}
+	j := Report{Started: now, Finished: now.Add(time.Minute)}
+	o := j
+	for _, path := range homeTargets(c) {
+		row := Result{Category: "owner_home_denial", Target: path, Attempt: 1, Success: true}
+		j.Results = append(j.Results, row)
+		o.Results = append(o.Results, row)
+	}
+	for _, path := range append([]string{c.Socket}, c.PrivatePaths...) {
+		j.Results = append(j.Results, Result{Category: "unix_socket_boundary", Target: path, Attempt: 1, Success: true})
+	}
+	j.Results = append(j.Results, Result{Category: "tool_profiles", Target: c.Environment.DeveloperDir, Attempt: 1, Success: true})
+	receipt := Receipts{Started: now.Add(-time.Second), Finished: now.Add(2 * time.Minute)}
+	receipt.OwnerBefore = OwnerCanaryControl{Path: c.OwnerCanary, At: receipt.Started, Readable: true}
+	receipt.OwnerAfter = OwnerCanaryControl{Path: c.OwnerCanary, At: receipt.Finished, Readable: true}
+	return c, j, o, []Receipts{receipt}
+}
+
+func TestNetworkObservationsNeverBlockApproval(t *testing.T) {
+	for _, outcome := range []string{"reachable", "unreachable", "missing", "UDP received", "receiver failed"} {
+		t.Run(outcome, func(t *testing.T) {
+			c, j, o, receipts := phaseOneFixture()
+			if outcome != "missing" {
+				for _, target := range c.TCP {
+					for attempt := 1; attempt <= 3; attempt++ {
+						row := Result{Category: "network_reachability", Target: target, Attempt: attempt, Success: outcome != "unreachable", Detail: outcome}
+						j.Results = append(j.Results, row)
+						o.Results = append(o.Results, row)
+					}
+				}
+			}
+			if outcome == "UDP received" {
+				c.UDP = []string{"127.0.0.1:9000"}
+				row := Result{Category: "network_reachability", Target: c.UDP[0], Attempt: 1, Success: true, Nonce: strings.Repeat("a", 64)}
+				j.Results = append(j.Results, row)
+				receipts = append(receipts, Receipts{Listen: c.UDP[0], Started: j.Started, Finished: j.Finished,
+					Packets: []Received{{Packet: Packet{Role: "job", Attempt: 1, Nonce: row.Nonce}, At: j.Started}}})
+			}
+			if outcome == "receiver failed" {
+				receipts = append(receipts, Receipts{Error: "bind: address already in use"})
+			}
+			if e := validateReceiptPackets(j, o, receipts); e != nil {
+				t.Fatal(e)
+			}
+			v := Candidate{Categories: aggregate(c, j, o, receipts)}
+			if e := readyAutomatic(v); e != nil {
+				t.Fatal(e)
+			}
+			for _, name := range []string{"fast_switch", "reboot"} {
+				v.Categories[name] = Category{Status: "pass"}
+			}
+			if e := readyApproval(v); e != nil {
+				t.Fatal(e)
+			}
+			network := v.Categories["network_reachability"]
+			if network.Status != networkStatus || network.Probe.Status != networkStatus {
+				t.Fatalf("network observation claimed enforcement: %+v", network)
+			}
+			if outcome == "UDP received" && network.Probe.CanaryReceipts != 1 {
+				t.Fatal("delivered job packet not preserved as observation")
+			}
+		})
+	}
+}
+
+func TestNonNetworkFailuresStillBlockApproval(t *testing.T) {
+	for _, category := range []string{"unix_socket_boundary", "owner_home_denial", "tool_profiles", "owner_unaffected", "fast_switch", "reboot"} {
+		t.Run(category, func(t *testing.T) {
+			c, j, o, receipts := phaseOneFixture()
+			if category == "owner_unaffected" {
+				receipts[0].OwnerAfter.Readable = false
+			} else {
+				for i := range j.Results {
+					if j.Results[i].Category == category {
+						j.Results[i].Success = false
+					}
+				}
+			}
+			v := Candidate{Categories: aggregate(c, j, o, receipts)}
+			for _, name := range []string{"fast_switch", "reboot"} {
+				if name != category {
+					v.Categories[name] = Category{Status: "pass"}
+				}
+			}
+			if e := readyApproval(v); e == nil {
+				t.Fatalf("%s failure admitted", category)
+			}
+		})
+	}
+}
+
+func TestOldChallengeAndReportSchemasRejected(t *testing.T) {
+	now := time.Now().UTC().Add(-time.Minute)
+	c := Challenge{Schema: 1, ID: strings.Repeat("a", 64), Created: now, Expires: now.Add(lifetime), Environment: deploy.Environment{JobUID: 502}}
+	if e := fresh(c, now.Add(time.Second)); e == nil {
+		t.Fatal("old challenge admitted")
+	}
+	r := Report{Schema: 1, ChallengeSHA256: "current", Role: "job", UID: 502, Groups: []int{502}, Started: now, Finished: now.Add(time.Second)}
+	if e := checkReport(r, c, "current", "job"); e == nil {
+		t.Fatal("old report admitted")
+	}
+}
+
+func TestReceiptIntegrityDoesNotRequireDelivery(t *testing.T) {
+	_, job, owner, receipts := receiptFixture()
+	if e := validateReceiptPackets(job, owner, receipts); e != nil {
+		t.Fatal(e)
+	}
+	for _, mutate := range []func(*Received){
+		func(p *Received) { p.Packet.Challenge = "other" },
+		func(p *Received) { p.Packet.Role = "unreviewed" },
+		func(p *Received) { p.Packet.Nonce = strings.Repeat("f", 64) },
+		func(p *Received) { p.At = receipts[0].Finished.Add(time.Second) },
+	} {
+		packet := receipts[0].Packets[0]
+		mutate(&packet)
+		r := receipts[0]
+		r.Packets = []Received{packet}
+		if e := validateReceiptPackets(job, owner, []Receipts{r}); e == nil {
+			t.Fatal("unbound receipt packet admitted")
+		}
+	}
+	receipts[0].Packets = nil
+	receipts[0].Error = "receiver unavailable"
+	if e := validateReceiptPackets(job, owner, receipts); e != nil {
+		t.Fatalf("missing delivery became an enforcement gate: %v", e)
 	}
 }
