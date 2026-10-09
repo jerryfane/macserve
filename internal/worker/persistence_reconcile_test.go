@@ -284,10 +284,24 @@ func TestLegacyLoginInspectionAndUnavailableNativeAdmissionFailClosed(t *testing
 }
 
 func TestTransientAdmissionDoesNotQuarantine(t *testing.T) {
-	for _, failure := range []error{context.Canceled, context.DeadlineExceeded, syscall.EPERM, errors.New("unsupported census")} {
+	for _, failure := range []error{
+		context.Canceled, context.DeadlineExceeded, syscall.EPERM,
+		errors.New("boot identity changed"),
+		errors.New("GUI baseline process disappeared"),
+		os.ErrNotExist,
+		errors.New("unsupported dumpbtm output"),
+	} {
 		t.Run(failure.Error(), func(t *testing.T) {
 			runner := &admissionRunner{failure: failure}
 			engine := engineFixture(t, runner)
+			for range 3 {
+				if err := engine.Recover(context.Background()); !errors.Is(err, failure) {
+					t.Fatalf("pre-claim recovery lost admission refusal: %v", err)
+				}
+				if _, err := engine.root.Lstat(quarantineRecord); !os.IsNotExist(err) {
+					t.Fatalf("pre-claim refusal persisted quarantine: %v", err)
+				}
+			}
 			job := fixtureJob(t, model.Build)
 			source, archive := sourceFixture(t)
 			if _, err := engine.Execute(context.Background(), job, source, bytes.NewReader(archive), nil); !errors.Is(err, failure) {

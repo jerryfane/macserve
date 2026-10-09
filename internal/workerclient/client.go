@@ -182,7 +182,9 @@ func (c *Client) Run(ctx context.Context) (returned error) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := c.engine.Recover(ctx); err != nil {
+		admissionErr := c.engine.Recover(ctx)
+		statusErr := c.saveAdmissionStatus(admissionErr)
+		if err := errors.Join(admissionErr, statusErr); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -395,6 +397,29 @@ func (s *remoteSink) Stage(state model.State) error {
 	return err
 }
 
+// admissionStatus is an observation, never an authority for clearing quarantine.
+type admissionStatus struct {
+	State     string    `json:"state"`
+	Reason    string    `json:"reason"`
+	CheckedAt time.Time `json:"checked_at"`
+}
+
+func (c *Client) saveAdmissionStatus(admissionErr error) error {
+	status := admissionStatus{State: "admitting", CheckedAt: time.Now().UTC()}
+	if admissionErr != nil {
+		status.State = "not_admitting"
+		status.Reason = admissionErr.Error()
+	}
+	data, err := json.Marshal(status)
+	if err != nil {
+		return err
+	}
+	if err := c.saveState("admission-status.json", data); err != nil {
+		return fmt.Errorf("write admission status: %w", err)
+	}
+	return nil
+}
+
 func (c *Client) savePending(value pending) error {
 	data, err := json.Marshal(value)
 	if err != nil {
@@ -403,11 +428,15 @@ func (c *Client) savePending(value pending) error {
 	if len(data) > 64<<20 {
 		return errors.New("completion exceeds 64 MiB")
 	}
+	return c.saveState("pending.json", data)
+}
+
+func (c *Client) saveState(name string, data []byte) error {
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return err
 	}
-	tmp := "pending-" + hex.EncodeToString(nonce[:]) + ".tmp"
+	tmp := name + "-" + hex.EncodeToString(nonce[:]) + ".tmp"
 	f, err := c.root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return err
@@ -424,7 +453,7 @@ func (c *Client) savePending(value pending) error {
 	if closeErr != nil {
 		return closeErr
 	}
-	if err := c.root.Rename(tmp, "pending.json"); err != nil {
+	if err := c.root.Rename(tmp, name); err != nil {
 		return err
 	}
 	dir, err := c.root.Open(".")

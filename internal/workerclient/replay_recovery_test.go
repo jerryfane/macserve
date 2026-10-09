@@ -83,66 +83,79 @@ func TestUncertainPendingCompletionReplaysBeforeRecoveryWithoutRegistration(t *t
 	}
 }
 
-func TestAdmissionFailureRecoversAndRegistersFreshEpochBeforeNextLease(t *testing.T) {
+func TestAdmissionRefusalPreservesQueueUntilNextAdmittingPoll(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var mu sync.Mutex
 	var events []string
-	var epochs []string
-	claims, recoveries, executions := 0, 0, 0
+	queued := true
+	claims, recoveries, executions, completions := 0, 0, 0, 0
+	var root string
+	checkStatus := func(state, reason string) {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(root, "admission-status.json"))
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		var status admissionStatus
+		if err := json.Unmarshal(data, &status); err != nil {
+			t.Error(err)
+			return
+		}
+		if status.State != state || status.Reason != reason || status.CheckedAt.IsZero() {
+			t.Errorf("unexpected admission status: %+v", status)
+		}
+	}
 	cfg, _ := unixController(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
 		switch r.URL.Path {
 		case protocol.Prefix + "/register":
 			events = append(events, "register")
-			var registration protocol.Registration
-			if err := json.NewDecoder(r.Body).Decode(&registration); err != nil {
-				t.Error(err)
-				w.WriteHeader(http.StatusBadRequest)
-				return
-			}
-			if !registration.Quiescent || registration.Epoch != r.Header.Get(protocol.EpochHeader) {
-				t.Error("registration did not acknowledge verified quiescence")
-			}
-			epochs = append(epochs, registration.Epoch)
+			checkStatus("admitting", "")
 			w.WriteHeader(http.StatusNoContent)
 		case protocol.Prefix + "/next":
 			events = append(events, "next")
 			claims++
-			if claims == 1 {
-				deadline := time.Now().Add(time.Minute)
-				json.NewEncoder(w).Encode(protocol.Lease{Job: model.Job{ID: "admission", WorkerEpoch: r.Header.Get(protocol.EpochHeader), State: model.Preparing, Deadline: &deadline}, Token: "lease"})
-				return
-			}
-			cancel()
-			w.WriteHeader(http.StatusNoContent)
+			queued = false
+			deadline := time.Now().Add(time.Minute)
+			json.NewEncoder(w).Encode(protocol.Lease{Job: model.Job{ID: "admission", WorkerEpoch: r.Header.Get(protocol.EpochHeader), State: model.Preparing, Deadline: &deadline}, Token: "lease"})
 		case protocol.Prefix + "/jobs/admission/source":
 			events = append(events, "source")
 			w.Write([]byte("source"))
 		case protocol.Prefix + "/jobs/admission/complete":
 			events = append(events, "complete")
-			var result worker.Result
-			if err := json.NewDecoder(r.Body).Decode(&result); err != nil {
-				t.Error(err)
-			}
-			if result.State != model.Failed || result.CleanupOK {
-				t.Errorf("admission failure falsely claimed cleanup: %+v", result)
-			}
+			completions++
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			t.Errorf("unexpected request %s", r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
+	root = cfg.Root
+	refusal := errors.New("GUI baseline process disappeared; worker-reset required")
 	engine := &fakeExecutor{
 		recover: func(context.Context) error {
 			mu.Lock()
 			defer mu.Unlock()
 			recoveries++
 			events = append(events, "recover")
-			if recoveries == 2 {
-				return errors.New("temporary cleanup inspection failure")
+			if recoveries == 5 {
+				cancel()
+				return context.Canceled
+			}
+			if claims != 0 || executions != 0 || completions != 0 || !queued {
+				t.Error("admission refusal consumed queued work")
+			}
+			if recoveries > 1 {
+				checkStatus("not_admitting", refusal.Error())
+			}
+			if _, err := os.Stat(filepath.Join(root, "admission-quarantine.json")); !os.IsNotExist(err) {
+				t.Errorf("non-contamination refusal created marker: %v", err)
+			}
+			if recoveries <= 3 {
+				return refusal
 			}
 			return nil
 		},
@@ -151,7 +164,7 @@ func TestAdmissionFailureRecoversAndRegistersFreshEpochBeforeNextLease(t *testin
 			defer mu.Unlock()
 			executions++
 			events = append(events, "execute")
-			return worker.Result{State: model.Failed, CleanupOK: false}, context.DeadlineExceeded
+			return worker.Result{State: model.Succeeded, CleanupOK: true}, nil
 		},
 	}
 	client, err := New(cfg, engine)
@@ -164,17 +177,42 @@ func TestAdmissionFailureRecoversAndRegistersFreshEpochBeforeNextLease(t *testin
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	want := []string{"recover", "register", "next", "source", "execute", "complete", "recover", "recover", "register", "next"}
+	want := []string{"recover", "recover", "recover", "recover", "register", "next", "source", "execute", "complete", "recover"}
 	if !reflect.DeepEqual(events, want) {
-		t.Fatalf("unsafe recovery ordering: got %v, want %v", events, want)
+		t.Fatalf("unsafe pre-claim ordering: got %v, want %v", events, want)
 	}
-	if len(epochs) != 2 || epochs[0] == epochs[1] || executions != 1 {
-		t.Fatalf("failed-cleanup epoch reused or job replayed: epochs=%v executions=%d", epochs, executions)
+	if queued || claims != 1 || executions != 1 || completions != 1 {
+		t.Fatalf("recovered admission did not resume work: queued=%v claims=%d executions=%d completions=%d", queued, claims, executions, completions)
 	}
-	if _, err := os.Stat(filepath.Join(cfg.Root, "pending.json")); !os.IsNotExist(err) {
-		t.Fatalf("acknowledged failed completion retained: %v", err)
+}
+
+func TestAdmissionStatusWriteFailurePreventsClaims(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cfg, _ := unixController(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("status write failure allowed request: %s", r.URL.Path)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	// A directory cannot be atomically replaced by the status file.
+	if err := os.Mkdir(filepath.Join(cfg.Root, "admission-status.json"), 0700); err != nil {
+		t.Fatal(err)
 	}
-	if len(engine.removed) != 1 || engine.removed[0] != "admission" {
-		t.Fatalf("acknowledged export not removed: %v", engine.removed)
+	recoveries := 0
+	client, err := New(cfg, &fakeExecutor{recover: func(context.Context) error {
+		recoveries++
+		if recoveries == 3 {
+			cancel()
+		}
+		return nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if err := client.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if recoveries != 3 {
+		t.Fatalf("status write failure did not retry ordinary polling: %d", recoveries)
 	}
 }

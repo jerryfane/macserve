@@ -104,11 +104,18 @@ It records `job_uid`, kernel `boot` identity, and each selected `pid` with its e
 It never adopts unselected processes or signals owner/controller processes. Missing/reused baseline
 processes or changed boot refuse admission without creating quarantine; audit and use the same reset.
 
-Before every native job, positive observation of a job-home LaunchAgents entry, nonempty crontab,
-legacy/modern login registration or leftover process outside the audited baseline creates the single
-durable `admission-quarantine.json` marker. Positive residuals after cleanup do likewise. Cancellation,
-deadlines, I/O and inspection-command errors fail admission/job without a marker; the worker logs,
-waits its normal poll interval and retries. Recovery does not run admission on every idle poll.
+Before every registration/claim poll, recovery first cleans up recorded owned resources, then verifies
+admission. Pending completion replay precedes recovery. A refusal leaves queued jobs untouched: the
+worker logs its reason, waits the normal poll interval and retries; cancellation exits. Execute rechecks
+admission after claim in case host state changed. Positive observation of a job-home LaunchAgents entry,
+nonempty crontab, legacy/modern login registration or leftover process outside the audited baseline creates
+the single durable `admission-quarantine.json` marker. Positive residuals after cleanup do likewise.
+Cancellation, deadlines, I/O and inspection-command errors refuse admission without creating a marker.
+Before registration/claim, the client atomically publishes `<root>/admission-status.json` (the worker config's
+broker-private `root`, mode `0600`) with `state` (`admitting` or `not_admitting`), `reason` and UTC `checked_at`.
+Status-write errors also block registration/claim and retry on the normal poll. This file is only the last
+observation, not a live heartbeat or a second quarantine authority; it may be stale after shutdown and
+requires no administrator clear. Editing/removing it cannot bypass recovery or clear quarantine.
 The fixed probes have deadlines and output bounds. Modern registration inspection requires an
 explicitly empty job-UID section from `sfltool dumpbtm`; missing/unfamiliar output is a transient refusal,
 not proof of absence. GUI scripting permissions and any long-lived probe-created processes must be

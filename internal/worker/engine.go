@@ -254,7 +254,7 @@ func (e *Engine) registryNames() ([]string, error) {
 	return dir.Readdirnames(-1)
 }
 
-// Recover retries only recorded resources; admission runs when executing work.
+// Recover retries recorded resources, then verifies admission before a new claim.
 func (e *Engine) Recover(ctx context.Context) error {
 	if !e.mu.TryLock() {
 		return ErrBusy
@@ -266,7 +266,10 @@ func (e *Engine) Recover(ctx context.Context) error {
 	if err := e.checkQuarantine(); err != nil {
 		return err
 	}
-	return e.recoverOwned(ctx, false)
+	if err := e.recoverOwned(ctx, false); err != nil {
+		return err
+	}
+	return e.admission(ctx)
 }
 
 func (e *Engine) recoverOwned(ctx context.Context, reset bool) error {
