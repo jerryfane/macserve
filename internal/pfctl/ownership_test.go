@@ -83,8 +83,14 @@ func (f *ownershipFixture) run(_ context.Context, args ...string) (Output, error
 		if f.loads > 0 {
 			return Output{Stdout: f.after}, nil
 		}
+		if f.absent && f.before == "" {
+			return Output{Stderr: "pfctl: DIOCGETRULES: Invalid argument\n"}, nil
+		}
 		return Output{Stdout: f.before}, nil
 	case "-sn":
+		if f.absent && f.loads == 0 && f.translation == "" {
+			return Output{Stderr: "pfctl: DIOCGETRULES: Invalid argument\n"}, nil
+		}
 		return Output{Stdout: f.translation}, nil
 	case "-s Tables":
 		return Output{Stdout: f.tables}, nil
@@ -127,6 +133,28 @@ func TestOwnershipInitializesEmptyOrAbsentThenReloadsReceipt(t *testing.T) {
 	}
 }
 
+func TestOwnershipMissingRulesRequiresMissingAnchor(t *testing.T) {
+	for _, query := range []string{"-sr", "-sn"} {
+		t.Run(query, func(t *testing.T) {
+			fixture := &ownershipFixture{after: ownedRules}
+			store := &memoryOwnershipStore{}
+			c := ownershipClient(t, fixture, store)
+			c.run = func(ctx context.Context, args ...string) (Output, error) {
+				if slices.Equal(args, []string{"-a", c.anchor, query}) {
+					return Output{Stderr: "pfctl: DIOCGETRULES: Invalid argument\n"}, nil
+				}
+				return fixture.run(ctx, args...)
+			}
+			if _, err := c.Load(context.Background(), policyPath(t, ownedRules), LoadOptions{JobUID: 1502}); err == nil {
+				t.Fatal("missing rules accepted for a separately observed existing anchor")
+			}
+			if fixture.loads != 0 || store.writes != 0 {
+				t.Fatal("inconsistent absence reached a write")
+			}
+		})
+	}
+}
+
 func TestOwnershipRefusesForeignOrUnprovenStateBeforeWrite(t *testing.T) {
 	prior := ownershipRecord("org.example/service", 1502, ownedRules)
 	for _, tc := range []struct {
@@ -152,6 +180,8 @@ func TestOwnershipRefusesForeignOrUnprovenStateBeforeWrite(t *testing.T) {
 		{name: "translation-unreadable", fixture: ownershipFixture{readFail: "-sn"}},
 		{name: "tables-unreadable", fixture: ownershipFixture{readFail: "-s Tables"}},
 		{name: "absent-but-filter-unreadable", fixture: ownershipFixture{absent: true, readFail: "-sr"}},
+		{name: "absent-but-translation-unreadable", fixture: ownershipFixture{absent: true, readFail: "-sn"}},
+		{name: "absent-but-tables-unreadable", fixture: ownershipFixture{absent: true, readFail: "-s Tables"}},
 		{name: "absent-but-populated", fixture: ownershipFixture{absent: true, before: ownedRules}},
 		{name: "receipt-destination-unprotected", prepareErr: errors.New("unprotected storage")},
 	} {

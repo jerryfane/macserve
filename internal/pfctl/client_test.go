@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -175,6 +176,52 @@ func TestReadDiagnosticsFailClosed(t *testing.T) {
 			_, err = c.Read(context.Background(), "-a", "org.example/peer", "-v", "-s", "Anchors")
 			if (err == nil) != tc.ok || tc.want != nil && !errors.Is(err, tc.want) || tc.want == nil && errors.Is(err, ErrAnchorAbsent) {
 				t.Fatalf("diagnostic classification: %v", err)
+			}
+		})
+	}
+}
+
+func TestAbsentRuleDiagnosticRequiresExactScopedReadAndExit(t *testing.T) {
+	const missing = "pfctl: DIOCGETRULES: Invalid argument\n"
+	const altq = "No ALTQ support in kernel\nALTQ related functions disabled\n"
+	exitOne := exec.Command("/bin/sh", "-c", "exit 1").Run()
+	exitTwo := exec.Command("/bin/sh", "-c", "exit 2").Run()
+	if exitOne == nil || exitTwo == nil {
+		t.Fatal("nonzero process fixtures unexpectedly succeeded")
+	}
+	for _, tc := range []struct {
+		name   string
+		args   []string
+		output Output
+		err    error
+		absent bool
+	}{
+		{"filter", []string{"-a", "org.example/service", "-sr"}, Output{Stderr: missing}, nil, true},
+		{"nat", []string{"-a", "org.example/service", "-sn"}, Output{Stderr: altq + missing}, nil, true},
+		{"exit-one", []string{"-a", "org.example/service", "-sr"}, Output{Stderr: missing}, exitOne, false},
+		{"exit-two", []string{"-a", "org.example/service", "-sr"}, Output{Stderr: missing}, exitTwo, false},
+		{"runner-failure", []string{"-a", "org.example/service", "-sr"}, Output{Stderr: missing}, errors.New("runner failed"), false},
+		{"partial-output", []string{"-a", "org.example/service", "-sr"}, Output{Stdout: "\n", Stderr: missing}, nil, false},
+		{"permission", []string{"-a", "org.example/service", "-sr"}, Output{Stderr: "pfctl: DIOCGETRULES: Permission denied\n"}, nil, false},
+		{"extra-diagnostic", []string{"-a", "org.example/service", "-sr"}, Output{Stderr: missing + "other failure\n"}, nil, false},
+		{"missing-newline", []string{"-a", "org.example/service", "-sr"}, Output{Stderr: strings.TrimSuffix(missing, "\n")}, nil, false},
+		{"extra-whitespace", []string{"-a", "org.example/service", "-sr"}, Output{Stderr: "\n" + missing}, nil, false},
+		{"root-rules", []string{"-sr"}, Output{Stderr: missing}, nil, false},
+		{"root-nat", []string{"-sn"}, Output{Stderr: missing}, nil, false},
+		{"tables", []string{"-a", "org.example/service", "-s", "Tables"}, Output{Stderr: missing}, nil, false},
+		{"verbose", []string{"-a", "org.example/service", "-vvsr"}, Output{Stderr: missing}, nil, false},
+		{"wrong-ioctl", []string{"-a", "org.example/service", "-sr"}, Output{Stderr: "pfctl: DIOCGETRULE: Invalid argument\n"}, nil, false},
+		{"anchor-exit-one", []string{"-a", "org.example/service", "-v", "-s", "Anchors"}, Output{Stderr: "Anchor 'org.example/service' not found.\n"}, exitOne, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := New("org.example/service")
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.run = func(context.Context, ...string) (Output, error) { return tc.output, tc.err }
+			_, err = c.Read(context.Background(), tc.args...)
+			if err == nil || errors.Is(err, ErrAnchorAbsent) != tc.absent {
+				t.Fatalf("absence classification=%v, want absent=%v", err, tc.absent)
 			}
 		})
 	}

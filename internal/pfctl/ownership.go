@@ -44,9 +44,10 @@ func ValidateOwnedAnchor(path string, exclusions ...[]string) error {
 	return nil
 }
 
-// All direct namespaces must be empty except filter rules; child absence is
-// never used to excuse failed rule/table reads. Even a named-but-empty child
-// makes the configured path a parent rather than an exclusively owned leaf.
+// All direct namespaces must be empty except filter rules. Only the exact
+// missing-ruleset diagnostic can stand for empty filter/NAT reads, and only
+// when the separate child listing also established that the anchor is absent.
+// Even a named-but-empty child makes this a parent, not an owned leaf.
 func (c *Client) ownedState(ctx context.Context) (string, error) {
 	children, err := c.Read(ctx, "-a", c.anchor, "-v", "-s", "Anchors")
 	absent := errors.Is(err, ErrAnchorAbsent)
@@ -63,12 +64,12 @@ func (c *Client) ownedState(ctx context.Context) (string, error) {
 		return "", errors.New("owned PF anchor has a reserved child or its absence is unproven")
 	}
 	filter, err := c.Read(ctx, "-a", c.anchor, "-sr")
-	if err != nil {
+	if err != nil && !(absent && errors.Is(err, ErrAnchorAbsent)) {
 		return "", fmt.Errorf("PF ownership filter observation: %w", err)
 	}
 	for _, args := range [][]string{{"-sn"}, {"-s", "Tables"}} {
 		out, err := c.Read(ctx, append([]string{"-a", c.anchor}, args...)...)
-		if err != nil {
+		if err != nil && !(absent && args[0] == "-sn" && errors.Is(err, ErrAnchorAbsent)) {
 			return "", fmt.Errorf("PF ownership direct namespace observation: %w", err)
 		}
 		if out.Stdout != "" {

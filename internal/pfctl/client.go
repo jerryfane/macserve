@@ -150,18 +150,25 @@ func (c *Client) execute(ctx context.Context, args ...string) (Output, error) {
 	if len(out.Stdout) > 1<<20 || len(out.Stderr) > 8192 {
 		return out, errors.New("PF output limit exceeded")
 	}
-	text := strings.TrimSpace(out.Stderr)
+	// The pinned BSD show paths warn and return -1, but main ignores that
+	// return value and exits 0. Do not also accept exit 1 or approximate text.
+	// Apple XNU returns EINVAL for a missing ruleset; live macOS confirmation
+	// of this userland contract remains part of the pre-load capture review.
 	const altq = "No ALTQ support in kernel\nALTQ related functions disabled"
+	diagnostic := strings.TrimPrefix(out.Stderr, altq+"\n")
+	if err == nil && out.Stdout == "" && len(args) >= 3 && args[0] == "-a" && AnchorPath(args[1]) {
+		if len(args) == 3 && (args[2] == "-sr" || args[2] == "-sn") &&
+			diagnostic == "pfctl: DIOCGETRULES: Invalid argument\n" {
+			return out, ErrAnchorAbsent
+		}
+		if len(args) == 5 && args[2] == "-v" && args[3] == "-s" && args[4] == "Anchors" &&
+			diagnostic == "Anchor '"+args[1]+"' not found.\n" {
+			return out, ErrAnchorAbsent
+		}
+	}
+	text := strings.TrimSpace(diagnostic)
 	if text == altq {
 		text = ""
-	} else {
-		text = strings.TrimPrefix(text, altq+"\n")
-	}
-	var exitErr *exec.ExitError
-	normalExit := err == nil || errors.As(err, &exitErr) && exitErr.ExitCode() == 1
-	if normalExit && out.Stdout == "" && len(args) == 5 && args[0] == "-a" && AnchorPath(args[1]) &&
-		args[2] == "-v" && args[3] == "-s" && args[4] == "Anchors" && text == "Anchor '"+args[1]+"' not found." {
-		return out, ErrAnchorAbsent
 	}
 	if err != nil {
 		return out, err

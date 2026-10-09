@@ -83,7 +83,7 @@ func TestFilterEvaluationOrder(t *testing.T) {
 		root, before, own, after string
 		want                     bool
 	}{
-		{"stock auxiliary calls", "scrub-anchor \"com.apple/*\" all\nanchor \"com.apple/*\" all\ndummynet-anchor \"com.apple/*\" all\n", "", ownedFilterRules, "", true},
+		{"stock auxiliary calls", "scrub-anchor \"com.apple/*\" all fragment reassemble\nanchor \"com.apple/*\" all\ndummynet-anchor \"com.apple/*\" all\n", "", ownedFilterRules, "", true},
 		{"earlier root quick bypass", "pass out quick proto tcp from any to 203.0.113.8 port = 443\nanchor \"com.apple/*\" all\n", "", ownedFilterRules, "", false},
 		{"earlier sibling quick bypass", "", "pass out quick all\n", ownedFilterRules, "", false},
 		{"interface is not disjoint", "", "pass out quick on en0 all\n", ownedFilterRules, "", false},
@@ -167,6 +167,34 @@ func TestFilterAnchorCalls(t *testing.T) {
 				t.Fatal("unproven graph accepted")
 			}
 		})
+	}
+}
+
+func TestFilterAnchorUnsupportedPrintForms(t *testing.T) {
+	for _, kind := range []string{"anchor", "scrub-anchor", "dummynet-anchor", "nat-anchor", "rdr-anchor", "binat-anchor"} {
+		for _, form := range []string{
+			"\"custom/*\" out all",
+			"\"custom/*\" quick all",
+			"quick \"custom/*\" all",
+			"\"custom/*\" all fragment",
+			"\"custom/*\" all fragment reassemble extra",
+			"\"custom/*\" out all fragment reassemble",
+			"quick \"custom/*\" all fragment reassemble",
+			"\"custom/*\" all fragment reassemble",
+		} {
+			if kind == "scrub-anchor" && form == "\"custom/*\" all fragment reassemble" {
+				continue
+			}
+			t.Run(kind+" "+form, func(t *testing.T) {
+				f := filterRulesFixture{
+					"":               kind + " " + form + "\nanchor \"custom/*\" all\n",
+					"custom/service": ownedFilterRules,
+				}
+				if _, err := observeFilterOrder(context.Background(), "custom/service", 550, f.query); err == nil {
+					t.Fatal("unsupported anchor print form accepted")
+				}
+			})
+		}
 	}
 }
 

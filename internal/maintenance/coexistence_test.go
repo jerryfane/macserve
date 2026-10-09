@@ -182,7 +182,7 @@ func TestCoexistenceObservationDetectsRuleAndPIDChanges(t *testing.T) {
 
 func TestCoexistenceStockAuxiliaryCallsRemainBound(t *testing.T) {
 	c, fixture := coexistenceInputs()
-	stock := "scrub-anchor \"com.apple/*\" all\nanchor \"com.apple/*\" all\ndummynet-anchor \"com.apple/*\" all\n"
+	stock := "scrub-anchor \"com.apple/*\" all fragment reassemble\nanchor \"com.apple/*\" all\ndummynet-anchor \"com.apple/*\" all\n"
 	fixture["-sr"] = coexistenceReply{out: pfctl.Output{Stdout: stock}}
 	before, err := observeCoexistenceWithCommands(context.Background(), c, fixture.command, fixture.command)
 	if err != nil {

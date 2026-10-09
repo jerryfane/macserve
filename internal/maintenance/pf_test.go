@@ -24,8 +24,8 @@ func stockPFFixture() pfFixture {
 	return pfFixture{
 		"-s info":                                 {{text: "Status: Enabled for 0 days 00:00:01           Debug: Urgent\n"}},
 		"-i lo0 -v -s Interfaces":                 {{text: "lo0\n"}},
-		"-sr":                                     {{text: "scrub-anchor \"com.apple/*\" all\nanchor \"com.apple/*\" all\ndummynet-anchor \"com.apple/*\" all\n"}},
-		"-a * -sr":                                {{text: "scrub-anchor \"com.apple/*\" all\nanchor \"com.apple/*\" all {\nanchor \"macserve\" all {\n" + ownedFilterRules + "}\n}\ndummynet-anchor \"com.apple/*\" all\n"}},
+		"-sr":                                     {{text: "scrub-anchor \"com.apple/*\" all fragment reassemble\nanchor \"com.apple/*\" all\ndummynet-anchor \"com.apple/*\" all\n"}},
+		"-a * -sr":                                {{text: "scrub-anchor \"com.apple/*\" all fragment reassemble\nanchor \"com.apple/*\" all {\nanchor \"macserve\" all {\n" + ownedFilterRules + "}\n}\ndummynet-anchor \"com.apple/*\" all\n"}},
 		"-a com.apple -sr":                        {{}},
 		"-a com.apple/empty -sr":                  {{}},
 		"-a com.apple/macserve -sr":               {{text: ownedFilterRules}},

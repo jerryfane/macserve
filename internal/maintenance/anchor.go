@@ -96,11 +96,19 @@ func directFilterRuleLine(line string) bool {
 
 // Exact printed calls only: conditional and quick anchor calls are unsupported.
 func filterAnchorTarget(current, line string) (string, bool, error) {
-	_, name, ok := strings.Cut(line, " \"")
-	if !ok || !strings.HasSuffix(name, "\" all") {
+	kind, name, ok := strings.Cut(line, " \"")
+	if !ok {
 		return "", false, errors.New("unsupported PF anchor call")
 	}
-	name = strings.TrimSuffix(name, "\" all")
+	switch kind {
+	case "anchor", "scrub-anchor", "dummynet-anchor", "nat-anchor", "rdr-anchor", "binat-anchor":
+	default:
+		return "", false, errors.New("unsupported PF anchor call")
+	}
+	name, suffix, ok := strings.Cut(name, "\"")
+	if !ok || (suffix != " all" && (kind != "scrub-anchor" || suffix != " all fragment reassemble")) {
+		return "", false, errors.New("unsupported PF anchor call")
+	}
 	absolute := strings.HasPrefix(name, "/")
 	if absolute {
 		name = strings.TrimPrefix(name, "/")
