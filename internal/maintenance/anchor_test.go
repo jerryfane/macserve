@@ -13,6 +13,20 @@ import (
 
 const ownedFilterRules = "block drop out log quick proto tcp all user = 550 label \"macserve-default-deny\"\nblock drop out log quick proto udp all user = 550 label \"macserve-default-deny\"\n"
 
+func mandatoryFilterRules() string {
+	var rules strings.Builder
+	for _, destination := range []string{"127.0.0.0/8", "169.254.0.0/16", "::1", "fe80::/10"} {
+		family := "inet"
+		if strings.Contains(destination, ":") {
+			family = "inet6"
+		}
+		for _, protocol := range []string{"tcp", "udp"} {
+			fmt.Fprintf(&rules, "block drop out log quick %s proto %s from any to %s user = 550 label \"macserve-private\"\n", family, protocol, destination)
+		}
+	}
+	return rules.String()
+}
+
 type filterRulesFixture map[string]string
 
 func (f filterRulesFixture) snapshot() []pfTranslation {
@@ -77,7 +91,13 @@ func TestFilterEvaluationOrder(t *testing.T) {
 		{"incoming is disjoint", "", "pass in quick all\n", ownedFilterRules, "", true},
 		{"icmp is disjoint", "", "pass out quick proto icmp all\n", ownedFilterRules, "", true},
 		{"nonquick sibling overridden", "", "pass out all\n", ownedFilterRules, "", true},
-		{"reviewed own exception before catchall", "", "pass out all\n", "pass out quick proto tcp from any to 203.0.113.9 port = 443 user = 550 flags S/SA keep state label \"reviewed-https\"\n" + ownedFilterRules, "", true},
+		{"reviewed own exception after mandatory boundary", "", "pass out all\n", mandatoryFilterRules() + "pass out quick proto tcp from any to 203.0.113.9 port = 443 user = 550 flags S/SA keep state label \"reviewed-https\"\n" + ownedFilterRules, "", true},
+		{"local exception before mandatory boundary", "", "", "pass out quick proto tcp from any to ::1 port = 443 user = 550\n" + mandatoryFilterRules() + ownedFilterRules, "", false},
+		{"local exception after mandatory boundary cannot bypass", "", "", mandatoryFilterRules() + "pass out quick proto tcp from any to ::1 port = 443 user = 550\n" + ownedFilterRules, "", true},
+		{"partial mandatory boundary before pass", "", "", strings.Replace(mandatoryFilterRules(), "inet6 proto udp from any to fe80::/10", "inet6 proto tcp from any to fe80::/10", 1) + "pass out quick proto tcp from any to fe80::1 port = 443 user = 550\n" + ownedFilterRules, "", false},
+		{"interface scoped mandatory boundary", "", "", strings.ReplaceAll(mandatoryFilterRules(), "quick ", "quick on lo0 ") + "pass out quick all user = 550\n" + ownedFilterRules, "", false},
+		{"port scoped mandatory boundary", "", "", strings.ReplaceAll(mandatoryFilterRules(), " user", " port = 443 user") + "pass out quick all user = 550\n" + ownedFilterRules, "", false},
+		{"source scoped mandatory boundary", "", "", strings.ReplaceAll(mandatoryFilterRules(), "from any", "from 192.0.2.1") + "pass out quick all user = 550\n" + ownedFilterRules, "", false},
 		{"family split catchalls override", "", "pass out all\n", "block drop out quick inet all user = 550\nblock drop out quick inet6 all user = 550\n", "", true},
 		{"nonquick root overridden", "pass out all\nanchor \"com.apple/*\" all\n", "", ownedFilterRules, "", true},
 		{"nonquick survives narrow deny", "", "pass out all\n", "block drop out quick proto tcp from any to 192.0.2.1 user = 550\n", "", false},
@@ -89,7 +109,7 @@ func TestFilterEvaluationOrder(t *testing.T) {
 		{"later sibling bypass without terminal deny", "", "", "block drop out proto tcp all user = 550\n", "pass out quick all\n", false},
 		{"later main nonquick survives", "anchor \"com.apple/*\" all\npass out all\n", "", "block drop out all user = 550\n", "", false},
 		{"later sibling nonquick survives", "", "", "block drop out all user = 550\n", "pass out all\n", false},
-		{"later blanket block overrides nonquick", "anchor \"com.apple/*\" all\nblock drop out all\n", "pass out all\n", "block drop out proto tcp all user = 550\n", "", true},
+		{"later blanket block overrides nonquick", "anchor \"com.apple/*\" all\nblock drop out all\n", "pass out all\n", mandatoryFilterRules() + "block drop out proto tcp all user = 550\n", "", true},
 		{"unknown syntax even disjoint", "", "pass in quick all probability 10%\n", ownedFilterRules, "", false},
 		{"unknown syntax after terminal deny", "", "", ownedFilterRules, "pass out all probability 10%\n", false},
 		{"wrong own uid cannot protect", "", "pass out all\n", "block drop out quick all user = 551\n", "", false},

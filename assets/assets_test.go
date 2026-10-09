@@ -231,11 +231,36 @@ func TestPFRenderedDenyPrecedenceAndOwnerIsolation(t *testing.T) {
 		for address, want := range map[string]string{
 			"10.20.30.40": "macserve-private", "172.16.1.2": "macserve-private", "192.168.1.2": "macserve-private", "100.64.1.2": "macserve-private", "fc00::1": "macserve-private", "fe80::1": "macserve-private",
 			"192.0.2.10": "macserve-host", "2001:db8::10": "macserve-host",
-			"127.0.0.1": "macserve-default-deny", "::1": "macserve-default-deny", "203.0.113.90": "macserve-default-deny",
+			"127.0.0.1": "macserve-private", "127.255.255.254": "macserve-private", "::1": "macserve-private", "169.254.255.254": "macserve-private", "febf:ffff::1": "macserve-private", "203.0.113.90": "macserve-default-deny",
 		} {
 			if got := policy.decision(1502, protocol, address, 443); got != want {
 				t.Fatalf("%s %s = %s, want %s", protocol, address, got, want)
 			}
+		}
+	}
+}
+
+func TestPFMandatoryRangesCannotReachLaterException(t *testing.T) {
+	policy, err := parsePF(render(t, "pf/org.macserve.conf.tmpl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Model an owner-reviewed quick pass immediately before the final catchall.
+	// No host-address entry includes these destinations.
+	policy.rules = append(policy.rules[:len(policy.rules)-1], pfRule{destination: "any", label: "reviewed-pass"})
+	for _, protocol := range []string{"tcp", "udp"} {
+		for _, address := range []string{"127.0.0.1", "127.255.255.255", "169.254.0.1", "169.254.255.255", "::1", "fe80::1", "febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff"} {
+			for _, port := range []int{1, 443, 65535} {
+				if got := policy.decision(1502, protocol, address, port); got != "macserve-private" {
+					t.Fatalf("mandatory boundary %s %s:%d reached %s", protocol, address, port, got)
+				}
+				if got := policy.decision(1501, protocol, address, port); got != "outside-anchor" {
+					t.Fatalf("mandatory boundary affected non-job UID: %s", got)
+				}
+			}
+		}
+		if got := policy.decision(1502, protocol, "203.0.113.90", 443); got != "reviewed-pass" {
+			t.Fatalf("public destination did not reach reviewed exception: %s", got)
 		}
 	}
 }

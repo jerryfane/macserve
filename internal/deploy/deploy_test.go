@@ -99,6 +99,64 @@ func TestEnvironmentRejectsAmbiguousAndExecutableData(t *testing.T) {
 	}
 }
 
+func TestEnvironmentOmitsCoveredLinkLocalHosts(t *testing.T) {
+	base, assets := fixture(t)
+	want, err := renderAssets(base, assets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, covered := range []string{
+		"169.254.0.0,169.254.255.255",
+		"fe80::1,febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+		"fe80::1%en0,fe80::1%en1,fe80::1%12",
+		"fe80::1%bridge_test-0.1,fe80::2%" + strings.Repeat("a", 63),
+	} {
+		t.Run(covered, func(t *testing.T) {
+			data := strings.Replace(reviewedEnvironment, "192.0.2.10\n", "192.0.2.10,"+covered+"\n", 1)
+			e, err := ParseEnvironment([]byte(data))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(e.HostAddresses, base.HostAddresses) {
+				t.Fatalf("covered hosts entered target inventory: %v", e.HostAddresses)
+			}
+			got, err := renderAssets(e, assets)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for name, source := range want {
+				if !bytes.Equal(got[name], source) {
+					t.Fatalf("covered addresses changed rendered %s", name)
+				}
+			}
+		})
+	}
+}
+
+func TestEnvironmentRejectsUnsafeHostScopes(t *testing.T) {
+	for _, host := range []string{
+		"fe80::1%", "fe80::1%en0%en1", "fe80::1%en 0", "fe80::1%en/0",
+		"fe80::1%en:0", "fe80::1%é", "fe80::1%" + strings.Repeat("a", 64),
+		"2001:db8::1%en0", "fd7a:115c:a1e0::1%en0", "::1%lo0",
+		"169.254.1.1%en0", "::ffff:169.254.1.1", "FE80::1%en0",
+		"fe80:0:0:0:0:0:0:1", "fe80::1/64", "fe80::1,fe80::1",
+		"192.0.2.10", "not-an-address",
+	} {
+		t.Run(host, func(t *testing.T) {
+			data := strings.Replace(reviewedEnvironment, "192.0.2.10\n", "192.0.2.10,"+host+"\n", 1)
+			if _, err := ParseEnvironment([]byte(data)); err == nil {
+				t.Fatal("accepted unsafe, noncanonical or repeated host")
+			}
+		})
+	}
+	for _, listener := range []string{"fe80::1", "fe80::1%en0", "169.254.1.1", "fd7a:115c:a1e0::1%en0"} {
+		data := strings.Replace(reviewedEnvironment, "TAILNET_IP=100.64.0.10", "TAILNET_IP="+listener, 1)
+		if _, err := ParseEnvironment([]byte(data)); err == nil {
+			t.Fatalf("accepted unsafe tailnet listener %s", listener)
+		}
+	}
+}
+
 func TestEnvironmentFirewallPolicy(t *testing.T) {
 	options := "PF_ANCHOR=com.apple/macserve-build\nCOEXISTING_ANCHORS=com.apple/guest-b,com.apple/guest-a\nCOEXISTING_SERVICES=com.example.router-b,com.example.router-a\nTOLERATED_TRANSLATION_ANCHORS=com.apple/guest-a\nAPPROVED_GUEST_SUBNETS=172.20.40.128/25\n"
 	e, err := ParseEnvironment([]byte(reviewedEnvironment + options))

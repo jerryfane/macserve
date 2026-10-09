@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-const ownedRules = "block drop out log quick proto tcp from any to any user = 1502 label \"macserve-default-deny\"\n"
+const ownedRules = "block drop out log quick proto tcp from any to any user = 1502 label \"macserve-default-deny\"\nblock drop out log quick proto udp from any to any user = 1502 label \"macserve-default-deny\"\n"
 
 type memoryOwnershipStore struct {
 	receipt    ownershipReceipt
@@ -136,9 +136,9 @@ func TestOwnershipRefusesForeignOrUnprovenStateBeforeWrite(t *testing.T) {
 		readErr    error
 		prepareErr error
 	}{
-		{name: "unmarked-foreign", fixture: ownershipFixture{before: "pass out all user = 1502\n"}},
+		{name: "unmarked-foreign", fixture: ownershipFixture{before: strings.ReplaceAll(ownedRules, "macserve-default-deny", "foreign-deny")}},
 		{name: "marker-without-receipt", fixture: ownershipFixture{before: ownedRules}},
-		{name: "changed-rules", fixture: ownershipFixture{before: strings.Replace(ownedRules, "proto tcp", "proto udp", 1)}, receipt: prior},
+		{name: "changed-rules", fixture: ownershipFixture{before: strings.Replace(ownedRules, "log quick", "quick", 1)}, receipt: prior},
 		{name: "different-path", fixture: ownershipFixture{before: ownedRules}, receipt: ownershipRecord("org.example/peer", 1502, ownedRules)},
 		{name: "different-uid", fixture: ownershipFixture{before: ownedRules}, receipt: ownershipRecord("org.example/service", 1503, ownedRules)},
 		{name: "receipt-unprotected", fixture: ownershipFixture{before: ownedRules}, receipt: prior, readErr: errors.New("unprotected receipt")},
@@ -177,9 +177,11 @@ func TestOwnershipReceiptsOnlySuccessfulValidatedLoads(t *testing.T) {
 		{name: "failed-native-load", fixture: ownershipFixture{loadFail: true, after: ownedRules}},
 		{name: "failed-post-observation", fixture: ownershipFixture{postFail: true, after: ownedRules}},
 		{name: "empty-post-state"},
-		{name: "unmarked-post-state", fixture: ownershipFixture{after: "block out all user = 1502\n"}},
+		{name: "unmarked-post-state", fixture: ownershipFixture{after: strings.ReplaceAll(ownedRules, "macserve-default-deny", "foreign-deny")}},
 		{name: "wrong-uid-post-state", fixture: ownershipFixture{after: strings.ReplaceAll(ownedRules, "1502", "1503")}},
 		{name: "inbound-post-state", fixture: ownershipFixture{after: strings.ReplaceAll(ownedRules, " out ", " in ")}},
+		{name: "missing-udp-post-state", fixture: ownershipFixture{after: strings.ReplaceAll(ownedRules, "proto udp", "proto tcp")}},
+		{name: "local-pass-before-deny-post-state", fixture: ownershipFixture{after: localPass + ownedRules}},
 		{name: "failed-receipt-write", fixture: ownershipFixture{after: ownedRules}, writeErr: errors.New("disk failure")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -243,7 +245,7 @@ func TestPolicyRequiresEveryRuleToHaveExactOutboundJobScope(t *testing.T) {
 			t.Fatalf("accepted configured UID %d", uid)
 		}
 	}
-	if err := validatePolicy("pass out all user 1502\n", 1502); err == nil {
+	if err := validatePolicy(strings.ReplaceAll(ownedRules, "macserve-default-deny", "foreign-deny"), 1502); err == nil {
 		t.Fatal("markerless policy accepted")
 	}
 }
@@ -265,5 +267,27 @@ func TestOwnershipStorageRejectsSymlinksAndWritableModes(t *testing.T) {
 	}
 	if _, err := protectedOwnershipPath(filepath.Dir(file), false, 0600); err == nil {
 		t.Fatal("directory receipt trusted")
+	}
+}
+
+func TestOwnershipUpgradesReceiptedPolicyBeforeBoundaryCutover(t *testing.T) {
+	previous := "pass out quick proto tcp from any to 203.0.113.10 port = 443 user = 1502\n" + ownedRules
+	for _, receipted := range []bool{false, true} {
+		t.Run(map[bool]string{false: "unreceipted-refused", true: "receipted-upgrade"}[receipted], func(t *testing.T) {
+			fixture := &ownershipFixture{before: previous, after: ownedRules}
+			store := &memoryOwnershipStore{}
+			if receipted {
+				store.receipt = ownershipRecord("org.example/service", 1502, previous)
+			}
+			c := ownershipClient(t, fixture, store)
+			_, err := c.Load(context.Background(), policyPath(t, ownedRules), LoadOptions{JobUID: 1502})
+			if receipted {
+				if err != nil || fixture.loads != 1 || store.writes != 1 || store.receipt != ownershipRecord(c.anchor, 1502, ownedRules) {
+					t.Fatalf("receipted prior policy could not upgrade: loads=%d writes=%d err=%v", fixture.loads, store.writes, err)
+				}
+			} else if err == nil || fixture.loads != 0 || store.writes != 0 {
+				t.Fatalf("unreceipted prior policy adopted: loads=%d writes=%d err=%v", fixture.loads, store.writes, err)
+			}
+		})
 	}
 }

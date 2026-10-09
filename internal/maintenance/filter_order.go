@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/jerryfane/macserve/internal/pfctl"
 )
 
 // The four bits cover outbound job-owned IPv4/IPv6 TCP/UDP socket traffic.
@@ -42,6 +44,11 @@ func proveFilterOrder(selected string, uid uint32, snapshot []pfTranslation) err
 	graph := make(map[string][]orderedFilterRule, len(snapshot))
 	remaining := 65536
 	for _, rules := range snapshot {
+		if rules.Path == selected {
+			if err := pfctl.ValidateMandatoryDeny(rules.Rules, uid); err != nil {
+				return fmt.Errorf("PF mandatory job boundary: %w", err)
+			}
+		}
 		graph[rules.Path] = nil
 		text := rules.Rules
 		for text != "" {

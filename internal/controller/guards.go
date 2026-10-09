@@ -186,15 +186,16 @@ func availableBytes(path string) (int64, error) {
 	return int64(stat.Bavail) * int64(stat.Bsize), nil
 }
 
-// InterfaceDigest invalidates qualification after address/interface changes. It
-// reads public interface metadata only, never traffic or another user's files.
+// InterfaceDigest invalidates qualification after relevant address/interface
+// changes. Link-local ranges are fixed-denied and do not affect qualification.
 func InterfaceDigest() (string, error) {
 	digest, _, err := observeInterfaces(false)
 	return digest, err
 }
 
 // InterfaceSnapshot returns the digest and host addresses from the same public
-// interface inventory, including loopback, aliases, and VM bridge gateways.
+// interface inventory, including loopback, aliases, and VM bridge gateways but
+// excluding fixed-denied link-local ranges.
 func InterfaceSnapshot() (string, []netip.Addr, error) {
 	return observeInterfaces(true)
 }
@@ -204,24 +205,38 @@ func observeInterfaces(includeAddresses bool) (string, []netip.Addr, error) {
 	if err != nil {
 		return "", nil, err
 	}
+	return interfaceInventory(interfaces, (*net.Interface).Addrs, includeAddresses)
+}
+
+// interfaceInventory accepts the public interface metadata reader separately so
+// qualification drift can be exercised without mutating host interfaces.
+func interfaceInventory(interfaces []net.Interface, addrs func(*net.Interface) ([]net.Addr, error), includeAddresses bool) (string, []netip.Addr, error) {
 	var inventory []string
 	var hosts []netip.Addr
 	for _, iface := range interfaces {
-		addresses, err := iface.Addrs()
+		addresses, err := addrs(&iface)
 		if err != nil {
 			return "", nil, err
 		}
-		inventory = append(inventory, iface.Name+" flags="+iface.Flags.String())
+		relevant := false
 		for _, address := range addresses {
 			text := address.String()
+			prefix, err := netip.ParsePrefix(text)
+			if err != nil {
+				return "", nil, fmt.Errorf("unrecognized interface address: %w", err)
+			}
+			host := prefix.Addr().Unmap()
+			if host.IsLinkLocalUnicast() {
+				continue
+			}
+			relevant = true
 			inventory = append(inventory, iface.Name+" "+text)
 			if includeAddresses {
-				prefix, err := netip.ParsePrefix(text)
-				if err != nil {
-					return "", nil, fmt.Errorf("unrecognized interface address: %w", err)
-				}
-				hosts = append(hosts, prefix.Addr().Unmap().WithZone(""))
+				hosts = append(hosts, host)
 			}
+		}
+		if relevant {
+			inventory = append(inventory, iface.Name+" flags="+iface.Flags.String())
 		}
 	}
 	sort.Strings(inventory)

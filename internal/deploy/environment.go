@@ -41,6 +41,7 @@ type Environment struct {
 var accountName = regexp.MustCompile(`^[a-z][a-z0-9_]{0,30}$`)
 var repositoryName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*/[a-z0-9][a-z0-9._-]*$`)
 var developerPath = regexp.MustCompile(`^/[A-Za-z0-9 /_.+-]+$`)
+var interfaceZone = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,63}$`)
 
 // ParseEnvironment accepts data, not shell syntax. Quotes and expansions are rejected.
 func ParseEnvironment(data []byte) (Environment, error) {
@@ -117,11 +118,15 @@ func ParseEnvironment(data []byte) (Environment, error) {
 	}
 	seenAddresses := map[string]bool{}
 	for _, s := range strings.Split(values["HOST_ADDRESSES"], ",") {
-		if _, err := canonicalAddress(s); err != nil || seenAddresses[s] {
+		address, err := canonicalHostAddress(s)
+		if err != nil || seenAddresses[s] {
 			return e, errors.New("invalid or repeated host address")
 		}
 		seenAddresses[s] = true
-		e.HostAddresses = append(e.HostAddresses, s)
+		// Fixed PF denies cover link-local ranges independently of this inventory.
+		if !address.IsLinkLocalUnicast() {
+			e.HostAddresses = append(e.HostAddresses, s)
+		}
 	}
 	if !seenAddresses[e.TailnetIP] {
 		return e, errors.New("HOST_ADDRESSES must include TAILNET_IP")
@@ -176,6 +181,16 @@ func canonicalAddress(s string) (netip.Addr, error) {
 		return netip.Addr{}, errors.New("noncanonical or unsafe address")
 	}
 	return a, nil
+}
+
+func canonicalHostAddress(s string) (netip.Addr, error) {
+	a, err := netip.ParseAddr(s)
+	if err == nil && a.String() == s && a.IsLinkLocalUnicast() && !a.Is4In6() {
+		if a.Zone() == "" || (a.Is6() && interfaceZone.MatchString(a.Zone())) {
+			return a, nil
+		}
+	}
+	return canonicalAddress(s)
 }
 func LoadEnvironment(path string) (Environment, error) {
 	data, err := readRegular(path, MaxEnvironment)

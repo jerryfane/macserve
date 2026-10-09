@@ -125,6 +125,9 @@ func (c *Client) Load(ctx context.Context, file string, options LoadOptions) (Ou
 	if err := validateLoadedPolicy(after, options.JobUID); err != nil {
 		return out, err
 	}
+	if err := ValidateMandatoryDeny(after, options.JobUID); err != nil {
+		return out, err
+	}
 	if err := c.store.write(ownershipRecord(c.anchor, options.JobUID, after)); err != nil {
 		return out, err
 	}

@@ -3,13 +3,14 @@
 # Its call path must precede any quick-pass bypass; no set skip lo0.
 # Loading this child never enables/reloads main PF or flushes states. Existing job states require
 # separately approved handling and actual effective-UID boundary qualification.
-# HostAddresses: ALL current host LAN/tailnet/alias IPv4/IPv6 literals (no DNS names).
+# HostAddresses: current non-link-local host LAN/tailnet/alias literals (no DNS).
 # Any endpoint covered by an early deny cannot be excepted later.
 job_uid = "{{.JobUID}}"
 protected_ports = "{ {{.ProtectedPorts}} }"
-private_addresses = "{ 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4, ::/128, fc00::/7, fe80::/10, ff00::/8 }"
+private_addresses = "{ 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4, ::/128, ::1/128, fc00::/7, fe80::/10, ff00::/8 }"
 host_addresses = "{ {{.HostAddresses}} }"
 # No interface clause: includes lo0 and all present/future interfaces.
+# Loopback/link-local denies are mandatory and cannot be excepted by a pass.
 block drop out log quick proto { tcp udp } from any to any port $protected_ports user $job_uid label "macserve-protected"
 block drop out log quick proto { tcp udp } from any to $private_addresses user $job_uid label "macserve-private"
 block drop out log quick proto { tcp udp } from any to $host_addresses user $job_uid label "macserve-host"

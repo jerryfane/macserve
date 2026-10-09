@@ -67,6 +67,7 @@ func validatePolicy(text string, jobUID uint32) error {
 	}
 	macros := make(map[string]string)
 	rules, marked := 0, false
+	var deny mandatoryDeny
 	for n, line := range strings.Split(text, "\n") {
 		if n >= 4096 || len(line) > 8192 {
 			return errors.New("PF policy line limit exceeded")
@@ -94,8 +95,12 @@ func validatePolicy(text string, jobUID uint32) error {
 			macros[name] = value
 			continue
 		}
-		if !filterLine(line, macros, jobUID) {
+		tokens, ok := filterTokens(line)
+		if !ok || !filterLine(tokens, macros, jobUID) {
 			return fmt.Errorf("unsupported PF filter-only source on line %d", n+1)
+		}
+		if err := deny.add(tokens, macros); err != nil {
+			return fmt.Errorf("PF policy line %d: %w", n+1, err)
 		}
 		if strings.HasPrefix(line, "block") && strings.Contains(line, `"macserve-default-deny"`) {
 			marked = true
@@ -105,7 +110,7 @@ func validatePolicy(text string, jobUID uint32) error {
 	if rules == 0 || !marked {
 		return errors.New("PF policy requires filter rules and the macserve default-deny marker")
 	}
-	return nil
+	return deny.complete()
 }
 
 func macroName(s string) bool {
@@ -149,9 +154,8 @@ func literalValue(s string) bool {
 	return true
 }
 
-func filterLine(line string, macros map[string]string, jobUID uint32) bool {
-	tokens, ok := filterTokens(line)
-	if !ok || !jobScope(tokens, macros, jobUID) {
+func filterLine(tokens []string, macros map[string]string, jobUID uint32) bool {
+	if !jobScope(tokens, macros, jobUID) {
 		return false
 	}
 	depth := 0

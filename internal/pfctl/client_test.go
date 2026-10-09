@@ -135,12 +135,17 @@ func TestLoadAcceptsRenderedPolicyAndNarrowPass(t *testing.T) {
 	if err := tmpl.Execute(&rendered, map[string]any{"JobUID": 1502, "ProtectedPorts": "12345, 12346", "HostAddresses": "192.0.2.10, 2001:db8::10"}); err != nil {
 		t.Fatal(err)
 	}
-	rendered.WriteString("pass out quick inet proto tcp from any to 192.0.2.20 port = 443 user $job_uid label \"reviewed-exception\"\n")
-	if err := validatePolicy(rendered.String(), 1502); err != nil {
+	source := strings.Replace(rendered.String(), "# BEGIN OWNER-REVIEWED NARROW EXCEPTIONS", "pass out quick inet proto tcp from any to 192.0.2.20 port = 443 user $job_uid label \"reviewed-exception\"\n# BEGIN OWNER-REVIEWED NARROW EXCEPTIONS", 1)
+	if err := validatePolicy(source, 1502); err != nil {
 		t.Fatalf("rendered bounded filter policy refused: %v", err)
 	}
-	if err := validatePolicy(rendered.String(), 1503); err == nil {
+	if err := validatePolicy(source, 1503); err == nil {
 		t.Fatal("rendered policy accepted for a different job UID")
+	}
+	for _, destination := range []string{"127.0.0.0/8, ", "169.254.0.0/16, ", "::1/128, ", "fe80::/10, "} {
+		if err := validatePolicy(strings.Replace(source, destination, "", 1), 1502); err == nil {
+			t.Fatalf("rendered exception accepted without mandatory range %s", destination)
+		}
 	}
 }
 
