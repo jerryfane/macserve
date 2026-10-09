@@ -268,7 +268,7 @@ func coexistenceRules(text string, translation bool) error {
 		if kind == "no" {
 			kind, _, _ = strings.Cut(remainder, " ")
 		}
-		filterKind := kind == "anchor" || kind == "pass" || kind == "block" || kind == "scrub"
+		filterKind := kind == "anchor" || kind == "pass" || kind == "block" || kind == "scrub" || kind == "scrub-anchor" || kind == "dummynet-anchor"
 		translationKind := kind == "nat" || kind == "rdr" || kind == "binat" || kind == "nat-anchor" || kind == "rdr-anchor" || kind == "binat-anchor"
 		if translation && !translationKind || !translation && !filterKind {
 			return errors.New("unexpected direct PF ruleset kind")

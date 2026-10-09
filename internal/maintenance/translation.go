@@ -16,8 +16,8 @@ func validatePFConfig(c *Config) error {
 	if c.PFAnchor == "" {
 		c.PFAnchor = DefaultPFAnchor
 	}
-	if !pfctl.AnchorPath(c.PFAnchor) {
-		return errors.New("PF anchor must be an exact bounded path")
+	if err := pfctl.ValidateOwnedAnchor(c.PFAnchor, c.CoexistingAnchors, c.ToleratedTranslationAnchors); err != nil {
+		return err
 	}
 	if len(c.ToleratedTranslationAnchors) > maxGuestPolicyEntries || len(c.ApprovedGuestSubnets) > maxGuestPolicyEntries {
 		return errors.New("guest translation policy exceeds entry limit")

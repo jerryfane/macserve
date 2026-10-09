@@ -22,13 +22,14 @@ type Output struct {
 type Client struct {
 	anchor string
 	run    func(context.Context, ...string) (Output, error)
+	store  ownershipStore
 }
 
 func New(anchor string) (*Client, error) {
 	if !AnchorPath(anchor) {
-		return nil, errors.New("PF write scope must be an exact bounded owned anchor")
+		return nil, errors.New("PF client requires an exact bounded anchor")
 	}
-	return &Client{anchor: anchor, run: native}, nil
+	return &Client{anchor: anchor, run: native, store: protectedOwnershipStore{}}, nil
 }
 
 // AnchorPath accepts only canonical, exact PF paths, never root or wildcards.
@@ -71,19 +72,63 @@ func readArgs(args []string) bool {
 	rest := args[2:]
 	return slices.Equal(rest, []string{"-sr"}) || slices.Equal(rest, []string{"-sn"}) ||
 		slices.Equal(rest, []string{"-vvsr"}) || slices.Equal(rest, []string{"-s", "labels"}) ||
-		slices.Equal(rest, []string{"-v", "-s", "Anchors"})
+		slices.Equal(rest, []string{"-v", "-s", "Anchors"}) || slices.Equal(rest, []string{"-s", "Tables"})
 }
 
-// Load has deliberately no scope or argument parameter. The caller must stage
-// reviewed bytes in a protected location that cannot change through execution.
-func (c *Client) Load(ctx context.Context, file string) (Output, error) {
-	if c == nil || !AnchorPath(c.anchor) || c.run == nil {
+// LoadOptions binds policy scope and ownership to the installed configuration.
+type LoadOptions struct {
+	JobUID                      uint32
+	CoexistingAnchors           []string
+	ToleratedTranslationAnchors []string
+}
+
+// Load only initializes an empty leaf or replaces a protected, receipted prior
+// load. The caller stages reviewed bytes in a location immutable during the call.
+func (c *Client) Load(ctx context.Context, file string, options LoadOptions) (Output, error) {
+	if c == nil || c.run == nil || c.store == nil {
 		return Output{}, errors.New("uninitialized PF client")
 	}
-	if err := policyFile(file); err != nil {
+	if err := ValidateOwnedAnchor(c.anchor, options.CoexistingAnchors, options.ToleratedTranslationAnchors); err != nil {
 		return Output{}, err
 	}
-	return c.execute(ctx, "-a", c.anchor, "-f", file)
+	if err := policyFile(file, options.JobUID); err != nil {
+		return Output{}, err
+	}
+	before, err := c.ownedState(ctx)
+	if err != nil {
+		return Output{}, err
+	}
+	if before != "" {
+		if err := validateLoadedPolicy(before, options.JobUID); err != nil {
+			return Output{}, err
+		}
+		prior, err := c.store.read(c.anchor)
+		if err != nil {
+			return Output{}, err
+		}
+		if prior != ownershipRecord(c.anchor, options.JobUID, before) {
+			return Output{}, errors.New("PF populated anchor does not match protected ownership receipt")
+		}
+	}
+	// Verify/create the protected receipt destination before changing PF.
+	if err := c.store.prepare(); err != nil {
+		return Output{}, err
+	}
+	out, err := c.execute(ctx, "-a", c.anchor, "-f", file)
+	if err != nil {
+		return out, err
+	}
+	after, err := c.ownedState(ctx)
+	if err != nil {
+		return out, err
+	}
+	if err := validateLoadedPolicy(after, options.JobUID); err != nil {
+		return out, err
+	}
+	if err := c.store.write(ownershipRecord(c.anchor, options.JobUID, after)); err != nil {
+		return out, err
+	}
+	return out, nil
 }
 
 func (c *Client) execute(ctx context.Context, args ...string) (Output, error) {

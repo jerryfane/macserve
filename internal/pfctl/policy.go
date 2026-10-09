@@ -13,7 +13,7 @@ import (
 
 const maxPolicyBytes = 1 << 20
 
-func policyFile(path string) error {
+func policyFile(path string, jobUID uint32) error {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return errors.New("PF policy must have a clean absolute path")
 	}
@@ -52,18 +52,21 @@ func policyFile(path string) error {
 	if err != nil {
 		return err
 	}
-	return validatePolicy(string(data))
+	return validatePolicy(string(data), jobUID)
 }
 
 // This is a scope guard, not a substitute for reviewing PF semantics. Only
 // literal numeric/address macros and a deliberately small filter-only dialect
 // are supported. In particular, macros can never expand into PF keywords.
-func validatePolicy(text string) error {
+func validatePolicy(text string, jobUID uint32) error {
 	if len(text) == 0 || len(text) > maxPolicyBytes || strings.ContainsAny(text, "\\\r") {
 		return errors.New("unsupported PF policy size or line continuation")
 	}
-	macros := make(map[string]bool)
-	rules := 0
+	if jobUID == 0 {
+		return errors.New("PF policy requires an explicit non-root job UID")
+	}
+	macros := make(map[string]string)
+	rules, marked := 0, false
 	for n, line := range strings.Split(text, "\n") {
 		if n >= 4096 || len(line) > 8192 {
 			return errors.New("PF policy line limit exceeded")
@@ -85,19 +88,22 @@ func validatePolicy(text string) error {
 			if strings.HasPrefix(value, "\"") && strings.HasSuffix(value, "\"") && len(value) >= 2 {
 				value = value[1 : len(value)-1]
 			}
-			if len(macros) >= 128 || macros[name] || !literalValue(value) {
+			if len(macros) >= 128 || macros[name] != "" || !literalValue(value) {
 				return fmt.Errorf("unsupported PF literal macro on line %d", n+1)
 			}
-			macros[name] = true
+			macros[name] = value
 			continue
 		}
-		if !filterLine(line, macros) {
+		if !filterLine(line, macros, jobUID) {
 			return fmt.Errorf("unsupported PF filter-only source on line %d", n+1)
+		}
+		if strings.HasPrefix(line, "block") && strings.Contains(line, `"macserve-default-deny"`) {
+			marked = true
 		}
 		rules++
 	}
-	if rules == 0 {
-		return errors.New("PF policy contains no filter rules")
+	if rules == 0 || !marked {
+		return errors.New("PF policy requires filter rules and the macserve default-deny marker")
 	}
 	return nil
 }
@@ -143,34 +149,9 @@ func literalValue(s string) bool {
 	return true
 }
 
-func filterLine(line string, macros map[string]bool) bool {
-	// Tokenize braces/commas even when adjacent; quotes are confined to labels.
-	var tokens []string
-	for rest := line; rest != ""; {
-		rest = strings.TrimLeft(rest, " \t")
-		if rest == "" {
-			break
-		}
-		i := 0
-		switch rest[0] {
-		case '{', '}', ',', '=':
-			i = 1
-		case '"':
-			end := strings.IndexByte(rest[1:], '"')
-			if end < 0 {
-				return false
-			}
-			i = end + 2
-		default:
-			i = strings.IndexAny(rest, " \t{},=\"")
-			if i < 0 {
-				i = len(rest)
-			}
-		}
-		tokens = append(tokens, rest[:i])
-		rest = rest[i:]
-	}
-	if len(tokens) < 2 || tokens[0] != "block" && tokens[0] != "pass" {
+func filterLine(line string, macros map[string]string, jobUID uint32) bool {
+	tokens, ok := filterTokens(line)
+	if !ok || !jobScope(tokens, macros, jobUID) {
 		return false
 	}
 	depth := 0
@@ -190,15 +171,14 @@ func filterLine(line string, macros map[string]bool) bool {
 			if depth != 1 {
 				return false
 			}
-		case "=", "drop", "return", "return-rst", "return-icmp", "return-icmp6", "in", "out", "log", "quick", "inet", "inet6", "proto", "tcp", "udp", "icmp", "icmp6", "from", "to", "any", "all", "port", "user", "group", "label", "keep", "no", "modulate", "synproxy", "state":
+		case "=", "drop", "return", "return-rst", "return-icmp", "return-icmp6", "out", "log", "quick", "inet", "inet6", "proto", "tcp", "udp", "icmp", "icmp6", "from", "to", "any", "all", "port", "user", "label", "keep", "no", "modulate", "synproxy", "state":
 		default:
 			if strings.HasPrefix(token, "\"") {
-				// No PF expansion ($if, $nr, etc.) or lexer syntax inside labels.
-				if tokens[i] != "label" || len(token) < 3 || !labelLiteral(token[1:len(token)-1]) {
+				if tokens[i] != "label" || len(token) < 3 || len(token)-2 > 63 || !labelLiteral(token[1:len(token)-1]) {
 					return false
 				}
 			} else if strings.HasPrefix(token, "$") {
-				if !macros[token[1:]] {
+				if macros[token[1:]] == "" {
 					return false
 				}
 			} else if !literal(token) {
@@ -207,6 +187,88 @@ func filterLine(line string, macros map[string]bool) bool {
 		}
 	}
 	return depth == 0
+}
+
+func filterTokens(line string) ([]string, bool) {
+	// Tokenize braces/commas even when adjacent; quotes are confined to labels.
+	var tokens []string
+	for rest := line; rest != ""; {
+		rest = strings.TrimLeft(rest, " \t")
+		if rest == "" {
+			break
+		}
+		i := 0
+		switch rest[0] {
+		case '{', '}', ',', '=':
+			i = 1
+		case '"':
+			end := strings.IndexByte(rest[1:], '"')
+			if end < 0 {
+				return nil, false
+			}
+			i = end + 2
+		default:
+			i = strings.IndexAny(rest, " \t{},=\"")
+			if i < 0 {
+				i = len(rest)
+			}
+		}
+		tokens = append(tokens, rest[:i])
+		rest = rest[i:]
+	}
+	return tokens, true
+}
+
+// A scalar numeric UID (or scalar literal macro) is the only accepted user
+// predicate. Operators, lists, groups, repeated directions and repeated users
+// cannot weaken the boundary. PF itself subsequently checks grammar/order.
+func jobScope(tokens []string, macros map[string]string, jobUID uint32) bool {
+	if jobUID == 0 || len(tokens) < 4 || tokens[0] != "block" && tokens[0] != "pass" {
+		return false
+	}
+	out, user, depth := false, false, 0
+	for i := 1; i < len(tokens); i++ {
+		token := tokens[i]
+		switch token {
+		case "{":
+			depth++
+		case "}":
+			depth--
+		case "in", "group":
+			return false
+		case "out":
+			if out || depth != 0 {
+				return false
+			}
+			out = true
+		case "user":
+			if user || depth != 0 {
+				return false
+			}
+			user = true
+			i++
+			if i < len(tokens) && tokens[i] == "=" {
+				i++
+			}
+			if i >= len(tokens) {
+				return false
+			}
+			value := tokens[i]
+			if strings.HasPrefix(value, "$") {
+				value = macros[value[1:]]
+			}
+			if value != strconv.FormatUint(uint64(jobUID), 10) {
+				return false
+			}
+			if i+1 < len(tokens) && (literal(tokens[i+1]) || strings.HasPrefix(tokens[i+1], "$") || strings.ContainsAny(tokens[i+1], "{},=<>!")) {
+				return false
+			}
+		}
+		if depth < 0 {
+			return false
+		}
+	}
+	return out && user && depth == 0
 }
 
 func labelLiteral(s string) bool {

@@ -90,12 +90,16 @@ func observePFWithCommand(ctx context.Context, c Config, hosts []netip.Addr, o *
 	if err != nil {
 		return err
 	}
-	if err := filterAnchorReachable(ctx, c.PFAnchor, query); err != nil {
-		return err
-	}
-	anchor, err := query(ctx, "-a", c.PFAnchor, "-sr")
+	filters, err := observeFilterOrder(ctx, c.PFAnchor, o.JobUID, query)
 	if err != nil {
 		return err
+	}
+	var anchor string
+	for _, filter := range filters {
+		if filter.Path == c.PFAnchor {
+			anchor = filter.Rules
+			break
+		}
 	}
 	// Dynamic tables/interfaces can change effective policy without changing rule
 	// text. This initial observer supports only literal static addresses.
@@ -128,7 +132,8 @@ func observePFWithCommand(ctx context.Context, c Config, hosts []netip.Addr, o *
 		CoexistingServices          []string
 		Filter                      string
 		Translations                []pfTranslation
-	}{c.PFAnchor, c.ToleratedTranslationAnchors, c.ApprovedGuestSubnets, c.CoexistingAnchors, c.CoexistingServices, root, translations})
+		DirectFilters               []pfTranslation
+	}{c.PFAnchor, c.ToleratedTranslationAnchors, c.ApprovedGuestSubnets, c.CoexistingAnchors, c.CoexistingServices, root, translations, filters})
 	if err != nil {
 		return err
 	}

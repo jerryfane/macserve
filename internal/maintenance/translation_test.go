@@ -22,7 +22,7 @@ func TestPFConfigExactGuestPolicy(t *testing.T) {
 		t.Fatalf("default anchor: %q, %v", defaults.PFAnchor, err)
 	}
 	c := guestTranslationPolicy()
-	c.PFAnchor = "com.apple/custom-service"
+	c.PFAnchor = "com.apple/macserve-custom"
 	if err := validatePFConfig(&c); err != nil {
 		t.Fatal(err)
 	}
@@ -35,24 +35,32 @@ func TestPFConfigExactGuestPolicy(t *testing.T) {
 	}
 
 	cases := map[string]func(*Config){
-		"wildcard service":     func(c *Config) { c.PFAnchor = "com.apple/*" },
-		"relative traversal":   func(c *Config) { c.PFAnchor = "com.apple/../service" },
-		"empty component":      func(c *Config) { c.PFAnchor = "com.apple//service" },
-		"absolute path":        func(c *Config) { c.PFAnchor = "/com.apple/service" },
-		"service too deep":     func(c *Config) { c.PFAnchor = strings.Repeat("a/", 8) + "b" },
-		"wildcard tolerated":   func(c *Config) { c.ToleratedTranslationAnchors[0] = "com.apple/*" },
-		"empty tolerated":      func(c *Config) { c.ToleratedTranslationAnchors[0] = "" },
-		"own anchor tolerated": func(c *Config) { c.ToleratedTranslationAnchors[0] = c.PFAnchor },
-		"duplicate tolerated":  func(c *Config) { c.ToleratedTranslationAnchors[0] = c.ToleratedTranslationAnchors[1] },
-		"unpaired anchors":     func(c *Config) { c.ApprovedGuestSubnets = nil },
-		"unpaired subnets":     func(c *Config) { c.ToleratedTranslationAnchors = nil },
-		"duplicate subnet":     func(c *Config) { c.ApprovedGuestSubnets[0] = c.ApprovedGuestSubnets[1] },
-		"noncanonical network": func(c *Config) { c.ApprovedGuestSubnets[0] = "172.20.40.1/24" },
-		"noncanonical ipv6":    func(c *Config) { c.ApprovedGuestSubnets[0] = "FD42:1234::/64" },
-		"noncanonical mask":    func(c *Config) { c.ApprovedGuestSubnets[0] = "172.20.40.0/024" },
-		"bare guest host":      func(c *Config) { c.ApprovedGuestSubnets[0] = "172.20.40.4" },
-		"guest wildcard":       func(c *Config) { c.ApprovedGuestSubnets[0] = "0.0.0.0/0" },
-		"guest mapped alias":   func(c *Config) { c.ApprovedGuestSubnets[0] = "::ffff:172.20.40.0/120" },
+		"Apple parent":          func(c *Config) { c.PFAnchor = "com.apple" },
+		"Apple reserved child":  func(c *Config) { c.PFAnchor = "com.apple/250.ApplicationFirewall" },
+		"Apple foreign child":   func(c *Config) { c.PFAnchor = "com.apple/custom-service" },
+		"Apple nested leaf":     func(c *Config) { c.PFAnchor = "com.apple/macserve/child" },
+		"reserved component":    func(c *Config) { c.PFAnchor = "org.example/_pf/service" },
+		"own anchor coexisting": func(c *Config) { c.CoexistingAnchors = []string{c.PFAnchor} },
+		"coexisting descendant": func(c *Config) { c.CoexistingAnchors = []string{c.PFAnchor + "/child"} },
+		"tolerated descendant":  func(c *Config) { c.ToleratedTranslationAnchors[0] = c.PFAnchor + "/child" },
+		"wildcard service":      func(c *Config) { c.PFAnchor = "com.apple/*" },
+		"relative traversal":    func(c *Config) { c.PFAnchor = "com.apple/../service" },
+		"empty component":       func(c *Config) { c.PFAnchor = "com.apple//service" },
+		"absolute path":         func(c *Config) { c.PFAnchor = "/com.apple/service" },
+		"service too deep":      func(c *Config) { c.PFAnchor = strings.Repeat("a/", 8) + "b" },
+		"wildcard tolerated":    func(c *Config) { c.ToleratedTranslationAnchors[0] = "com.apple/*" },
+		"empty tolerated":       func(c *Config) { c.ToleratedTranslationAnchors[0] = "" },
+		"own anchor tolerated":  func(c *Config) { c.ToleratedTranslationAnchors[0] = c.PFAnchor },
+		"duplicate tolerated":   func(c *Config) { c.ToleratedTranslationAnchors[0] = c.ToleratedTranslationAnchors[1] },
+		"unpaired anchors":      func(c *Config) { c.ApprovedGuestSubnets = nil },
+		"unpaired subnets":      func(c *Config) { c.ToleratedTranslationAnchors = nil },
+		"duplicate subnet":      func(c *Config) { c.ApprovedGuestSubnets[0] = c.ApprovedGuestSubnets[1] },
+		"noncanonical network":  func(c *Config) { c.ApprovedGuestSubnets[0] = "172.20.40.1/24" },
+		"noncanonical ipv6":     func(c *Config) { c.ApprovedGuestSubnets[0] = "FD42:1234::/64" },
+		"noncanonical mask":     func(c *Config) { c.ApprovedGuestSubnets[0] = "172.20.40.0/024" },
+		"bare guest host":       func(c *Config) { c.ApprovedGuestSubnets[0] = "172.20.40.4" },
+		"guest wildcard":        func(c *Config) { c.ApprovedGuestSubnets[0] = "0.0.0.0/0" },
+		"guest mapped alias":    func(c *Config) { c.ApprovedGuestSubnets[0] = "::ffff:172.20.40.0/120" },
 		"too many anchors": func(c *Config) {
 			c.ToleratedTranslationAnchors = nil
 			for i := range 65 {

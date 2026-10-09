@@ -20,7 +20,7 @@ type firewallStepRecord struct {
 	Error    string                          `json:"error,omitempty"`
 }
 
-func loadFirewallPolicy(ctx context.Context, dir string, config maintenance.Config, policySHA string) (maintenance.CoexistenceEvidence, []byte, error) {
+func loadFirewallPolicy(ctx context.Context, dir string, config maintenance.Config, jobUID uint32, policySHA string) (maintenance.CoexistenceEvidence, []byte, error) {
 	var empty maintenance.CoexistenceEvidence
 	policy, err := protectedRead(config.PFPolicyFile)
 	if err != nil {
@@ -39,7 +39,14 @@ func loadFirewallPolicy(ctx context.Context, dir string, config maintenance.Conf
 	observe := func(ctx context.Context) (maintenance.CoexistenceState, error) {
 		return maintenance.ObserveCoexistence(ctx, config)
 	}
-	return runFirewallStep(ctx, dir, config.PFAnchor, policySHA, observe, client.Load)
+	load := func(ctx context.Context, file string) (pfctl.Output, error) {
+		return client.Load(ctx, file, pfctl.LoadOptions{
+			JobUID:                      jobUID,
+			CoexistingAnchors:           config.CoexistingAnchors,
+			ToleratedTranslationAnchors: config.ToleratedTranslationAnchors,
+		})
+	}
+	return runFirewallStep(ctx, dir, config.PFAnchor, policySHA, observe, load)
 }
 
 // Persist the complete before-state before invoking the sole scoped mutation.

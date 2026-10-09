@@ -3,99 +3,73 @@ package maintenance
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 
 	"github.com/jerryfane/macserve/internal/pfctl"
 )
 
-// filterAnchorReachable proves a call path, not that earlier quick rules cannot
-// bypass it. The observer separately checks the selected rules and whole policy.
-// Only direct, newline-terminated pfctl -sr output is accepted. Proof edges have
-// exactly the printed form anchor "name" all; conditional calls are not edges.
-// Names may be relative, absolute (one leading slash), or end in /*. Dot/parent
-// components, escaped names, inline/recursive braces and other call modifiers
-// are unsupported. Absolute paths follow Apple's pf_anchor_copyout:
-// https://github.com/apple-oss-distributions/xnu/blob/main/bsd/net/pf_ruleset.c
-//
-// pf.conf(5), ANCHORS specifies that wildcards visit immediate children only.
-// Without an anchor-list query, we can prove only the wildcard child on the
-// selected path, not an unrelated wildcard child that might call back into it.
-// The caller supplies its aggregate query budget; local bounds also cap direct
-// output, graph nodes and path depth even for a query without such a budget.
-func filterAnchorReachable(ctx context.Context, path string, query func(context.Context, ...string) (string, error)) error {
-	if !pfctl.AnchorPath(path) {
-		return errors.New("invalid selected PF filter anchor")
+// observeFilterOrder binds a stable, bounded direct-rules snapshot to the order
+// proof. Recursive -sr output alone cannot establish which wildcard siblings ran.
+func observeFilterOrder(ctx context.Context, path string, uid uint32, query func(context.Context, ...string) (string, error)) ([]pfTranslation, error) {
+	if !pfctl.AnchorPath(path) || uid < 501 {
+		return nil, errors.New("invalid selected PF filter anchor or job UID")
 	}
-	pending := []string{""}
-	visited := map[string]bool{"": true}
 	remaining := 4 << 20
-	for i := 0; i < len(pending); i++ {
+	bounded := func(ctx context.Context, args ...string) (string, error) {
 		if err := ctx.Err(); err != nil {
-			return err
+			return "", err
 		}
-		current := pending[i]
-		var text string
-		var err error
-		if current == "" {
-			text, err = query(ctx, "-sr")
-		} else {
-			text, err = query(ctx, "-a", current, "-sr")
-		}
+		text, err := query(ctx, args...)
 		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if err != nil {
-			return err
+			return "", ctx.Err()
 		}
 		remaining -= len(text)
 		if len(text) > 1<<20 || remaining < 0 {
-			return errors.New("PF filter anchor output limit exceeded")
+			return "", errors.New("PF filter anchor output limit exceeded")
 		}
-		if current == path {
-			return nil
-		}
-		for text != "" {
-			line, rest, complete := strings.Cut(text, "\n")
-			if !complete {
-				return errors.New("truncated PF filter rules")
+		return text, err
+	}
+	paths, err := pfAnchorTopology(ctx, bounded)
+	if err != nil {
+		return nil, err
+	}
+	if !slices.Contains(paths, path) {
+		return nil, errors.New("selected PF filter anchor missing from topology")
+	}
+	rules := make([]pfTranslation, len(paths))
+	for pass := range 2 {
+		for i, current := range paths {
+			var text string
+			if current == "" {
+				text, err = bounded(ctx, "-sr")
+			} else {
+				text, err = bounded(ctx, "-a", current, "-sr")
 			}
-			text = rest
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			if !directFilterRuleLine(line) {
-				return errors.New("unsupported direct PF filter rule output")
-			}
-			if !strings.HasPrefix(line, "anchor ") {
-				continue
-			}
-			name, suffix, quoted := strings.Cut(strings.TrimPrefix(line, "anchor \""), "\"")
-			if !strings.HasPrefix(line, "anchor \"") || !quoted {
-				return errors.New("unsupported PF filter anchor call")
-			}
-			if suffix != " all" {
-				continue
-			}
-			next, err := filterAnchorTarget(current, name, path)
 			if err != nil {
-				return err
+				return nil, err
 			}
-			if next == "" || visited[next] {
-				continue
+			if pass == 0 {
+				rules[i] = pfTranslation{current, text}
+			} else if text != rules[i].Rules {
+				return nil, errors.New("PF direct filter rules changed during observation")
 			}
-			if len(pending) >= 65 {
-				return errors.New("PF filter anchor traversal limit exceeded")
-			}
-			visited[next] = true
-			pending = append(pending, next)
+		}
+		after, err := pfAnchorTopology(ctx, bounded)
+		if err != nil {
+			return nil, err
+		}
+		if !slices.Equal(paths, after) {
+			return nil, errors.New("PF filter topology changed during observation")
 		}
 	}
-	return errors.New("selected PF filter anchor is not unconditionally reachable from root")
+	if err := proveFilterOrder(path, uid, rules); err != nil {
+		return nil, err
+	}
+	return rules, nil
 }
 
-// Reject multi-line quoted labels and recursive/inline output before looking
-// for anchor lines, so a label or nested block cannot manufacture a root edge.
+// Reject multi-line quoted labels and recursive/inline output before parsing.
 func directFilterRuleLine(line string) bool {
 	quoted := false
 	for _, c := range line {
@@ -113,20 +87,26 @@ func directFilterRuleLine(line string) bool {
 	}
 	kind, _, _ := strings.Cut(line, " ")
 	switch kind {
-	case "anchor", "pass", "block", "scrub", "no", "nat-anchor", "rdr-anchor", "binat-anchor", "nat", "rdr", "binat":
+	case "anchor", "pass", "block", "scrub", "no", "scrub-anchor", "dummynet-anchor", "nat-anchor", "rdr-anchor", "binat-anchor", "nat", "rdr", "binat":
 		return true
 	default:
 		return false
 	}
 }
 
-func filterAnchorTarget(current, name, selected string) (string, error) {
+// Exact printed calls only: conditional and quick anchor calls are unsupported.
+func filterAnchorTarget(current, line string) (string, bool, error) {
+	_, name, ok := strings.Cut(line, " \"")
+	if !ok || !strings.HasSuffix(name, "\" all") {
+		return "", false, errors.New("unsupported PF anchor call")
+	}
+	name = strings.TrimSuffix(name, "\" all")
 	absolute := strings.HasPrefix(name, "/")
 	if absolute {
 		name = strings.TrimPrefix(name, "/")
 	}
 	if name == "" || strings.HasPrefix(name, "/") {
-		return "", errors.New("unsupported PF filter anchor reference")
+		return "", false, errors.New("unsupported PF anchor reference")
 	}
 	wildcard := name == "*" || strings.HasSuffix(name, "/*")
 	if name == "*" {
@@ -134,9 +114,8 @@ func filterAnchorTarget(current, name, selected string) (string, error) {
 	} else if wildcard {
 		name = strings.TrimSuffix(name, "/*")
 	}
-	// Empty names are only meaningful for "*" (or its absolute form "/*").
 	if name == "" && !wildcard || name != "" && !pfctl.AnchorPath(name) {
-		return "", errors.New("unsupported PF filter anchor reference")
+		return "", false, errors.New("unsupported PF anchor reference")
 	}
 	base := name
 	if !absolute && current != "" {
@@ -146,22 +125,7 @@ func filterAnchorTarget(current, name, selected string) (string, error) {
 		}
 	}
 	if base != "" && !pfctl.AnchorPath(base) {
-		return "", errors.New("unsupported PF filter anchor depth")
+		return "", false, errors.New("unsupported PF anchor depth")
 	}
-	if !wildcard {
-		return base, nil
-	}
-	prefix := base
-	if prefix != "" {
-		prefix += "/"
-	}
-	if !strings.HasPrefix(selected, prefix) {
-		return "", nil
-	}
-	rest := strings.TrimPrefix(selected, prefix)
-	child, _, _ := strings.Cut(rest, "/")
-	if child == "" {
-		return "", nil
-	}
-	return prefix + child, nil
+	return base, wildcard, nil
 }

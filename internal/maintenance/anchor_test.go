@@ -4,234 +4,216 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/jerryfane/macserve/internal/pfctl"
 )
 
-// Keys are loaded ruleset paths, not an anchor inventory. A ruleset's mere
-// presence here must never establish its attachment to the root filter graph.
+const ownedFilterRules = "block drop out log quick proto tcp all user = 550 label \"macserve-default-deny\"\nblock drop out log quick proto udp all user = 550 label \"macserve-default-deny\"\n"
+
 type filterRulesFixture map[string]string
 
-func (f filterRulesFixture) query(_ context.Context, args ...string) (string, error) {
-	path := ""
-	switch {
-	case len(args) == 1 && args[0] == "-sr":
-	case len(args) == 3 && args[0] == "-a" && args[2] == "-sr":
-		path = args[1]
-	default:
-		return "", fmt.Errorf("not a direct filter query: %v", args)
+func (f filterRulesFixture) snapshot() []pfTranslation {
+	paths := map[string]bool{"": true}
+	for path := range f {
+		for path != "" {
+			paths[path] = true
+			i := strings.LastIndexByte(path, '/')
+			if i < 0 {
+				break
+			}
+			path = path[:i]
+		}
 	}
-	text, ok := f[path]
-	if !ok {
-		return "", fmt.Errorf("ruleset %q unavailable", path)
+	sorted := make([]string, 0, len(paths))
+	for path := range paths {
+		sorted = append(sorted, path)
 	}
-	return text, nil
+	slices.Sort(sorted)
+	out := make([]pfTranslation, 0, len(sorted))
+	for _, path := range sorted {
+		out = append(out, pfTranslation{path, f[path]})
+	}
+	return out
 }
 
-func TestFilterAnchorReachableGraphs(t *testing.T) {
-	cases := []struct {
-		name  string
-		path  string
-		rules filterRulesFixture
-	}{
-		{
-			name: "stock wildcard without standalone root call",
-			path: "com.apple/macserve",
-			rules: filterRulesFixture{
-				"":                   "anchor \"com.apple/*\" all\n",
-				"com.apple/macserve": "block drop out quick all\n",
-			},
-		},
-		{
-			name: "exact top level",
-			path: "custom",
-			rules: filterRulesFixture{
-				"":       "anchor \"custom\" all\n",
-				"custom": "block drop out quick all\n",
-			},
-		},
-		{
-			name: "exact nested reference skips parent rules",
-			path: "custom/service",
-			rules: filterRulesFixture{
-				"":               "anchor \"custom/service\" all\n",
-				"custom":         "anchor \"unrelated\" out all\n",
-				"custom/service": "block drop out quick all\n",
-			},
-		},
-		{
-			name: "relative nested calls",
-			path: "custom/service/guard",
-			rules: filterRulesFixture{
-				"":                     "anchor \"custom\" all\n",
-				"custom":               "anchor \"service\" all\n",
-				"custom/service":       "anchor \"guard\" all\n",
-				"custom/service/guard": "block drop out quick all\n",
-			},
-		},
-		{
-			name: "wildcard child requires further call",
-			path: "custom/service/guard",
-			rules: filterRulesFixture{
-				"":                     "anchor \"custom/*\" all\n",
-				"custom/service":       "anchor \"guard\" all\n",
-				"custom/service/guard": "block drop out quick all\n",
-			},
-		},
-		{
-			name: "absolute call from different branch",
-			path: "custom/service",
-			rules: filterRulesFixture{
-				"":               "anchor \"entry\" all\n",
-				"entry":          "anchor \"/custom/service\" all\n",
-				"custom/service": "block drop out quick all\n",
-			},
-		},
-		{
-			name: "relative wildcard",
-			path: "custom/service",
-			rules: filterRulesFixture{
-				"":               "anchor \"custom\" all\n",
-				"custom":         "anchor \"*\" all\n",
-				"custom/service": "block drop out quick all\n",
-			},
-		},
-		{
-			name: "absolute wildcard",
-			path: "custom/service",
-			rules: filterRulesFixture{
-				"":               "anchor \"entry\" all\n",
-				"entry":          "anchor \"/custom/*\" all\n",
-				"custom/service": "block drop out quick all\n",
-			},
-		},
-		{
-			name: "cycle does not hide independent route",
-			path: "custom",
-			rules: filterRulesFixture{
-				"":       "anchor \"entry\" all\n",
-				"entry":  "anchor \"/entry\" all\nanchor \"/custom\" all\n",
-				"custom": "block drop out quick all\n",
-			},
-		},
+func (f filterRulesFixture) query(_ context.Context, args ...string) (string, error) {
+	switch {
+	case slices.Equal(args, []string{"-v", "-s", "Anchors"}):
+		var out strings.Builder
+		for _, item := range f.snapshot() {
+			if item.Path != "" {
+				fmt.Fprintf(&out, "  %s\n", item.Path)
+			}
+		}
+		return out.String(), nil
+	case len(args) == 5 && args[0] == "-a" && args[2] == "-v":
+		return "", pfctl.ErrAnchorAbsent
+	case slices.Equal(args, []string{"-sr"}):
+		return f[""], nil
+	case len(args) == 3 && args[0] == "-a" && args[2] == "-sr":
+		for _, item := range f.snapshot() {
+			if item.Path == args[1] {
+				return item.Rules, nil
+			}
+		}
 	}
-	for _, tc := range cases {
+	return "", fmt.Errorf("unexpected filter query %v", args)
+}
+
+func TestFilterEvaluationOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		root, before, own, after string
+		want                     bool
+	}{
+		{"stock auxiliary calls", "scrub-anchor \"com.apple/*\" all\nanchor \"com.apple/*\" all\ndummynet-anchor \"com.apple/*\" all\n", "", ownedFilterRules, "", true},
+		{"earlier root quick bypass", "pass out quick proto tcp from any to 203.0.113.8 port = 443\nanchor \"com.apple/*\" all\n", "", ownedFilterRules, "", false},
+		{"earlier sibling quick bypass", "", "pass out quick all\n", ownedFilterRules, "", false},
+		{"interface is not disjoint", "", "pass out quick on en0 all\n", ownedFilterRules, "", false},
+		{"other uid is disjoint", "", "pass out quick all user = 551\n", ownedFilterRules, "", true},
+		{"incoming is disjoint", "", "pass in quick all\n", ownedFilterRules, "", true},
+		{"icmp is disjoint", "", "pass out quick proto icmp all\n", ownedFilterRules, "", true},
+		{"nonquick sibling overridden", "", "pass out all\n", ownedFilterRules, "", true},
+		{"reviewed own exception before catchall", "", "pass out all\n", "pass out quick proto tcp from any to 203.0.113.9 port = 443 user = 550 flags S/SA keep state label \"reviewed-https\"\n" + ownedFilterRules, "", true},
+		{"family split catchalls override", "", "pass out all\n", "block drop out quick inet all user = 550\nblock drop out quick inet6 all user = 550\n", "", true},
+		{"nonquick root overridden", "pass out all\nanchor \"com.apple/*\" all\n", "", ownedFilterRules, "", true},
+		{"nonquick survives narrow deny", "", "pass out all\n", "block drop out quick proto tcp from any to 192.0.2.1 user = 550\n", "", false},
+		{"tcp only deny leaves udp", "", "pass out all\n", "block drop out quick proto tcp all user = 550\n", "", false},
+		{"v4 only deny leaves v6", "", "pass out all\n", "block drop out quick inet all user = 550\n", "", false},
+		{"interface deny cannot override", "", "pass out all\n", "block drop out quick on lo0 all user = 550\n", "", false},
+		{"later sibling quick unreachable", "", "", ownedFilterRules, "pass out quick all\n", true},
+		{"later main quick unreachable", "anchor \"com.apple/*\" all\npass out quick all\n", "", ownedFilterRules, "", true},
+		{"later sibling bypass without terminal deny", "", "", "block drop out proto tcp all user = 550\n", "pass out quick all\n", false},
+		{"later main nonquick survives", "anchor \"com.apple/*\" all\npass out all\n", "", "block drop out all user = 550\n", "", false},
+		{"later sibling nonquick survives", "", "", "block drop out all user = 550\n", "pass out all\n", false},
+		{"later blanket block overrides nonquick", "anchor \"com.apple/*\" all\nblock drop out all\n", "pass out all\n", "block drop out proto tcp all user = 550\n", "", true},
+		{"unknown syntax even disjoint", "", "pass in quick all probability 10%\n", ownedFilterRules, "", false},
+		{"unknown syntax after terminal deny", "", "", ownedFilterRules, "pass out all probability 10%\n", false},
+		{"wrong own uid cannot protect", "", "pass out all\n", "block drop out quick all user = 551\n", "", false},
+		{"missing own uid cannot protect", "", "pass out all\n", "block drop out quick all\n", "", false},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := filterAnchorReachable(context.Background(), tc.path, tc.rules.query); err != nil {
+			root := tc.root
+			if root == "" {
+				root = "anchor \"com.apple/*\" all\n"
+			}
+			f := filterRulesFixture{"": root, "com.apple/aaa": tc.before, "com.apple/macserve": tc.own, "com.apple/zzz": tc.after}
+			// Reverse inventory order: neither map nor listing order determines
+			// the order in which wildcard children execute.
+			snapshot := f.snapshot()
+			slices.Reverse(snapshot)
+			err := proveFilterOrder("com.apple/macserve", 550, snapshot)
+			if (err == nil) != tc.want {
+				t.Fatalf("accepted=%v want=%v: %v", err == nil, tc.want, err)
+			}
+		})
+	}
+}
+
+func TestFilterAnchorCalls(t *testing.T) {
+	for name, f := range map[string]filterRulesFixture{
+		"exact nested skips parent rules": {"": "anchor \"custom/service\" all\n", "custom": "pass out quick all\n", "custom/service": ownedFilterRules},
+		"relative wildcard":               {"": "anchor \"custom\" all\n", "custom": "anchor \"*\" all\n", "custom/service": ownedFilterRules},
+		"absolute from another branch":    {"": "anchor \"entry\" all\n", "entry": "anchor \"/custom/service\" all\n", "custom/service": ownedFilterRules},
+		"absolute wildcard":               {"": "anchor \"entry\" all\n", "entry": "anchor \"/custom/*\" all\n", "custom/service": ownedFilterRules},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := observeFilterOrder(context.Background(), "custom/service", 550, f.query); err != nil {
 				t.Fatal(err)
 			}
 		})
 	}
-}
-
-func TestFilterAnchorRefusesUnprovenGraphs(t *testing.T) {
-	cases := map[string]string{
-		"orphan":                         "block drop all\n",
-		"comment":                        "# anchor \"custom/service\" all\n",
-		"label":                          "pass all label \"anchor custom/service all\"\n",
-		"multiline label":                "pass all label \"note\nanchor \"custom/service\" all\n\"\n",
-		"translation only":               "nat-anchor \"custom/service\" all\nrdr-anchor \"custom/service\" all\nbinat-anchor \"custom/service\" all\n",
-		"prefix confusion":               "anchor \"custom/service-other\" all\n",
-		"wildcard prefix confusion":      "anchor \"customized/*\" all\n",
-		"wildcard does not reach parent": "anchor \"custom/service/*\" all\n",
-		"wildcard not recursive":         "anchor \"*\" all\n",
-		"direction":                      "anchor \"custom/service\" out all\n",
-		"interface":                      "anchor \"custom/service\" on lo0 all\n",
-		"family":                         "anchor \"custom/service\" inet all\n",
-		"protocol":                       "anchor \"custom/service\" inet proto tcp all\n",
-		"source":                         "anchor \"custom/service\" from 192.0.2.1 to any\n",
-		"quick modifier":                 "anchor \"custom/service\" quick all\n",
-		"trailing label":                 "anchor \"custom/service\" all label \"note\"\n",
-		"unquoted":                       "anchor custom/service all\n",
-		"missing all":                    "anchor \"custom/service\"\n",
-		"truncated":                      "anchor \"custom/service\" all",
-		"recursive output":               "anchor \"unattached\" all {\nanchor \"custom/service\" all\n}\n",
-		"anonymous inline":               "anchor all {\nanchor \"custom/service\" all\n}\n",
-		"parent path":                    "anchor \"../custom/service\" all\n",
-		"double absolute slash":          "anchor \"//custom/service\" all\n",
-		"double absolute wildcard slash": "anchor \"//*\" all\n",
-		"partial wildcard":               "anchor \"custom/serv*\" all\n",
-		"escaped name":                   "anchor \"custom/serv\\ice\" all\n",
-		"cycle":                          "anchor \"entry\" all\n",
-	}
-	for name, root := range cases {
+	for name, root := range map[string]string{
+		"orphan":                      "block drop all\n",
+		"scrub is not filter edge":    "scrub-anchor \"custom/service\" all\n",
+		"dummynet is not filter edge": "dummynet-anchor \"custom/service\" all\n",
+		"wildcard not recursive":      "anchor \"*\" all\n",
+		"conditional":                 "anchor \"custom/service\" out all\n",
+		"quick call":                  "anchor \"custom/service\" quick all\n",
+		"truncated":                   "anchor \"custom/service\" all",
+		"recursive output":            "anchor \"custom/service\" all {\n}\n",
+		"parent reference":            "anchor \"../custom/service\" all\n",
+		"double slash wildcard":       "anchor \"//*\" all\n",
+		"partial wildcard":            "anchor \"custom/serv*\" all\n",
+		"multiline label":             "pass all label \"note\nanchor \"custom/service\" all\n\"\n",
+		"unknown match":               "pass out all user != 551\nanchor \"custom/service\" all\n",
+	} {
 		t.Run(name, func(t *testing.T) {
-			f := filterRulesFixture{
-				"":                     root,
-				"custom":               "block drop all\n",
-				"custom/service":       "block drop out quick all\n",
-				"custom/service-other": "block drop all\n",
-				"entry":                "anchor \"/other\" all\n",
-				"other":                "anchor \"/entry\" all\n",
-			}
-			if err := filterAnchorReachable(context.Background(), "custom/service", f.query); err == nil {
-				t.Fatal("unproven selected anchor accepted")
+			f := filterRulesFixture{"": root, "custom/service": ownedFilterRules}
+			if _, err := observeFilterOrder(context.Background(), "custom/service", 550, f.query); err == nil {
+				t.Fatal("unproven graph accepted")
 			}
 		})
 	}
 }
 
-func TestFilterAnchorReadFailuresAndCancellation(t *testing.T) {
-	failure := errors.New("filter read unavailable")
-	for _, failedPath := range []string{"", "entry", "custom"} {
-		f := filterRulesFixture{
-			"":       "anchor \"entry\" all\n",
-			"entry":  "anchor \"/custom\" all\n",
-			"custom": "block drop all\n",
-		}
-		query := func(ctx context.Context, args ...string) (string, error) {
-			if failedPath == "" && len(args) == 1 || len(args) == 3 && args[1] == failedPath {
-				return "", failure
+func TestFilterSnapshotStabilityAndFailure(t *testing.T) {
+	for _, change := range []string{"root", "sibling", "inventory", "error", "cancel"} {
+		t.Run(change, func(t *testing.T) {
+			f := filterRulesFixture{"": "anchor \"custom/*\" all\n", "custom/service": ownedFilterRules, "custom/aaa": ""}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			counts := map[string]int{}
+			query := func(ctx context.Context, args ...string) (string, error) {
+				key := strings.Join(args, " ")
+				counts[key]++
+				if change == "error" && key == "-a custom/aaa -sr" {
+					return "", errors.New("permission denied")
+				}
+				if change == "cancel" {
+					cancel()
+				}
+				if counts[key] > 1 {
+					switch {
+					case change == "root" && key == "-sr", change == "sibling" && key == "-a custom/aaa -sr":
+						return "pass out quick all\n", nil
+					case change == "inventory" && key == "-v -s Anchors":
+						return "  custom\n  custom/service\n", nil
+					}
+				}
+				return f.query(ctx, args...)
 			}
-			return f.query(ctx, args...)
-		}
-		if err := filterAnchorReachable(context.Background(), "custom", query); !errors.Is(err, failure) {
-			t.Fatalf("failure at %q: got %v", failedPath, err)
-		}
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := filterAnchorReachable(ctx, "custom", filterRulesFixture{}.query); !errors.Is(err, context.Canceled) {
-		t.Fatalf("pre-canceled context: %v", err)
-	}
-	ctx, cancel = context.WithCancel(context.Background())
-	defer cancel()
-	query := func(context.Context, ...string) (string, error) {
-		cancel()
-		return "anchor \"custom\" all\n", nil
-	}
-	if err := filterAnchorReachable(ctx, "custom", query); !errors.Is(err, context.Canceled) {
-		t.Fatalf("cancellation during query: %v", err)
+			if _, err := observeFilterOrder(ctx, "custom/service", 550, query); err == nil {
+				t.Fatal("unstable or incomplete filter proof accepted")
+			}
+		})
 	}
 }
 
-func TestFilterAnchorTraversalBounds(t *testing.T) {
+func TestFilterEvaluationBounds(t *testing.T) {
+	f := filterRulesFixture{"": "anchor \"custom\" all\n", "custom": ownedFilterRules}
+	for _, uid := range []uint32{0, 500} {
+		if _, err := observeFilterOrder(context.Background(), "custom", uid, f.query); err == nil {
+			t.Fatal("missing/invalid UID accepted")
+		}
+	}
 	for _, path := range []string{"", "custom/*", "/custom", "custom/../service", strings.Repeat("a/", 8) + "b"} {
-		if err := filterAnchorReachable(context.Background(), path, filterRulesFixture{"": ""}.query); err == nil {
+		if _, err := observeFilterOrder(context.Background(), path, 550, f.query); err == nil {
 			t.Fatalf("invalid selected path %q accepted", path)
 		}
 	}
-	f := filterRulesFixture{"": strings.Repeat("x", (1<<20)+1)}
-	if err := filterAnchorReachable(context.Background(), "custom", f.query); err == nil {
-		t.Fatal("oversized direct output accepted")
+	for name, f := range map[string]filterRulesFixture{
+		"cycle":        {"": "anchor \"entry\" all\n", "entry": "anchor \"/entry\" all\nanchor \"/custom\" all\n", "custom": ownedFilterRules},
+		"oversized":    {"": strings.Repeat("x", (1<<20)+1), "custom": ownedFilterRules},
+		"excess rules": {"": strings.Repeat("block all\n", 65537), "custom": ownedFilterRules},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := observeFilterOrder(context.Background(), "custom", 550, f.query); err == nil {
+				t.Fatal("unbounded filter proof accepted")
+			}
+		})
 	}
-	f = filterRulesFixture{}
-	var root strings.Builder
-	for i := range 65 {
-		name := fmt.Sprintf("branch%d", i)
-		fmt.Fprintf(&root, "anchor %q all\n", name)
-		f[name] = ""
-	}
-	f[""] = root.String() + "anchor \"custom\" all\n"
-	f["custom"] = "block drop all\n"
-	if err := filterAnchorReachable(context.Background(), "custom", f.query); err == nil {
-		t.Fatal("unbounded graph accepted")
-	}
-	f = filterRulesFixture{"": "anchor \"a\" all\n"}
+	// A small DAG can expand exponentially when calls are repeated. Bound
+	// evaluated visits, not just the number of distinct loaded anchors.
+	f = filterRulesFixture{"": "anchor \"a0\" all\nanchor \"custom\" all\n", "custom": ownedFilterRules}
 	for i := range 8 {
-		f[strings.TrimSuffix(strings.Repeat("a/", i+1), "/")] = "anchor \"a\" all\n"
+		f[fmt.Sprintf("a%d", i)] = strings.Repeat(fmt.Sprintf("anchor \"/a%d\" all\n", i+1), 4)
 	}
-	if err := filterAnchorReachable(context.Background(), "custom", f.query); err == nil {
-		t.Fatal("unbounded relative depth accepted")
+	f["a8"] = ""
+	if _, err := observeFilterOrder(context.Background(), "custom", 550, f.query); err == nil {
+		t.Fatal("unbounded repeated calls accepted")
 	}
 }

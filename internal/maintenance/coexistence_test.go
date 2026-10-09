@@ -180,6 +180,27 @@ func TestCoexistenceObservationDetectsRuleAndPIDChanges(t *testing.T) {
 	}
 }
 
+func TestCoexistenceStockAuxiliaryCallsRemainBound(t *testing.T) {
+	c, fixture := coexistenceInputs()
+	stock := "scrub-anchor \"com.apple/*\" all\nanchor \"com.apple/*\" all\ndummynet-anchor \"com.apple/*\" all\n"
+	fixture["-sr"] = coexistenceReply{out: pfctl.Output{Stdout: stock}}
+	before, err := observeCoexistenceWithCommands(context.Background(), c, fixture.command, fixture.command)
+	if err != nil {
+		t.Fatalf("stock auxiliary anchor calls refused: %v", err)
+	}
+	for _, kind := range []string{"scrub-anchor", "dummynet-anchor"} {
+		changed := strings.Replace(stock, kind+" \"com.apple/*\"", kind+" \"com.apple/normalizer\"", 1)
+		fixture["-sr"] = coexistenceReply{out: pfctl.Output{Stdout: changed}}
+		after, err := observeCoexistenceWithCommands(context.Background(), c, fixture.command, fixture.command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := SameCoexistence(before, after); err == nil {
+			t.Fatalf("%s change disappeared from direct main evidence", kind)
+		}
+	}
+}
+
 func TestCoexistenceReadsOnlyDirectPeerRules(t *testing.T) {
 	c, f := coexistenceInputs()
 	c.CoexistingAnchors = []string{"com.example"}

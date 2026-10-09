@@ -43,11 +43,11 @@ func Install(o Options, stdout, stderr io.Writer) error {
 	}
 	if o.Apply {
 		for _, path := range []string{o.EnvironmentPath, o.BinaryPath} {
-			if err := CheckProtectedPath(path, false); err != nil {
+			if err := hostguard.CheckProtectedPath(path, false); err != nil {
 				return err
 			}
 		}
-		if err := CheckProtectedPath(o.AssetsPath, true); err != nil {
+		if err := hostguard.CheckProtectedPath(o.AssetsPath, true); err != nil {
 			return err
 		}
 	}
@@ -66,7 +66,7 @@ func Install(o Options, stdout, stderr io.Writer) error {
 	for _, name := range assetNames {
 		path := filepath.Join(o.AssetsPath, name)
 		if o.Apply {
-			if err := CheckProtectedPath(path, false); err != nil {
+			if err := hostguard.CheckProtectedPath(path, false); err != nil {
 				return err
 			}
 		}
@@ -128,37 +128,6 @@ func verifyBinary(path, expected string, destination io.Writer) error {
 	return nil
 }
 
-// CheckProtectedPath enforces root ownership, non-writable ancestors and native
-// ACL protection. Deny-only ACLs cannot grant writes; other ACLs require review.
-func CheckProtectedPath(path string, directory bool) error {
-	var err error
-	if directory {
-		err = hostguard.RootDirectory(path)
-	} else {
-		err = hostguard.RootConfig(path)
-	}
-	if err != nil {
-		return err
-	}
-	for current := path; ; current = filepath.Dir(current) {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		cmd := exec.CommandContext(ctx, "/bin/ls", "-lde", current)
-		cmd.Env = nativeEnv()
-		output, runErr := cmd.Output()
-		cancel()
-		if runErr != nil {
-			return fmt.Errorf("cannot inspect protected input ACL: %w", runErr)
-		}
-		for _, line := range strings.Split(strings.TrimSuffix(string(output), "\n"), "\n")[1:] {
-			if !strings.Contains(line, " deny ") {
-				return fmt.Errorf("ACL requires manual review: %s", current)
-			}
-		}
-		if current == filepath.Dir(current) {
-			return nil
-		}
-	}
-}
 func nativeEnv() []string {
 	return []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LANG=C", "LC_ALL=C", "HOME=/private/var/root"}
 }
@@ -177,7 +146,7 @@ func requireAbsent(paths []string) error {
 func apply(o Options, e Environment, envData []byte, assets, rendered map[string][]byte, stdout, stderr io.Writer) (result error) {
 	targets := []string{Prefix, "/Users/" + e.JobUser, "/Library/LaunchDaemons/org.macserve.controller.plist", "/Library/LaunchDaemons/org.macserve.worker.plist", "/Library/LaunchDaemons/org.macserve.maintenance.plist"}
 	for _, dir := range []string{"/Library", "/Library/LaunchDaemons", "/Users", "/private/var/root"} {
-		if err := CheckProtectedPath(dir, true); err != nil {
+		if err := hostguard.CheckProtectedPath(dir, true); err != nil {
 			return err
 		}
 	}
@@ -302,7 +271,7 @@ func nativeCommand(timeout time.Duration, output io.Writer, path string, args ..
 	return nil
 }
 func installBinary(source, sha string) error {
-	if err := CheckProtectedPath(Prefix+"/bin", true); err != nil {
+	if err := hostguard.CheckProtectedPath(Prefix+"/bin", true); err != nil {
 		return err
 	}
 	f, err := os.OpenFile(Prefix+"/bin/macserve", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0700)

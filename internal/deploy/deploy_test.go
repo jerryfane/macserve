@@ -100,7 +100,7 @@ func TestEnvironmentRejectsAmbiguousAndExecutableData(t *testing.T) {
 }
 
 func TestEnvironmentFirewallPolicy(t *testing.T) {
-	options := "PF_ANCHOR=com.apple/build-service\nCOEXISTING_ANCHORS=com.apple/guest-b,com.apple/guest-a\nCOEXISTING_SERVICES=com.example.router-b,com.example.router-a\nTOLERATED_TRANSLATION_ANCHORS=com.apple/guest-a\nAPPROVED_GUEST_SUBNETS=172.20.40.128/25\n"
+	options := "PF_ANCHOR=com.apple/macserve-build\nCOEXISTING_ANCHORS=com.apple/guest-b,com.apple/guest-a\nCOEXISTING_SERVICES=com.example.router-b,com.example.router-a\nTOLERATED_TRANSLATION_ANCHORS=com.apple/guest-a\nAPPROVED_GUEST_SUBNETS=172.20.40.128/25\n"
 	e, err := ParseEnvironment([]byte(reviewedEnvironment + options))
 	if err != nil {
 		t.Fatal(err)
@@ -122,7 +122,7 @@ func TestEnvironmentFirewallPolicy(t *testing.T) {
 			}
 		}
 	}
-	if config.PFAnchor != "com.apple/build-service" ||
+	if config.PFAnchor != "com.apple/macserve-build" ||
 		!slices.Equal(config.CoexistingAnchors, []string{"com.apple/guest-a", "com.apple/guest-b"}) ||
 		!slices.Equal(config.CoexistingServices, []string{"com.example.router-a", "com.example.router-b"}) ||
 		!slices.Equal(config.ToleratedTranslationAnchors, []string{"com.apple/guest-a"}) ||
@@ -137,6 +137,11 @@ func TestEnvironmentFirewallPolicy(t *testing.T) {
 	}
 	for _, suffix := range []string{
 		"PF_ANCHOR=com.apple/*\n",
+		"PF_ANCHOR=com.apple\n",
+		"PF_ANCHOR=com.apple/250.ApplicationFirewall\n",
+		"PF_ANCHOR=com.apple/guest-router\n",
+		"PF_ANCHOR=com.apple/macserve/child\n",
+		"TOLERATED_TRANSLATION_ANCHORS=com.apple/macserve\nAPPROVED_GUEST_SUBNETS=172.20.40.128/25\n",
 		"PF_ANCHOR=\nPF_ANCHOR=com.apple/service\n",
 		"COEXISTING_ANCHORS=com.apple/macserve\n",
 		"COEXISTING_ANCHORS=com.apple/macserve/child\n",

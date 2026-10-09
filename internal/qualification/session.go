@@ -16,6 +16,7 @@ import (
 
 	"github.com/jerryfane/macserve/internal/controller"
 	"github.com/jerryfane/macserve/internal/deploy"
+	"github.com/jerryfane/macserve/internal/hostguard"
 	"github.com/jerryfane/macserve/internal/maintenance"
 	"github.com/jerryfane/macserve/internal/pfctl"
 	"github.com/jerryfane/macserve/internal/profiles"
@@ -229,7 +230,7 @@ func Begin(ctx context.Context, o BeginOptions) error {
 	if e != nil {
 		return e
 	}
-	if e = deploy.CheckProtectedPath(cc.ProfilesFile, false); e != nil {
+	if e = hostguard.CheckProtectedPath(cc.ProfilesFile, false); e != nil {
 		return e
 	}
 	registry, e := profiles.Load(cc.ProfilesFile)
@@ -260,7 +261,7 @@ func Begin(ctx context.Context, o BeginOptions) error {
 	if e = os.Mkdir(o.Session, 0755); e != nil {
 		return e
 	}
-	step, stepRaw, e := loadFirewallPolicy(ctx, o.Session, mc, cc.PolicySHA256)
+	step, stepRaw, e := loadFirewallPolicy(ctx, o.Session, mc, cc.JobUID, cc.PolicySHA256)
 	if e != nil {
 		return e
 	}

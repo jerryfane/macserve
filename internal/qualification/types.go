@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/jerryfane/macserve/internal/deploy"
+	"github.com/jerryfane/macserve/internal/hostguard"
 	"github.com/jerryfane/macserve/internal/maintenance"
 	"github.com/jerryfane/macserve/internal/model"
 )
@@ -178,7 +179,7 @@ func protectedDirectory(p string) error {
 	if !cleanPath(p) {
 		return errors.New("expected clean absolute protected directory")
 	}
-	return deploy.CheckProtectedPath(p, true)
+	return hostguard.CheckProtectedPath(p, true)
 }
 
 // readArtifact opens only bounded regular files, never follows the final symlink,
@@ -224,7 +225,7 @@ func readArtifact(p string, uid int) ([]byte, error) {
 	return b, nil
 }
 func protectedRead(p string) ([]byte, error) {
-	if e := deploy.CheckProtectedPath(p, false); e != nil {
+	if e := hostguard.CheckProtectedPath(p, false); e != nil {
 		return nil, e
 	}
 	return readArtifact(p, 0)

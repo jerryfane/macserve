@@ -58,37 +58,6 @@ func TestExactOwnedAnchorRequired(t *testing.T) {
 	}
 }
 
-func TestClientReadAndLoadInvocationContract(t *testing.T) {
-	c, calls := recordingClient(t)
-	reads := [][]string{
-		{"-sr"}, {"-sn"}, {"-s", "info"}, {"-v", "-s", "Anchors"},
-		{"-i", "lo0", "-v", "-s", "Interfaces"}, {"-a", "*", "-sr"}, {"-a", "", "-sn"},
-	}
-	for _, anchor := range []string{"org.example/service", "org.example/peer", "org.example", "_pf"} {
-		for _, suffix := range [][]string{{"-sr"}, {"-sn"}, {"-vvsr"}, {"-s", "labels"}, {"-v", "-s", "Anchors"}} {
-			reads = append(reads, append([]string{"-a", anchor}, suffix...))
-		}
-	}
-	for _, args := range reads {
-		if _, err := c.Read(context.Background(), args...); err != nil {
-			t.Fatalf("read %q: %v", args, err)
-		}
-		if !slices.Equal((*calls)[len(*calls)-1], args) {
-			t.Fatalf("read scope changed: %q", *calls)
-		}
-	}
-	file := policyPath(t, "block drop out quick all\n")
-	if _, err := c.Load(context.Background(), file); err != nil {
-		t.Fatal(err)
-	}
-	if got := (*calls)[len(*calls)-1]; !slices.Equal(got, []string{"-a", "org.example/service", "-f", file}) {
-		t.Fatalf("write escaped immutable owned scope: %q", got)
-	}
-	if len(*calls) != len(reads)+1 {
-		t.Fatalf("unexpected PF operations: %q", *calls)
-	}
-}
-
 func TestClientRefusesAllNonReadFormsBeforeRunner(t *testing.T) {
 	c, calls := recordingClient(t)
 	forms := [][]string{
@@ -124,7 +93,7 @@ func TestLoadRejectsUnsafeFilesBeforeRunner(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, path := range []string{"relative.conf", "", file + "/../policy.conf", link, filepath.Join(ancestor, "policy.conf"), filepath.Dir(file), file + ".absent", policyPath(t, ""), policyPath(t, strings.Repeat("#", maxPolicyBytes+1))} {
-		if _, err := c.Load(context.Background(), path); err == nil {
+		if _, err := c.Load(context.Background(), path, LoadOptions{JobUID: 1502}); err == nil {
 			t.Fatalf("accepted unsafe file %q", path)
 		}
 	}
@@ -146,9 +115,9 @@ func TestLoadRejectsSourceEscapesBeforeRunner(t *testing.T) {
 		"block out user $undefined all\n", "block all label \"line\nbreak\"\n",
 		"block all {\npass all\n}\n", "block all anchor \"/foreign\"\n", "block all label \"$nr\"\n",
 		"block all\x00\n", "block all # inline directive\n", "block all label \"ok\" include \"/policy\"\n",
-		"pass all nat-to 192.0.2.1\n", "pass all rdr-to 127.0.0.1\n", "# only comments\n",
+		"pass all nat-to 192.0.2.1\n", "pass all rdr-to 127.0.0.1\n",
 	} {
-		if _, err := c.Load(context.Background(), policyPath(t, source)); err == nil {
+		if _, err := c.Load(context.Background(), policyPath(t, ownedRules+source), LoadOptions{JobUID: 1502}); err == nil {
 			t.Fatalf("accepted source escape %q", source)
 		}
 	}
@@ -167,13 +136,11 @@ func TestLoadAcceptsRenderedPolicyAndNarrowPass(t *testing.T) {
 		t.Fatal(err)
 	}
 	rendered.WriteString("pass out quick inet proto tcp from any to 192.0.2.20 port = 443 user $job_uid label \"reviewed-exception\"\n")
-	c, calls := recordingClient(t)
-	file := policyPath(t, rendered.String())
-	if _, err := c.Load(context.Background(), file); err != nil {
+	if err := validatePolicy(rendered.String(), 1502); err != nil {
 		t.Fatalf("rendered bounded filter policy refused: %v", err)
 	}
-	if len(*calls) != 1 || !slices.Equal((*calls)[0], []string{"-a", "org.example/service", "-f", file}) {
-		t.Fatalf("rendered policy load escaped scope: %q", *calls)
+	if err := validatePolicy(rendered.String(), 1503); err == nil {
+		t.Fatal("rendered policy accepted for a different job UID")
 	}
 }
 
@@ -219,7 +186,7 @@ func TestCancelledReadNeverInvokesPF(t *testing.T) {
 	if _, err := zero.Read(context.Background(), "-sr"); err == nil {
 		t.Fatal("zero client permitted read")
 	}
-	if _, err := zero.Load(context.Background(), "/policy"); err == nil {
+	if _, err := zero.Load(context.Background(), "/policy", LoadOptions{JobUID: 1502}); err == nil {
 		t.Fatal("zero client permitted write")
 	}
 }

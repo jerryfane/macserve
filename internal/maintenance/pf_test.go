@@ -24,9 +24,11 @@ func stockPFFixture() pfFixture {
 	return pfFixture{
 		"-s info":                                 {{text: "Status: Enabled for 0 days 00:00:01           Debug: Urgent\n"}},
 		"-i lo0 -v -s Interfaces":                 {{text: "lo0\n"}},
-		"-sr":                                     {{text: "anchor \"com.apple/*\" all\n"}},
-		"-a * -sr":                                {{text: "anchor \"com.apple/*\" all {\nanchor \"macserve\" all {\nblock drop out quick all\n}\n}\n"}},
-		"-a com.apple/macserve -sr":               {{text: "block drop out quick all\n"}},
+		"-sr":                                     {{text: "scrub-anchor \"com.apple/*\" all\nanchor \"com.apple/*\" all\ndummynet-anchor \"com.apple/*\" all\n"}},
+		"-a * -sr":                                {{text: "scrub-anchor \"com.apple/*\" all\nanchor \"com.apple/*\" all {\nanchor \"macserve\" all {\n" + ownedFilterRules + "}\n}\ndummynet-anchor \"com.apple/*\" all\n"}},
+		"-a com.apple -sr":                        {{}},
+		"-a com.apple/empty -sr":                  {{}},
+		"-a com.apple/macserve -sr":               {{text: ownedFilterRules}},
 		"-v -s Anchors":                           {{text: "  com.apple\n  com.apple/empty\n  com.apple/macserve\n"}},
 		"-a  -sn":                                 {{text: stockTranslationCalls}},
 		"-a com.apple -sn":                        {{}},
@@ -129,7 +131,7 @@ func TestPFTranslationObservationRefusesUnsafeOrIncompleteReads(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := stockPFFixture()
 			change(f)
-			var o Observation
+			o := Observation{JobUID: 550}
 			if err := observePFWithCommand(context.Background(), Config{}, nil, &o, f.command); err == nil {
 				t.Fatal("unsafe PF observation accepted")
 			}
@@ -147,7 +149,9 @@ func TestPFReservedAnchorCannotHideMapping(t *testing.T) {
 	f["-a com.apple/_pf/hidden/_pf -v -s Anchors"] = []pfReply{{err: pfctl.ErrAnchorAbsent}}
 	f["-a com.apple/_pf -sn"] = []pfReply{{}}
 	f["-a com.apple/_pf/hidden -sn"] = []pfReply{{}}
-	var o Observation
+	f["-a com.apple/_pf -sr"] = []pfReply{{}}
+	f["-a com.apple/_pf/hidden -sr"] = []pfReply{{}}
+	o := Observation{JobUID: 550}
 	if err := observePFWithCommand(context.Background(), Config{}, nil, &o, f.command); err != nil {
 		t.Fatalf("empty reserved subtree refused: %v", err)
 	}
@@ -160,7 +164,7 @@ func TestPFReservedAnchorCannotHideMapping(t *testing.T) {
 func TestPFObservationHonorsCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	var o Observation
+	o := Observation{JobUID: 550}
 	if err := observePFWithCommand(ctx, Config{}, nil, &o, stockPFFixture().command); !errors.Is(err, context.Canceled) {
 		t.Fatalf("got %v, want cancellation", err)
 	}
@@ -175,9 +179,12 @@ func guestPFFixture() (Config, []netip.Addr, pfFixture) {
 	f := stockPFFixture()
 	// Both reachable filters have identical text. Selecting the other one must
 	// invalidate qualification even when topology and every ruleset stay fixed.
-	f["-a com.apple/empty -sr"] = []pfReply{{text: "block drop out quick all\n"}}
-	f["-a * -sr"] = []pfReply{{text: "anchor \"com.apple/*\" all {\nanchor \"empty\" all {\nblock drop out quick all\n}\nanchor \"macserve\" all {\nblock drop out quick all\n}\n}\n"}}
-	f["-v -s Anchors"] = []pfReply{{text: "  com.apple\n  com.apple/empty\n  com.apple/guest-router\n  com.apple/macserve\n"}}
+	f["-a com.apple/macserve-alt -sr"] = []pfReply{{text: ownedFilterRules}}
+	f["-a com.apple/macserve-alt -sn"] = []pfReply{{}}
+	f["-a com.apple/macserve-alt/_pf -v -s Anchors"] = []pfReply{{err: pfctl.ErrAnchorAbsent}}
+	f["-a com.apple/guest-router -sr"] = []pfReply{{}}
+	f["-a * -sr"] = []pfReply{{text: "anchor \"com.apple/*\" all {\nanchor \"macserve\" all {\n" + ownedFilterRules + "}\nanchor \"macserve-alt\" all {\n" + ownedFilterRules + "}\n}\n"}}
+	f["-v -s Anchors"] = []pfReply{{text: "  com.apple\n  com.apple/empty\n  com.apple/guest-router\n  com.apple/macserve\n  com.apple/macserve-alt\n"}}
 	f["-a com.apple/guest-router/_pf -v -s Anchors"] = []pfReply{{err: pfctl.ErrAnchorAbsent}}
 	f["-a com.apple/guest-router -sn"] = []pfReply{{text: "nat on en0 inet from 172.20.40.0/24 to any -> (en0)\n"}}
 	return c, []netip.Addr{netip.MustParseAddr("192.0.2.10"), netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr("::1")}, f
@@ -204,7 +211,7 @@ func TestGuestTranslationCoexistenceBindsQualification(t *testing.T) {
 			c.ToleratedTranslationAnchors = append(c.ToleratedTranslationAnchors, "com.apple/another-router")
 		},
 		"selected filter path": func(c *Config, _ pfFixture) {
-			c.PFAnchor = "com.apple/empty"
+			c.PFAnchor = "com.apple/macserve-alt"
 		},
 		"reviewed coexisting anchors": func(c *Config, _ pfFixture) {
 			c.CoexistingAnchors = []string{"com.apple/guest-router"}
@@ -245,8 +252,9 @@ func TestGuestTranslationObservationFailsClosed(t *testing.T) {
 			f["-a com.apple/empty -sn"] = f["-a com.apple/guest-router -sn"]
 		},
 		"allowlist does not include descendants": func(_ *Config, _ *[]netip.Addr, f pfFixture) {
-			f["-v -s Anchors"] = []pfReply{{text: "  com.apple\n  com.apple/empty\n  com.apple/guest-router\n  com.apple/guest-router/child\n  com.apple/macserve\n"}}
+			f["-v -s Anchors"] = []pfReply{{text: "  com.apple\n  com.apple/empty\n  com.apple/guest-router\n  com.apple/guest-router/child\n  com.apple/macserve\n  com.apple/macserve-alt\n"}}
 			f["-a com.apple/guest-router/child/_pf -v -s Anchors"] = []pfReply{{err: pfctl.ErrAnchorAbsent}}
+			f["-a com.apple/guest-router/child -sr"] = []pfReply{{}}
 			f["-a com.apple/guest-router/child -sn"] = f["-a com.apple/guest-router -sn"]
 		},
 		"translation changes during read": func(_ *Config, _ *[]netip.Addr, f pfFixture) {
@@ -262,7 +270,7 @@ func TestGuestTranslationObservationFailsClosed(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			c, hosts, f := guestPFFixture()
 			change(&c, &hosts, f)
-			o := Observation{RootRulesSHA256: "previous-digest", AnchorRulesSHA256: "previous-anchor"}
+			o := Observation{JobUID: 550, RootRulesSHA256: "previous-digest", AnchorRulesSHA256: "previous-anchor"}
 			if err := observePFWithCommand(context.Background(), c, hosts, &o, f.command); err == nil {
 				t.Fatal("unsafe coexistence accepted")
 			}
@@ -270,5 +278,30 @@ func TestGuestTranslationObservationFailsClosed(t *testing.T) {
 				t.Fatal("failed observation retained usable approval bindings")
 			}
 		})
+	}
+}
+
+func TestPFObservationRejectsFilterBypassAndBindsSafeSiblingChanges(t *testing.T) {
+	f := stockPFFixture()
+	o := Observation{JobUID: 550}
+	if err := observePFWithCommand(context.Background(), Config{}, nil, &o, f.command); err != nil {
+		t.Fatal(err)
+	}
+	before := o.RootRulesSHA256
+	// A nonquick pass is safe only because the later owned catchall denies
+	// terminate every protected domain. Its exact text still binds approval.
+	f["-a com.apple/empty -sr"] = []pfReply{{text: "pass out all\n"}}
+	if err := observePFWithCommand(context.Background(), Config{}, nil, &o, f.command); err != nil {
+		t.Fatal(err)
+	}
+	if o.RootRulesSHA256 == before {
+		t.Fatal("safe sibling change did not invalidate previous qualification")
+	}
+	f["-a com.apple/empty -sr"] = []pfReply{{text: "pass out quick all\n"}}
+	if err := observePFWithCommand(context.Background(), Config{}, nil, &o, f.command); err == nil {
+		t.Fatal("earlier sibling quick pass bypass accepted")
+	}
+	if o.RootRulesSHA256 != "" || o.AnchorRulesSHA256 != "" {
+		t.Fatal("unsafe filter observation published qualification bindings")
 	}
 }
