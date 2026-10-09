@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/netip"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -22,30 +21,15 @@ import (
 	"github.com/jerryfane/macserve/internal/workerclient"
 )
 
-const DefaultPFAnchor = "com.apple/macserve"
-
 type Config struct {
-	ControllerConfig            string   `json:"controller_config"`
-	WorkerConfig                string   `json:"worker_config"`
-	QualificationFile           string   `json:"qualification_file"`
-	BoundaryEvidenceFile        string   `json:"boundary_evidence_file"`
-	PFPolicyFile                string   `json:"pf_policy_file"`
-	PFAnchor                    string   `json:"pf_anchor"`
-	ToleratedTranslationAnchors []string `json:"tolerated_translation_anchors,omitempty"`
-	ApprovedGuestSubnets        []string `json:"approved_guest_subnets,omitempty"`
-	CoexistingAnchors           []string `json:"coexisting_anchors,omitempty"`
-	CoexistingServices          []string `json:"coexisting_services,omitempty"`
-	IntervalSeconds             int      `json:"interval_seconds"`
-	path                        string
-}
-
-// ValidateFirewallConfig normalizes and validates the shared JSON/deploy.env
-// firewall policy. Live host addresses and loaded rules are checked by Inspect.
-func ValidateFirewallConfig(c *Config) error {
-	if err := validatePFConfig(c); err != nil {
-		return err
-	}
-	return validateCoexistenceConfig(c)
+	ControllerConfig     string   `json:"controller_config"`
+	WorkerConfig         string   `json:"worker_config"`
+	QualificationFile    string   `json:"qualification_file"`
+	BoundaryEvidenceFile string   `json:"boundary_evidence_file"`
+	CoexistingAnchors    []string `json:"coexisting_anchors,omitempty"`
+	CoexistingServices   []string `json:"coexisting_services,omitempty"`
+	IntervalSeconds      int      `json:"interval_seconds"`
+	path                 string
 }
 
 func decode(data []byte, v any) error {
@@ -93,10 +77,10 @@ func LoadConfig(path string) (Config, error) {
 	if c.IntervalSeconds < 5 || c.IntervalSeconds > 15 {
 		return c, errors.New("unsupported maintenance interval")
 	}
-	if err := ValidateFirewallConfig(&c); err != nil {
+	if err := ValidateCoexistenceConfig(&c); err != nil {
 		return c, err
 	}
-	for _, p := range []string{c.ControllerConfig, c.WorkerConfig, c.QualificationFile, c.BoundaryEvidenceFile, c.PFPolicyFile} {
+	for _, p := range []string{c.ControllerConfig, c.WorkerConfig, c.QualificationFile, c.BoundaryEvidenceFile} {
 		if !filepath.IsAbs(p) || filepath.Clean(p) != p || p == "/" {
 			return c, errors.New("maintenance paths must be clean and absolute")
 		}
@@ -134,7 +118,7 @@ func Run(ctx context.Context, c Config) error {
 		if err == nil {
 			interval = time.Duration(current.IntervalSeconds) * time.Second
 			probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-			h, err = observe(probeCtx, current, started)
+			h, err = observe(probeCtx, current)
 			cancel()
 		}
 		if err != nil {
@@ -178,7 +162,7 @@ func publish(path string, h controller.Health) error {
 	}
 	return os.Rename(f.Name(), path)
 }
-func observe(ctx context.Context, c Config, now time.Time) (controller.Health, error) {
+func observe(ctx context.Context, c Config) (controller.Health, error) {
 	invalid := controller.Health{}
 	qdata, err := protectedRead(c.QualificationFile)
 	if err != nil {
@@ -207,7 +191,7 @@ func observe(ctx context.Context, c Config, now time.Time) (controller.Health, e
 			return invalid, fmt.Errorf("approval input changed: %s", p)
 		}
 	}
-	return Evaluate(now, q, e, o)
+	return Evaluate(time.Now(), q, e, o)
 }
 
 // Inspect collects live facts without requiring approval records or publishing
@@ -254,14 +238,6 @@ func Inspect(ctx context.Context, c Config) (Observation, error) {
 		return invalid, errors.New("unsupported job home")
 	}
 	o := Observation{JobUID: wc.JobUID, IdentityValid: true, Profiles: map[string]string{}}
-	policy, err := protectedRead(c.PFPolicyFile)
-	if err != nil {
-		return invalid, err
-	}
-	o.PolicySHA256 = digest(policy)
-	if o.PolicySHA256 != cc.PolicySHA256 {
-		return invalid, errors.New("controller policy digest differs")
-	}
 	baseline, err := protectedRead(wc.BaselinePath)
 	if err != nil {
 		return invalid, err
@@ -286,25 +262,9 @@ func Inspect(ctx context.Context, c Config) (Observation, error) {
 		}
 		o.Profiles[p.ID] = digest(raw)
 	}
-	var hostAddresses []netip.Addr
-	o.InterfacesSHA256, hostAddresses, err = controller.InterfaceSnapshot()
+	o.InterfacesSHA256, err = controller.InterfaceDigest()
 	if err != nil {
 		return invalid, err
-	}
-	if err = observePF(ctx, c, hostAddresses, &o); err != nil {
-		return invalid, err
-	}
-	coexistence, err := ObserveCoexistence(ctx, c)
-	if err != nil {
-		return invalid, err
-	}
-	o.Coexistence = &coexistence
-	interfacesAfter, err := controller.InterfaceDigest()
-	if err != nil {
-		return invalid, err
-	}
-	if interfacesAfter != o.InterfacesSHA256 {
-		return invalid, errors.New("interfaces changed during PF observation")
 	}
 	o.MemoryPressure, err = memoryPressure()
 	if err != nil {
@@ -318,11 +278,23 @@ func Inspect(ctx context.Context, c Config) (Observation, error) {
 		return invalid, err
 	}
 	// Protected records cannot be silently replaced between their digest and use.
-	for p, old := range map[string][]byte{c.PFPolicyFile: policy, wc.BaselinePath: baseline} {
+	for p, old := range map[string][]byte{wc.BaselinePath: baseline} {
 		b, err := protectedRead(p)
 		if err != nil || !bytes.Equal(b, old) {
 			return invalid, fmt.Errorf("approval input changed: %s", p)
 		}
 	}
-	return o, ctx.Err()
+	interfacesAfter, err := controller.InterfaceDigest()
+	if err != nil {
+		return invalid, err
+	}
+	if interfacesAfter != o.InterfacesSHA256 {
+		return invalid, errors.New("interfaces changed during observation")
+	}
+	coexistence, err := ObserveCoexistence(ctx, c)
+	if err != nil {
+		return invalid, err
+	}
+	o.Coexistence = &coexistence
+	return o, nil
 }

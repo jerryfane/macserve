@@ -1,5 +1,5 @@
 // Package qualification collects bounded operator-reviewed boundary evidence.
-// Only explicit begin --load-policy writes PF, confined to the owned anchor.
+// Network probes are informational; PF is never changed.
 // It never changes launchd, accounts, GUI baselines, owner state, or health.
 package qualification
 
@@ -33,26 +33,27 @@ const maxArtifact = 4 << 20
 const lifetime = 2 * time.Hour
 const maintenancePath = "/Library/macserve/config/maintenance.json"
 
-var categories = []string{"tcp_denial", "udp_denial", "approved_allow", "delegated_boundary", "unix_socket_boundary", "owner_unaffected", "owner_home_denial", "fast_switch", "reboot", "tool_profiles"}
+const networkStatus = "not enforced in phase 1"
+
+var categories = []string{"network_reachability", "unix_socket_boundary", "owner_unaffected", "owner_home_denial", "fast_switch", "reboot", "tool_profiles"}
 
 type Challenge struct {
-	Schema             int                     `json:"schema"`
-	ID                 string                  `json:"id"`
-	Created            time.Time               `json:"created"`
-	Expires            time.Time               `json:"expires"`
-	Environment        deploy.Environment      `json:"environment"`
-	EnvironmentSHA256  string                  `json:"environment_sha256"`
-	Observation        maintenance.Observation `json:"observation"`
-	FirewallStepSHA256 string                  `json:"firewall_step_sha256"`
-	TCP                []string                `json:"tcp"`
-	Allow              []string                `json:"allow"`
-	UDP                []string                `json:"udp"`
-	OwnerCanary        string                  `json:"owner_canary"`
-	PrivatePaths       []string                `json:"private_paths"`
-	Socket             string                  `json:"socket"`
-	Profiles           []model.Profile         `json:"profiles"`
-	Previous           string                  `json:"previous,omitempty"`
-	PreviousSHA256     string                  `json:"previous_sha256,omitempty"`
+	Schema            int                     `json:"schema"`
+	ID                string                  `json:"id"`
+	Created           time.Time               `json:"created"`
+	Expires           time.Time               `json:"expires"`
+	Environment       deploy.Environment      `json:"environment"`
+	EnvironmentSHA256 string                  `json:"environment_sha256"`
+	Observation       maintenance.Observation `json:"observation"`
+	TCP               []string                `json:"tcp"`
+	Allow             []string                `json:"allow"`
+	UDP               []string                `json:"udp"`
+	OwnerCanary       string                  `json:"owner_canary"`
+	PrivatePaths      []string                `json:"private_paths"`
+	Socket            string                  `json:"socket"`
+	Profiles          []model.Profile         `json:"profiles"`
+	Previous          string                  `json:"previous,omitempty"`
+	PreviousSHA256    string                  `json:"previous_sha256,omitempty"`
 }
 type Result struct {
 	Category string `json:"category"`
@@ -103,13 +104,8 @@ type Receipts struct {
 	Error           string             `json:"error,omitempty"`
 }
 type Snapshot struct {
-	At               time.Time               `json:"at"`
-	Observation      maintenance.Observation `json:"observation"`
-	Counters         map[string]uint64       `json:"counters"`
-	ProtocolCounters map[string]uint64       `json:"protocol_counters"`
-	PFRules          string                  `json:"pf_rules_with_counters"`
-	PFOutput         string                  `json:"pf_output"`
-	PFStderr         string                  `json:"pf_stderr"`
+	At          time.Time               `json:"at"`
+	Observation maintenance.Observation `json:"observation"`
 }
 type Category struct {
 	Status   string            `json:"status"`
@@ -158,13 +154,13 @@ func decode(b []byte, v any) error {
 	return nil
 }
 func fresh(c Challenge, now time.Time) error {
-	if c.Schema != 1 || len(c.ID) != 64 || c.Created.IsZero() || now.Before(c.Created) || !now.Before(c.Expires) || c.Expires.Sub(c.Created) != lifetime {
+	if c.Schema != 2 || len(c.ID) != 64 || c.Created.IsZero() || now.Before(c.Created) || !now.Before(c.Expires) || c.Expires.Sub(c.Created) != lifetime {
 		return errors.New("invalid or expired challenge; begin a fresh sitting")
 	}
 	return nil
 }
 func sameObservation(a, b maintenance.Observation) bool {
-	return a.JobUID == b.JobUID && a.PFAnchor == b.PFAnchor && a.Boot == b.Boot && a.InterfacesSHA256 == b.InterfacesSHA256 && a.PolicySHA256 == b.PolicySHA256 && a.RootRulesSHA256 == b.RootRulesSHA256 && a.AnchorRulesSHA256 == b.AnchorRulesSHA256 && a.BaselineSHA256 == b.BaselineSHA256 && maps.Equal(a.Profiles, b.Profiles) && b.PFEnabled && b.LoopbackFiltered && b.IdentityValid && b.BaselineValid
+	return a.JobUID == b.JobUID && a.Boot == b.Boot && a.InterfacesSHA256 == b.InterfacesSHA256 && a.BaselineSHA256 == b.BaselineSHA256 && maps.Equal(a.Profiles, b.Profiles) && b.IdentityValid && b.BaselineValid
 }
 func rootOnly() error {
 	if runtime.GOOS != "darwin" || os.Getuid() != 0 || os.Geteuid() != 0 {

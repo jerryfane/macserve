@@ -40,8 +40,9 @@ func (b *coexistenceBuffer) String() string { return b.buffer.String() }
 // descendants, table contents, counters, or other changing PF runtime state.
 type AnchorRulesDigest struct {
 	Path              string `json:"path"`
-	FilterSHA256      string `json:"filter_sha256"`
-	TranslationSHA256 string `json:"translation_sha256"`
+	Status            string `json:"status"`
+	FilterSHA256      string `json:"filter_sha256,omitempty"`
+	TranslationSHA256 string `json:"translation_sha256,omitempty"`
 }
 
 type ServicePID struct {
@@ -51,17 +52,15 @@ type ServicePID struct {
 
 type CoexistenceState struct {
 	RecordedAt      time.Time           `json:"recorded_at"`
-	MainRulesSHA256 string              `json:"main_rules_sha256"`
+	MainRulesStatus string              `json:"main_rules_status"`
+	MainRulesSHA256 string              `json:"main_rules_sha256,omitempty"`
 	Anchors         []AnchorRulesDigest `json:"anchors"`
 	Services        []ServicePID        `json:"services"`
 }
 
 type CoexistenceEvidence struct {
-	OwnedAnchor        string           `json:"owned_anchor"`
-	PolicySHA256       string           `json:"policy_sha256"`
-	Before             CoexistenceState `json:"before"`
-	AfterFirewall      CoexistenceState `json:"after_firewall"`
-	AfterQualification CoexistenceState `json:"after_qualification"`
+	Before CoexistenceState `json:"before"`
+	After  CoexistenceState `json:"after"`
 }
 
 // Labels are literal system-domain service names, not launchctl targets. The
@@ -79,13 +78,8 @@ func coexistenceServiceLabel(label string) bool {
 	return true
 }
 
-func validateCoexistenceConfig(c *Config) error {
-	if c.PFAnchor == "" {
-		c.PFAnchor = DefaultPFAnchor
-	}
-	if !pfctl.AnchorPath(c.PFAnchor) {
-		return errors.New("invalid owned PF anchor")
-	}
+// ValidateCoexistenceConfig validates and canonicalizes the configured peers.
+func ValidateCoexistenceConfig(c *Config) error {
 	if len(c.CoexistingAnchors) > coexistenceListLimit || len(c.CoexistingServices) > coexistenceListLimit {
 		return errors.New("coexistence configuration list limit exceeded")
 	}
@@ -94,8 +88,8 @@ func validateCoexistenceConfig(c *Config) error {
 	slices.Sort(anchors)
 	slices.Sort(services)
 	for i, path := range anchors {
-		if !pfctl.AnchorPath(path) || path == c.PFAnchor || strings.HasPrefix(path, c.PFAnchor+"/") || i > 0 && anchors[i-1] == path {
-			return errors.New("invalid, duplicate, or owned coexisting PF anchor")
+		if !pfctl.AnchorPath(path) || i > 0 && anchors[i-1] == path {
+			return errors.New("invalid or duplicate coexisting PF anchor")
 		}
 	}
 	for i, label := range services {
@@ -122,17 +116,10 @@ func ObserveCoexistence(ctx context.Context, c Config) (CoexistenceState, error)
 	if runtime.GOOS != "darwin" || os.Getuid() != 0 || os.Geteuid() != 0 {
 		return CoexistenceState{}, errors.New("coexistence observation requires macOS root")
 	}
-	if err := validatePFConfig(&c); err != nil {
+	if err := ValidateCoexistenceConfig(&c); err != nil {
 		return CoexistenceState{}, err
 	}
-	if err := validateCoexistenceConfig(&c); err != nil {
-		return CoexistenceState{}, err
-	}
-	client, err := pfctl.New(c.PFAnchor)
-	if err != nil {
-		return CoexistenceState{}, err
-	}
-	return observeCoexistenceWithCommands(ctx, c, client.Read, coexistenceLaunchctl)
+	return observeCoexistenceWithCommands(ctx, c, pfctl.Read, coexistenceLaunchctl)
 }
 
 func coexistenceLaunchctl(ctx context.Context, args ...string) (pfctl.Output, error) {
@@ -154,27 +141,34 @@ func coexistenceLaunchctl(ctx context.Context, args ...string) (pfctl.Output, er
 // The command seams are private: fixtures cannot replace production host/root
 // checks. Every returned byte, including diagnostics, consumes the shared budget.
 func observeCoexistenceWithCommands(ctx context.Context, c Config, pf, launchctl coexistenceCommand) (CoexistenceState, error) {
-	if err := validatePFConfig(&c); err != nil {
-		return CoexistenceState{}, err
-	}
-	if err := validateCoexistenceConfig(&c); err != nil {
+	if err := ValidateCoexistenceConfig(&c); err != nil {
 		return CoexistenceState{}, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	remaining := 4 << 20
+	pfRemaining, serviceRemaining := 4<<20, 4<<20
+	pfCtx, pfCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer pfCancel()
 	query := func(command coexistenceCommand, isPF bool, args ...string) (string, error) {
-		if err := ctx.Err(); err != nil {
+		commandParent := ctx
+		if isPF {
+			commandParent = pfCtx
+		}
+		if err := commandParent.Err(); err != nil {
 			return "", err
 		}
-		commandCtx, commandCancel := context.WithTimeout(ctx, 2*time.Second)
+		commandCtx, commandCancel := context.WithTimeout(commandParent, 2*time.Second)
 		defer commandCancel()
 		out, err := command(commandCtx, args...)
 		if commandCtx.Err() != nil {
 			return "", commandCtx.Err()
 		}
-		remaining -= len(out.Stdout) + len(out.Stderr)
-		if len(out.Stdout) > 1<<20 || len(out.Stderr) > 8192 || remaining < 0 {
+		remaining := &serviceRemaining
+		if isPF {
+			remaining = &pfRemaining
+		}
+		*remaining -= len(out.Stdout) + len(out.Stderr)
+		if len(out.Stdout) > 1<<20 || len(out.Stderr) > 8192 || *remaining < 0 {
 			return "", errors.New("coexistence observation output limit exceeded")
 		}
 		if err != nil {
@@ -187,47 +181,14 @@ func observeCoexistenceWithCommands(ctx context.Context, c Config, pf, launchctl
 		}
 		return out.Stdout, nil
 	}
-	readRules := func(args ...string) (string, error) {
-		text, err := query(pf, true, args...)
-		if err != nil {
-			return "", err
-		}
-		if err := coexistenceRules(text, args[len(args)-1] == "-sn"); err != nil {
-			return "", err
-		}
-		return text, nil
-	}
-	mainFilter, err := readRules("-sr")
-	if err != nil {
-		return CoexistenceState{}, fmt.Errorf("main PF filter rules: %w", err)
-	}
-	mainTranslation, err := readRules("-sn")
-	if err != nil {
-		return CoexistenceState{}, fmt.Errorf("main PF translation rules: %w", err)
-	}
+	// PF bytes are opaque. A failed read does not imply an empty or absent anchor.
 	state := CoexistenceState{
-		MainRulesSHA256: coexistenceMainDigest(mainFilter, mainTranslation),
+		MainRulesStatus: "unavailable",
 		Anchors:         make([]AnchorRulesDigest, 0, len(c.CoexistingAnchors)),
 		Services:        make([]ServicePID, 0, len(c.CoexistingServices)),
 	}
-	for _, path := range c.CoexistingAnchors {
-		listing, err := query(pf, true, "-a", path, "-v", "-s", "Anchors")
-		if err != nil {
-			return CoexistenceState{}, fmt.Errorf("coexisting PF anchor %q existence: %w", path, err)
-		}
-		if err := coexistenceAnchorListing(path, listing); err != nil {
-			return CoexistenceState{}, err
-		}
-		filter, err := readRules("-a", path, "-sr")
-		if err != nil {
-			return CoexistenceState{}, fmt.Errorf("coexisting PF anchor %q filter rules: %w", path, err)
-		}
-		translation, err := readRules("-a", path, "-sn")
-		if err != nil {
-			return CoexistenceState{}, fmt.Errorf("coexisting PF anchor %q translation rules: %w", path, err)
-		}
-		state.Anchors = append(state.Anchors, AnchorRulesDigest{path, digest([]byte(filter)), digest([]byte(translation))})
-	}
+	// Required service observations have their own budget and run first so PF
+	// unavailability cannot consume their bounded observation window.
 	for _, label := range c.CoexistingServices {
 		text, err := query(launchctl, false, "print", "system/"+label)
 		if err != nil {
@@ -239,8 +200,22 @@ func observeCoexistenceWithCommands(ctx context.Context, c Config, pf, launchctl
 		}
 		state.Services = append(state.Services, ServicePID{label, pid})
 	}
-	if err := ctx.Err(); err != nil {
-		return CoexistenceState{}, err
+	mainFilter, filterErr := query(pf, true, "-sr")
+	mainTranslation, translationErr := query(pf, true, "-sn")
+	if filterErr == nil && translationErr == nil {
+		state.MainRulesStatus = "available"
+		state.MainRulesSHA256 = coexistenceMainDigest(mainFilter, mainTranslation)
+	}
+	for _, path := range c.CoexistingAnchors {
+		anchor := AnchorRulesDigest{Path: path, Status: "unavailable"}
+		filter, filterErr := query(pf, true, "-a", path, "-sr")
+		translation, translationErr := query(pf, true, "-a", path, "-sn")
+		if filterErr == nil && translationErr == nil {
+			anchor.Status = "available"
+			anchor.FilterSHA256 = digest([]byte(filter))
+			anchor.TranslationSHA256 = digest([]byte(translation))
+		}
+		state.Anchors = append(state.Anchors, anchor)
 	}
 	state.RecordedAt = time.Now().UTC()
 	return state, nil
@@ -255,43 +230,6 @@ func coexistenceMainDigest(filter, translation string) string {
 		io.WriteString(h, text)
 	}
 	return hex.EncodeToString(h.Sum(nil))
-}
-
-func coexistenceRules(text string, translation bool) error {
-	for text != "" {
-		line, rest, complete := strings.Cut(text, "\n")
-		if !complete || !directFilterRuleLine(line) {
-			return errors.New("unsupported or truncated direct PF rules")
-		}
-		text = rest
-		kind, remainder, _ := strings.Cut(line, " ")
-		if kind == "no" {
-			kind, _, _ = strings.Cut(remainder, " ")
-		}
-		filterKind := kind == "anchor" || kind == "pass" || kind == "block" || kind == "scrub" || kind == "scrub-anchor" || kind == "dummynet-anchor"
-		translationKind := kind == "nat" || kind == "rdr" || kind == "binat" || kind == "nat-anchor" || kind == "rdr-anchor" || kind == "binat-anchor"
-		if translation && !translationKind || !translation && !filterKind {
-			return errors.New("unexpected direct PF ruleset kind")
-		}
-	}
-	return nil
-}
-
-func coexistenceAnchorListing(parent, text string) error {
-	seen := make(map[string]bool)
-	for text != "" {
-		line, rest, complete := strings.Cut(text, "\n")
-		if !complete || !strings.HasPrefix(line, "  ") {
-			return errors.New("unsupported or truncated coexisting PF anchor listing")
-		}
-		path := strings.TrimPrefix(line, "  ")
-		if !pfctl.AnchorPath(path) || !strings.HasPrefix(path, parent+"/") || seen[path] || len(seen) >= 4096 {
-			return errors.New("invalid coexisting PF anchor listing")
-		}
-		seen[path] = true
-		text = rest
-	}
-	return nil
 }
 
 // Accept the newline-terminated `launchctl print system/LABEL` dictionary, with
@@ -394,11 +332,11 @@ func coexistenceLineSyntax(line string) (int, bool) {
 }
 
 func validCoexistenceState(state CoexistenceState) error {
-	if state.RecordedAt.IsZero() || !validDigest(state.MainRulesSHA256) || len(state.Anchors) > coexistenceListLimit || len(state.Services) > coexistenceListLimit {
+	if state.RecordedAt.IsZero() || !validMeasurement(state.MainRulesStatus, state.MainRulesSHA256) || len(state.Anchors) > coexistenceListLimit || len(state.Services) > coexistenceListLimit {
 		return errors.New("incomplete coexistence state")
 	}
 	for i, anchor := range state.Anchors {
-		if !pfctl.AnchorPath(anchor.Path) || !validDigest(anchor.FilterSHA256) || !validDigest(anchor.TranslationSHA256) || i > 0 && state.Anchors[i-1].Path >= anchor.Path {
+		if !pfctl.AnchorPath(anchor.Path) || !validMeasurement(anchor.Status, anchor.FilterSHA256, anchor.TranslationSHA256) || i > 0 && state.Anchors[i-1].Path >= anchor.Path {
 			return errors.New("invalid or noncanonical coexistence anchor state")
 		}
 	}
@@ -410,34 +348,60 @@ func validCoexistenceState(state CoexistenceState) error {
 	return nil
 }
 
-// SameCoexistence compares complete canonical sets; observation timestamps may
-// differ but cannot go backwards. Empty and nil collections are equivalent.
-func SameCoexistence(before, after CoexistenceState) error {
+func validMeasurement(status string, digests ...string) bool {
+	if status != "available" && status != "unavailable" {
+		return false
+	}
+	for _, d := range digests {
+		if status == "available" && !validDigest(d) || status == "unavailable" && d != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// SameCoexistingServices validates canonical observations and unchanged running
+// service PIDs. Current PF bytes and availability do not gate health.
+func SameCoexistingServices(before, after CoexistenceState) error {
 	if err := validCoexistenceState(before); err != nil {
 		return err
 	}
 	if err := validCoexistenceState(after); err != nil {
 		return err
 	}
-	if after.RecordedAt.Before(before.RecordedAt) || before.MainRulesSHA256 != after.MainRulesSHA256 || !slices.Equal(before.Anchors, after.Anchors) || !slices.Equal(before.Services, after.Services) {
-		return errors.New("coexisting PF rules or running service PIDs changed, or observation time regressed")
+	if after.RecordedAt.Before(before.RecordedAt) || !slices.Equal(before.Services, after.Services) {
+		return errors.New("coexisting running service PIDs changed, or observation time regressed")
 	}
 	return nil
 }
 
-func ValidateCoexistenceEvidence(e CoexistenceEvidence, current CoexistenceState, ownedAnchor, policySHA string) error {
-	if !pfctl.AnchorPath(ownedAnchor) || e.OwnedAnchor != ownedAnchor || !validDigest(policySHA) || e.PolicySHA256 != policySHA {
-		return errors.New("coexistence evidence owned anchor or policy mismatch")
+// SameCoexistence compares the configured sets, services and any mutually
+// available opaque rule measurements across one observation window.
+func SameCoexistence(before, after CoexistenceState) error {
+	if err := SameCoexistingServices(before, after); err != nil {
+		return err
 	}
-	for _, anchor := range e.Before.Anchors {
-		if anchor.Path == ownedAnchor || strings.HasPrefix(anchor.Path, ownedAnchor+"/") {
-			return errors.New("coexistence evidence includes owned PF rules")
+	if len(before.Anchors) != len(after.Anchors) {
+		return errors.New("coexisting anchor set changed")
+	}
+	if before.MainRulesStatus == "available" && after.MainRulesStatus == "available" && before.MainRulesSHA256 != after.MainRulesSHA256 {
+		return errors.New("main PF rules changed")
+	}
+	for i, old := range before.Anchors {
+		current := after.Anchors[i]
+		if old.Path != current.Path {
+			return errors.New("coexisting anchor set changed")
 		}
-	}
-	for _, pair := range [][2]CoexistenceState{{e.Before, e.AfterFirewall}, {e.AfterFirewall, e.AfterQualification}, {e.AfterQualification, current}} {
-		if err := SameCoexistence(pair[0], pair[1]); err != nil {
-			return err
+		if old.Status == "available" && current.Status == "available" && (old.FilterSHA256 != current.FilterSHA256 || old.TranslationSHA256 != current.TranslationSHA256) {
+			return fmt.Errorf("coexisting PF rules changed: %s", old.Path)
 		}
 	}
 	return nil
+}
+
+func ValidateCoexistenceEvidence(e CoexistenceEvidence, current CoexistenceState) error {
+	if err := SameCoexistence(e.Before, e.After); err != nil {
+		return err
+	}
+	return SameCoexistingServices(e.After, current)
 }

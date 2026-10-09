@@ -12,11 +12,11 @@ Replaced all 15 reported SC2015 chains with explicit conditionals: ten in `asset
 
 `create-users.sh` now rejects GID 20 for both newly created service accounts, alongside GIDs 0, 80, and the other service account's primary GID. This check occurs before directory provisioning. Unexpected membership still leaves account creation in a refused partial state requiring reviewed recovery; no automatic account deletion or privilege removal was added. The production membership validator is exercised with both roles and each forbidden group.
 
-### P3 — Case-insensitive JSON and StagePolicy field meaning
+### P3 — Case-insensitive JSON
 
 Qualification's strict JSON validation rejects duplicate keys under the same Unicode simple-fold equivalence used by Go's JSON field matching, recursively and before destination mutation. This covers ASCII case variants, escaped keys, long s, Kelvin sign, and nested reports/controller values.
 
-`StagePolicy` already uses this validator through `policyConfig`; ambiguous controller input now fails before archiving or replacing installed files. The canonical `policy_sha256` field remains required. Reordering uniquely named fields preserves their typed controller meaning; only the intended policy digest changes. Regressions cover report success overrides, policy/other-field aliases, and unchanged unrelated controller semantics.
+The later phase-1 network cutover removes policy staging and all policy-digest fields. The strict JSON validator remains required for qualification input; report success aliases still cannot override an earlier value.
 
 ### P3 — Retryable partial collection
 

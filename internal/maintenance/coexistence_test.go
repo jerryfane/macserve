@@ -61,22 +61,19 @@ func (f coexistenceFixture) command(ctx context.Context, args ...string) (pfctl.
 
 func coexistenceInputs() (Config, coexistenceFixture) {
 	c := Config{
-		PFAnchor:           "com.example/owned",
 		CoexistingAnchors:  []string{"com.example/gateway", "com.example/empty"},
 		CoexistingServices: []string{"org.example.gateway"},
 	}
 	// No table-content or verbose-rule/counter response exists: observations
 	// requiring those changing values fail rather than silently consuming them.
 	f := coexistenceFixture{
-		"-sr":                                  {out: pfctl.Output{Stdout: "anchor \"com.example/*\" all\n"}},
-		"-sn":                                  {out: pfctl.Output{Stdout: "nat-anchor \"com.example/*\" all\n"}},
-		"-a com.example/empty -v -s Anchors":   {},
-		"-a com.example/empty -sr":             {},
-		"-a com.example/empty -sn":             {},
-		"-a com.example/gateway -v -s Anchors": {out: pfctl.Output{Stdout: "  com.example/gateway/child\n"}},
-		"-a com.example/gateway -sr":           {out: pfctl.Output{Stdout: "pass in on en0 from <clients> to any\n"}},
-		"-a com.example/gateway -sn":           {out: pfctl.Output{Stdout: "nat on en0 inet from <clients> to any -> (en0)\n"}},
-		"print system/org.example.gateway":     {out: pfctl.Output{Stdout: coexistenceLaunchOutput}},
+		"-sr":                              {out: pfctl.Output{Stdout: "anchor \"com.example/*\" all\n"}},
+		"-sn":                              {out: pfctl.Output{Stdout: "nat-anchor \"com.example/*\" all\n"}},
+		"-a com.example/empty -sr":         {},
+		"-a com.example/empty -sn":         {},
+		"-a com.example/gateway -sr":       {out: pfctl.Output{Stdout: "pass in on en0 from <clients> to any\n"}},
+		"-a com.example/gateway -sn":       {out: pfctl.Output{Stdout: "nat on en0 inet from <clients> to any -> (en0)\n"}},
+		"print system/org.example.gateway": {out: pfctl.Output{Stdout: coexistenceLaunchOutput}},
 	}
 	return c, f
 }
@@ -85,7 +82,7 @@ func TestCoexistenceConfigCanonicalization(t *testing.T) {
 	c, _ := coexistenceInputs()
 	original := c.CoexistingAnchors
 	c.CoexistingServices = []string{"org.example.zeta", "org.example.alpha"}
-	if err := validateCoexistenceConfig(&c); err != nil {
+	if err := ValidateCoexistenceConfig(&c); err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Equal(c.CoexistingAnchors, []string{"com.example/empty", "com.example/gateway"}) {
@@ -98,20 +95,20 @@ func TestCoexistenceConfigCanonicalization(t *testing.T) {
 		t.Fatal("source configuration was mutated")
 	}
 	c = Config{CoexistingAnchors: []string{}, CoexistingServices: []string{}}
-	if err := validateCoexistenceConfig(&c); err != nil || c.CoexistingAnchors != nil || c.CoexistingServices != nil {
+	if err := ValidateCoexistenceConfig(&c); err != nil || c.CoexistingAnchors != nil || c.CoexistingServices != nil {
 		t.Fatalf("empty collections not normalized: %v", err)
 	}
-	c = Config{PFAnchor: "com.example/owned", CoexistingAnchors: []string{"com.example", "com.example/owned-other"}}
-	if err := validateCoexistenceConfig(&c); err != nil {
+	c = Config{CoexistingAnchors: []string{"com.example", "com.example/owned-other"}}
+	if err := ValidateCoexistenceConfig(&c); err != nil {
 		t.Fatalf("direct ancestor or disjoint sibling refused: %v", err)
 	}
 }
 
 func TestCoexistenceConfigRejectsAmbiguousSelectors(t *testing.T) {
-	for _, path := range []string{"", "*", "com.example/*", "com.example/owned", "com.example/owned/child", "/com.example/peer", "com.example/../peer", "peer\nother"} {
+	for _, path := range []string{"", "*", "com.example/*", "/com.example/peer", "com.example/../peer", "peer\nother"} {
 		t.Run("anchor "+path, func(t *testing.T) {
-			c := Config{PFAnchor: "com.example/owned", CoexistingAnchors: []string{path}}
-			if err := validateCoexistenceConfig(&c); err == nil {
+			c := Config{CoexistingAnchors: []string{path}}
+			if err := ValidateCoexistenceConfig(&c); err == nil {
 				t.Fatal("unsafe peer path accepted")
 			}
 		})
@@ -119,7 +116,7 @@ func TestCoexistenceConfigRejectsAmbiguousSelectors(t *testing.T) {
 	for _, label := range []string{"", "*", "org.example.*", "system/org.example.peer", "gui/501/org.example.peer", "../peer", "-peer", "org.example:peer", "peer\nstate", "\"peer\"", strings.Repeat("x", 256)} {
 		t.Run("service "+label, func(t *testing.T) {
 			c := Config{CoexistingServices: []string{label}}
-			if err := validateCoexistenceConfig(&c); err == nil {
+			if err := ValidateCoexistenceConfig(&c); err == nil {
 				t.Fatal("unsafe service selector accepted")
 			}
 		})
@@ -128,7 +125,7 @@ func TestCoexistenceConfigRejectsAmbiguousSelectors(t *testing.T) {
 		{CoexistingAnchors: []string{"peer", "peer"}},
 		{CoexistingServices: []string{"org.example.peer", "org.example.peer"}},
 	} {
-		if err := validateCoexistenceConfig(&c); err == nil {
+		if err := ValidateCoexistenceConfig(&c); err == nil {
 			t.Fatal("duplicate or excessive config list accepted")
 		}
 	}
@@ -137,11 +134,11 @@ func TestCoexistenceConfigRejectsAmbiguousSelectors(t *testing.T) {
 		anchors[i], services[i] = fmt.Sprintf("peer%d", i), fmt.Sprintf("org.example.peer%d", i)
 	}
 	atLimit := Config{CoexistingAnchors: anchors[:64], CoexistingServices: services[:64]}
-	if err := validateCoexistenceConfig(&atLimit); err != nil {
+	if err := ValidateCoexistenceConfig(&atLimit); err != nil {
 		t.Fatalf("bounded exact lists refused: %v", err)
 	}
 	for _, c := range []Config{{CoexistingAnchors: anchors}, {CoexistingServices: services}} {
-		if err := validateCoexistenceConfig(&c); err == nil {
+		if err := ValidateCoexistenceConfig(&c); err == nil {
 			t.Fatal("excessive exact list accepted")
 		}
 	}
@@ -180,114 +177,67 @@ func TestCoexistenceObservationDetectsRuleAndPIDChanges(t *testing.T) {
 	}
 }
 
-func TestCoexistenceStockAuxiliaryCallsRemainBound(t *testing.T) {
-	c, fixture := coexistenceInputs()
-	stock := "scrub-anchor \"com.apple/*\" all fragment reassemble\nanchor \"com.apple/*\" all\ndummynet-anchor \"com.apple/*\" all\n"
-	fixture["-sr"] = coexistenceReply{out: pfctl.Output{Stdout: stock}}
-	before, err := observeCoexistenceWithCommands(context.Background(), c, fixture.command, fixture.command)
-	if err != nil {
-		t.Fatalf("stock auxiliary anchor calls refused: %v", err)
-	}
-	for _, kind := range []string{"scrub-anchor", "dummynet-anchor"} {
-		changed := strings.Replace(stock, kind+" \"com.apple/*\"", kind+" \"com.apple/normalizer\"", 1)
-		fixture["-sr"] = coexistenceReply{out: pfctl.Output{Stdout: changed}}
-		after, err := observeCoexistenceWithCommands(context.Background(), c, fixture.command, fixture.command)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := SameCoexistence(before, after); err == nil {
-			t.Fatalf("%s change disappeared from direct main evidence", kind)
+func TestUnreadablePFRulesAreUnavailable(t *testing.T) {
+	for _, command := range []string{"-sr", "-sn", "-a com.example/empty -sr", "-a com.example/empty -sn"} {
+		for _, reply := range []coexistenceReply{
+			{err: errors.New("permission denied")},
+			{out: pfctl.Output{Stderr: "pfctl: DIOCGETRULES: Invalid argument\n"}},
+			{out: pfctl.Output{Stdout: strings.Repeat("x", (1<<20)+1)}},
+		} {
+			c, f := coexistenceInputs()
+			before, err := observeCoexistenceWithCommands(context.Background(), c, f.command, f.command)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f[command] = reply
+			after, err := observeCoexistenceWithCommands(context.Background(), c, f.command, f.command)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.HasPrefix(command, "-a") {
+				a := after.Anchors[0]
+				if a.Status != "unavailable" || a.FilterSHA256 != "" || a.TranslationSHA256 != "" {
+					t.Fatalf("partial measurement retained: %+v", a)
+				}
+			} else if after.MainRulesStatus != "unavailable" || after.MainRulesSHA256 != "" {
+				t.Fatalf("unreadable main retained: %+v", after)
+			}
+			if err := SameCoexistence(before, after); err != nil {
+				t.Fatal(err)
+			}
+			recovered := before
+			recovered.RecordedAt = after.RecordedAt.Add(time.Second)
+			if err := SameCoexistence(after, recovered); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 }
 
-func TestCoexistenceReadsOnlyDirectPeerRules(t *testing.T) {
+func TestCoexistenceServiceFailuresRemainFatal(t *testing.T) {
+	for _, reply := range []coexistenceReply{
+		{err: errors.New("service missing")},
+		{out: pfctl.Output{Stdout: strings.Replace(coexistenceLaunchOutput, "state = running", "state = waiting", 1)}},
+		{out: pfctl.Output{Stdout: coexistenceLaunchOutput, Stderr: "partial"}},
+	} {
+		c, f := coexistenceInputs()
+		f["print system/org.example.gateway"] = reply
+		if _, err := observeCoexistenceWithCommands(context.Background(), c, f.command, f.command); err == nil {
+			t.Fatal("unproven running service admitted")
+		}
+	}
+}
+
+func TestCoexistenceRulesAreOpaqueBytes(t *testing.T) {
 	c, f := coexistenceInputs()
-	c.CoexistingAnchors = []string{"com.example"}
-	f["-a com.example -v -s Anchors"] = coexistenceReply{out: pfctl.Output{Stdout: "  com.example/owned\n"}}
-	f["-a com.example -sr"] = coexistenceReply{out: pfctl.Output{Stdout: "anchor \"owned\" all\n"}}
-	f["-a com.example -sn"] = coexistenceReply{}
-	before, err := observeCoexistenceWithCommands(context.Background(), c, f.command, f.command)
+	text := "unfamiliar native syntax without newline"
+	f["-a com.example/empty -sr"] = coexistenceReply{out: pfctl.Output{Stdout: text}}
+	state, err := observeCoexistenceWithCommands(context.Background(), c, f.command, f.command)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Descendants may appear without changing this exact peer's direct rules.
-	// Their rule/table contents are intentionally not observation inputs.
-	f["-a com.example -v -s Anchors"] = coexistenceReply{out: pfctl.Output{Stdout: "  com.example/owned\n  com.example/other\n"}}
-	after, err := observeCoexistenceWithCommands(context.Background(), c, f.command, f.command)
-	if err != nil || SameCoexistence(before, after) != nil {
-		t.Fatalf("direct ancestor measurement accidentally bound descendants: %v", err)
-	}
-}
-
-func TestCoexistenceObservationRejectsIncompleteReads(t *testing.T) {
-	cases := map[string]func(coexistenceFixture){
-		"absent empty peer": func(f coexistenceFixture) {
-			f["-a com.example/empty -v -s Anchors"] = coexistenceReply{err: pfctl.ErrAnchorAbsent}
-		},
-		"absent diagnostic without error": func(f coexistenceFixture) {
-			f["-a com.example/empty -v -s Anchors"] = coexistenceReply{out: pfctl.Output{Stderr: "Anchor 'com.example/empty' not found.\n"}}
-		},
-		"missing peer filter read": func(f coexistenceFixture) { delete(f, "-a com.example/empty -sr") },
-		"truncated anchor listing": func(f coexistenceFixture) {
-			f["-a com.example/gateway -v -s Anchors"] = coexistenceReply{out: pfctl.Output{Stdout: "  com.example/gateway/child"}}
-		},
-		"unrelated anchor listing": func(f coexistenceFixture) {
-			f["-a com.example/gateway -v -s Anchors"] = coexistenceReply{out: pfctl.Output{Stdout: "  com.example/other\n"}}
-		},
-		"truncated rules":       func(f coexistenceFixture) { f["-sr"] = coexistenceReply{out: pfctl.Output{Stdout: "block all"}} },
-		"unknown PF diagnostic": func(f coexistenceFixture) { f["-sr"] = coexistenceReply{out: pfctl.Output{Stderr: "partial rules\n"}} },
-		"counter output": func(f coexistenceFixture) {
-			f["-sr"] = coexistenceReply{out: pfctl.Output{Stdout: "pass all\n  [ Evaluations: 1 ]\n"}}
-		},
-		"recursive output": func(f coexistenceFixture) {
-			f["-sr"] = coexistenceReply{out: pfctl.Output{Stdout: "anchor \"peer\" all {\nblock all\n}\n"}}
-		},
-		"table contents": func(f coexistenceFixture) { f["-sr"] = coexistenceReply{out: pfctl.Output{Stdout: "192.0.2.1\n"}} },
-		"service absent": func(f coexistenceFixture) {
-			f["print system/org.example.gateway"] = coexistenceReply{err: errors.New("service not found")}
-		},
-		"service diagnostic": func(f coexistenceFixture) {
-			f["print system/org.example.gateway"] = coexistenceReply{out: pfctl.Output{Stdout: coexistenceLaunchOutput, Stderr: "partial output\n"}}
-		},
-		"excess stdout": func(f coexistenceFixture) {
-			f["-sr"] = coexistenceReply{out: pfctl.Output{Stdout: strings.Repeat("x", (1<<20)+1)}}
-		},
-		"excess stderr": func(f coexistenceFixture) {
-			f["-sr"] = coexistenceReply{out: pfctl.Output{Stderr: strings.Repeat("x", 8193)}}
-		},
-		"aggregate limit": func(f coexistenceFixture) {
-			for _, command := range []string{"-sr", "-a com.example/empty -sr", "-a com.example/gateway -sr"} {
-				f[command] = coexistenceReply{out: pfctl.Output{Stdout: strings.Repeat("pass all\n", 110000)}}
-			}
-			for _, command := range []string{"-sn", "-a com.example/empty -sn", "-a com.example/gateway -sn"} {
-				f[command] = coexistenceReply{out: pfctl.Output{Stdout: strings.Repeat("no nat all\n", 99000)}}
-			}
-		},
-	}
-	for name, change := range cases {
-		t.Run(name, func(t *testing.T) {
-			c, f := coexistenceInputs()
-			change(f)
-			state, err := observeCoexistenceWithCommands(context.Background(), c, f.command, f.command)
-			if err == nil || !state.RecordedAt.IsZero() {
-				t.Fatalf("incomplete observation published as successful: %v", err)
-			}
-		})
-	}
-}
-
-func TestCoexistenceObservationCancellation(t *testing.T) {
-	c, f := coexistenceInputs()
-	ctx, cancel := context.WithCancel(context.Background())
-	command := func(ctx context.Context, args ...string) (pfctl.Output, error) {
-		out, err := f.command(ctx, args...)
-		cancel()
-		return out, err
-	}
-	state, err := observeCoexistenceWithCommands(ctx, c, command, f.command)
-	if !errors.Is(err, context.Canceled) || !state.RecordedAt.IsZero() {
-		t.Fatalf("canceled read accepted: %v", err)
+	if state.Anchors[0].FilterSHA256 != digest([]byte(text)) {
+		t.Fatal("opaque bytes not measured exactly")
 	}
 }
 
@@ -340,8 +290,9 @@ func TestCoexistenceLaunchctlParser(t *testing.T) {
 func coexistenceStateFixture(at time.Time) CoexistenceState {
 	return CoexistenceState{
 		RecordedAt:      at,
+		MainRulesStatus: "available",
 		MainRulesSHA256: digest([]byte("main")),
-		Anchors:         []AnchorRulesDigest{{"com.example/peer", digest([]byte("filter")), digest([]byte("translation"))}},
+		Anchors:         []AnchorRulesDigest{{Path: "com.example/peer", Status: "available", FilterSHA256: digest([]byte("filter")), TranslationSHA256: digest([]byte("translation"))}},
 		Services:        []ServicePID{{"org.example.peer", 123}},
 	}
 }
@@ -363,7 +314,7 @@ func TestSameCoexistenceValidatesShapeAndOrder(t *testing.T) {
 		"changed peer set":           func(s *CoexistenceState) { s.Anchors[0].Path = "com.example/other" },
 		"duplicate peer":             func(s *CoexistenceState) { s.Anchors = append(s.Anchors, s.Anchors[0]) },
 		"unsorted peers": func(s *CoexistenceState) {
-			s.Anchors = append(s.Anchors, AnchorRulesDigest{"com.example/aaa", s.Anchors[0].FilterSHA256, s.Anchors[0].TranslationSHA256})
+			s.Anchors = append(s.Anchors, AnchorRulesDigest{Path: "com.example/aaa", Status: "available", FilterSHA256: s.Anchors[0].FilterSHA256, TranslationSHA256: s.Anchors[0].TranslationSHA256})
 		},
 		"missing service":   func(s *CoexistenceState) { s.Services = nil },
 		"duplicate service": func(s *CoexistenceState) { s.Services = append(s.Services, s.Services[0]) },
@@ -385,56 +336,41 @@ func TestSameCoexistenceValidatesShapeAndOrder(t *testing.T) {
 	}
 }
 
-func TestCoexistenceEvidenceRequiresFinalRecheck(t *testing.T) {
+func TestCoexistenceEvidenceBindsWindowButOnlyCurrentServices(t *testing.T) {
 	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	policy := digest([]byte("reviewed owned policy"))
-	fresh := func() (CoexistenceEvidence, CoexistenceState) {
-		return CoexistenceEvidence{
-			OwnedAnchor: "com.example/owned", PolicySHA256: policy,
-			Before:             coexistenceStateFixture(at),
-			AfterFirewall:      coexistenceStateFixture(at.Add(time.Second)),
-			AfterQualification: coexistenceStateFixture(at.Add(2 * time.Second)),
-		}, coexistenceStateFixture(at.Add(3 * time.Second))
-	}
-	e, current := fresh()
-	if err := ValidateCoexistenceEvidence(e, current, "com.example/owned", policy); err != nil {
+	e := CoexistenceEvidence{Before: coexistenceStateFixture(at), After: coexistenceStateFixture(at.Add(time.Second))}
+	current := coexistenceStateFixture(at.Add(2 * time.Second))
+	current.MainRulesSHA256 = digest([]byte("current main changed"))
+	current.Anchors[0].FilterSHA256 = digest([]byte("current peer changed"))
+	if err := ValidateCoexistenceEvidence(e, current); err != nil {
 		t.Fatal(err)
 	}
-	cases := map[string]func(*CoexistenceEvidence, *CoexistenceState){
-		"owned anchor mismatch": func(e *CoexistenceEvidence, _ *CoexistenceState) { e.OwnedAnchor = "com.example/other" },
-		"policy mismatch":       func(e *CoexistenceEvidence, _ *CoexistenceState) { e.PolicySHA256 = digest([]byte("different policy")) },
-		"missing final recheck": func(e *CoexistenceEvidence, _ *CoexistenceState) { e.AfterQualification = CoexistenceState{} },
-		"main changed at firewall step": func(e *CoexistenceEvidence, _ *CoexistenceState) {
-			e.AfterFirewall.MainRulesSHA256 = digest([]byte("changed"))
-		},
-		"peer changed at qualification": func(e *CoexistenceEvidence, _ *CoexistenceState) {
-			e.AfterQualification.Anchors[0].TranslationSHA256 = digest([]byte("changed"))
-		},
-		"service restarted at qualification": func(e *CoexistenceEvidence, _ *CoexistenceState) { e.AfterQualification.Services[0].PID++ },
-		"current peer changed": func(_ *CoexistenceEvidence, s *CoexistenceState) {
-			s.Anchors[0].FilterSHA256 = digest([]byte("changed"))
-		},
-		"current service restarted": func(_ *CoexistenceEvidence, s *CoexistenceState) { s.Services[0].PID++ },
-		"before follows firewall":   func(e *CoexistenceEvidence, _ *CoexistenceState) { e.Before.RecordedAt = at.Add(2 * time.Second) },
-		"firewall follows qualification": func(e *CoexistenceEvidence, _ *CoexistenceState) {
-			e.AfterFirewall.RecordedAt = at.Add(3 * time.Second)
-		},
-		"qualification follows current": func(e *CoexistenceEvidence, _ *CoexistenceState) {
-			e.AfterQualification.RecordedAt = at.Add(4 * time.Second)
-		},
-		"owned peer": func(e *CoexistenceEvidence, s *CoexistenceState) {
-			for _, state := range []*CoexistenceState{&e.Before, &e.AfterFirewall, &e.AfterQualification, s} {
-				state.Anchors[0].Path = "com.example/owned/child"
-			}
-		},
+	current.Services[0].PID++
+	if err := ValidateCoexistenceEvidence(e, current); err == nil {
+		t.Fatal("current PID drift accepted")
 	}
-	for name, change := range cases {
-		t.Run(name, func(t *testing.T) {
-			e, current := fresh()
-			change(&e, &current)
-			if err := ValidateCoexistenceEvidence(e, current, "com.example/owned", policy); err == nil {
-				t.Fatal("incomplete, reordered, or changed evidence accepted")
-			}
-		})
+	current.Services[0].PID--
+	e.After.Anchors[0].TranslationSHA256 = digest([]byte("window drift"))
+	if err := ValidateCoexistenceEvidence(e, current); err == nil {
+		t.Fatal("recorded rule drift accepted")
+	}
+}
+
+func TestPFDeadlineDoesNotInvalidateObservedServices(t *testing.T) {
+	c, f := coexistenceInputs()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pf := func(context.Context, ...string) (pfctl.Output, error) {
+		cancel()
+		return pfctl.Output{}, context.Canceled
+	}
+	state, err := observeCoexistenceWithCommands(ctx, c, pf, f.command)
+	if err != nil || state.MainRulesStatus != "unavailable" || len(state.Services) != 1 || state.Services[0].PID != 123 {
+		t.Fatalf("PF cancellation discarded service evidence: %+v %v", state, err)
+	}
+	for _, anchor := range state.Anchors {
+		if anchor.Status != "unavailable" || anchor.FilterSHA256 != "" || anchor.TranslationSHA256 != "" {
+			t.Fatalf("PF cancellation produced available peer: %+v", anchor)
+		}
 	}
 }

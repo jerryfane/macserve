@@ -15,11 +15,11 @@ func readyGuard(t *testing.T) (*Guard, *Health, *int64) {
 	t.Helper()
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	digest := strings.Repeat("a", 64)
-	g, err := NewGuard(GuardOptions{Root: "/service/data", HealthFile: "/service/config/health.json", PolicySHA256: digest, JobUID: 502, OwnerUID: 501, Profiles: map[string]string{"unit": digest}, Now: func() time.Time { return now }})
+	g, err := NewGuard(GuardOptions{Root: "/service/data", HealthFile: "/service/config/health.json", JobUID: 502, OwnerUID: 501, Profiles: map[string]string{"unit": digest}, Now: func() time.Time { return now }})
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := &Health{Schema: 1, JobUID: 502, PolicySHA256: digest, InterfacesSHA256: digest, BoundaryReceiptSHA256: digest, BoundaryValidated: true, CheckedAt: now, ExpiresAt: now.Add(30 * time.Second), AccountedBytes: 10 << 30, QualifiedProfiles: map[string]string{"unit": digest}}
+	h := &Health{Schema: 2, JobUID: 502, InterfacesSHA256: digest, BoundaryReceiptSHA256: digest, BoundaryValidated: true, CheckedAt: now, ExpiresAt: now.Add(30 * time.Second), AccountedBytes: 10 << 30, QualifiedProfiles: map[string]string{"unit": digest}}
 	free := int64(200 << 30)
 	g.readHealth = func(string) (Health, error) { return *h, nil }
 	g.freeBytes = func(string) (int64, error) { return free, nil }
@@ -27,7 +27,7 @@ func readyGuard(t *testing.T) (*Guard, *Health, *int64) {
 	return g, h, &free
 }
 func TestReadinessRequiresCurrentQualifiedBoundary(t *testing.T) {
-	for _, scenario := range []string{"stale", "future", "expiry", "unsigned qualification", "policy changed", "wrong worker", "interface changed", "profile changed", "unreadable"} {
+	for _, scenario := range []string{"stale", "future", "expiry", "unsigned qualification", "old schema", "wrong worker", "interface changed", "profile changed", "unreadable"} {
 		t.Run(scenario, func(t *testing.T) {
 			g, h, _ := readyGuard(t)
 			switch scenario {
@@ -39,8 +39,8 @@ func TestReadinessRequiresCurrentQualifiedBoundary(t *testing.T) {
 				h.ExpiresAt = h.CheckedAt
 			case "unsigned qualification":
 				h.BoundaryValidated = false
-			case "policy changed":
-				h.PolicySHA256 = strings.Repeat("b", 64)
+			case "old schema":
+				h.Schema = 1
 			case "wrong worker":
 				h.JobUID = 503
 			case "interface changed":
@@ -87,7 +87,7 @@ func TestOwnerPauseDoesNotCancelDrainingWork(t *testing.T) {
 	}
 }
 func TestPrivateListenerPolicyRejectsPublicWildcardAndMappedAddresses(t *testing.T) {
-	base := Config{Root: "/service/data", Socket: "/service/run/worker.sock", JobUID: 502, OwnerUID: 501, ProfilesFile: "/service/config/profiles.json", TLSCertificate: "/service/config/tls.crt", TLSKey: "/service/secrets/tls.key", HealthFile: "/service/config/health.json", PolicySHA256: strings.Repeat("a", 64)}
+	base := Config{Root: "/service/data", Socket: "/service/run/worker.sock", JobUID: 502, OwnerUID: 501, ProfilesFile: "/service/config/profiles.json", TLSCertificate: "/service/config/tls.crt", TLSKey: "/service/secrets/tls.key", HealthFile: "/service/config/health.json"}
 	base.Receipt = ReceiptConfig{KeyID: "test", PrivateKeyFile: "/service/secrets/receipt.key", ServiceID: "test", HostID: "test", Repositories: map[string]int64{"example-org/example-app": 123}}
 	for _, address := range []string{"0.0.0.0:9443", "[::]:9443", "127.0.0.1:9443", "localhost:9443", "8.8.8.8:9443", "[::ffff:100.64.0.1]:9443", "100.64.0.1:0", "192.168.1.1:9443", "[fe80::1]:9443", "[fe80::1%en0]:9443", "169.254.1.1:9443", "[fd7a:115c:a1e0::1%en0]:9443"} {
 		c := base

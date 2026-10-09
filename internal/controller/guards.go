@@ -28,12 +28,11 @@ const (
 )
 
 // Health is written atomically by the root-managed maintenance helper. Boundary
-// qualification is bound to the current PF policy and interface inventory. The
-// controller cannot manufacture readiness from a live worker connection.
+// qualification is bound to the current interface inventory and non-network
+// protections. The controller cannot manufacture readiness from a live worker.
 type Health struct {
 	Schema                int               `json:"schema"`
 	JobUID                uint32            `json:"job_uid"`
-	PolicySHA256          string            `json:"policy_sha256"`
 	InterfacesSHA256      string            `json:"interfaces_sha256"`
 	BoundaryReceiptSHA256 string            `json:"boundary_receipt_sha256"`
 	BoundaryValidated     bool              `json:"boundary_validated"`
@@ -44,10 +43,10 @@ type Health struct {
 	QualifiedProfiles     map[string]string `json:"qualified_profiles"`
 }
 type GuardOptions struct {
-	Root, HealthFile, PolicySHA256, PauseFile string
-	JobUID, OwnerUID                          uint32
-	Profiles                                  map[string]string
-	Now                                       func() time.Time
+	Root, HealthFile, PauseFile string
+	JobUID, OwnerUID            uint32
+	Profiles                    map[string]string
+	Now                         func() time.Time
 }
 type Guard struct {
 	options    GuardOptions
@@ -58,7 +57,7 @@ type Guard struct {
 }
 
 func NewGuard(o GuardOptions) (*Guard, error) {
-	if !cleanAbsolute(o.Root) || !cleanAbsolute(o.HealthFile) || !digestString(o.PolicySHA256) || o.JobUID < 501 || o.OwnerUID == 0 || o.JobUID == o.OwnerUID {
+	if !cleanAbsolute(o.Root) || !cleanAbsolute(o.HealthFile) || o.JobUID < 501 || o.OwnerUID == 0 || o.JobUID == o.OwnerUID {
 		return nil, errors.New("invalid readiness guard configuration")
 	}
 	if o.PauseFile != "" && !cleanAbsolute(o.PauseFile) {
@@ -115,7 +114,7 @@ func (g *Guard) Check(ctx context.Context) (GateState, error) {
 	} else {
 		now := g.options.Now()
 		state.UsedBytes = health.AccountedBytes
-		if health.Schema != 1 || health.JobUID != g.options.JobUID || health.PolicySHA256 != g.options.PolicySHA256 || !health.BoundaryValidated || !digestString(health.BoundaryReceiptSHA256) || health.CheckedAt.After(now.Add(5*time.Second)) || now.Sub(health.CheckedAt) > 45*time.Second || !health.ExpiresAt.After(now) || health.ExpiresAt.Sub(health.CheckedAt) > 45*time.Second || !health.ExpiresAt.After(health.CheckedAt) {
+		if health.Schema != 2 || health.JobUID != g.options.JobUID || !health.BoundaryValidated || !digestString(health.BoundaryReceiptSHA256) || health.CheckedAt.After(now.Add(5*time.Second)) || now.Sub(health.CheckedAt) > 45*time.Second || !health.ExpiresAt.After(now) || health.ExpiresAt.Sub(health.CheckedAt) > 45*time.Second || !health.ExpiresAt.After(health.CheckedAt) {
 			fail("isolation_unavailable", true)
 		}
 		current, err := g.interfaces()

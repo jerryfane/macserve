@@ -99,35 +99,23 @@ func TestEnvironmentRejectsAmbiguousAndExecutableData(t *testing.T) {
 	}
 }
 
-func TestEnvironmentOmitsCoveredLinkLocalHosts(t *testing.T) {
-	base, assets := fixture(t)
-	want, err := renderAssets(base, assets)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, covered := range []string{
+func TestEnvironmentRetainsLinkLocalProbeTargets(t *testing.T) {
+	base, _ := fixture(t)
+	for _, hosts := range []string{
 		"169.254.0.0,169.254.255.255",
 		"fe80::1,febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
 		"fe80::1%en0,fe80::1%en1,fe80::1%12",
 		"fe80::1%bridge_test-0.1,fe80::2%" + strings.Repeat("a", 63),
 	} {
-		t.Run(covered, func(t *testing.T) {
-			data := strings.Replace(reviewedEnvironment, "192.0.2.10\n", "192.0.2.10,"+covered+"\n", 1)
+		t.Run(hosts, func(t *testing.T) {
+			data := strings.Replace(reviewedEnvironment, "192.0.2.10\n", "192.0.2.10,"+hosts+"\n", 1)
 			e, err := ParseEnvironment([]byte(data))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !slices.Equal(e.HostAddresses, base.HostAddresses) {
-				t.Fatalf("covered hosts entered target inventory: %v", e.HostAddresses)
-			}
-			got, err := renderAssets(e, assets)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for name, source := range want {
-				if !bytes.Equal(got[name], source) {
-					t.Fatalf("covered addresses changed rendered %s", name)
-				}
+			want := append(slices.Clone(base.HostAddresses), strings.Split(hosts, ",")...)
+			if !slices.Equal(e.HostAddresses, want) {
+				t.Fatalf("informational targets changed: got %v want %v", e.HostAddresses, want)
 			}
 		})
 	}
@@ -157,62 +145,30 @@ func TestEnvironmentRejectsUnsafeHostScopes(t *testing.T) {
 	}
 }
 
-func TestEnvironmentFirewallPolicy(t *testing.T) {
-	options := "PF_ANCHOR=com.apple/macserve-build\nCOEXISTING_ANCHORS=com.apple/guest-b,com.apple/guest-a\nCOEXISTING_SERVICES=com.example.router-b,com.example.router-a\nTOLERATED_TRANSLATION_ANCHORS=com.apple/guest-a\nAPPROVED_GUEST_SUBNETS=172.20.40.128/25\n"
+func TestEnvironmentCoexistenceTargets(t *testing.T) {
+	options := "COEXISTING_ANCHORS=com.apple/guest-b,com.apple/guest-a\nCOEXISTING_SERVICES=com.example.router-b,com.example.router-a\n"
 	e, err := ParseEnvironment([]byte(reviewedEnvironment + options))
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, assets := fixture(t)
-	rendered, err := renderAssets(e, assets)
-	if err != nil {
-		t.Fatal(err)
-	}
-	material, err := makeMaterial(e, []byte(reviewedEnvironment+options), rendered, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	var config maintenance.Config
-	for _, file := range material.Files {
-		if file.Path == Prefix+"/config/maintenance.json" {
-			if err := json.Unmarshal(file.Data, &config); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
-	if config.PFAnchor != "com.apple/macserve-build" ||
-		!slices.Equal(config.CoexistingAnchors, []string{"com.apple/guest-a", "com.apple/guest-b"}) ||
-		!slices.Equal(config.CoexistingServices, []string{"com.example.router-a", "com.example.router-b"}) ||
-		!slices.Equal(config.ToleratedTranslationAnchors, []string{"com.apple/guest-a"}) ||
-		!slices.Equal(config.ApprovedGuestSubnets, []string{"172.20.40.128/25"}) {
-		t.Fatalf("installed maintenance policy differs from reviewed environment: %+v", config)
-	}
-	for _, suffix := range []string{"", "PF_ANCHOR=\nCOEXISTING_ANCHORS=\nCOEXISTING_SERVICES=\nTOLERATED_TRANSLATION_ANCHORS=\nAPPROVED_GUEST_SUBNETS=\n"} {
-		defaults, err := ParseEnvironment([]byte(reviewedEnvironment + suffix))
-		if err != nil || defaults.PFAnchor != maintenance.DefaultPFAnchor || len(defaults.CoexistingAnchors)+len(defaults.CoexistingServices)+len(defaults.ToleratedTranslationAnchors)+len(defaults.ApprovedGuestSubnets) != 0 {
-			t.Fatalf("omitted/empty optional policy: %+v %v", defaults, err)
-		}
+	if !slices.Equal(e.CoexistingAnchors, []string{"com.apple/guest-a", "com.apple/guest-b"}) ||
+		!slices.Equal(e.CoexistingServices, []string{"com.example.router-a", "com.example.router-b"}) {
+		t.Fatalf("noncanonical coexistence targets: %+v", e)
 	}
 	for _, suffix := range []string{
-		"PF_ANCHOR=com.apple/*\n",
-		"PF_ANCHOR=com.apple\n",
-		"PF_ANCHOR=com.apple/250.ApplicationFirewall\n",
-		"PF_ANCHOR=com.apple/guest-router\n",
-		"PF_ANCHOR=com.apple/macserve/child\n",
-		"TOLERATED_TRANSLATION_ANCHORS=com.apple/macserve\nAPPROVED_GUEST_SUBNETS=172.20.40.128/25\n",
-		"PF_ANCHOR=\nPF_ANCHOR=com.apple/service\n",
-		"COEXISTING_ANCHORS=com.apple/macserve\n",
-		"COEXISTING_ANCHORS=com.apple/macserve/child\n",
+		"COEXISTING_ANCHORS=com.apple/*\n",
 		"COEXISTING_ANCHORS=com.apple/peer,com.apple/peer\n",
 		"COEXISTING_SERVICES=system/com.example.router\n",
 		"COEXISTING_SERVICES=com.example.router,\n",
+		"PF_ANCHOR=\n",
+		"PF_ANCHOR=com.apple/macserve\n",
+		"TOLERATED_TRANSLATION_ANCHORS=\n",
 		"TOLERATED_TRANSLATION_ANCHORS=com.apple/guest-a\n",
+		"APPROVED_GUEST_SUBNETS=\n",
 		"APPROVED_GUEST_SUBNETS=172.20.40.128/25\n",
-		"TOLERATED_TRANSLATION_ANCHORS=com.apple/guest-a\nAPPROVED_GUEST_SUBNETS=172.20.40.129/25\n",
-		"TOLERATED_TRANSLATION_ANCHORS=com.apple/guest-a\nAPPROVED_GUEST_SUBNETS=127.0.0.0/8\n",
 	} {
 		if _, err := ParseEnvironment([]byte(reviewedEnvironment + suffix)); err == nil {
-			t.Fatalf("unsafe firewall policy accepted: %q", suffix)
+			t.Fatalf("unsafe or obsolete configuration accepted: %q", suffix)
 		}
 	}
 }
@@ -274,21 +230,19 @@ func TestMaterialHasValidCryptoConsumerConfigsAndPrivateIntent(t *testing.T) {
 	if c.GitHub != nil || c.Principals[0].TokenSHA256 != digest([]byte(m.Token)) || c.Receipt.Repositories["example-org/example-app"] != 12345 {
 		t.Fatal("incorrect API staging policy")
 	}
-	if c.PolicySHA256 != digest(files[Prefix+"/config/pf-anchor.conf"].Data) {
-		t.Fatal("policy hash does not bind rendered PF")
-	}
 	if _, err := workerclient.LoadConfig(filepath.Join(stage, "worker.json")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := profiles.Load(filepath.Join(stage, "profiles.json")); err != nil {
 		t.Fatal(err)
 	}
+	// The native loader requires root-protected ancestors; this unprivileged
+	// material test decodes the consumer type without claiming protected staging.
 	var mc maintenance.Config
-	if err := json.Unmarshal(files[Prefix+"/config/maintenance.json"].Data, &mc); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(files[Prefix+"/config/maintenance.json"].Data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&mc); err != nil {
 		t.Fatal(err)
-	}
-	if mc.PFPolicyFile != Prefix+"/config/pf-anchor.conf" || mc.ControllerConfig != Prefix+"/config/controller.json" {
-		t.Fatal("maintenance observes different deployment")
 	}
 	certData := files[Prefix+"/config/tls-cert.pem"].Data
 	tlsData := files[c.TLSKey].Data

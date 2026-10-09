@@ -75,7 +75,7 @@ func serveController(parent context.Context, config controller.Config) error {
 	if err != nil {
 		return err
 	}
-	guard, err := controller.NewGuard(controller.GuardOptions{Root: config.Root, HealthFile: config.HealthFile, PolicySHA256: config.PolicySHA256, PauseFile: config.PauseFile, JobUID: config.JobUID, OwnerUID: config.OwnerUID, Profiles: qualified})
+	guard, err := controller.NewGuard(controller.GuardOptions{Root: config.Root, HealthFile: config.HealthFile, PauseFile: config.PauseFile, JobUID: config.JobUID, OwnerUID: config.OwnerUID, Profiles: qualified})
 	if err != nil {
 		return err
 	}

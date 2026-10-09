@@ -2,9 +2,15 @@
 
 This is a **future, owner-approved deployment runbook**, not a report that this Mac has been installed or qualified. Repository checks and fixture results do not prove native GUI, PF, FileVault, App authorization or target-recipe behavior. Every administrative action below requires an approved owner sitting. No service should be enabled just to see whether a real build works.
 
+## Network isolation: not provided in phase 1
+
+The owner's accepted model is **trusted repositories only**, including their writers, build scripts and dependencies. Native execution under a separate non-admin UID is not a network sandbox. Jobs may reach protected service ports, loopback, LAN, tailnet and internet destinations subject to unrelated host/network policy. macserve installs no PF template, manages no anchor, writes no PF rules, and requires no PF enforcement for health or qualification.
+
+Network probes report actual reachability as **`not enforced in phase 1`** for the owner's information. A reachable protected endpoint is not a qualification failure; a timeout or refused connection is not proof of isolation. Unix permissions, controller/broker separation, owner-home protection, trusted toolchains, GUI/lifecycle evidence and resource limits remain required. PF enforcement is a possible separately reviewed future opt-in, not a phase-1 capability.
+
 ## Quick path
 
-These are future commands for **four separately approved owner sittings**, not permission to run them now. Installation stages disabled services without activating launchd or PF. Qualification's explicit `begin --load-policy` loads only the configured service-owned PF anchor and preserves coexistence evidence; no command enables PF, changes owner ACLs, logs in the job user, or turns an untested boundary into a pass. Use a prebuilt release: no Go toolchain or JSON editing is needed for initial disabled staging.
+These are future commands for **four separately approved owner sittings**, not permission to run them now. Installation stages disabled services; qualification observes host state and collects evidence without writing PF. No command changes owner ACLs, logs in the job user, or turns an untested non-network boundary into a pass. Use a prebuilt release: no Go toolchain or JSON editing is needed for initial disabled staging.
 
 ### Sitting 1: review, plan, install disabled assets
 
@@ -21,7 +27,7 @@ cat SHA256SUMS
 
 The tag workflow builds Darwin arm64 with CGO disabled and `-trimpath`, then publishes `macserve-darwin-arm64` and `SHA256SUMS` using only `GITHUB_TOKEN`. Review the tag/source/publisher and expected binary digest. A checksum downloaded beside a binary detects corruption, not an independently compromised release. Set `EXPECTED_SHA256` to the reviewed 64-character lowercase digest; do not substitute an unreviewed local hash.
 
-Create and review `deploy.env`. **Every value below is illustrative**, not a claim that an identity, address, port, Xcode or repository ID is suitable or available. Include every current non-link-local host alias in `HOST_ADDRESSES`, approve the complete protected-port set, and pin real repository IDs out of band:
+Create and review `deploy.env`. **Every value below is illustrative**, not a claim that an identity, address, port, Xcode or repository ID is suitable or available. Include current non-link-local host aliases in `HOST_ADDRESSES`, choose the protected ports to include in informational reachability reports, and pin real repository IDs out of band:
 
 ```sh
 cat > deploy.env <<'ENV'
@@ -47,19 +53,16 @@ ENV
 
 `deploy.env` is bounded **data**, never shell-sourced: plain `KEY=VALUE`, blank/comment lines, comma-separated lists, and `owner/repo:numeric-id` repository pins. No shell expansions, commands, unknown keys or duplicate keys. Default plan verifies the binary digest and validates/renders the deployment without creating accounts or installation files. It does not prove native identity availability or any security boundary.
 
-`HOST_ADDRESSES` also accepts canonical IPv6 link-local addresses with or without a `%scope` (for example `fe80::1%en0`) and canonical IPv4 link-local addresses. A scope is supported only for IPv6 link-local hosts: 1–63 ASCII letters, digits, underscores, dots or hyphens. Covered `fe80::/10` and `169.254.0.0/16` entries are validated but omitted from per-host PF literals and the per-address TCP matrix; fixed early job-UID denies cover those entire ranges regardless of this list. Scoped non-link-local addresses, malformed addresses and exact duplicate entries remain refused. Tailnet/listener validation is unchanged. The installed raw reviewed environment is still preserved and hashed exactly.
+`HOST_ADDRESSES` also accepts canonical IPv6 link-local addresses with or without a `%scope` and canonical IPv4 link-local addresses. A scope is supported only for IPv6 link-local hosts: 1–63 ASCII letters, digits, underscores, dots or hyphens. Link-local entries are validated but omitted from the per-host inventory and TCP target expansion. This omission establishes no deny rule or isolation guarantee. Scoped non-link-local addresses, malformed addresses and exact duplicates remain refused. Tailnet/listener validation is unchanged; the raw reviewed environment is preserved and hashed exactly.
 
-Optional firewall keys are `PF_ANCHOR` (default `com.apple/macserve`), `COEXISTING_ANCHORS`, `COEXISTING_SERVICES`, `TOLERATED_TRANSLATION_ANCHORS`, and `APPROVED_GUEST_SUBNETS`. Lists are comma-separated exact values; omission or an empty value means an empty list (or the default anchor). They use the same validation and canonical ordering as the corresponding maintenance JSON fields described below, including guest-range pairing and owned-anchor exclusions. Installation renders them directly into `maintenance.json`; no root JSON editing is needed. For example:
+Optional read-only coexistence keys are `COEXISTING_ANCHORS` and `COEXISTING_SERVICES`, comma-separated exact anchor paths and system-domain launchd labels. Omission or an empty value means an empty list. Lists are unique, bounded and sorted internally; installation carries them into `maintenance.json`. For example:
 
 ```text
-PF_ANCHOR=com.apple/macserve
 COEXISTING_ANCHORS=com.apple/guest-router
 COEXISTING_SERVICES=com.example.guest-router
-TOLERATED_TRANSLATION_ANCHORS=com.apple/guest-router
-APPROVED_GUEST_SUBNETS=172.20.40.128/25
 ```
 
-These illustrative ranges are not discovered or approved automatically. Live qualification still refuses host-overlapping sources, unsupported translations, missing peers, and stopped/restarted services.
+These entries do not grant ownership or approve translations. During installation and each qualification window, configured services must remain running with identical PIDs and available before/after PF measurements must match. Unreadable PF is recorded as `unavailable`, not a failure. macserve neither repairs nor interprets another manager's rules.
 
 After reviewing the source, plan and actual host approvals, stage the reviewed inputs under root-controlled storage. The destination must be new; do not reuse a stale staging directory. These administrative commands are for the approved Darwin sitting only:
 
@@ -78,16 +81,8 @@ Apply refuses existing installation/accounts/targets. It uses the existing accou
 
 `deployment-pins.json` includes `receipt_key_id`, standard-base64 `receipt_public_key`, opaque service/host IDs and `tls_certificate_sha256` over the certificate's **DER** encoding, not its PEM file text.
 
-No daemon, PF rule, owner-home permission or GUI session was activated. An interrupted apply is not rerunnable recovery: retain evidence and inspect the partial state instead of deleting objects and retrying. Approve/integrate PF and any owner-home restrictions separately using sections 1 and 4 below. The default PF template permits no job egress; an approved-allow probe requires a separately reviewed narrow exception, not a blanket bypass.
+No daemon, PF rule, owner-home permission or GUI session was activated. An interrupted apply is not rerunnable recovery: retain evidence and inspect partial state instead of deleting objects and retrying. Before deployment mutation, apply durably saves `before.json` under a new root-private `/private/var/root/.macserve-install-evidence-*` directory; final `coexistence.json` records before/after observations and any installation error where possible. Owner-home restrictions remain a separately approved prerequisite; there is no service PF policy to stage or load.
 
-To stage a separately reviewed PF policy with narrow exceptions, keep the reviewed file root-controlled and use the explicit configuration-only command below. It archives the previous policy/config, installs the new exact bytes and updates the controller's matching policy digest without hand-editing JSON. **It does not load PF**; loading occurs only through the guarded `begin --load-policy` step during an approved network window:
-
-```sh
-sudo /Library/macserve/bin/qualify.sh stage-policy \
-  --file /private/var/root/reviewed-macserve-pf.conf
-```
-
-Qualification JSON, including the controller configuration read by `stage-policy`, rejects duplicate keys under Go's case-insensitive field matching (including Unicode simple-fold aliases). Staging requires the canonical `policy_sha256` key and refuses ambiguous input rather than reordering keys and changing another field's meaning.
 
 ### Sitting 2: actual job GUI, tools and boundary evidence
 
@@ -105,31 +100,28 @@ Create one fresh **nonsecret** owner-home canary from the actual owner session. 
 (set -C; umask 022; printf '%s\n' 'macserve owner boundary canary' > "$HOME/macserve-boundary-canary.txt")
 ```
 
-Use a new session directory for each complete probe round. Review the plan's full TCP matrix, exact allowed endpoint(s) and controlled UDP receivers. Set `ALLOW_ENDPOINTS`, `UDP_ENDPOINTS`, `TCP_CANARY_ENDPOINTS` and `OWNER_CANARY` to actual approved values; endpoints are comma-separated literal `IP:port` (IPv6 `[address]:port`). Never aim the UDP nonce sender at a production UDP service. `TCP_CANARY_ENDPOINTS` contains only unoccupied matrix endpoints that need an accept-and-close test listener; leave existing services untouched. All required TCP targets need live owner controls, not just timeouts:
+Use a new session directory for each complete probe round. Review the informational TCP matrix and any optional authorized endpoint/canary targets. `ALLOW_ENDPOINTS`, `UDP_ENDPOINTS` and `TCP_CANARY_ENDPOINTS` are optional comma-separated literal `IP:port` values (IPv6 `[address]:port`); omit their flags when unused. `OWNER_CANARY` identifies the required nonsecret owner-home control. Never send a UDP nonce to a production UDP service or replace an existing listener. Network success, failure, missing listeners and unsupported transports are reported, not isolation gates.
 
 ```sh
 SESSION=/Library/macserve/var/qualification/before-switch
-sudo /Library/macserve/bin/qualify.sh begin --load-policy --session "$SESSION" \
-  --env /Library/macserve/config/deploy.env --allow "$ALLOW_ENDPOINTS" \
-  --udp-canary "$UDP_ENDPOINTS" --owner-canary "$OWNER_CANARY"
+sudo /Library/macserve/bin/qualify.sh begin --session "$SESSION" \
+  --env /Library/macserve/config/deploy.env --owner-canary "$OWNER_CANARY"
 ```
 
-Every new sitting, including post-switch and post-reboot sittings, requires explicit `--load-policy`. Before loading, configure the exact foreign anchors and system service labels whose continuity must be proven (below). The command stages the pinned policy privately, saves the baseline, proves exact-leaf ownership, loads only that leaf, then requires unchanged main/peer rules and running service PIDs. Every source filter rule must be outbound and scoped to the configured numeric job UID (directly or through a scalar literal macro); missing/other users, user lists/ranges/operators and group-only predicates are refused. Missing consent or an unsafe policy source is refused; no command-line PF passthrough exists.
+Each new sitting takes a read-only coexistence baseline. Before beginning, configure the exact peer anchors and system service labels whose continuity should be observed. Collection and approval compare available main/peer rule measurements and require unchanged running service PIDs. There is no policy load, ownership adoption, enable/disable or PF repair operation.
 
 The root-owned challenge is readable by both accounts; private evidence remains root-only. Add `--private-path /absolute/path,...` at `begin` for other explicitly approved local boundaries. **The following is the probe round to repeat for every new session:**
 
-1. In the actual owner GUI, start controlled receiver(s) in separate terminals before either probe. Keep them running across the job and owner probes; `Ctrl-C` after both probes finalizes receipts. Pick a bounded lifetime sufficient for the sitting (maximum two hours):
+1. In the actual owner GUI, start the required **file-only** owner-home control before either probe. It reads only the approved nonsecret canary before and after the window and opens no network listener. Keep it running across both account probes; `Ctrl-C` after both finalizes its receipt:
 
    ```sh
    /Library/macserve/bin/qualify.sh canary --session "$SESSION" \
-     --transport udp --listen "$UDP_ENDPOINTS" --out "$HOME/udp-receipts.json" --duration 30m
-   /Library/macserve/bin/qualify.sh canary --session "$SESSION" \
-     --transport tcp --listen "$TCP_CANARY_ENDPOINTS" --out "$HOME/tcp-receipts.json" --duration 30m
+     --transport owner-home --out "$HOME/owner-home-receipts.json" --duration 30m
    ```
 
-   A comma-list receiver writes `OUTPUT.1.json`, `OUTPUT.2.json`, etc.; one listener writes `OUTPUT` itself. Use new output names for every session. Skip the TCP receiver command only where reviewed existing listeners already provide all live controls.
+   Optional TCP/UDP canaries use `--transport tcp|udp --listen IP:port --out FILE`; start only explicitly approved listeners. A comma-list receiver writes `OUTPUT.1.json`, `OUTPUT.2.json`, etc.; one listener writes `OUTPUT`. Use fresh outputs for each sitting. Their network outcomes remain informational.
 
-   The UDP receiver also reads only the approved nonsecret owner canary before and after the probe window. Both real owner reads must succeed and bracket both account reports; early receiver exit or missing controls blocks owner-home qualification.
+   Both actual owner file reads must succeed and bracket both account reports; missing file controls still block owner-home qualification. No network receiver is required for that proof.
 
 2. At the **actual job GUI console**, run the job probe. Set `SESSION` in that terminal to the same protected path; do not use root, `sudo -u`, `su`, or a helper that drops supplementary groups:
 
@@ -147,15 +139,15 @@ The root-owned challenge is readable by both accounts; private evidence remains 
      --role owner --out "$HOME/owner-probe.json"
    ```
 
-4. As administrator, collect the exact new job/owner report paths and comma-separated UDP receipt paths. `JOB_REPORT`, `OWNER_REPORT` and `UDP_RECEIPTS` name those real files, not sample JSON:
+4. As administrator, collect the exact job/owner reports and the required file-only owner-home receipt. `RECEIPTS` is that real file, optionally followed by comma-separated UDP receipt files; it is not sample JSON. Optional network receipts cannot substitute for the independent owner-home controls:
 
    ```sh
    sudo /Library/macserve/bin/qualify.sh collect --session "$SESSION" \
-     --job "$JOB_REPORT" --owner "$OWNER_REPORT" --receipts "$UDP_RECEIPTS"
+     --job "$JOB_REPORT" --owner "$OWNER_REPORT" --receipts "$RECEIPTS"
    sudo /bin/cat "$SESSION/candidate.json"
    ```
 
-Collection preserves bounded snapshots, hashes, PF counters and current boot/interface/baseline/policy/profile bindings; inspect every artifact and status. Candidate `boundary-evidence.json` and `qualification.json` are **not approvals**. TCP/UDP failures, missing controls, unexpected owner-home access or unsupported native output cannot be overridden by an attestation. Unix permission denial is not a claim that a disabled worker's credential-bearing API was exercised.
+Collection preserves bounded snapshots, hashes and current boot/interface/baseline/profile bindings; inspect every artifact and status. Candidate `boundary-evidence.json` and `qualification.json` are **not approvals**. Network results are retained under `network_reachability` with status `not enforced in phase 1`; they do not gate approval. Unexpected owner-home access, failed Unix boundaries, missing file controls or unsupported non-network security observations still cannot be overridden by an attestation. Unix permission denial is not a claim that a disabled worker's credential-bearing API was exercised.
 
 An incomplete collection can be retried in the same unexpired session after resolving its input error. Collection snapshots use immutable `collect-<random-id>-*` names, including receipt bytes that fail validation; evidence already saved by failed attempts remains available for inspection. Only the successful attempt's input hashes enter the candidate. Partial summary files are not a commit: `candidate.json` is published last. Once it exists, recollection refuses; begin a new session for another probe round, even if the completed candidate contains failed categories.
 
@@ -174,24 +166,21 @@ sudo /Library/macserve/bin/qualify.sh attest \
   --reason "$REVIEWED_SWITCH_CONCLUSIONS"
 ```
 
-The same-boot predecessor must already be collected and remain unchanged. Attestation accepts real owner/root artifacts and records provenance; it is not a test generator. Delegated networking/helpers and any required UI semantics still need genuine owner-reviewed evidence as described in section 4.
+The same-boot predecessor must already be collected and remain unchanged. Attestation accepts real owner/root artifacts and records provenance; it is not a test generator. Required UI semantics still need genuine reviewed evidence. Delegated networking is informational, not a network-isolation attestation gate.
 
 ### Sitting 3: repository/App enrollment and real recipe evidence
 
 Review the installed numeric repository/public-key pins, actual GitHub App enrollment and trust rules in section 5. The installer does **not** invent App credentials, policies, recipes or test outcomes. An empty registry admits no recipes; tool inspection then records the exact observed Xcode version/build and zero qualified recipes. Adding an actual approved profile changes the exact qualification binding and requires that profile's real recipe/UI evidence. Selected-repository App credential/config provisioning remains an explicit separate enrollment operation, not an installer side effect.
 
-Run approved recipes only as the job user and retain their actual artifacts. Tool inspection may create long-lived job processes: audit them and use the existing reset explicitly, never auto-adopt them. Collect a fresh round after any policy/profile/baseline changes. For the current collected session, record genuine manual categories with:
+Run approved recipes only as the job user and retain their actual artifacts. Tool inspection may create long-lived job processes: audit them and use the existing reset explicitly, never auto-adopt them. Collect a fresh round after configuration/profile/baseline changes. For the current collected session, record genuine recipe/UI evidence with:
 
 ```sh
-sudo /Library/macserve/bin/qualify.sh attest --session "$SESSION" \
-  --category delegated_boundary --artifact "$DELEGATED_ARTIFACT" \
-  --reason "$REVIEWED_DELEGATED_CONCLUSIONS"
 sudo /Library/macserve/bin/qualify.sh attest --session "$SESSION" \
   --category tool_profiles --artifact "$RECIPE_ARTIFACT" \
   --reason "$REVIEWED_RECIPE_CONCLUSIONS"
 ```
 
-The second command is needed when enabled profiles require semantic recipe/UI evidence; it cannot repair failed automated tool inspection. Keep profiles empty until real recipes and their trusted writers are approved. `reboot` is still pending before sitting 4, so no production approval is available yet.
+This command is needed when enabled profiles require semantic recipe/UI evidence; it cannot repair failed automated tool inspection. Keep profiles empty until real recipes and their trusted writers are approved. `reboot` is still pending before sitting 4, so no production approval is available yet.
 
 ### Sitting 4: planned cold reboot, repeat, explicit approval
 
@@ -214,17 +203,17 @@ sudo /Library/macserve/bin/qualify.sh approve \
   --session /Library/macserve/var/qualification/final-switch
 ```
 
-Approval refuses pending/failed categories, changed artifacts or current binding drift and checks the existing maintenance evaluator. It remeasures main/peer rules and running service PIDs after qualification, requires continuity from the preserved firewall baseline, and saves the exact final bytes as `approved-boundary-evidence.json` before installation. The candidate/predecessor chain remains unchanged. Approval does not manufacture health, clear `owner.pause`, adopt GUI processes, load PF or activate services. Only after all remaining enrollment/health gates and a separate explicit service-start approval may section 6 be followed. Preserve all session directories for review and recovery.
+Approval refuses pending/failed non-network categories, changed artifacts or current host/profile binding drift and checks the maintenance evaluator. It remeasures read-only coexistence, requiring unchanged running service PIDs and unchanged rule digests wherever both measurements are available, then saves exact final bytes as `approved-boundary-evidence.json`. PF unavailability alone never blocks approval. The candidate/predecessor chain remains unchanged. Approval does not manufacture health, clear `owner.pause`, adopt GUI processes or activate services. Only after remaining enrollment/health gates and separate explicit service-start approval may section 6 be followed. Preserve every session for review and recovery.
 
 ## Trust boundary and stop conditions
 
 Use only trusted repositories and trusted repository writers. A root broker handles protected leases, exports and cleanup, then executes tools as a separate non-admin GUI user; the credential-bearing controller is a different non-login user. A broker defect is a root risk. This is shared-kernel native execution, not a VM, disposable reset or hostile-code sandbox. Same-UID delayed persistence can run after a clean census and affect a later job. The owner must accept that residual risk explicitly; signatures attest observations, not host integrity or honest tests.
 
-Keep all three LaunchDaemons disabled if PF UID matching, recursive rule inspection, loopback filtering, persistence inspection, real GUI operation or evidence accounting is unsupported. Do not replace a failed probe with a success boolean, adopt all current processes automatically, weaken the firewall, or run a first production build as a fallback. Phase 1 is unsigned build/test only: no signing identities, provisioning profiles, App Store Connect or TestFlight credentials, and no Apple ID required for the job account.
+Keep all three LaunchDaemons disabled if persistence inspection, required account/Unix boundaries, real GUI operation, tool evidence or accounting is unsupported. Do not replace failed non-network probes with success booleans, adopt all current processes automatically, or run a first production build as a fallback. Phase 1 is unsigned build/test only: no signing identities, provisioning profiles, App Store Connect or TestFlight credentials, and no Apple ID required for the job account. Network isolation is explicitly not provided.
 
 Four separate future owner sittings are required; no duration or unattended completion is promised:
 
-1. **Administrative setup:** approve identities, protected installation, separately scoped owner-home ACL changes if needed, and a network maintenance window. Stage disabled assets; inspect and integrate only the dedicated PF anchor without disturbing existing policy.
+1. **Administrative setup:** approve identities, protected installation and separately scoped owner-home ACL changes if needed. Stage disabled assets; preserve before/after read-only coexistence measurements without modifying existing services or PF.
 2. **Job GUI/tool qualification:** log in as the job user at the actual GUI, handle approved tool prompts, audit baseline processes, exercise native target recipes and UI tests, and perform the complete boundary matrix before and after fast user switching.
 3. **Repository/App enrollment:** approve selected repositories, numeric identity pins, controller-only keys, tailnet access and App-bound branch requirements. Qualify evidence publication and verification with trusted target code before opening production admission.
 4. **Planned reboot:** arrange a person at the physical console for FileVault unlock after cold boot. Restore an actual job GUI login, preserve recorded state, audit retained GUI PIDs and use the same worker reset described below, then repeat qualification. Reboot is not automatically qualified by launchd.
@@ -258,10 +247,9 @@ All ancestors of protected policy, executable and control-state paths must be ro
 | `var` | root:wheel `0711` |
 | `bin/macserve` | reviewed prebuilt Darwin binary, root-owned executable, normally `0755` |
 | `config/controller.json`, `worker.json`, `maintenance.json`, `profiles.json` | root-owned `0644` policy (no embedded secrets); controller configuration and profiles readable by controller |
-| `config/qualification.json`, `boundary-evidence.json`, `pf-anchor.conf` | root-approved policy/evidence, no job/controller write; evidence `0600`, PF policy readable `0644` |
+| `config/qualification.json`, `boundary-evidence.json` | root-approved schema-2 evidence, mode `0600`; no job/controller write |
 | `var/broker/gui-baseline.json` | root-private audited GUI baseline, written by the existing reset command |
 | `var/qualification/<session>` | root-owned session `0755`; public challenge `0644`, preserved evidence/approval artifacts `0600` |
-| `var/pf-ownership/<SHA256(anchor-path)>.json` | root-owned `0700` directory / single-link `0600` prior-load receipt; created by the guarded loader, not by policy staging |
 | `var/controller` and its `secrets` | controller-owned `0700`; secret files `0600` |
 | `var/controller/run/worker.sock` | controller-private executor socket; production peer identity is root, not job UID |
 | `var/broker`, `var/exports` | root-owned `0700`, disjoint protected worker state and sealed exports |
@@ -279,7 +267,7 @@ Keep the owner's home at **0700**, or **0750 with an owner-private group that is
 
 ### Disabled launchd templates
 
-`assets/install.sh` calls the verified prebuilt binary's `deploy-install` command to render the reviewed `assets/launchd/org.macserve.{controller,worker,maintenance}.plist.tmpl` files and the PF template. Rendering is literal substitution of the recognized markers only: validated controller user/group names, numeric job UID/ports and literal host addresses. Unknown or unresolved `{{`/`}}` markers are refused. Apply runs `/usr/bin/plutil -lint` on all three rendered plists before installing them root-owned under `/Library/LaunchDaemons`.
+`assets/install.sh` calls the verified prebuilt binary's `deploy-install` command to render the reviewed `assets/launchd/org.macserve.{controller,worker,maintenance}.plist.tmpl` files. Rendering is literal substitution of recognized markers only; unknown or unresolved `{{`/`}}` markers refuse. Apply runs `/usr/bin/plutil -lint` on all three rendered plists before installing them root-owned under `/Library/LaunchDaemons`. No PF template or policy file is rendered or installed.
 
 No deployment Go toolchain or separate JSON/template renderer is needed. Inspect the generated files: plist syntax acceptance does not qualify launchd behavior or grant permission to start services.
 
@@ -291,9 +279,9 @@ The installer supplies matching initial JSON configurations and `{"profiles":[]}
 
 **`worker.json`:** `socket` = `/Library/macserve/var/controller/run/worker.sock`; `controller_uid`, `job_uid`, `job_gid`, `owner_uid` = the approved numeric identities; `root` = `/Library/macserve/var/broker`; `export_root` = `/Library/macserve/var/exports`; `workspace_root` = `/Library/macserve/var/workspaces`; `helper_path` = `/Library/macserve/bin/macserve`; `baseline_path` = `/Library/macserve/var/broker/gui-baseline.json`. Optional timing fields are `poll_seconds` (default 2, range 1–30), `heartbeat_seconds` (default 5, range 1–5), `request_timeout_seconds` (default 10, range 1–10). Protect the helper and state first; initialize the protected baseline with `worker-reset` in section 3 before starting the broker.
 
-**`controller.json`:** `root` = `/Library/macserve/var/controller`; `socket` as above; `job_uid`, `owner_uid`; `profiles_file` = `/Library/macserve/config/profiles.json`; `health_file` = `/Library/macserve/health/current.json`; `policy_sha256` = SHA-256 of the approved PF policy file's exact bytes; `listen` = an assigned literal tailnet IP and an approved port; `tls_certificate`, `tls_key` = protected certificate/private-key paths. No wildcard, LAN, public or loopback listener. Optional `allowed_networks` may narrow the supported tailnet ranges, not broaden them. Optional `pause_file` names a protected owner-controlled dispatch pause marker.
+**`controller.json`:** `root` = `/Library/macserve/var/controller`; `socket` as above; `job_uid`, `owner_uid`; `profiles_file` = `/Library/macserve/config/profiles.json`; `health_file` = `/Library/macserve/health/current.json`; `listen` = an assigned literal tailnet IP and an approved port; `tls_certificate`, `tls_key` = protected certificate/private-key paths. No wildcard, LAN, public or loopback listener. Optional `allowed_networks` narrows the supported API-client tailnet ranges, not job egress. Optional `pause_file` names a protected owner-controlled dispatch pause marker.
 
-There is no `controller_uid` field in `controller.json`: launchd selects that account, and the worker's `controller_uid` must identify the same dedicated controller. The worker's `job_uid` must match the controller's execution/network-policy UID, not the controller account or root broker; both configurations must agree on `owner_uid` and `socket`. Keep the fixed paths above for this installation: maintenance supports the fixed controller/broker/export/workspace roots and health path, and derives the entire job home as `/Users/<job_user>`. A generic alternate worker layout is not an approved maintenance topology.
+There is no `controller_uid` field in `controller.json`: launchd selects that account, and the worker's `controller_uid` must identify the same dedicated controller. The worker's `job_uid` must match the controller's execution UID, not the controller account or root broker; both configurations must agree on `owner_uid` and `socket`. Keep the fixed paths above: maintenance supports fixed controller/broker/export/workspace roots and health path, and derives the entire job home as `/Users/<job_user>`. A generic alternate worker layout is not an approved maintenance topology.
 
 `principals` is an array of objects with `id`, `token_sha256`, `repositories` (for example `example-org/example-app`), `scopes`, and optional `revoked`. Grant only needed `jobs:submit`, `jobs:read`, `jobs:cancel`; reserve `service:admin` for approved operators. `receipt` contains `key_id`, `private_key_file`, opaque `service_id`, opaque `host_id`, `repositories` mapping canonical lowercase repository names to pinned numeric IDs, and optional `verification_keys` mapping key IDs to standard-base64 Ed25519 public keys. Use an accepted Ed25519 PKCS#8 PEM, raw seed/private key or base64 seed/private key for the private signing key. Keep old verification keys deliberately during rotation; remove revoked keys deliberately. Optional `github` is described below.
 
@@ -309,32 +297,11 @@ The exact `maintenance.json` shape for the fixed installation is:
   "worker_config": "/Library/macserve/config/worker.json",
   "qualification_file": "/Library/macserve/config/qualification.json",
   "boundary_evidence_file": "/Library/macserve/config/boundary-evidence.json",
-  "pf_policy_file": "/Library/macserve/config/pf-anchor.conf",
-  "pf_anchor": "com.apple/macserve",
   "interval_seconds": 10
 }
 ```
 
 The interval defaults to 10 seconds and must be 5–15 seconds. Identities, profile registry, health path and accounting roots come from the protected controller/worker configurations rather than duplicate maintenance identity fields.
-
-`pf_anchor` defaults to `com.apple/macserve` when omitted. It must be an exact dedicated leaf, not a wildcard. Under `com.apple`, only the direct `macserve` or `macserve-*` leaf namespace is writable; `com.apple` itself, other Apple children and every `_pf` component are refused. Custom non-Apple exact paths such as `org.macserve` remain selectable. The selected path must be reachable through unconditional loaded filter-anchor calls. Observation, qualification counter reads, and rule-counter evidence all use that path. A stock root `anchor "com.apple/*" all` reaches an immediate child without adding a main-ruleset call.
-
-**Evaluation order is part of the proof.** Rules execute in order, with depth-first anchor traversal. Wildcards visit immediate children in case-sensitive ASCII path order, not the order printed by enumeration and not administrator preference: Apple's [anchor comparator](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/net/pf_ruleset.c#L148-L154) and [RB_MIN/RB_NEXT traversal](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/net/pf.c#L3119-L3200) define that order. A [quick match terminates the whole evaluation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/net/pf.c#L5355-L5375), including its anchor stack. The observer refuses any foreign quick pass that could match remaining outbound job-owned IPv4/IPv6 TCP/UDP traffic, including earlier main rules and earlier `com.apple/*` siblings. A foreign nonquick pass is accepted only if a guaranteed later decision overrides its entire affected domain; the owned protocol/family-complete quick default denies provide that proof. Later main/sibling passes are checked too unless guaranteed quick decisions already terminate the domain. Interface/address/port-restricted denies do not establish universal overrides. Unknown syntax, conditional/quick anchor calls, dynamic matches, named ports and ambiguous UID predicates fail closed; the supported normalized rules use literal addresses and numeric ports/UIDs.
-
-By default no descendant NAT/RDR mapping is tolerated. To opt into separately reviewed guest-only translations, add both optional fields to the same protected configuration; these generic values are examples, not host discovery:
-
-```json
-{
-  "tolerated_translation_anchors": ["com.apple/guest-router"],
-  "approved_guest_subnets": ["172.20.40.128/25", "172.20.41.128/25"]
-}
-```
-
-Each list is unique and limited to 64 entries. Anchor entries are exact paths distinct from the service filter anchor: listing a parent does not approve its descendants. Guest entries are canonical unicast CIDRs. Every approved guest range must exclude **all current host addresses**, including loopback, aliases, tailnet addresses and VM bridge gateways. The observer obtains those addresses and the interface digest from the same inventory and checks that the inventory digest remains unchanged after PF inspection.
-
-A tolerated ruleset must contain only supported NAT/RDR mappings whose literal source is contained in an approved guest range. `from any`, negated/dynamic/table sources, `nat pass`/`rdr pass`, other bypass modifiers, `binat`, `no nat`, nested translation calls and unknown syntax are refused. RDR targets must be literal non-host unicast addresses; loopback, host aliases and dynamic RDR targets are refused. The bounded parser supports IPv4 and IPv6, optional simple interface/protocol restrictions, numeric port matches/translations, `round-robin`, and NAT `static-port`; NAT targets may be a literal address or `(interface)`/`(interface:0)`. Address pools, other interface modifiers, named ports and unrecognized options remain unsupported. Each ruleset is limited to 1 MiB, 1,024 lines and 4,096 bytes per line.
-
-**A VM subnet is not automatically guest-only.** If a host bridge owns `172.20.40.1`, approving `172.20.40.0/24` is refused even when the currently observed NAT rule is narrower or the anchor is empty. A job can bind an assigned host address; an egress-interface condition does not exclude it. The example `/25` excludes that gateway, but the helper's actual rule must also be constrained to an approved guest-only source range. Merely allowlisting the anchor or approving a smaller range does not make a broad helper rule safe. Narrowing another PF user's rules is a separate owner-reviewed operation, never an installer or observer side effect.
 
 Optional independent coexistence checks use exact paths and **system-domain** launchd labels:
 
@@ -345,58 +312,45 @@ Optional independent coexistence checks use exact paths and **system-domain** la
 }
 ```
 
-Lists are unique, sorted internally, and limited to 64 entries each; wildcard/domain-selector inputs are refused. Coexisting anchors must not equal or descend from the owned anchor. An ancestor is permitted because only its **direct** rules are measured; descendants must be listed individually. These fields do not grant translation tolerance or ownership. `pf_anchor` must identify a dedicated leaf exclusively assigned to macserve by the administrator, never another manager's anchor.
+Lists are unique, sorted internally and limited to 64 entries each. Wildcards and domain selectors refuse. Only each configured anchor's direct filter/translation stdout is measured; listing a parent does not recursively list its descendants. No path is owned by macserve and no rule syntax or isolation guarantee is inferred.
 
-Immediately before the sole `pfctl -a PATH -f FILE` operation, the loader requires no ordinary or hidden `_pf` children, no direct translations or tables, and readable direct filter rules. The path must not equal a coexisting/tolerated entry or contain a listed peer below it. A genuinely absent/empty leaf may be initialized. Only when independent child enumeration proves absence may scoped `-sr`/`-sn` reads return the exact stderr `pfctl: DIOCGETRULES: Invalid argument\n`, empty stdout, and exit status **0**; the exact standard two-line ALTQ warning prefix is optional. Exit 1, partial output, altered whitespace, extra diagnostics, table-read errors, or the same diagnostic for an enumerated existing anchor fail closed. A populated leaf requires its `macserve-default-deny` block label, outbound exact-job-UID rules, and a matching prior-load receipt from protected storage; a label or configured path alone is not ownership. Receipts bind schema `1`, exact `anchor`, `job_uid`, and `rules_sha256` over the exact loaded `-sr` bytes. Root ownership, modes, non-symlink/single-link files and ancestor ACL protection are checked. After a successful load, fresh leaf/rule validation must succeed before an atomic synced receipt replacement.
+`boundary-evidence.json` carries a `coexistence` object with `before` and `after`. Each state records `recorded_at`, `main_rules_status`, optional `main_rules_sha256`, `anchors` (`path`, `status`, optional `filter_sha256` and `translation_sha256`) and `services` (`label`, `pid`). Status is `available` or `unavailable`. Main hashing frames exact direct `-sr` and `-sn` stdout with each byte length as big-endian uint64 before its bytes; anchor digests hash their exact direct stdout. Unknown diagnostics, permission errors, absent anchors and incomplete reads produce unavailable measurements, never inferred empty rules.
 
-Unreceipted legacy or foreign populated anchors are never adopted. A failed load, post-load read or receipt write stops qualification and retains evidence; it does not roll back PF or manufacture ownership. Native PF has no compare-and-swap for this operation: use the approved quiescent, single-writer window. The qualification parent lock serializes macserve's own load/staging commands, not unrelated root managers. Uninstall/own-anchor flush support is **deferred**; this change adds no destructive uninstall command, global flush or automatic cleanup. Preserve receipts and failed session artifacts for separately reviewed recovery.
-
-Each firewall step records `before` and `after_firewall` measurements: timestamp, direct main filter-plus-translation digest, each selected anchor's direct filter/translation SHA-256, and each selected service's running PID. Table contents and hit counters are excluded. An empty anchor must still verifiably exist. Services are read only with `launchctl print system/<label>`; missing/stopped services, ambiguous output or PID changes refuse qualification. No service is started, stopped or restarted to satisfy the check. This digest exclusion does not relax the separate observer restriction on dynamic filter rules.
-
-`boundary-evidence.json` requires a `coexistence` object containing `owned_anchor`, `policy_sha256`, `before`, `after_firewall`, and `after_qualification`. Each state contains `recorded_at`, `main_rules_sha256`, `anchors` (`path`, `filter_sha256`, `translation_sha256`), and `services` (`label`, `pid`). Main hashing frames exact direct `-sr` and `-sn` stdout with each byte length as a big-endian uint64 before its bytes. All three measurements must match, with nondecreasing timestamps; services must retain their original running PIDs. Collection and approval both recheck continuity. Maintenance continues checking these bindings: a later peer service restart invalidates health until requalification. Old approvals without this evidence are refused.
+Services are read with `launchctl print system/<label>` and must be verifiably running. Before/after service sets and PIDs must match, timestamps cannot regress, and matching available PF measurements must be unchanged. A measurement unavailable on either side is not a comparison failure and is never described as verified unchanged. Installation and each qualification sitting preserve their own before/after windows, including fresh windows after a planned reboot. Health continues requiring service continuity but does not gate on live PF availability or rule digests.
 
 `qualification.json` is a root-approved object with these exact fields:
 
 | Field | Meaning |
 | --- | --- |
-| `schema` | integer `1` |
+| `schema` | integer `2`; legacy schema-1 approvals are not reused |
 | `approved_at` | actual approval timestamp, RFC3339 |
 | `job_uid` | approved numeric job effective UID |
 | `boot` | current kernel boot identity, matching the protected worker baseline |
 | `interfaces_sha256` | controller network-interface inventory digest |
-| `policy_sha256` | SHA-256 of exact `pf-anchor.conf` bytes; also controller `policy_sha256` |
-| `root_rules_sha256` | SHA-256 binding selected anchor, reviewed translation policy, recursive filter rules and all translation observations, as returned by `maintenance-observe` |
-| `anchor_rules_sha256` | SHA-256 of the selected filter anchor's exact `-sr` stdout |
 | `baseline_sha256` | SHA-256 of exact protected `gui-baseline.json` bytes |
 | `boundary_evidence_sha256` | SHA-256 of exact approved `boundary-evidence.json` bytes |
 | `profiles` | object mapping each qualified profile ID to its normalized registry digest |
 
-`boundary-evidence.json` contains `schema` (integer `1`), `recorded_at` (actual RFC3339 timestamp), `job_uid`, `boot`, the required `coexistence` object described above, and `probes` (array). Each probe object has `category`, `artifact_sha256`, `passed`, `attempts`, `pf_hit_delta`, `authorized_control_successes`, `canary_receipts`. Required categories are exactly `tcp_denial`, `udp_denial`, `approved_allow`, `delegated_boundary`, `unix_socket_boundary`, `owner_unaffected`, `owner_home_denial`, `fast_switch`, `reboot`, `tool_profiles`. Each must pass with at least one attempt and a valid SHA-256 reference to preserved real evidence. TCP requires at least three attempts, positive labeled PF hits and successful authorized controls; UDP requires positive PF hits, successful controls and zero canary receipts. Owner-home denial requires successful owner read controls and zero job canary reads. These are minimum machine-readable checks, not a replacement for **every** destination/transport/profile row of the matrix below. Associate each category with a complete private evidence bundle and its exact-byte digest; a category's `passed:true` alone proves nothing.
+`boundary-evidence.json` contains `schema` (integer `2`), `recorded_at`, `job_uid`, `boot`, `coexistence` and `probes`. Each probe has `category`, `artifact_sha256`, `status`, `attempts`, `authorized_control_successes` and `canary_receipts`. Required categories are `network_reachability`, `unix_socket_boundary`, `owner_unaffected`, `owner_home_denial`, `fast_switch`, `reboot` and `tool_profiles`. Network status is exactly `not enforced in phase 1`; its actual reachability/unsupported results are informational. Other categories require `passed`, actual attempts and valid artifact digests. Owner-home denial additionally requires successful owner file controls and zero successful job canary reads. There are no PF-hit counters or network-denial pass criteria.
 
 Supply exactly one probe per required category, no duplicate/unknown categories, and nonnegative integer counts. Digests are 64 lowercase hexadecimal characters. Evidence `recorded_at` must be no later than `approved_at`, and approval must not be in the future. The qualification's profile map must exactly match the observed configured profiles, not an approved subset of an otherwise unqualified registry.
 
 The operator records these only after actual probes, audits the full artifacts, then approves and installs the records root-owned under protected ancestors. Never copy an example digest, guess a value, predate approval or treat the evidence record as a test generator. Missing reboot evidence intentionally prevents first production qualification until sitting 4. Retain prior records/artifacts in access-controlled archival storage instead of overwriting the only incident evidence.
 
-After the approved baseline reset and policy integration, the future root-only read-only collection command is:
+After the approved baseline reset, the future root-only read-only observation command is:
 
 ```sh
 /Library/macserve/bin/macserve maintenance-observe \
   --config /Library/macserve/config/maintenance.json
 ```
 
-This command collects protected live facts without requiring qualification/evidence files and without writing health. Its JSON fields are `job_uid`, `boot`, `interfaces_sha256`, `policy_sha256`, `pf_anchor`, `root_rules_sha256`, `anchor_rules_sha256`, `baseline_sha256`, `profiles`, `pf_enabled`, `loopback_filtered`, `identity_valid`, `baseline_valid`, `accounted_bytes`, `memory_pressure`, and `coexistence` (the current measurement). This is **not** boundary evidence or automatic approval. `macserve qualify` uses these bindings to generate inspectable candidate records and checks them again at explicit approval. Do not install observation JSON as qualification or copy its observation booleans/accounting into an approval record.
+This command collects protected live facts without qualification/evidence files and without writing health: `job_uid`, `boot`, `interfaces_sha256`, `baseline_sha256`, `profiles`, `identity_valid`, `baseline_valid`, `accounted_bytes`, `memory_pressure` and `coexistence`. It is **not** boundary evidence or approval. `maintenance-observe --coexistence-only --config /Library/macserve/config/maintenance.json` emits only the read-only coexistence state and needs no GUI baseline/profile qualification. Do not install observation JSON as qualification or copy observation booleans into an approval record.
 
-The controller and maintenance observer share the same relevant-interface digest. Link-local IPv4/IPv6 addresses are omitted from both its digest and host-address snapshot; interfaces with only covered addresses or no addresses contribute no rows. Other host addresses, prefixes, and their interface names/flags still invalidate qualification on change. Thus link-local address or link-local-only interface churn does not invalidate health. This policy/digest cutover requires fresh qualification of existing deployments; it does not reuse old approvals.
+The controller and maintenance observer share the relevant-interface digest. Link-local IPv4/IPv6 addresses and interfaces with no included addresses contribute no rows. Other host addresses, prefixes and interface names/flags still invalidate qualification on change. This does not imply link-local network enforcement. Schema-2 health, qualification and boundary evidence require fresh approval; all qualification challenge/report/receipt/candidate/attestation artifacts also use schema 2.
 
-For hash reproducibility, `anchor_rules_sha256` covers exact stdout from `/sbin/pfctl -a "$PF_ANCHOR" -sr`, where `PF_ANCHOR` is the configured path. `root_rules_sha256` covers JSON framing, in order, of `PFAnchor`, sorted `ToleratedTranslationAnchors`, sorted `ApprovedGuestSubnets`, sorted `CoexistingAnchors`, sorted `CoexistingServices`, `Filter` (exact `/sbin/pfctl -a '*' -sr` stdout), `Translations` (path-sorted objects with `Path` and exact `Rules` stdout, including the root), and `DirectFilters` (the corresponding path-sorted direct `-sr` snapshots used for evaluation order). Empty optional lists are normalized to null in this framing. Thus rule order, tolerated mappings, their paths, complete topology and review/coexistence policy are cryptographically bound into qualification. A change invalidates previous approval, even if a newly allowed translation anchor is currently absent. Use `maintenance-observe` to obtain this digest; older digest formats require fresh qualification. This composite digest is **not** another PF user's main-only ruleset hash. Do not hash verbose hit counters; preserve them separately in evidence. Boot identity is SHA-256 of raw `kern.boottime` bytes. Interface/profile digests use the controller inventory and normalized registry; policy/baseline/evidence digests cover exact file bytes.
+Maintenance is a root/Darwin-only observer except for its health publication. It checks network inventory, boot/baseline process identity, account separation, configured peer services, profile digests, memory pressure and bounded mutable-byte accounting. It never writes PF, adopts processes, runs root Apple build tools or signals a job. Unsupported non-network security observations invalidate health rather than refreshing stale success. Missing/stale/mismatched health blocks admission and cancels active work; unavailable PF alone does not.
 
-The observer requires recognized enabled/loopback status, a nonempty selected filter anchor, a proven unconditional call path and safe evaluation order from root, and literal static filter rules; table/dynamic-interface references in filter rules remain unsupported. Stock `scrub-anchor "com.apple/*" all fragment reassemble`, bare `scrub-anchor ... all`, and `dummynet-anchor ... all` calls are accepted and hashed but are not filter-call edges. The fragment suffix is accepted only for scrub anchors; conditional/quick calls and other suffixes remain unsupported. A wildcard call reaches immediate children, not arbitrary descendants. Stock root `nat-anchor "com.apple/*" all` and `rdr-anchor "com.apple/*" all` calls are supported without removing owner anchors: `-v -s Anchors` enumerates topology, explicit reserved `_pf` probes cover otherwise hidden children, and `-a PATH -sn` inspects the root and every discovered anchor. Root translation rules may be empty or unconditional calls into discovered paths. Descendant mappings are refused unless their exact anchor is listed and every rule passes the guest-only checks above; all other nonempty descendant translation rulesets remain refused. Unreadable children and unstable observations fail closed. Each direct-filter and translation observation uses two matching rule sweeps and three matching topology observations; recursive and selected filter text are rechecked too. This is not an atomic kernel snapshot. Limits are 64 non-root anchors, depth 8, 4 MiB total PF observation stdout, 1 MiB stdout/8 KiB stderr per command, 2 seconds per command and the existing 8-second overall context. Filter evaluation additionally bounds anchor visits at 4096 and rule steps at 65536. Exact missing-reserved-anchor diagnostics are distinguished from permission/read errors. Do not remove or disable owner policy to satisfy remaining limits. Anchor handling follows installed `pfctl(8)`/`pf.conf(5)`, [BSD enumeration behavior](https://github.com/freebsd/freebsd-src/blob/28cce1d5b5f5636459f6fa4b99d32139af8ecd2b/sbin/pfctl/pfctl.c#L1991-L1998), and [Apple anchor path semantics](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/net/pf_ruleset.c). Offline fixtures do not establish privileged native behavior or qualify a host.
-
-The missing-ruleset contract has explicitly split provenance, not an assertion that BSD userland is Apple's: [Apple XNU returns `EINVAL` for a missing `DIOCGETRULES` ruleset](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/bsd/net/pf_ioctl.c#L2954-L2969). Pinned FreeBSD stable/10 supplies the [fragment-reassembly print suffix](https://github.com/freebsd/freebsd-src/blob/28cce1d5b5f5636459f6fa4b99d32139af8ecd2b/sbin/pfctl/pfctl_parser.c#L989-L999), [filter warning path](https://github.com/freebsd/freebsd-src/blob/28cce1d5b5f5636459f6fa4b99d32139af8ecd2b/sbin/pfctl/pfctl.c#L891-L895), and [NAT warning path](https://github.com/freebsd/freebsd-src/blob/28cce1d5b5f5636459f6fa4b99d32139af8ecd2b/sbin/pfctl/pfctl.c#L1022-L1025). Its [show dispatch ignores those return values](https://github.com/freebsd/freebsd-src/blob/28cce1d5b5f5636459f6fa4b99d32139af8ecd2b/sbin/pfctl/pfctl.c#L2241-L2260), leaving [`error` initialized to zero](https://github.com/freebsd/freebsd-src/blob/28cce1d5b5f5636459f6fa4b99d32139af8ecd2b/sbin/pfctl/pfctl.c#L2034-L2041) for the [final exit](https://github.com/freebsd/freebsd-src/blob/28cce1d5b5f5636459f6fa4b99d32139af8ecd2b/sbin/pfctl/pfctl.c#L2433). The actual macOS absent-anchor exit contract remains unconfirmed until an owner-authorized read-only capture preserves exact stdout, stderr and status. Different native output must stop deployment, not broaden the accepted diagnostic.
-
-Maintenance is a root/Darwin-only read-only observer except for its own health publication. It checks live PF enabled state, recursive policy and anchor hashes, loopback filtering, network inventory, boot/baseline process identity, account separation, profile digests, memory pressure and bounded mutable-byte accounting. It never reloads PF, adopts processes, runs root Apple tools or signals a job. A failed/unsupported observation invalidates health rather than refreshing stale success. Controller health must be fresh within 45 seconds; missing/stale/mismatched health blocks admission and cancels active work. Keep disabled if the native output cannot be interpreted safely.
-
-Published health has exactly `schema`, `job_uid`, `policy_sha256`, `interfaces_sha256`, `boundary_receipt_sha256`, `boundary_validated`, `checked_at`, `expires_at`, `accounted_bytes`, `memory_pressure`, `qualified_profiles`. Here `boundary_receipt_sha256` is the approved boundary-evidence file digest (not a job receipt); `qualified_profiles` maps profile IDs to normalized digests. Successful evaluation sets schema 1, current bindings and a 30-second lifetime. The controller requires unexpired health, check age at most 45 seconds, lifetime at most 45 seconds, no check timestamp more than 5 seconds ahead, matching job/policy/interfaces/profile digests, validated boundary evidence and available accounting. Memory pressure or exhausted reservation can still block admission despite a valid boundary. Boot, baseline and PF-rule digest checks happen in maintenance before health publication; these are not additional health fields. Failed observations publish invalid health with `boundary_validated:false`, `accounted_bytes:-1` and `memory_pressure:true`; they do not create the worker's durable admission marker. Do not manually refresh timestamps or manufacture a healthy record.
+Published health has exactly `schema`, `job_uid`, `interfaces_sha256`, `boundary_receipt_sha256`, `boundary_validated`, `checked_at`, `expires_at`, `accounted_bytes`, `memory_pressure`, `qualified_profiles`. `boundary_receipt_sha256` binds the approved evidence file, not a job receipt or network-isolation claim. Successful evaluation publishes schema 2 and a 30-second lifetime. The controller requires unexpired health, age and lifetime no greater than 45 seconds, no check timestamp more than 5 seconds ahead, matching job/interfaces/profile bindings, validated non-network evidence and available accounting. Memory pressure or exhausted reservations still block admission. Failed observations publish `boundary_validated:false`, `accounted_bytes:-1`, `memory_pressure:true`; they do not create the worker's durable admission marker. Never manufacture or manually refresh health.
 
 Accounting walks the fixed `/Library/macserve/var` tree and entire dedicated `/Users/<job_user>` home, including `Library` and diagnostics. It never follows symlink targets or nested mounts, counts hardlinks/overlaps once, and charges the larger of logical and allocated bytes plus supported node metadata. This is an approximate live budget census, not an isolation snapshot: ordinary writes, creation, deletion, rename and directory timestamp changes do not invalidate health. Concurrent changes may be reflected only in a later sample; budget/free-space thresholds remain enforced by the controller. Unsupported special nodes, real I/O/permission failures, more than 1,000,000 entries, depth over 128 or the observation deadline still fail closed; those support limits are unchanged. Memory-pressure observation accepts the native normal/warning/critical values only; unknown sysctl behavior fails closed.
 
@@ -421,57 +375,26 @@ Modern registration inspection requires a recognized explicitly empty job-UID se
 
 Run the actual approved build, unit and simulator UI recipes as the job user with exact Xcode build, runtime build and device type. Prove expected test identities/counts, failure detection, timeouts, cancellation, screenshots/artifact privacy, no signing, and cleanup. Simulator cleanup is limited to recorded service UDIDs or exact job-UID additions proven against protected pre-create inventory as described in section 7; never run global simulator cleanup. Prove UI operation while the owner is foreground after fast switching, with the approved lock/display state, and that owner interaction does not redirect test input or leak owner data. Audit any required probe-created long-lived process and rerun the same reset before committing the final baseline and its evidence bindings. These real target runs remain future owner-authorized deployment acceptance; repository fixtures do not satisfy them.
 
-## 4. Integrate PF and execute the boundary matrix
+## 4. Record network reachability and qualify non-network boundaries
 
-Render `assets/pf/org.macserve.conf.tmpl` using `.JobUID` (numeric effective execution UID), `.ProtectedPorts` (reviewed numeric PF port-list contents), and `.HostAddresses` (reviewed literal current host IPv4/IPv6 aliases). Install reviewed exact bytes as `/Library/macserve/config/pf-anchor.conf`. Neither the template nor the installer loads it. The target is the exact `pf_anchor` in protected `maintenance.json`, defaulting to `com.apple/macserve`; the template filename is not the anchor path.
+Run probes from the **actual job GUI effective UID**, not a root shell claiming to impersonate it. Keep admission disabled until the required non-network qualification is approved. The network report describes what trusted repository code can reach; it does not establish or test macserve-enforced isolation.
 
-During the approved network window, a qualified administrator inspects the **whole recursive loaded policy**, verifies that the selected anchor's call path cannot be bypassed by an earlier quick pass, and confirms PF is enabled and `lo0` is filtered. Preserve the prechange rules/topology and recovery plan. Do not replace `/etc/pf.conf`, flush global states, toggle unrelated anchors, or reload a whole host policy blindly. Deal with preexisting job-owned states using a separately approved precisely scoped procedure; if attribution is uncertain, remain disabled. Verify that unrelated owner sessions/services stay intact.
-
-### Load only the service child anchor
-
-On a stock host with the existing `com.apple/*` filter call, **do not add `anchor "org.macserve"` to the main ruleset**. Other PF owners can pin the main ruleset's hash; adding a call or reloading a modified root policy breaks that contract. After reviewing the staged policy and configuration, use the `qualify begin --load-policy` command shown in sitting 2. Do not bypass its before/after measurements with manual loads.
-
-The sole PF write API constructs exactly `/sbin/pfctl -a <configured-owned-anchor> -f <private-staged-policy>`. It exposes no arbitrary arguments, global flush/reload, foreign-anchor writes, enable/disable, or uninstall operation. Read-only PF invocations necessarily inspect main and peer rulesets. The loader accepts bounded, single-line `block`/`pass` rules, literal numeric/address/list macros and literal labels, including the rendered template. Includes, `load anchor`, anchor declarations, global options, tables, translation rules, keyword macros and line continuations are refused before execution. No shell or helper bypass accepts raw PF arguments.
-
-The public challenge binds `firewall_step_sha256`; detailed `firewall-policy.conf`, `firewall-before.json`, `firewall-after.json`, and `firewall-step.json` stay root-private and are included in collected artifact hashes. Baseline persistence must succeed before loading. After-state capture is attempted even if the load fails. A failed step may have changed the **owned** anchor: retain its evidence, keep admission disabled and arrange reviewed recovery/new qualification. There is no automatic rollback or foreign-policy repair.
-
-This requires no `/etc/pf.conf` edit and adds no main-ruleset call. Do not load at `com.apple`, use another manager's child, change its pinned hash, or use global flush/enable/disable operations as a workaround. A custom `pf_anchor` requires its own already-reachable unconditional call path; an orphan loaded ruleset is not protection. If the stock call is absent or its ordering permits a bypass, stop for an owner-reviewed integration plan rather than silently changing the root policy.
-
-Loading a child is not boot persistence. After its PF owner is ready, use a fresh explicitly approved `begin --load-policy` sitting and requalify after reboot. If another manager removes/replaces the child, maintenance refuses health; it does not repair PF. `qualify stage-policy` still stages files only. Loading under the existing wildcard preserves the main-only rule text, but changes macserve's recursive observation digest, so previous qualifications cannot be reused.
-
-### Coexist with reviewed guest translations
-
-An unrelated guest router may continue using its own exact child anchor and the stock NAT/RDR wildcard calls. Configure the optional lists above only after reviewing its actual normalized `-sn` rules and the complete host-address inventory. For example, a helper rule with source `172.20.40.128/25` can coexist when that is an approved guest-only range; one with source `172.20.40.0/24` cannot if the host owns a gateway inside it. NAT source restrictions, not a helper's name, root ownership or pinned main hash, establish this exclusion.
-
-No allowance is inferred from a running VM, launchd entry or a parent anchor. Re-run the actual job/owner boundary matrix after loading or changing the service policy, reviewed guest ranges, tolerated rules, interface inventory, or anchor topology. Keep admission disabled until those live bindings and genuine evidence are approved.
-
-### Execute the boundary matrix
-
-For PF substitution, use a canonical decimal job UID at least 501, a nonempty comma-separated list of decimal ports 1–65535, and a nonempty comma-separated list of validated non-link-local host IPv4/IPv6 literals. `deploy.env` validation removes covered link-local entries, including their scopes, before rendering. Do not substitute DNS names, macros, ranges, scoped literals or untrusted template text into `HostAddresses` directly. Review the rendered expanded rules and their order; future platform syntax inspection and actual loaded-rule/probe qualification are both required. No validator was run against the owner's PF here.
-
-The template matches job effective UID for TCP/UDP on all interfaces, including loopback. **`fe80::/10`, `::1`, `127.0.0.0/8`, and `169.254.0.0/16` are mandatory quick denies, independent of `HOST_ADDRESSES` or any other environment value.** They use the existing `macserve-private` counter label. The loader validates incoming source and post-load rules; the observer checks live rules too. Coverage for both protocols and all four ranges must precede every pass. Missing, nonquick, wrong-UID, or interface/source/port-restricted denies cannot establish this coverage; broader unconditional quick denies can. A verified prior ownership receipt permits upgrading an older owned policy, but the replacement must satisfy the new boundary.
-
-Protected-port denies apply to every destination; private/tailnet/current-host denies precede exceptions, and the tail denies remaining job TCP/UDP. There are no default egress allows. Add only reviewed exact endpoint/protocol/port exceptions after the mandatory denies. DNS, proxy or simulator needs cannot waive the local-network boundary; choose another approved endpoint rather than adding a loopback exception. Never give a job an arbitrary CONNECT proxy that can reach denied networks on its behalf. UID rules still do not prove raw/delegated helper boundaries; those require the native evidence below.
-
-Perform and retain this matrix from the **actual job GUI effective UID**, not a root shell claiming to impersonate it:
+Read-only coexistence snapshots protect unrelated configured services from unnoticed changes during installation and qualification. They neither inspect rule semantics nor authorize changing the host firewall. PF read failures remain explicitly unavailable; running service/PID and readable before/after digest changes still require owner investigation.
 
 | Probe | Required evidence |
 | --- | --- |
-| TCP to every protected port at loopback IPv4 and IPv6, each current non-link-local host LAN/tailnet IP and alias, and all resolved addresses of relevant DNS names | Three **fresh sockets** per destination/port, each with a 2-second deadline; record failures and matching labeled PF rule counter deltas |
-| Private, tailnet, link-local and direct/proxy bypass paths | Denied routes plus attributable rule-hit deltas; enumerate IPv4 and IPv6, not just one representative route |
-| UDP denial | Random nonsecret nonce sent only to an approved canary receiver, denied-rule hit deltas and zero nonce receipts, with authorized nonjob controls proving that same receiver/path was reachable |
-| Allowed endpoints | Each narrow approved DNS/proxy/simulator path actually works, while protected/private destinations through the proxy and direct paths still fail |
-| Alternate networking | Ordinary sockets, raw sockets when available, URLSession/background transfers, delegated helpers and proxy paths; inability to attribute/control a required helper path is a failed boundary |
+| TCP to protected ports, loopback IPv4/IPv6, current host LAN/tailnet IPs and approved DNS targets | Record fresh connection outcomes and actual job UID under `network_reachability`; status `not enforced in phase 1`, whether reachable or not |
+| Optional UDP, endpoint, proxy and delegated networking observations | Use only authorized test destinations; preserve successes, failures and unsupported paths without pass/fail gates or PF counters |
 | Local delegation | Job cannot connect to controller executor Unix socket or read private controller/broker/export/secret paths; check other relevant Unix sockets and delegated services without invoking secret-bearing APIs |
-| Owner controls | Authorized nonjob fresh connections succeed against live approved controls; owner services and interaction remain unchanged |
+| Owner controls | Independent file controls bracket both account reports; configured owner services retain their running PIDs |
 | Owner-home denial | From the actual job GUI identity with its full groups, owner-home listing/traversal and reading the approved nonsecret canary must be denied; owner reads the same canary successfully before/after |
-| Lifecycle | Repeat after fast user switching and after the planned reboot/GUI login, recording boot/interface/baseline/policy changes |
+| Lifecycle | Repeat after fast switching and planned reboot/GUI login with fresh boot/interface/baseline evidence |
 
-Connection refusal, timeout to an offline service, DNS failure, or a successful unrelated nonjob request alone is **not denial proof**. Use live authorized controls, exact destinations, timestamps, effective UID, command/tool provenance, labeled before/after counters and correlated canary logs. Never send a probe nonce to production UDP services. If raw sockets are unavailable, record the restriction and why it is safe; never mark an untested required transport as tested. Delegated system services may use a different effective UID and bypass UID rules: prove their boundary or keep the deployment disabled. PF cannot substitute for Unix permissions or UI qualification.
+Connection refusal, an offline timeout, DNS failure or an unrelated successful request is not denial proof. Never send nonces to production UDP services, silently skip observations, or mark unsupported transports as tested. Existing host/network restrictions belong to their owner, not macserve. Unix permissions and UI qualification remain separate required boundaries.
 
 Store detailed evidence privately, sanitized where exported. The root-approved evidence and qualification files authenticate an operator's real observations; arbitrary JSON does not perform tests. Their exact schema is specified in section 2.
 
-For `owner_home_denial`, the owner creates a fresh nonsecret canary at an explicitly approved path inside their home, with file mode `0644` so denial tests the home boundary rather than a private file's mode. The owner verifies that exact path is readable before and after the probe. From the actual job GUI session, record `id -u` and `id -G`; attempt directory listing and reading only that canary, discarding stdout. Both must fail with permission denial, not a missing path, missing mount or unrelated command error. Do not enumerate/read private owner files. Record attempts, successful owner controls in `authorized_control_successes`, and successful job reads in `canary_receipts` (must be zero); `passed` also requires denied directory access. Preserve the evidence and let the owner remove only that canary. Repeat after relevant identity/permission changes and reboot; existing evidence without this category cannot qualify.
+For `owner_home_denial`, create a fresh nonsecret mode0644 canary at an explicitly approved owner-home path. The owner's file-only control reads it before and after the job/owner probe window. From the actual job GUI identity and full groups, directory access and reading that exact canary must fail with permission denial, not missing-path/mount errors. Do not enumerate private owner files. Record real attempts, successful owner controls and zero successful job canary reads; status `passed` also requires denied directory access. Preserve evidence and let the owner remove only that canary. Repeat after identity/permission changes and reboot.
 
 ## 5. Enroll the App and require verified evidence
 
@@ -501,7 +424,7 @@ Qualify real App permissions, numeric bot matching, branch gates and exact-head 
 
 ## 6. Enable only after the gates; operate within budgets
 
-Before any approved start: verify protected binary/config/secrets and identity separation; real GUI baseline; accepted native persistence limits; full current PF/network/tool/UI evidence; matching qualification bindings; actual root maintenance observation with fresh health; and explicit manual pause/disabled profiles preventing enrollment during commissioning. An operator may start the read-only maintenance observer under root using `macserve maintenance --config /Library/macserve/config/maintenance.json` to obtain real health; never manufacture `health/current.json`. Only after valid observation and approved enrollment may the operator deliberately enable/bootstrap the three specific labels in their approved launchd procedure. Staged files do not grant this approval. Controller runs as the dedicated user; broker/maintenance as root. No root Apple tools, background PF reload or automatic baseline adoption are allowed.
+Before approved start: verify protected binary/config/secrets and identity separation; real GUI baseline; accepted native persistence and trusted-repository/no-network-isolation model; required account/tool/UI evidence and informational network report; matching qualification; fresh root maintenance health; and manual pause/disabled profiles during commissioning. An operator may run `macserve maintenance --config /Library/macserve/config/maintenance.json` to obtain actual health, never manufacture it. Only then may a separately approved procedure enable/bootstrap the three dedicated services. Controller runs as its dedicated user, broker/maintenance as root. No root Apple build tools, PF writes or automatic baseline adoption are allowed.
 
 Allocate the 80 GiB mutable pool as **30 GiB workspaces + 15 GiB caches + 15 GiB logs/artifacts + 15 GiB simulators + 5 GiB metadata**. Include full job home/`Library`, diagnostics, controller/broker/exports/workspaces and service-owned logs. Avoid counting nested roots twice. Extra Xcodes/runtimes are separately approved installation storage, but still consume filesystem free space. These are monitored budgets, not hard filesystem quotas; sampled usage may overshoot. Admission reserves 30 GiB while preserving a 120 GiB free floor; below 100 GiB active work is cancelled. Monitor whole-UID memory pressure/RSS and leave owner headroom.
 
@@ -526,8 +449,8 @@ For a crash, reboot, GUI drift, missing baseline PID or cleanup uncertainty:
    ```
 
    Reset holds the broker lock, removes supported job persistence and extra processes, updates the audited baseline, retries owned-resource cleanup and performs full clean verification before clearing the admission marker. It preserves pending completions and sealed evidence; failure retains unresolved records and any existing marker. For an interrupted simulator create, it compares stable job-UID inventory with the protected pre-create inventory and deletes only exact added UDIDs, preserving baseline devices. Recorded service UDIDs remain eligible for cleanup. It never guesses legacy ownership: an old record without inventory can recover only when inspection proves the inventory empty. Unrelated workspaces and owner devices are not cleanup targets. If modern BTM residuals or uncertain inspection remain, keep disabled, resolve the scoped cause and rerun this same reset.
-5. A reset is not boundary approval: refresh qualification bindings for changed boot/baseline/interfaces/PF policy/topology/profiles and repeat affected real evidence gates. Restart only the dedicated services after valid fresh health and explicit approval. Startup replays pending completions before recovery; no registration or lease occurs before recovery succeeds. Transient unclean completion fences the old controller epoch; verified recovery registers a fresh epoch without another administrator clear command. Verify state and evidence delivery before clearing manual pause.
+5. A reset is not boundary approval: refresh qualification bindings for changed boot/baseline/interfaces/profiles and repeat affected real evidence gates, including a fresh coexistence window. Restart only the dedicated services after valid fresh health and explicit approval. Startup replays pending completions before recovery; no registration or lease occurs before recovery succeeds. Transient unclean completion fences the old controller epoch; verified recovery registers a fresh epoch without another administrator clear command. Verify state and evidence delivery before clearing manual pause.
 
 Manual disk relief is an administrative incident procedure, not `rm -rf` on the install root. First establish quiescence and preserve an access-controlled evidence inventory/backup. Identify ownership, exact recorded paths, retention eligibility, outstanding publication/completion references and current budget before removing only approved expired data. Never delete active records, pending receipts, source-cleanup debt or quarantine to force admission. If safe evidence-preserving cleanup cannot be established, keep disabled and add capacity or investigate; do not mutate unrelated owner infrastructure.
 
-Changes to OS/PF behavior, binaries, pinned Xcodes/runtimes, recipes, network inventory, keys/policy or GUI permissions require a reviewed rollout and relevant requalification. Unsupported native behavior is a deployment limit, not a reason to relax the guard.
+Changes to host behavior, binaries, pinned Xcodes/runtimes, recipes, relevant inventory, keys/configuration or GUI permissions require reviewed rollout and relevant requalification. PF remains externally managed; macserve never repairs it. Unsupported non-network security behavior is a deployment limit, not a reason to relax required gates.

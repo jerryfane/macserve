@@ -27,8 +27,7 @@ func TestCommandExitStatus(t *testing.T) {
 		{name: "reset help", args: []string{"worker-reset", "--help"}, want: 0},
 		{name: "private exec rejects incomplete request", args: []string{"_job-exec"}, want: 1},
 		{name: "private signal rejects incomplete request", args: []string{"_job-signal"}, want: 1},
-		{name: "begin requires explicit firewall load", args: []string{"qualify", "begin", "--session", "/example/session"}, want: 2},
-		{name: "begin rejects disabled firewall load", args: []string{"qualify", "begin", "--session", "/example/session", "--load-policy=false"}, want: 2},
+		{name: "begin rejects obsolete firewall load", args: []string{"qualify", "begin", "--session", "/example/session", "--load-policy"}, want: 2},
 	}
 
 	for _, tt := range tests {

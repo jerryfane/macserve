@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -81,7 +82,7 @@ func Install(o Options, stdout, stderr io.Writer) error {
 		return err
 	}
 	if !o.Apply {
-		_, err := fmt.Fprintf(stdout, "PLAN ONLY: verified binary SHA256 %s.\nController: %s uid=%d gid=%d\nJob GUI: %s uid=%d gid=%d\nOwner: %s uid=%d\nTLS listener: %s port=%d\nPF protected ports: %v\nPF host addresses: %v\nDeveloper directory: %s\nRepository numeric pins: %v\nWould preflight root-controlled inputs and absent targets, run create-users --apply, install /Library/macserve, generate TLS/receipt keys and a hash-only API credential, and install three disabled launchd plists.\nProfiles remain empty; qualification/health absent; owner.pause set. No accounts, owner homes, services, PF, ACLs, passwords or GUI sessions inspected or changed. Apply requires an exclusive reviewed administration window.\n", o.SHA256, e.ControllerUser, e.ControllerUID, e.ControllerGID, e.JobUser, e.JobUID, e.JobGID, e.OwnerUser, e.OwnerUID, e.TailnetIP, e.Port, e.ProtectedPorts, e.HostAddresses, e.DeveloperDir, e.Repositories)
+		_, err := fmt.Fprintf(stdout, "PLAN ONLY: verified binary SHA256 %s.\nController: %s uid=%d gid=%d\nJob GUI: %s uid=%d gid=%d\nOwner: %s uid=%d\nTLS listener: %s port=%d\nInformational probe ports: %v\nInformational host addresses: %v\nDeveloper directory: %s\nRepository numeric pins: %v\nWould preflight root-controlled inputs and absent targets, preserve read-only coexistence before any deployment mutation and after (including failures), run create-users --apply, install /Library/macserve, generate TLS/receipt keys and a hash-only API credential, and install three disabled launchd plists.\nProfiles remain empty; qualification/health absent; owner.pause set. Network isolation is not enforced in phase 1. No accounts, owner homes, services, PF, ACLs, passwords or GUI sessions inspected or changed. Apply requires an exclusive reviewed administration window.\n", o.SHA256, e.ControllerUser, e.ControllerUID, e.ControllerGID, e.JobUser, e.JobUID, e.JobGID, e.OwnerUser, e.OwnerUID, e.TailnetIP, e.Port, e.ProtectedPorts, e.HostAddresses, e.DeveloperDir, e.Repositories)
 		return err
 	}
 	return apply(o, e, envData, assets, rendered, stdout, stderr)
@@ -158,6 +159,46 @@ func apply(o Options, e Environment, envData []byte, assets, rendered map[string
 		if err != nil || info.Mode().Perm()&0111 == 0 {
 			return fmt.Errorf("required native tool unavailable: %s", path)
 		}
+	}
+	coexistenceConfig := maintenance.Config{CoexistingAnchors: e.CoexistingAnchors, CoexistingServices: e.CoexistingServices}
+	before, err := maintenance.ObserveCoexistence(context.Background(), coexistenceConfig)
+	if err != nil {
+		return fmt.Errorf("pre-install coexistence: %w", err)
+	}
+	// This root-private journal survives success and partial failure. Preserve the
+	// before-state durably before staging, account creation, or installed writes.
+	evidenceDir, err := os.MkdirTemp("/private/var/root", ".macserve-install-evidence-")
+	if err != nil {
+		return err
+	}
+	finished := false
+	finish := func() error {
+		finished = true
+		after, observeErr := maintenance.ObserveCoexistence(context.Background(), coexistenceConfig)
+		checkErr := observeErr
+		if checkErr == nil {
+			checkErr = maintenance.SameCoexistence(before, after)
+		}
+		record := struct {
+			maintenance.CoexistenceEvidence
+			Error string `json:"error,omitempty"`
+		}{CoexistenceEvidence: maintenance.CoexistenceEvidence{Before: before, After: after}}
+		if checkErr != nil {
+			record.Error = checkErr.Error()
+		}
+		saveErr := writeInstallEvidence(filepath.Join(evidenceDir, "coexistence.json"), record)
+		return errors.Join(checkErr, saveErr)
+	}
+	defer func() {
+		if !finished {
+			result = errors.Join(result, finish())
+		}
+		if result != nil {
+			result = fmt.Errorf("%w; read-only coexistence evidence: %s", result, evidenceDir)
+		}
+	}()
+	if err := writeInstallEvidence(filepath.Join(evidenceDir, "before.json"), before); err != nil {
+		return err
 	}
 	stage, err := os.MkdirTemp("/private/var/root", ".macserve-install-")
 	if err != nil {
@@ -247,13 +288,45 @@ func apply(o Options, e Environment, envData []byte, assets, rendered map[string
 			return err
 		}
 	}
-	if _, err := fmt.Fprintf(stdout, "Installed with every service disabled; PF unchanged; empty profiles and owner.pause require reviewed qualification. Public verification pins: %s/config/deployment-pins.json\n", Prefix); err != nil {
+	if err := finish(); err != nil {
+		return fmt.Errorf("post-install coexistence: %w", err)
+	}
+	if _, err := fmt.Fprintf(stdout, "Installed with every service disabled; no PF writes; network isolation not enforced in phase 1. Empty profiles and owner.pause require reviewed qualification. Read-only coexistence evidence: %s\nPublic verification pins: %s/config/deployment-pins.json\n", evidenceDir, Prefix); err != nil {
 		return err
 	}
 	// This is the sole token emission. No persistent file ever contains it.
 	tokenDelivery = true
 	if _, err := fmt.Fprintf(stdout, "API_BEARER_TOKEN=%s\n", m.Token); err != nil {
 		return errors.New("installation completed but one-time credential delivery failed; do not rerun; rotate the API credential through reviewed configuration")
+	}
+	return nil
+}
+
+func writeInstallEvidence(path string, value any) error {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(append(data, '\n'))
+	if err == nil {
+		err = f.Sync()
+	}
+	if err = errors.Join(err, f.Close()); err != nil {
+		return err
+	}
+	// Persist the directory entry as well as its contents before proceeding.
+	for _, dir := range []string{filepath.Dir(path), filepath.Dir(filepath.Dir(path))} {
+		d, err := os.Open(dir)
+		if err != nil {
+			return err
+		}
+		if err := errors.Join(d.Sync(), d.Close()); err != nil {
+			return err
+		}
 	}
 	return nil
 }

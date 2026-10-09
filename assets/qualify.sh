@@ -14,7 +14,7 @@ if [[ "${1:-}" == "--binary" ]]; then
   shift 2
 fi
 case "${1:-}" in
-  plan|begin|probe|canary|stage-policy|collect|attest|approve) ;;
+  plan|begin|probe|canary|collect|attest|approve) ;;
   *)
     printf '%s\n' 'qualify.sh: expected a recognized qualification subcommand; raw commands are refused' >&2
     exit 2

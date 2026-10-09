@@ -31,11 +31,8 @@ type Environment struct {
 	HostAddresses                []string
 	DeveloperDir                 string
 	Repositories                 map[string]int64
-	PFAnchor                     string
 	CoexistingAnchors            []string
 	CoexistingServices           []string
-	ToleratedTranslationAnchors  []string
-	ApprovedGuestSubnets         []string
 }
 
 var accountName = regexp.MustCompile(`^[a-z][a-z0-9_]{0,30}$`)
@@ -55,7 +52,7 @@ func ParseEnvironment(data []byte) (Environment, error) {
 	for _, k := range keys {
 		allowed[k] = true
 	}
-	for _, k := range strings.Fields("PF_ANCHOR COEXISTING_ANCHORS COEXISTING_SERVICES TOLERATED_TRANSLATION_ANCHORS APPROVED_GUEST_SUBNETS") {
+	for _, k := range strings.Fields("COEXISTING_ANCHORS COEXISTING_SERVICES") {
 		allowed[k] = true
 	}
 	for n, line := range strings.Split(string(data), "\n") {
@@ -118,15 +115,12 @@ func ParseEnvironment(data []byte) (Environment, error) {
 	}
 	seenAddresses := map[string]bool{}
 	for _, s := range strings.Split(values["HOST_ADDRESSES"], ",") {
-		address, err := canonicalHostAddress(s)
+		_, err := canonicalHostAddress(s)
 		if err != nil || seenAddresses[s] {
 			return e, errors.New("invalid or repeated host address")
 		}
 		seenAddresses[s] = true
-		// Fixed PF denies cover link-local ranges independently of this inventory.
-		if !address.IsLinkLocalUnicast() {
-			e.HostAddresses = append(e.HostAddresses, s)
-		}
+		e.HostAddresses = append(e.HostAddresses, s)
 	}
 	if !seenAddresses[e.TailnetIP] {
 		return e, errors.New("HOST_ADDRESSES must include TAILNET_IP")
@@ -153,19 +147,14 @@ func ParseEnvironment(data []byte) (Environment, error) {
 		}
 		return strings.Split(values[key], ",")
 	}
-	firewall := maintenance.Config{
-		PFAnchor:                    values["PF_ANCHOR"],
-		CoexistingAnchors:           list("COEXISTING_ANCHORS"),
-		CoexistingServices:          list("COEXISTING_SERVICES"),
-		ToleratedTranslationAnchors: list("TOLERATED_TRANSLATION_ANCHORS"),
-		ApprovedGuestSubnets:        list("APPROVED_GUEST_SUBNETS"),
+	coexistence := maintenance.Config{
+		CoexistingAnchors:  list("COEXISTING_ANCHORS"),
+		CoexistingServices: list("COEXISTING_SERVICES"),
 	}
-	if err := maintenance.ValidateFirewallConfig(&firewall); err != nil {
-		return e, fmt.Errorf("deploy firewall policy: %w", err)
+	if err := maintenance.ValidateCoexistenceConfig(&coexistence); err != nil {
+		return e, fmt.Errorf("deploy coexistence configuration: %w", err)
 	}
-	e.PFAnchor = firewall.PFAnchor
-	e.CoexistingAnchors, e.CoexistingServices = firewall.CoexistingAnchors, firewall.CoexistingServices
-	e.ToleratedTranslationAnchors, e.ApprovedGuestSubnets = firewall.ToleratedTranslationAnchors, firewall.ApprovedGuestSubnets
+	e.CoexistingAnchors, e.CoexistingServices = coexistence.CoexistingAnchors, coexistence.CoexistingServices
 	return e, nil
 }
 func canonicalNumber(s string, max uint64) (uint64, error) {

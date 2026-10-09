@@ -10,7 +10,7 @@ import (
 
 func runDeployInstall(args []string, stdout, stderr io.Writer) int {
 	usage := func(w io.Writer) {
-		fmt.Fprintln(w, "Usage: macserve deploy-install --env PATH --binary PATH --sha256 LOWERCASE_HEX --assets PATH [--apply]\nDefault: safe plan; --apply requires Darwin root, protected reviewed inputs and an absent deployment. No activation, PF, ACL, password or GUI changes.")
+		fmt.Fprintln(w, "Usage: macserve deploy-install --env PATH --binary PATH --sha256 LOWERCASE_HEX --assets PATH [--apply]\nDefault: safe plan; --apply requires Darwin root, protected reviewed inputs and an absent deployment. Apply preserves read-only coexistence before/after evidence. No activation, PF writes, ACL, password or GUI changes. Network isolation is not enforced in phase 1.")
 	}
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
 		usage(stdout)

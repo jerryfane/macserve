@@ -32,7 +32,7 @@ import (
 
 const Prefix = "/Library/macserve"
 
-var assetNames = []string{"create-users.sh", "qualify.sh", "launchd/org.macserve.controller.plist.tmpl", "launchd/org.macserve.worker.plist.tmpl", "launchd/org.macserve.maintenance.plist.tmpl", "pf/org.macserve.conf.tmpl"}
+var assetNames = []string{"create-users.sh", "qualify.sh", "launchd/org.macserve.controller.plist.tmpl", "launchd/org.macserve.worker.plist.tmpl", "launchd/org.macserve.maintenance.plist.tmpl"}
 
 type File struct {
 	Path     string
@@ -69,11 +69,7 @@ func Render(source []byte, values map[string]string) ([]byte, error) {
 	return []byte(s), nil
 }
 func renderAssets(e Environment, assets map[string][]byte) (map[string][]byte, error) {
-	ports := make([]string, len(e.ProtectedPorts))
-	for i, p := range e.ProtectedPorts {
-		ports[i] = strconv.Itoa(int(p))
-	}
-	values := map[string]string{"{{.ControllerUser}}": e.ControllerUser, "{{.ControllerGroup}}": e.ControllerUser, "{{.JobUID}}": strconv.FormatUint(uint64(e.JobUID), 10), "{{.ProtectedPorts}}": strings.Join(ports, ", "), "{{.HostAddresses}}": strings.Join(e.HostAddresses, ", ")}
+	values := map[string]string{"{{.ControllerUser}}": e.ControllerUser, "{{.ControllerGroup}}": e.ControllerUser, "{{.JobUID}}": strconv.FormatUint(uint64(e.JobUID), 10)}
 	result := map[string][]byte{}
 	for _, name := range assetNames[2:] {
 		source, ok := assets[name]
@@ -228,8 +224,6 @@ func makeMaterial(e Environment, envData []byte, rendered map[string][]byte, now
 	add(Prefix+"/config/tls-cert.pem", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0644, 0, 0)
 	add(Prefix+"/config/deploy.env", envData, 0644, 0, 0)
 	add(Prefix+"/config/profiles.json", []byte("{\"profiles\":[]}\n"), 0644, 0, 0)
-	pf := rendered["pf/org.macserve.conf.tmpl"]
-	add(Prefix+"/config/pf-anchor.conf", pf, 0644, 0, 0)
 	for _, service := range []string{"controller", "worker", "maintenance"} {
 		name := "org.macserve." + service + ".plist"
 		add("/Library/LaunchDaemons/"+name, rendered["launchd/"+name+".tmpl"], 0644, 0, 0)
@@ -239,9 +233,9 @@ func makeMaterial(e Environment, envData []byte, rendered map[string][]byte, now
 		repos = append(repos, repo)
 	}
 	sort.Strings(repos)
-	c := controller.Config{Root: Prefix + "/var/controller", Socket: Prefix + "/var/controller/run/worker.sock", JobUID: e.JobUID, ProfilesFile: Prefix + "/config/profiles.json", Listen: netip.AddrPortFrom(netip.MustParseAddr(e.TailnetIP), e.Port).String(), AllowedNetworks: []string{"100.64.0.0/10", "fd7a:115c:a1e0::/48"}, TLSCertificate: Prefix + "/config/tls-cert.pem", TLSKey: secrets + "tls-key.pem", Principals: []store.Principal{{ID: "owner", TokenSHA256: digest([]byte(token)), Repositories: repos, Scopes: []string{"jobs:submit", "jobs:read", "jobs:cancel", "service:admin"}}}, HealthFile: Prefix + "/health/current.json", PolicySHA256: digest(pf), PauseFile: Prefix + "/config/owner.pause", OwnerUID: e.OwnerUID, Receipt: controller.ReceiptConfig{KeyID: keyID, PrivateKeyFile: secrets + "receipt-key.pem", ServiceID: serviceID, HostID: hostID, Repositories: e.Repositories, VerificationKeys: map[string]string{keyID: m.ReceiptPublicKey}}}
+	c := controller.Config{Root: Prefix + "/var/controller", Socket: Prefix + "/var/controller/run/worker.sock", JobUID: e.JobUID, ProfilesFile: Prefix + "/config/profiles.json", Listen: netip.AddrPortFrom(netip.MustParseAddr(e.TailnetIP), e.Port).String(), AllowedNetworks: []string{"100.64.0.0/10", "fd7a:115c:a1e0::/48"}, TLSCertificate: Prefix + "/config/tls-cert.pem", TLSKey: secrets + "tls-key.pem", Principals: []store.Principal{{ID: "owner", TokenSHA256: digest([]byte(token)), Repositories: repos, Scopes: []string{"jobs:submit", "jobs:read", "jobs:cancel", "service:admin"}}}, HealthFile: Prefix + "/health/current.json", PauseFile: Prefix + "/config/owner.pause", OwnerUID: e.OwnerUID, Receipt: controller.ReceiptConfig{KeyID: keyID, PrivateKeyFile: secrets + "receipt-key.pem", ServiceID: serviceID, HostID: hostID, Repositories: e.Repositories, VerificationKeys: map[string]string{keyID: m.ReceiptPublicKey}}}
 	w := workerclient.Config{Socket: c.Socket, ControllerUID: e.ControllerUID, Root: Prefix + "/var/broker", ExportRoot: Prefix + "/var/exports", WorkspaceRoot: Prefix + "/var/workspaces", JobUID: e.JobUID, JobGID: e.JobGID, OwnerUID: e.OwnerUID, HelperPath: Prefix + "/bin/macserve", BaselinePath: Prefix + "/var/broker/gui-baseline.json", PollSeconds: 2, HeartbeatSeconds: 5, RequestTimeoutSeconds: 10}
-	maintenanceConfig := maintenance.Config{ControllerConfig: Prefix + "/config/controller.json", WorkerConfig: Prefix + "/config/worker.json", QualificationFile: Prefix + "/config/qualification.json", BoundaryEvidenceFile: Prefix + "/config/boundary-evidence.json", PFPolicyFile: Prefix + "/config/pf-anchor.conf", PFAnchor: e.PFAnchor, CoexistingAnchors: e.CoexistingAnchors, CoexistingServices: e.CoexistingServices, ToleratedTranslationAnchors: e.ToleratedTranslationAnchors, ApprovedGuestSubnets: e.ApprovedGuestSubnets, IntervalSeconds: 10}
+	maintenanceConfig := maintenance.Config{ControllerConfig: Prefix + "/config/controller.json", WorkerConfig: Prefix + "/config/worker.json", QualificationFile: Prefix + "/config/qualification.json", BoundaryEvidenceFile: Prefix + "/config/boundary-evidence.json", CoexistingAnchors: e.CoexistingAnchors, CoexistingServices: e.CoexistingServices, IntervalSeconds: 10}
 	for _, item := range []struct {
 		name  string
 		value any

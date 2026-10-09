@@ -1,5 +1,4 @@
-// Package pfctl is the sole native PF process boundary. Reads may inspect the
-// whole firewall; writes can only replace the configured, exclusively owned leaf.
+// Package pfctl provides bounded, read-only opaque PF rule measurements.
 package pfctl
 
 import (
@@ -7,29 +6,13 @@ import (
 	"context"
 	"errors"
 	"os/exec"
-	"slices"
 	"strings"
 	"time"
 )
 
-var ErrAnchorAbsent = errors.New("PF anchor absent")
-
 type Output struct {
 	Stdout string
 	Stderr string
-}
-
-type Client struct {
-	anchor string
-	run    func(context.Context, ...string) (Output, error)
-	store  ownershipStore
-}
-
-func New(anchor string) (*Client, error) {
-	if !AnchorPath(anchor) {
-		return nil, errors.New("PF client requires an exact bounded anchor")
-	}
-	return &Client{anchor: anchor, run: native, store: protectedOwnershipStore{}}, nil
 }
 
 // AnchorPath accepts only canonical, exact PF paths, never root or wildcards.
@@ -50,130 +33,38 @@ func AnchorPath(path string) bool {
 	return true
 }
 
-func (c *Client) Read(ctx context.Context, args ...string) (Output, error) {
-	if !readArgs(args) {
-		return Output{}, errors.New("PF read arguments are not allowlisted")
-	}
-	return c.execute(ctx, args...)
+func Read(ctx context.Context, args ...string) (Output, error) {
+	return read(ctx, native, args...)
 }
 
 func readArgs(args []string) bool {
-	if slices.Equal(args, []string{"-sr"}) || slices.Equal(args, []string{"-sn"}) ||
-		slices.Equal(args, []string{"-s", "info"}) ||
-		slices.Equal(args, []string{"-v", "-s", "Anchors"}) ||
-		slices.Equal(args, []string{"-i", "lo0", "-v", "-s", "Interfaces"}) ||
-		slices.Equal(args, []string{"-a", "*", "-sr"}) ||
-		slices.Equal(args, []string{"-a", "", "-sn"}) {
-		return true
+	if len(args) == 1 {
+		return args[0] == "-sr" || args[0] == "-sn"
 	}
-	if len(args) < 3 || args[0] != "-a" || !AnchorPath(args[1]) {
-		return false
-	}
-	rest := args[2:]
-	return slices.Equal(rest, []string{"-sr"}) || slices.Equal(rest, []string{"-sn"}) ||
-		slices.Equal(rest, []string{"-vvsr"}) || slices.Equal(rest, []string{"-s", "labels"}) ||
-		slices.Equal(rest, []string{"-v", "-s", "Anchors"}) || slices.Equal(rest, []string{"-s", "Tables"})
+	return len(args) == 3 && args[0] == "-a" && AnchorPath(args[1]) && (args[2] == "-sr" || args[2] == "-sn")
 }
 
-// LoadOptions binds policy scope and ownership to the installed configuration.
-type LoadOptions struct {
-	JobUID                      uint32
-	CoexistingAnchors           []string
-	ToleratedTranslationAnchors []string
-}
-
-// Load only initializes an empty leaf or replaces a protected, receipted prior
-// load. The caller stages reviewed bytes in a location immutable during the call.
-func (c *Client) Load(ctx context.Context, file string, options LoadOptions) (Output, error) {
-	if c == nil || c.run == nil || c.store == nil {
-		return Output{}, errors.New("uninitialized PF client")
-	}
-	if err := ValidateOwnedAnchor(c.anchor, options.CoexistingAnchors, options.ToleratedTranslationAnchors); err != nil {
-		return Output{}, err
-	}
-	if err := policyFile(file, options.JobUID); err != nil {
-		return Output{}, err
-	}
-	before, err := c.ownedState(ctx)
-	if err != nil {
-		return Output{}, err
-	}
-	if before != "" {
-		if err := validateLoadedPolicy(before, options.JobUID); err != nil {
-			return Output{}, err
-		}
-		prior, err := c.store.read(c.anchor)
-		if err != nil {
-			return Output{}, err
-		}
-		if prior != ownershipRecord(c.anchor, options.JobUID, before) {
-			return Output{}, errors.New("PF populated anchor does not match protected ownership receipt")
-		}
-	}
-	// Verify/create the protected receipt destination before changing PF.
-	if err := c.store.prepare(); err != nil {
-		return Output{}, err
-	}
-	out, err := c.execute(ctx, "-a", c.anchor, "-f", file)
-	if err != nil {
-		return out, err
-	}
-	after, err := c.ownedState(ctx)
-	if err != nil {
-		return out, err
-	}
-	if err := validateLoadedPolicy(after, options.JobUID); err != nil {
-		return out, err
-	}
-	if err := ValidateMandatoryDeny(after, options.JobUID); err != nil {
-		return out, err
-	}
-	if err := c.store.write(ownershipRecord(c.anchor, options.JobUID, after)); err != nil {
-		return out, err
-	}
-	return out, nil
-}
-
-func (c *Client) execute(ctx context.Context, args ...string) (Output, error) {
-	if c == nil || !AnchorPath(c.anchor) || c.run == nil {
-		return Output{}, errors.New("uninitialized PF client")
+func read(ctx context.Context, run func(context.Context, ...string) (Output, error), args ...string) (Output, error) {
+	if !readArgs(args) {
+		return Output{}, errors.New("PF read arguments are not allowlisted")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return Output{}, err
 	}
-	out, err := c.run(ctx, args...)
+	out, err := run(ctx, args...)
 	if ctx.Err() != nil {
 		return out, ctx.Err()
 	}
 	if len(out.Stdout) > 1<<20 || len(out.Stderr) > 8192 {
 		return out, errors.New("PF output limit exceeded")
 	}
-	// The pinned BSD show paths warn and return -1, but main ignores that
-	// return value and exits 0. Do not also accept exit 1 or approximate text.
-	// Apple XNU returns EINVAL for a missing ruleset; live macOS confirmation
-	// of this userland contract remains part of the pre-load capture review.
-	const altq = "No ALTQ support in kernel\nALTQ related functions disabled"
-	diagnostic := strings.TrimPrefix(out.Stderr, altq+"\n")
-	if err == nil && out.Stdout == "" && len(args) >= 3 && args[0] == "-a" && AnchorPath(args[1]) {
-		if len(args) == 3 && (args[2] == "-sr" || args[2] == "-sn") &&
-			diagnostic == "pfctl: DIOCGETRULES: Invalid argument\n" {
-			return out, ErrAnchorAbsent
-		}
-		if len(args) == 5 && args[2] == "-v" && args[3] == "-s" && args[4] == "Anchors" &&
-			diagnostic == "Anchor '"+args[1]+"' not found.\n" {
-			return out, ErrAnchorAbsent
-		}
-	}
-	text := strings.TrimSpace(diagnostic)
-	if text == altq {
-		text = ""
-	}
 	if err != nil {
 		return out, err
 	}
-	if text != "" {
+	const altq = "No ALTQ support in kernel\nALTQ related functions disabled"
+	if diagnostic := strings.TrimSpace(out.Stderr); diagnostic != "" && diagnostic != altq {
 		return out, errors.New("unrecognized PF diagnostic")
 	}
 	return out, nil
