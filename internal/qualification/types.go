@@ -154,13 +154,13 @@ func decode(b []byte, v any) error {
 	return nil
 }
 func fresh(c Challenge, now time.Time) error {
-	if c.Schema != 2 || len(c.ID) != 64 || c.Created.IsZero() || now.Before(c.Created) || !now.Before(c.Expires) || c.Expires.Sub(c.Created) != lifetime {
+	if c.Schema != 3 || len(c.ID) != 64 || c.Created.IsZero() || now.Before(c.Created) || !now.Before(c.Expires) || c.Expires.Sub(c.Created) != lifetime {
 		return errors.New("invalid or expired challenge; begin a fresh sitting")
 	}
 	return nil
 }
 func sameObservation(a, b maintenance.Observation) bool {
-	return a.JobUID == b.JobUID && a.Boot == b.Boot && a.InterfacesSHA256 == b.InterfacesSHA256 && a.BaselineSHA256 == b.BaselineSHA256 && maps.Equal(a.Profiles, b.Profiles) && b.IdentityValid && b.BaselineValid
+	return a.JobUID == b.JobUID && a.Boot == b.Boot && a.BaselineSHA256 == b.BaselineSHA256 && maps.Equal(a.Profiles, b.Profiles) && b.IdentityValid && b.BaselineValid
 }
 func rootOnly() error {
 	if runtime.GOOS != "darwin" || os.Getuid() != 0 || os.Geteuid() != 0 {

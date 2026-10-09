@@ -211,10 +211,12 @@ high-entropy bearer credentials belong in the caller's private credential storag
   Poll `GET /v1/admin/state` until `quiescent=true` before benchmarking; acceptance of pause is not quiescence.
   `DELETE /v1/admin/pause` clears only manual pause. An optional owner-controlled pause marker also blocks dispatch.
 
-The controller requires schema-2 root-owned health attestation bound to current interface inventory, job UID
-and qualified profile digests, not PF policy or rules. Health expires within 45 seconds. Missing, stale or
-changed host/tool qualification stops admission and cancels active work. Merely creating a profile does not
-qualify it. Installation and actual non-network boundary qualification remain separate provisioning work.
+The controller requires schema-3 root-owned health attestation bound to job UID and qualified profile
+digests, not interface inventory or PF policy/rules. VM bridge/address churn does not invalidate health
+or cancel work. Health expires within 45 seconds; missing, stale or changed non-network host/tool
+qualification stops admission and cancels active work. Schema-1/2 records require fresh qualification,
+not migration. Merely creating a profile does not qualify it. Installation and actual non-network
+boundary qualification remain separate provisioning work.
 
 Disk admission reserves 30 GiB while preserving 120 GiB free; below 100 GiB active work is cancelled.
 The total accounted mutable-data budget is 80 GiB. The retained evidence pool reserves 1 GiB for store log
@@ -360,7 +362,7 @@ job GUI identity with its full groups: directory access and reading an approved 
 be denied while owner read controls succeed. The installer never changes owner-home permissions.
 
 `macserve maintenance --config PATH` publishes short-lived root-owned health after checking protected
-qualification/evidence bindings, interface state, exact GUI baseline identities, profile
+qualification/evidence bindings, exact GUI baseline identities, profile
 digests, memory pressure and mutable storage including the entire job home. Failed observations publish
 invalid health; startup/shutdown invalidate it. Probe cadence is measured from probe start, not completion.
 `maintenance-observe` collects live inputs without approving the host or writing health. Both require

@@ -12,6 +12,34 @@ import (
 	"github.com/jerryfane/macserve/internal/deploy"
 )
 
+func TestCollectionRejectsPreviousReceiptSchemas(t *testing.T) {
+	now := time.Now().UTC()
+	c := Challenge{Created: now.Add(-time.Minute), Expires: now.Add(time.Hour), Environment: deploy.Environment{OwnerUID: uint32(os.Getuid())}}
+	for _, schema := range []int{1, 2, 3} {
+		dir, err := filepath.EvalSymlinks(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		v := Candidate{Schema: 3, ChallengeSHA256: strings.Repeat("a", 64), Collected: now, Artifacts: map[string]string{}}
+		r := Receipts{Schema: schema, ChallengeSHA256: v.ChallengeSHA256, UID: os.Getuid(), Started: c.Created, Finished: now}
+		raw, err := encode(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(dir, "input.json")
+		if err := os.WriteFile(path, raw, 0600); err != nil {
+			t.Fatal(err)
+		}
+		_, err = collectArtifacts(dir, "attempt-", c, v, []byte("{}"), []byte("{}"), Snapshot{At: now}, path)
+		if schema == 3 && err != nil {
+			t.Fatalf("current receipt refused: %v", err)
+		}
+		if schema != 3 && (err == nil || !strings.Contains(err.Error(), "invalid canary receipt document")) {
+			t.Fatalf("schema %d receipt did not fail schema validation: %v", schema, err)
+		}
+	}
+}
+
 func TestCollectionRetryPreservesFailedAttempt(t *testing.T) {
 	dir, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -43,7 +71,7 @@ func TestCollectionRetryPreservesFailedAttempt(t *testing.T) {
 	if !bytes.Equal(originals[first+"receipts-000.json"], bad) {
 		t.Fatal("failed receipt evidence not retained")
 	}
-	valid := Receipts{Schema: 2, ChallengeSHA256: failed.ChallengeSHA256, UID: os.Getuid(), Listen: c.UDP[0], Started: c.Created, Finished: now}
+	valid := Receipts{Schema: 3, ChallengeSHA256: failed.ChallengeSHA256, UID: os.Getuid(), Listen: c.UDP[0], Started: c.Created, Finished: now}
 	b, err := encode(valid)
 	if err != nil {
 		t.Fatal(err)
@@ -81,7 +109,7 @@ func TestCollectionRetryPreservesFailedAttempt(t *testing.T) {
 			t.Fatalf("retry hash does not bind current artifact: %s", name)
 		}
 	}
-	committed := []byte(`{"schema":2}`)
+	committed := []byte(`{"schema":3}`)
 	if err := os.WriteFile(filepath.Join(dir, "candidate.json"), committed, 0600); err != nil {
 		t.Fatal(err)
 	}

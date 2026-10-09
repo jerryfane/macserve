@@ -11,9 +11,9 @@ import (
 func approvedFixture() (time.Time, Qualification, BoundaryEvidence, Observation) {
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	d := digest([]byte("approved"))
-	o := Observation{JobUID: 550, Boot: d, InterfacesSHA256: d, BaselineSHA256: d, BoundaryEvidenceSHA256: d, Profiles: map[string]string{"build": d}, IdentityValid: true, BaselineValid: true, AccountedBytes: 1234}
-	q := Qualification{Schema: 2, ApprovedAt: now, JobUID: o.JobUID, Boot: d, InterfacesSHA256: d, BaselineSHA256: d, BoundaryEvidenceSHA256: d, Profiles: map[string]string{"build": d}}
-	e := BoundaryEvidence{Schema: 2, RecordedAt: now.Add(-time.Minute), JobUID: o.JobUID, Boot: d}
+	o := Observation{JobUID: 550, Boot: d, BaselineSHA256: d, BoundaryEvidenceSHA256: d, Profiles: map[string]string{"build": d}, IdentityValid: true, BaselineValid: true, AccountedBytes: 1234}
+	q := Qualification{Schema: 3, ApprovedAt: now, JobUID: o.JobUID, Boot: d, BaselineSHA256: d, BoundaryEvidenceSHA256: d, Profiles: map[string]string{"build": d}}
+	e := BoundaryEvidence{Schema: 3, RecordedAt: now.Add(-time.Minute), JobUID: o.JobUID, Boot: d}
 	before := CoexistenceState{RecordedAt: now.Add(-2 * time.Minute), MainRulesStatus: "available", MainRulesSHA256: d}
 	after := before
 	after.RecordedAt = e.RecordedAt
@@ -30,7 +30,6 @@ func approvedFixture() (time.Time, Qualification, BoundaryEvidence, Observation)
 func TestQualificationInvalidatesChangedLiveFacts(t *testing.T) {
 	mutations := map[string]func(*Observation){
 		"boot":             func(o *Observation) { o.Boot = digest([]byte("new boot")) },
-		"interfaces":       func(o *Observation) { o.InterfacesSHA256 = digest([]byte("new address")) },
 		"baseline":         func(o *Observation) { o.BaselineSHA256 = digest([]byte("new baseline")) },
 		"evidence":         func(o *Observation) { o.BoundaryEvidenceSHA256 = digest([]byte("new evidence")) },
 		"profile":          func(o *Observation) { o.Profiles["build"] = digest([]byte("new recipe")) },
@@ -42,7 +41,7 @@ func TestQualificationInvalidatesChangedLiveFacts(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			now, q, e, o := approvedFixture()
 			h, err := Evaluate(now, q, e, o)
-			if err != nil || !h.BoundaryValidated || h.AccountedBytes != 1234 {
+			if err != nil || h.Schema != 3 || !h.BoundaryValidated || h.AccountedBytes != 1234 {
 				t.Fatalf("valid approval: %+v %v", h, err)
 			}
 			mutate(&o)
@@ -157,22 +156,24 @@ func TestHealthDoesNotGateOnCurrentPFOrNetworkOutcome(t *testing.T) {
 		}
 		e.Probes[0].CanaryReceipts = 20
 		h, err := Evaluate(now, q, e, o)
-		if err != nil || !h.BoundaryValidated || h.Schema != 2 {
+		if err != nil || !h.BoundaryValidated || h.Schema != 3 {
 			t.Fatalf("informational facts gated health: %+v %v", h, err)
 		}
 	}
 }
 
 func TestOldQualificationSchemasRejected(t *testing.T) {
-	for _, qualification := range []bool{false, true} {
-		now, q, e, o := approvedFixture()
-		if qualification {
-			q.Schema = 1
-		} else {
-			e.Schema = 1
-		}
-		if h, err := Evaluate(now, q, e, o); err == nil || h.BoundaryValidated {
-			t.Fatal("old schema admitted")
+	for _, schema := range []int{1, 2} {
+		for _, qualification := range []bool{false, true} {
+			now, q, e, o := approvedFixture()
+			if qualification {
+				q.Schema = schema
+			} else {
+				e.Schema = schema
+			}
+			if h, err := Evaluate(now, q, e, o); err == nil || h.Schema != 3 || h.BoundaryValidated || h.AccountedBytes != -1 || !h.MemoryPressure {
+				t.Fatalf("old schema %d (qualification=%t) admitted: %+v %v", schema, qualification, h, err)
+			}
 		}
 	}
 }

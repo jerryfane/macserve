@@ -45,7 +45,7 @@ probe --session DIR --role job|owner --out NEW_FILE
 collect --session DIR --job JOB_REPORT --owner OWNER_REPORT
   --receipts OWNER_HOME_RECEIPT[,UDP_RECEIPT...]
   Root snapshots bounded reports, owner-home controls, optional receiver evidence
-  and current observations into schema2 candidate and qualification artifacts.
+  and current observations into schema3 candidate and qualification artifacts.
   Network results never gate; non-network failures cannot be manually attested.
   Incomplete attempts retain separate snapshots and can retry before expiry.
   Once candidate.json exists, begin a new session rather than recollecting.

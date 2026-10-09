@@ -198,7 +198,7 @@ func Begin(ctx context.Context, o BeginOptions) error {
 		return e
 	}
 	now := time.Now().UTC()
-	c := Challenge{Schema: 2, ID: id, Created: now, Expires: now.Add(lifetime), Environment: env, EnvironmentSHA256: digest(envRaw), TCP: targets, Allow: allow, UDP: udp, OwnerCanary: o.OwnerCanary, PrivatePaths: private, Socket: cc.Socket, Profiles: registry.List()}
+	c := Challenge{Schema: 3, ID: id, Created: now, Expires: now.Add(lifetime), Environment: env, EnvironmentSHA256: digest(envRaw), TCP: targets, Allow: allow, UDP: udp, OwnerCanary: o.OwnerCanary, PrivatePaths: private, Socket: cc.Socket, Profiles: registry.List()}
 	if o.Previous != "" {
 		previous, b, err := loadCollected(o.Previous)
 		if err != nil {
@@ -244,7 +244,7 @@ func loadCollected(dir string) (Candidate, []byte, error) {
 	if e = decode(b, &c); e != nil {
 		return c, nil, e
 	}
-	if c.Schema != 2 {
+	if c.Schema != 3 {
 		return c, nil, errors.New("unsupported candidate")
 	}
 	return c, b, nil
@@ -254,7 +254,7 @@ func checkReport(r Report, c Challenge, hash, role string) error {
 	if role == "owner" {
 		uid = c.Environment.OwnerUID
 	}
-	if r.Schema != 2 || r.ChallengeSHA256 != hash || r.Role != role || r.UID != int(uid) || len(r.Groups) == 0 || r.Started.Before(c.Created) || r.Finished.Before(r.Started) || r.Finished.After(c.Expires) || r.Finished.After(time.Now().UTC()) || len(r.Results) > 4096 {
+	if r.Schema != 3 || r.ChallengeSHA256 != hash || r.Role != role || r.UID != int(uid) || len(r.Groups) == 0 || r.Started.Before(c.Created) || r.Finished.Before(r.Started) || r.Finished.After(c.Expires) || r.Finished.After(time.Now().UTC()) || len(r.Results) > 4096 {
 		return errors.New("report identity, challenge or time mismatch")
 	}
 	if r.Refusal != "" {
@@ -335,7 +335,7 @@ func Collect(ctx context.Context, dir, jobPath, ownerPath, receiptPaths string) 
 		}{after, e.Error()}, 0600)
 		return errors.Join(e, saveErr)
 	}
-	candidate := Candidate{Schema: 2, ChallengeSHA256: digest(raw), Collected: time.Now().UTC(), Observation: after.Observation, Artifacts: map[string]string{"challenge.json": digest(raw), "before.json": digest(beforeBytes)}, Categories: map[string]Category{}}
+	candidate := Candidate{Schema: 3, ChallengeSHA256: digest(raw), Collected: time.Now().UTC(), Observation: after.Observation, Artifacts: map[string]string{"challenge.json": digest(raw), "before.json": digest(beforeBytes)}, Categories: map[string]Category{}}
 	receipts, e := collectArtifacts(dir, attempt, c, candidate, jb, ob, after, receiptPaths)
 	if e != nil {
 		return e
@@ -408,7 +408,7 @@ func collectArtifacts(dir, attempt string, c Challenge, candidate Candidate, job
 		if err = decode(b, &r); err != nil {
 			return nil, err
 		}
-		if r.Schema != 2 || r.ChallengeSHA256 != candidate.ChallengeSHA256 || r.UID != int(c.Environment.OwnerUID) || r.Started.Before(c.Created) || r.Finished.Before(r.Started) || r.Finished.After(c.Expires) || r.Finished.After(candidate.Collected) || (r.Listen != "" && !slices.Contains(c.UDP, r.Listen)) {
+		if r.Schema != 3 || r.ChallengeSHA256 != candidate.ChallengeSHA256 || r.UID != int(c.Environment.OwnerUID) || r.Started.Before(c.Created) || r.Finished.Before(r.Started) || r.Finished.After(c.Expires) || r.Finished.After(candidate.Collected) || (r.Listen != "" && !slices.Contains(c.UDP, r.Listen)) {
 			return nil, errors.New("invalid canary receipt document")
 		}
 		receipts = append(receipts, r)
@@ -529,7 +529,7 @@ func ownerCanaryControls(c Challenge, j, o Report, receipts []Receipts) (bool, i
 	return count >= 2, count
 }
 func writeCandidate(dir string, c Challenge, v Candidate) error {
-	boundary := maintenance.BoundaryEvidence{Schema: 2, RecordedAt: v.Collected, JobUID: c.Environment.JobUID, Boot: v.Observation.Boot, Coexistence: v.Coexistence}
+	boundary := maintenance.BoundaryEvidence{Schema: 3, RecordedAt: v.Collected, JobUID: c.Environment.JobUID, Boot: v.Observation.Boot, Coexistence: v.Coexistence}
 	for _, name := range categories {
 		cat := v.Categories[name]
 		framing := map[string]string{}
@@ -575,7 +575,7 @@ func writeCandidate(dir string, c Challenge, v Candidate) error {
 	return replaceJSON(filepath.Join(dir, "candidate.json"), v)
 }
 func qualification(o maintenance.Observation) maintenance.Qualification {
-	return maintenance.Qualification{Schema: 2, JobUID: o.JobUID, Boot: o.Boot, InterfacesSHA256: o.InterfacesSHA256, BaselineSHA256: o.BaselineSHA256, Profiles: maps.Clone(o.Profiles)}
+	return maintenance.Qualification{Schema: 3, JobUID: o.JobUID, Boot: o.Boot, BaselineSHA256: o.BaselineSHA256, Profiles: maps.Clone(o.Profiles)}
 }
 func homeTargets(c Challenge) []string {
 	out := []string{c.OwnerCanary, filepath.Dir(c.OwnerCanary), "/Users/" + c.Environment.OwnerUser}
