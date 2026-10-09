@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GOMAXPROCS: "2"
+      GOTOOLCHAIN: local
+      CGO_ENABLED: "0"
+      GOOS: darwin
+      GOARCH: arm64
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build Darwin arm64 release
+        run: |
+          mkdir -p dist
+          nice -n 10 go build -p 2 -trimpath -o dist/macserve-darwin-arm64 ./cmd/macserve
+      - name: Hash release binary
+        working-directory: dist
+        run: sha256sum macserve-darwin-arm64 > SHA256SUMS
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            dist/macserve-darwin-arm64 dist/SHA256SUMS \
+            --verify-tag --title "$RELEASE_TAG" \
+            --notes "Darwin arm64 macserve; CGO disabled, trimpath build. Verify SHA256SUMS against the reviewed release before installation."

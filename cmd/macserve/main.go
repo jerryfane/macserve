@@ -50,6 +50,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runMaintenance(args[1:], stdout, stderr, false)
 	case "maintenance-observe":
 		return runMaintenance(args[1:], stdout, stderr, true)
+	case "deploy-install":
+		return runDeployInstall(args[1:], stdout, stderr)
+	case "qualify":
+		return runQualify(args[1:], stdout, stderr)
 	case "wait":
 		return runWait(args[1:], stdout, stderr)
 	default:
@@ -69,6 +73,8 @@ Commands:
   wait        Request exact-head GitHub evidence and verify pinned receipts
   maintenance Observe qualified host boundaries and publish fail-closed health
   maintenance-observe Collect live qualification inputs without approving them
+  deploy-install Plan or install reviewed disabled deployment assets
+  qualify     Collect, inspect and explicitly approve boundary evidence
 
 Use macserve <command> --help for command help.
 `)

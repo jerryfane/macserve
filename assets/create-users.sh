@@ -7,8 +7,16 @@ fail() { printf 'REFUSED: %s\n' "$*" >&2; exit 1; }
 usage() {
     printf '%s\n' 'Usage: /bin/bash assets/create-users.sh --controller-user NAME --controller-uid UID --controller-gid GID --job-user NAME --job-uid UID --job-gid GID --owner-user NAME --owner-uid UID [--apply]'
 }
+# Pure membership check, also usable by callers that already resolved group IDs.
+validate_account_groups() {
+    local name=$1 other=$2 actual=$3 gid
+    for gid in $actual; do
+        case "$gid" in 0|20|80|"$other") fail "privileged/shared supplementary group for $name; keep services disabled and reconcile manually" ;; esac
+    done
+}
+main() {
 apply=false
-controller_user= controller_uid= controller_gid= job_user= job_uid= job_gid= owner_user= owner_uid=
+controller_user='' controller_uid='' controller_gid='' job_user='' job_uid='' job_gid='' owner_user='' owner_uid=''
 seen=' '
 while [ "$#" -gt 0 ]; do
     flag=$1; shift
@@ -37,8 +45,12 @@ for number in "$controller_uid" "$controller_gid" "$job_uid" "$job_gid" "$owner_
     [[ "$number" =~ ^[1-9][0-9]{2,8}$ ]] || fail 'IDs must be canonical decimal integers >=501 and <=999999999'
     [ "$number" -ge 501 ] || fail 'IDs below 501 are reserved'
 done
-[ "$controller_user" != "$job_user" ] && [ "$controller_user" != "$owner_user" ] && [ "$job_user" != "$owner_user" ] || fail 'account names must differ'
-[ "$controller_uid" != "$job_uid" ] && [ "$controller_uid" != "$owner_uid" ] && [ "$job_uid" != "$owner_uid" ] || fail 'account UIDs must differ'
+if [ "$controller_user" = "$job_user" ] || [ "$controller_user" = "$owner_user" ] || [ "$job_user" = "$owner_user" ]; then
+    fail 'account names must differ'
+fi
+if [ "$controller_uid" = "$job_uid" ] || [ "$controller_uid" = "$owner_uid" ] || [ "$job_uid" = "$owner_uid" ]; then
+    fail 'account UIDs must differ'
+fi
 [ "$controller_gid" != "$job_gid" ] || fail 'dedicated primary GIDs must differ'
 prefix=/Library/macserve
 home=/Users/$job_user
@@ -60,8 +72,12 @@ check_records() {
     local records=$1 name id extra
     while read -r name id extra; do
         [ -n "$name" ] || continue
-        [ -z "$extra" ] && [[ "$id" =~ ^-?[0-9]+$ ]] || fail 'ambiguous directory record; review manually'
-        [ "$name" != "$controller_user" ] && [ "$name" != "$job_user" ] || fail "account/group name collision: $name"
+        if [ -n "$extra" ] || ! [[ "$id" =~ ^-?[0-9]+$ ]]; then
+            fail 'ambiguous directory record; review manually'
+        fi
+        if [ "$name" = "$controller_user" ] || [ "$name" = "$job_user" ]; then
+            fail "account/group name collision: $name"
+        fi
         case "$2:$id" in "user:$controller_uid"|"user:$job_uid"|"group:$controller_gid"|"group:$job_gid") fail "numeric $2 collision: $id" ;; esac
     done <<< "$records"
 }
@@ -72,7 +88,9 @@ for node in /Search .; do
     memberships=$(/usr/bin/dscl "$node" -list /Groups GroupMembership) || fail 'cannot enumerate supplementary group membership'
     while read -r group members; do
         for member in $members; do
-            [ "$member" != "$controller_user" ] && [ "$member" != "$job_user" ] || fail "preexisting supplementary membership in $group"
+            if [ "$member" = "$controller_user" ] || [ "$member" = "$job_user" ]; then
+                fail "preexisting supplementary membership in $group"
+            fi
         done
     done <<< "$memberships"
 done
@@ -86,7 +104,9 @@ done
 [ "$(/usr/bin/id -u "$owner_user")" = "$owner_uid" ] || fail 'owner identity mismatch'
 owner_groups=$(/usr/bin/id -G "$owner_user") || fail 'cannot resolve owner groups'
 for gid in $owner_groups; do
-    [ "$gid" != "$controller_gid" ] && [ "$gid" != "$job_gid" ] || fail 'primary group shared with owner'
+    if [ "$gid" = "$controller_gid" ] || [ "$gid" = "$job_gid" ]; then
+        fail 'primary group shared with owner'
+    fi
 done
 # Existing records must not already reference the proposed unallocated primary groups.
 primary_groups=$(/usr/bin/dscl /Search -list /Users PrimaryGroupID) || fail 'cannot enumerate primary groups'
@@ -95,11 +115,17 @@ primary_groups="$primary_groups
 $local_primary_groups"
 while read -r name gid extra; do
     [ -n "$name" ] || continue
-    [ -z "$extra" ] && [[ "$gid" =~ ^-?[0-9]+$ ]] || fail 'ambiguous primary group record'
-    [ "$gid" != "$controller_gid" ] && [ "$gid" != "$job_gid" ] || fail 'proposed primary group referenced by existing user'
+    if [ -n "$extra" ] || ! [[ "$gid" =~ ^-?[0-9]+$ ]]; then
+        fail 'ambiguous primary group record'
+    fi
+    if [ "$gid" = "$controller_gid" ] || [ "$gid" = "$job_gid" ]; then
+        fail 'proposed primary group referenced by existing user'
+    fi
 done <<< "$primary_groups"
 for path in /Library /Users; do
-    [ -d "$path" ] && [ ! -L "$path" ] || fail "unsafe parent: $path"
+    if [ ! -d "$path" ] || [ -L "$path" ]; then
+        fail "unsafe parent: $path"
+    fi
     [ "$(/usr/bin/stat -f %u "$path")" = 0 ] || fail "parent not root-owned: $path"
     mode=$(/usr/bin/stat -f %Lp "$path")
     (( (8#$mode & 0022) == 0 )) || fail "parent writable by non-root: $path"
@@ -112,11 +138,18 @@ for path in /Library /Users; do
     done <<< "$acl"
 done
 for path in "$prefix" "$home"; do
-    [ ! -e "$path" ] && [ ! -L "$path" ] || fail "existing path: $path"
+    if [ -e "$path" ] || [ -L "$path" ]; then
+        fail "existing path: $path"
+    fi
 done
 # There is no rollback: never delete accounts or paths on a partial failure.
 # Run only in an exclusive approved administration window; directory checks are not atomic.
-trap 'status=$?; if [ "$status" -ne 0 ]; then printf "%s\n" "PARTIAL FAILURE: no rollback attempted. Keep services disabled. Inspect only the named new accounts/groups and /Library/macserve plus the proposed job home; reconcile manually before retrying. Existing paths/accounts will cause retry refusal." >&2; fi' EXIT
+report_partial_failure() {
+    if [ "$1" -ne 0 ]; then
+        printf '%s\n' 'PARTIAL FAILURE: no rollback attempted. Keep services disabled. Inspect only the named new accounts/groups and /Library/macserve plus the proposed job home; reconcile manually before retrying. Existing paths/accounts will cause retry refusal.' >&2
+    fi
+}
+trap 'report_partial_failure "$?"' EXIT
 create_identity() {
     local name=$1 uid=$2 gid=$3 shell=$4 userhome=$5
     /usr/bin/dscl . -create "/Groups/$name"
@@ -137,9 +170,7 @@ for name in "$controller_user" "$job_user"; do
     actual=$(/usr/bin/id -G "$name")
     if [ "$name" = "$controller_user" ]; then expected=$controller_gid; other=$job_gid; else expected=$job_gid; other=$controller_gid; fi
     [ "$(/usr/bin/id -g "$name")" = "$expected" ] || fail "incorrect primary group for $name"
-    for gid in $actual; do
-        case "$gid" in 0|80|"$other") fail "privileged/shared supplementary group for $name; keep services disabled and reconcile manually" ;; esac
-    done
+    validate_account_groups "$name" "$other" "$actual"
 done
 /usr/bin/install -d -o root -g wheel -m 0755 "$prefix" "$prefix/bin" "$prefix/health"
 /usr/bin/install -d -o root -g wheel -m 0755 "$prefix/config"
@@ -148,3 +179,7 @@ done
 /usr/bin/install -d -o root -g wheel -m 0700 "$prefix/var/broker" "$prefix/var/broker/log" "$prefix/var/exports"
 /usr/bin/install -d -o "$job_uid" -g "$job_gid" -m 0700 "$home"
 printf '%s\n' 'Created accounts and empty protected directories only. Both passwords remain disabled. Install reviewed inputs separately and qualify before enabling anything.'
+}
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main "$@"
+fi
