@@ -6,10 +6,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/jerryfane/macserve/internal/hostguard"
 	"golang.org/x/sys/unix"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
@@ -187,24 +189,44 @@ func availableBytes(path string) (int64, error) {
 // InterfaceDigest invalidates qualification after address/interface changes. It
 // reads public interface metadata only, never traffic or another user's files.
 func InterfaceDigest() (string, error) {
+	digest, _, err := observeInterfaces(false)
+	return digest, err
+}
+
+// InterfaceSnapshot returns the digest and host addresses from the same public
+// interface inventory, including loopback, aliases, and VM bridge gateways.
+func InterfaceSnapshot() (string, []netip.Addr, error) {
+	return observeInterfaces(true)
+}
+
+func observeInterfaces(includeAddresses bool) (string, []netip.Addr, error) {
 	interfaces, err := net.Interfaces()
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	var inventory []string
+	var hosts []netip.Addr
 	for _, iface := range interfaces {
 		addresses, err := iface.Addrs()
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		inventory = append(inventory, iface.Name+" flags="+iface.Flags.String())
 		for _, address := range addresses {
-			inventory = append(inventory, iface.Name+" "+address.String())
+			text := address.String()
+			inventory = append(inventory, iface.Name+" "+text)
+			if includeAddresses {
+				prefix, err := netip.ParsePrefix(text)
+				if err != nil {
+					return "", nil, fmt.Errorf("unrecognized interface address: %w", err)
+				}
+				hosts = append(hosts, prefix.Addr().Unmap().WithZone(""))
+			}
 		}
 	}
 	sort.Strings(inventory)
 	sum := sha256.Sum256([]byte(strings.Join(inventory, "\n")))
-	return hex.EncodeToString(sum[:]), nil
+	return hex.EncodeToString(sum[:]), hosts, nil
 }
 func ownerPause(path string, owner uint32) (bool, error) {
 	present := false

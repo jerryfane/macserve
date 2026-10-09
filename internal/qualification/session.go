@@ -17,10 +17,14 @@ import (
 	"github.com/jerryfane/macserve/internal/controller"
 	"github.com/jerryfane/macserve/internal/deploy"
 	"github.com/jerryfane/macserve/internal/maintenance"
+	"github.com/jerryfane/macserve/internal/pfctl"
 	"github.com/jerryfane/macserve/internal/profiles"
 )
 
-type BeginOptions struct{ Environment, Session, Allow, UDP, OwnerCanary, PrivatePaths, Previous string }
+type BeginOptions struct {
+	Environment, Session, Allow, UDP, OwnerCanary, PrivatePaths, Previous string
+	LoadPolicy                                                            bool
+}
 
 func Plan(path string) (any, error) {
 	e, err := deploy.LoadEnvironment(path)
@@ -73,29 +77,26 @@ func snapshot(ctx context.Context) (Snapshot, error) {
 	if e != nil {
 		return s, e
 	}
-	text, diag, e := command(ctx, "", "/sbin/pfctl", "-a", "org.macserve", "-s", "labels")
-	s.PFOutput = text
-	s.PFStderr = diag
+	client, e := pfctl.New(s.Observation.PFAnchor)
 	if e != nil {
 		return s, e
 	}
-	if !pfDiagnostic(diag) {
-		return s, errors.New("unrecognized PF counter diagnostic")
-	}
-	s.Counters, e = parseCounters(text)
+	result, e := client.Read(ctx, "-a", s.Observation.PFAnchor, "-s", "labels")
+	s.PFOutput, s.PFStderr = result.Stdout, result.Stderr
 	if e != nil {
 		return s, e
 	}
-	text, diag, e = command(ctx, "", "/sbin/pfctl", "-a", "org.macserve", "-vvsr")
-	s.PFRules = text
-	s.PFStderr += "\n" + diag
+	s.Counters, e = parseCounters(result.Stdout)
 	if e != nil {
 		return s, e
 	}
-	if !pfDiagnostic(diag) {
-		return s, errors.New("unrecognized PF rule-counter diagnostic")
+	result, e = client.Read(ctx, "-a", s.Observation.PFAnchor, "-vvsr")
+	s.PFRules = result.Stdout
+	s.PFStderr += "\n" + result.Stderr
+	if e != nil {
+		return s, e
 	}
-	s.ProtocolCounters, e = protocolCounters(text)
+	s.ProtocolCounters, e = protocolCounters(result.Stdout)
 	return s, e
 }
 func sessionLock(dir string) (func(), error) {
@@ -143,6 +144,9 @@ func Begin(ctx context.Context, o BeginOptions) error {
 	if e := rootOnly(); e != nil {
 		return e
 	}
+	if !o.LoadPolicy {
+		return errors.New("begin requires explicit --load-policy; PF unchanged")
+	}
 	if o.Environment != "/Library/macserve/config/deploy.env" {
 		return errors.New("reuse the installed reviewed /Library/macserve/config/deploy.env")
 	}
@@ -167,6 +171,11 @@ func Begin(ctx context.Context, o BeginOptions) error {
 	if e = protectedDirectory(parent); e != nil {
 		return e
 	}
+	unlock, e := sessionLock(parent)
+	if e != nil {
+		return e
+	}
+	defer unlock()
 	allow, e := endpoints(o.Allow)
 	if e != nil {
 		return fmt.Errorf("allow: %w", e)
@@ -251,6 +260,11 @@ func Begin(ctx context.Context, o BeginOptions) error {
 	if e = os.Mkdir(o.Session, 0755); e != nil {
 		return e
 	}
+	step, stepRaw, e := loadFirewallPolicy(ctx, o.Session, mc, cc.PolicySHA256)
+	if e != nil {
+		return e
+	}
+	c.FirewallStepSHA256 = digest(stepRaw)
 	s, e := snapshot(ctx)
 	if e != nil {
 		_ = saveJSON(filepath.Join(o.Session, "begin-refusal.json"), struct {
@@ -259,7 +273,12 @@ func Begin(ctx context.Context, o BeginOptions) error {
 		}{s, e.Error()}, 0600)
 		return e
 	}
+	if _, e = finalizeCoexistence(step, s.Observation); e != nil {
+		return e
+	}
 	c.Observation = s.Observation
+	// Peer labels/PIDs and detailed step measurements remain root-private.
+	c.Observation.Coexistence = nil
 	if c.Observation.JobUID != env.JobUID {
 		return errors.New("installed environment and observation job UID differ")
 	}
@@ -334,6 +353,10 @@ func Collect(ctx context.Context, dir, jobPath, ownerPath, receiptPaths string) 
 	if e != nil {
 		return e
 	}
+	step, e := loadFirewallStep(dir, c)
+	if e != nil {
+		return e
+	}
 	var job, owner Report
 	jb, e := readArtifact(jobPath, int(c.Environment.JobUID))
 	if e != nil {
@@ -375,6 +398,18 @@ func Collect(ctx context.Context, dir, jobPath, ownerPath, receiptPaths string) 
 	receipts, e := collectArtifacts(dir, attempt, c, candidate, jb, ob, after, receiptPaths)
 	if e != nil {
 		return e
+	}
+	coexistence, e := finalizeCoexistence(step, after.Observation)
+	if e != nil {
+		return e
+	}
+	candidate.Coexistence = &coexistence
+	for _, name := range []string{firewallPolicyFile, "firewall-before.json", "firewall-after.json", firewallStepFile} {
+		b, err := protectedRead(filepath.Join(dir, name))
+		if err != nil {
+			return err
+		}
+		candidate.Artifacts[name] = digest(b)
 	}
 	candidate.Categories = aggregate(c, job, owner, receipts, before, after)
 	evidence := make([]string, 0, len(candidate.Artifacts))
@@ -627,7 +662,7 @@ func ownerCanaryControls(c Challenge, j, o Report, receipts []Receipts) (bool, i
 	return true, count
 }
 func writeCandidate(dir string, c Challenge, v Candidate) error {
-	boundary := maintenance.BoundaryEvidence{Schema: 1, RecordedAt: v.Collected, JobUID: c.Environment.JobUID, Boot: v.Observation.Boot}
+	boundary := maintenance.BoundaryEvidence{Schema: 1, RecordedAt: v.Collected, JobUID: c.Environment.JobUID, Boot: v.Observation.Boot, Coexistence: v.Coexistence}
 	for _, name := range categories {
 		cat := v.Categories[name]
 		framing := map[string]string{}

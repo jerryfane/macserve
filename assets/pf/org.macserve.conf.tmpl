@@ -1,6 +1,7 @@
 # TEMPLATE ONLY: render numeric JobUID, reviewed ProtectedPorts, HostAddresses.
-# Owner integrates org.macserve BEFORE any earlier quick pass; no set skip lo0.
-# This file never enables/reloads PF or flushes states. Existing job states require
+# qualify begin --load-policy loads maintenance.json's pf_anchor (com.apple/macserve).
+# Its call path must precede any quick-pass bypass; no set skip lo0.
+# Loading this child never enables/reloads main PF or flushes states. Existing job states require
 # separately approved handling and actual effective-UID boundary qualification.
 # HostAddresses: ALL current host LAN/tailnet/alias IPv4/IPv6 literals (no DNS names).
 # Any endpoint covered by an early deny cannot be excepted later.

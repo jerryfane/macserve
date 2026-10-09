@@ -28,11 +28,12 @@ type Qualification struct {
 // BoundaryEvidence is a protected operator attestation to actual probe artifacts,
 // not independently verified proof that network tests occurred.
 type BoundaryEvidence struct {
-	Schema     int       `json:"schema"`
-	RecordedAt time.Time `json:"recorded_at"`
-	JobUID     uint32    `json:"job_uid"`
-	Boot       string    `json:"boot"`
-	Probes     []Probe   `json:"probes"`
+	Schema      int                  `json:"schema"`
+	RecordedAt  time.Time            `json:"recorded_at"`
+	JobUID      uint32               `json:"job_uid"`
+	Boot        string               `json:"boot"`
+	Probes      []Probe              `json:"probes"`
+	Coexistence *CoexistenceEvidence `json:"coexistence"`
 }
 type Probe struct {
 	Category                   string `json:"category"`
@@ -51,6 +52,7 @@ type Observation struct {
 	Boot                   string            `json:"boot"`
 	InterfacesSHA256       string            `json:"interfaces_sha256"`
 	PolicySHA256           string            `json:"policy_sha256"`
+	PFAnchor               string            `json:"pf_anchor"`
 	RootRulesSHA256        string            `json:"root_rules_sha256"`
 	AnchorRulesSHA256      string            `json:"anchor_rules_sha256"`
 	BaselineSHA256         string            `json:"baseline_sha256"`
@@ -62,6 +64,7 @@ type Observation struct {
 	BaselineValid          bool              `json:"baseline_valid"`
 	AccountedBytes         int64             `json:"accounted_bytes"`
 	MemoryPressure         bool              `json:"memory_pressure"`
+	Coexistence            *CoexistenceState `json:"coexistence,omitempty"`
 }
 
 func digest(data []byte) string { s := sha256.Sum256(data); return hex.EncodeToString(s[:]) }
@@ -84,6 +87,12 @@ func Evaluate(now time.Time, q Qualification, e BoundaryEvidence, o Observation)
 		if !validDigest(pair[0]) || pair[0] != pair[1] {
 			return fail()
 		}
+	}
+	if e.Coexistence == nil || o.Coexistence == nil || o.Coexistence.RecordedAt.After(now) {
+		return fail()
+	}
+	if err := ValidateCoexistenceEvidence(*e.Coexistence, *o.Coexistence, o.PFAnchor, o.PolicySHA256); err != nil {
+		return fail()
 	}
 	if !maps.Equal(q.Profiles, o.Profiles) {
 		return fail()

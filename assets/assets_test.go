@@ -375,3 +375,36 @@ func TestInstallerEarlyRefusals(t *testing.T) {
 		})
 	}
 }
+
+func TestQualificationWrapperRejectsRawCommandsBeforeBinary(t *testing.T) {
+	script, err := filepath.Abs("qualify.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "macserve-fixture")
+	marker := filepath.Join(dir, "executed")
+	if err := os.WriteFile(binary, []byte("#!/bin/bash\nprintf executed > \"$MARKER\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"pfctl", "-f", "/policy"},
+		{"/sbin/pfctl", "-a", "org.example/peer", "-f", "/policy"},
+		{"-a", "org.example/service", "-f", "/policy"},
+		{"sh", "-c", "pfctl -F all"},
+		{"exec", "/sbin/pfctl", "-d"},
+		{"begin;pfctl", "-d"},
+		{"unknown"},
+	} {
+		cmd := exec.Command("/bin/bash", append([]string{script, "--binary", binary}, args...)...)
+		cmd.Dir = dir
+		cmd.Env = []string{"PATH=/nonexistent", "HOME=" + dir, "MARKER=" + marker}
+		out, err := cmd.CombinedOutput()
+		if err == nil || !strings.Contains(string(out), "raw commands are refused") {
+			t.Fatalf("raw qualification command was not refused: args=%q err=%v output=%q", args, err, out)
+		}
+		if _, err := os.Stat(marker); !os.IsNotExist(err) {
+			t.Fatalf("raw command executed supplied binary: %v", err)
+		}
+	}
+}

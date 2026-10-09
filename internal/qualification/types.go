@@ -1,5 +1,6 @@
-// Package qualification collects bounded operator-reviewed boundary evidence. It
-// never changes PF, launchd, account state, GUI baselines, or health records.
+// Package qualification collects bounded operator-reviewed boundary evidence.
+// Only explicit begin --load-policy writes PF, confined to the owned anchor.
+// It never changes launchd, accounts, GUI baselines, owner state, or health.
 package qualification
 
 import (
@@ -34,22 +35,23 @@ const maintenancePath = "/Library/macserve/config/maintenance.json"
 var categories = []string{"tcp_denial", "udp_denial", "approved_allow", "delegated_boundary", "unix_socket_boundary", "owner_unaffected", "owner_home_denial", "fast_switch", "reboot", "tool_profiles"}
 
 type Challenge struct {
-	Schema            int                     `json:"schema"`
-	ID                string                  `json:"id"`
-	Created           time.Time               `json:"created"`
-	Expires           time.Time               `json:"expires"`
-	Environment       deploy.Environment      `json:"environment"`
-	EnvironmentSHA256 string                  `json:"environment_sha256"`
-	Observation       maintenance.Observation `json:"observation"`
-	TCP               []string                `json:"tcp"`
-	Allow             []string                `json:"allow"`
-	UDP               []string                `json:"udp"`
-	OwnerCanary       string                  `json:"owner_canary"`
-	PrivatePaths      []string                `json:"private_paths"`
-	Socket            string                  `json:"socket"`
-	Profiles          []model.Profile         `json:"profiles"`
-	Previous          string                  `json:"previous,omitempty"`
-	PreviousSHA256    string                  `json:"previous_sha256,omitempty"`
+	Schema             int                     `json:"schema"`
+	ID                 string                  `json:"id"`
+	Created            time.Time               `json:"created"`
+	Expires            time.Time               `json:"expires"`
+	Environment        deploy.Environment      `json:"environment"`
+	EnvironmentSHA256  string                  `json:"environment_sha256"`
+	Observation        maintenance.Observation `json:"observation"`
+	FirewallStepSHA256 string                  `json:"firewall_step_sha256"`
+	TCP                []string                `json:"tcp"`
+	Allow              []string                `json:"allow"`
+	UDP                []string                `json:"udp"`
+	OwnerCanary        string                  `json:"owner_canary"`
+	PrivatePaths       []string                `json:"private_paths"`
+	Socket             string                  `json:"socket"`
+	Profiles           []model.Profile         `json:"profiles"`
+	Previous           string                  `json:"previous,omitempty"`
+	PreviousSHA256     string                  `json:"previous_sha256,omitempty"`
 }
 type Result struct {
 	Category string `json:"category"`
@@ -115,12 +117,13 @@ type Category struct {
 	Probe    maintenance.Probe `json:"probe"`
 }
 type Candidate struct {
-	Schema          int                     `json:"schema"`
-	ChallengeSHA256 string                  `json:"challenge_sha256"`
-	Collected       time.Time               `json:"collected"`
-	Observation     maintenance.Observation `json:"observation"`
-	Artifacts       map[string]string       `json:"artifacts"`
-	Categories      map[string]Category     `json:"categories"`
+	Schema          int                              `json:"schema"`
+	ChallengeSHA256 string                           `json:"challenge_sha256"`
+	Collected       time.Time                        `json:"collected"`
+	Observation     maintenance.Observation          `json:"observation"`
+	Artifacts       map[string]string                `json:"artifacts"`
+	Categories      map[string]Category              `json:"categories"`
+	Coexistence     *maintenance.CoexistenceEvidence `json:"coexistence"`
 }
 type Attestation struct {
 	Schema          int               `json:"schema"`
@@ -160,7 +163,7 @@ func fresh(c Challenge, now time.Time) error {
 	return nil
 }
 func sameObservation(a, b maintenance.Observation) bool {
-	return a.JobUID == b.JobUID && a.Boot == b.Boot && a.InterfacesSHA256 == b.InterfacesSHA256 && a.PolicySHA256 == b.PolicySHA256 && a.RootRulesSHA256 == b.RootRulesSHA256 && a.AnchorRulesSHA256 == b.AnchorRulesSHA256 && a.BaselineSHA256 == b.BaselineSHA256 && maps.Equal(a.Profiles, b.Profiles) && b.PFEnabled && b.LoopbackFiltered && b.IdentityValid && b.BaselineValid
+	return a.JobUID == b.JobUID && a.PFAnchor == b.PFAnchor && a.Boot == b.Boot && a.InterfacesSHA256 == b.InterfacesSHA256 && a.PolicySHA256 == b.PolicySHA256 && a.RootRulesSHA256 == b.RootRulesSHA256 && a.AnchorRulesSHA256 == b.AnchorRulesSHA256 && a.BaselineSHA256 == b.BaselineSHA256 && maps.Equal(a.Profiles, b.Profiles) && b.PFEnabled && b.LoopbackFiltered && b.IdentityValid && b.BaselineValid
 }
 func rootOnly() error {
 	if runtime.GOOS != "darwin" || os.Getuid() != 0 || os.Geteuid() != 0 {

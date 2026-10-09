@@ -63,7 +63,7 @@ func readyAutomatic(v Candidate) error {
 	return nil
 }
 func compatibleSitting(a, b Challenge) bool {
-	return a.EnvironmentSHA256 == b.EnvironmentSHA256 && a.Observation.JobUID == b.Observation.JobUID && a.Observation.PolicySHA256 == b.Observation.PolicySHA256 && a.Observation.RootRulesSHA256 == b.Observation.RootRulesSHA256 && a.Observation.AnchorRulesSHA256 == b.Observation.AnchorRulesSHA256 && a.Observation.InterfacesSHA256 == b.Observation.InterfacesSHA256 && maps.Equal(a.Observation.Profiles, b.Observation.Profiles) && slices.Equal(a.TCP, b.TCP) && slices.Equal(a.UDP, b.UDP) && slices.Equal(a.Allow, b.Allow) && a.OwnerCanary == b.OwnerCanary && slices.Equal(a.PrivatePaths, b.PrivatePaths)
+	return a.EnvironmentSHA256 == b.EnvironmentSHA256 && a.Observation.JobUID == b.Observation.JobUID && a.Observation.PFAnchor == b.Observation.PFAnchor && a.Observation.PolicySHA256 == b.Observation.PolicySHA256 && a.Observation.RootRulesSHA256 == b.Observation.RootRulesSHA256 && a.Observation.AnchorRulesSHA256 == b.Observation.AnchorRulesSHA256 && a.Observation.InterfacesSHA256 == b.Observation.InterfacesSHA256 && maps.Equal(a.Observation.Profiles, b.Observation.Profiles) && slices.Equal(a.TCP, b.TCP) && slices.Equal(a.UDP, b.UDP) && slices.Equal(a.Allow, b.Allow) && a.OwnerCanary == b.OwnerCanary && slices.Equal(a.PrivatePaths, b.PrivatePaths)
 }
 
 // Lifecycle evidence cannot be supplied by an arbitrary old artifact alone. A
@@ -212,6 +212,10 @@ func Approve(ctx context.Context, dir string) error {
 	if e != nil {
 		return e
 	}
+	step, e := loadFirewallStep(dir, c)
+	if e != nil {
+		return e
+	}
 	v, _, e := loadCollected(dir)
 	if e != nil {
 		return e
@@ -273,6 +277,33 @@ func Approve(ctx context.Context, dir string) error {
 	if q.BoundaryEvidenceSHA256 != digest(boundaryRaw) {
 		return errors.New("boundary digest mismatch")
 	}
+	coexistence, e := finalizeCoexistence(step, current.Observation)
+	if e != nil {
+		return e
+	}
+	collected, e := finalizeCoexistence(step, v.Observation)
+	if e != nil {
+		return e
+	}
+	expected, e := encode(collected)
+	if e != nil {
+		return e
+	}
+	for _, recorded := range []*maintenance.CoexistenceEvidence{v.Coexistence, boundary.Coexistence} {
+		actual, err := encode(recorded)
+		if err != nil || digest(actual) != digest(expected) {
+			return errors.New("collected coexistence evidence differs from preserved firewall step")
+		}
+	}
+	// Preserve candidate/predecessor bytes. The approved boundary adds the fresh
+	// post-qualification measurement and gets its own exact-byte digest.
+	boundary.Coexistence = &coexistence
+	boundary.RecordedAt = coexistence.AfterQualification.RecordedAt
+	boundaryRaw, e = encode(boundary)
+	if e != nil {
+		return e
+	}
+	q.BoundaryEvidenceSHA256 = digest(boundaryRaw)
 	q.ApprovedAt = time.Now().UTC()
 	current.Observation.BoundaryEvidenceSHA256 = digest(boundaryRaw)
 	if e = fresh(c, q.ApprovedAt); e != nil {
@@ -293,6 +324,9 @@ func Approve(ctx context.Context, dir string) error {
 		Snapshot      Snapshot                  `json:"snapshot"`
 	}{q, current}, 0600); e != nil {
 		return fmt.Errorf("approval already attempted or intent could not be preserved: %w", e)
+	}
+	if e = saveNew(filepath.Join(dir, "approved-boundary-evidence.json"), boundaryRaw, 0600); e != nil {
+		return e
 	}
 	// Write evidence first, then the matching qualification commit. A crash or
 	// error between writes leaves any old approval mismatched and failclosed.

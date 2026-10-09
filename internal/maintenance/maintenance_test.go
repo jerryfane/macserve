@@ -14,6 +14,16 @@ func approvedFixture() (time.Time, Qualification, BoundaryEvidence, Observation)
 	o := Observation{JobUID: 550, Boot: d, InterfacesSHA256: d, PolicySHA256: d, RootRulesSHA256: d, AnchorRulesSHA256: d, BaselineSHA256: d, BoundaryEvidenceSHA256: d, Profiles: map[string]string{"build": d}, PFEnabled: true, LoopbackFiltered: true, IdentityValid: true, BaselineValid: true, AccountedBytes: 1234}
 	q := Qualification{Schema: 1, ApprovedAt: now, JobUID: o.JobUID, Boot: d, InterfacesSHA256: d, PolicySHA256: d, RootRulesSHA256: d, AnchorRulesSHA256: d, BaselineSHA256: d, BoundaryEvidenceSHA256: d, Profiles: map[string]string{"build": d}}
 	e := BoundaryEvidence{Schema: 1, RecordedAt: now.Add(-time.Minute), JobUID: o.JobUID, Boot: d}
+	o.PFAnchor = DefaultPFAnchor
+	before := CoexistenceState{RecordedAt: now.Add(-2 * time.Minute), MainRulesSHA256: d}
+	after := before
+	after.RecordedAt = now.Add(-90 * time.Second)
+	qualified := after
+	qualified.RecordedAt = e.RecordedAt
+	current := qualified
+	current.RecordedAt = now
+	o.Coexistence = &current
+	e.Coexistence = &CoexistenceEvidence{OwnedAnchor: DefaultPFAnchor, PolicySHA256: d, Before: before, AfterFirewall: after, AfterQualification: qualified}
 	for _, category := range []string{"tcp_denial", "udp_denial", "approved_allow", "delegated_boundary", "unix_socket_boundary", "owner_unaffected", "fast_switch", "reboot", "tool_profiles", "owner_home_denial"} {
 		e.Probes = append(e.Probes, Probe{Category: category, ArtifactSHA256: d, Passed: true, Attempts: 3, PFHitDelta: 3, AuthorizedControlSuccesses: 3})
 	}
@@ -34,6 +44,20 @@ func TestQualificationInvalidatesChangedLiveFacts(t *testing.T) {
 				t.Fatalf("uncertain observation published success: %+v %v", h, err)
 			}
 		})
+	}
+}
+func TestQualificationRefusesPostApprovalServiceRestart(t *testing.T) {
+	now, q, evidence, observation := approvedFixture()
+	for _, state := range []*CoexistenceState{&evidence.Coexistence.Before, &evidence.Coexistence.AfterFirewall, &evidence.Coexistence.AfterQualification, observation.Coexistence} {
+		state.Services = []ServicePID{{Label: "com.example.guest-router", PID: 123}}
+	}
+	if _, err := Evaluate(now, q, evidence, observation); err != nil {
+		t.Fatal(err)
+	}
+	observation.Coexistence.Services[0].PID = 124
+	health, err := Evaluate(now, q, evidence, observation)
+	if err == nil || health.BoundaryValidated || health.AccountedBytes != -1 {
+		t.Fatalf("restarted peer retained qualified health: %+v %v", health, err)
 	}
 }
 func TestEvidenceRequiresActualProbeAttestationFields(t *testing.T) {

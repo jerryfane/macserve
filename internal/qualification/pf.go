@@ -77,7 +77,3 @@ func protocolDelta(before, after Snapshot, protocol string) (int64, bool) {
 	}
 	return int64(total), true
 }
-func pfDiagnostic(text string) bool {
-	text = strings.TrimSpace(text)
-	return text == "" || text == "No ALTQ support in kernel\nALTQ related functions disabled"
-}

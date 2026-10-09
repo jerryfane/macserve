@@ -1,68 +1,17 @@
 package maintenance
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"os/exec"
+	"fmt"
+	"net/netip"
 	"slices"
 	"sort"
 	"strings"
-	"time"
+
+	"github.com/jerryfane/macserve/internal/pfctl"
 )
-
-type boundedBuffer struct {
-	bytes.Buffer
-	limit int
-}
-
-func (b *boundedBuffer) Write(p []byte) (int, error) {
-	if len(p) > b.limit-b.Len() {
-		return 0, errors.New("probe output limit exceeded")
-	}
-	return b.Buffer.Write(p)
-}
-
-var errPFAnchorAbsent = errors.New("PF anchor absent")
-
-func pfCommand(ctx context.Context, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "/sbin/pfctl", args...)
-	cmd.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LANG=C", "LC_ALL=C"}
-	cmd.Dir = "/"
-	cmd.WaitDelay = 100 * time.Millisecond
-	out := boundedBuffer{limit: 1 << 20}
-	diagnostic := boundedBuffer{limit: 8192}
-	cmd.Stdout = &out
-	cmd.Stderr = &diagnostic
-	err := cmd.Run()
-	text := strings.TrimSpace(diagnostic.String())
-	const altq = "No ALTQ support in kernel\nALTQ related functions disabled"
-	if text == altq {
-		text = ""
-	} else {
-		text = strings.TrimPrefix(text, altq+"\n")
-	}
-	// The BSD anchor enumerator hides _pf. Explicit existence probes below must
-	// distinguish this exact diagnostic from permission errors or partial reads.
-	var exitErr *exec.ExitError
-	normalExit := err == nil || errors.As(err, &exitErr) && exitErr.ExitCode() == 1
-	if normalExit && ctx.Err() == nil && out.Len() == 0 && len(args) == 5 &&
-		args[0] == "-a" && args[2] == "-v" && args[3] == "-s" && args[4] == "Anchors" &&
-		(args[1] == "_pf" || strings.HasSuffix(args[1], "/_pf")) &&
-		text == "Anchor '"+args[1]+"' not found." {
-		return "", errPFAnchorAbsent
-	}
-	if err != nil {
-		return "", err
-	}
-	if text != "" {
-		return "", errors.New("unrecognized PF diagnostic")
-	}
-	return out.String(), ctx.Err()
-}
 
 // pfctl(8) documents recursive '*' -sr and -v -s Interfaces. The BSD
 // print_iface format prints ' (skip)' only with -v; -vv adds counters.
@@ -75,11 +24,37 @@ func pfEnabled(text string) bool {
 	}
 	return strings.HasPrefix(lines[0], "Status: Enabled for ") && strings.Contains(lines[0], "Debug:")
 }
-func observePF(ctx context.Context, o *Observation) error {
-	return observePFWithCommand(ctx, o, pfCommand)
+func observePF(ctx context.Context, c Config, hosts []netip.Addr, o *Observation) error {
+	if err := validatePFConfig(&c); err != nil {
+		return err
+	}
+	client, err := pfctl.New(c.PFAnchor)
+	if err != nil {
+		return err
+	}
+	return observePFWithCommand(ctx, c, hosts, o, func(ctx context.Context, args ...string) (string, error) {
+		out, err := client.Read(ctx, args...)
+		return out.Stdout, err
+	})
 }
 
-func observePFWithCommand(ctx context.Context, o *Observation, command func(context.Context, ...string) (string, error)) error {
+func observePFWithCommand(ctx context.Context, c Config, hosts []netip.Addr, o *Observation, command func(context.Context, ...string) (string, error)) error {
+	o.PFAnchor, o.RootRulesSHA256, o.AnchorRulesSHA256 = "", "", ""
+	if err := validatePFConfig(&c); err != nil {
+		return err
+	}
+	if err := validateCoexistenceConfig(&c); err != nil {
+		return err
+	}
+	approved, err := approvedGuestPrefixes(c)
+	if err != nil {
+		return err
+	}
+	if len(c.ToleratedTranslationAnchors) != 0 {
+		if err := validateGuestTranslations("", approved, hosts); err != nil {
+			return err
+		}
+	}
 	remaining := 4 << 20
 	query := func(ctx context.Context, args ...string) (string, error) {
 		if err := ctx.Err(); err != nil {
@@ -115,28 +90,49 @@ func observePFWithCommand(ctx context.Context, o *Observation, command func(cont
 	if err != nil {
 		return err
 	}
-	anchor, err := query(ctx, "-a", "org.macserve", "-sr")
+	if err := filterAnchorReachable(ctx, c.PFAnchor, query); err != nil {
+		return err
+	}
+	anchor, err := query(ctx, "-a", c.PFAnchor, "-sr")
 	if err != nil {
 		return err
 	}
 	// Dynamic tables/interfaces can change effective policy without changing rule
 	// text. This initial observer supports only literal static addresses.
-	if strings.TrimSpace(anchor) == "" || !strings.Contains(root, "anchor \"org.macserve\"") || strings.ContainsAny(root, "<(") || strings.ContainsAny(anchor, "<(") {
+	if strings.TrimSpace(root) == "" || strings.TrimSpace(anchor) == "" || strings.ContainsAny(root, "<(") || strings.ContainsAny(anchor, "<(") {
 		return errors.New("missing anchor or unsupported dynamic PF rules")
 	}
-	translations, err := observePFTranslations(ctx, query)
+	translations, err := observePFTranslations(ctx, c, approved, hosts, query)
 	if err != nil {
 		return err
 	}
-	// JSON string/array framing binds rule text and every observed path without
-	// delimiter ambiguity. A topology change invalidates prior qualification.
+	rootAfter, err := query(ctx, "-a", "*", "-sr")
+	if err != nil {
+		return err
+	}
+	anchorAfter, err := query(ctx, "-a", c.PFAnchor, "-sr")
+	if err != nil {
+		return err
+	}
+	if rootAfter != root || anchorAfter != anchor {
+		return errors.New("PF filter rules changed during observation")
+	}
+	// Bind the selected path and reviewed exceptions as well as every observed
+	// ruleset. Changing tolerance policy requires new qualification even when
+	// the current translation text happens to remain unchanged.
 	framed, err := json.Marshal(struct {
-		Filter       string
-		Translations []pfTranslation
-	}{root, translations})
+		PFAnchor                    string
+		ToleratedTranslationAnchors []string
+		ApprovedGuestSubnets        []string
+		CoexistingAnchors           []string
+		CoexistingServices          []string
+		Filter                      string
+		Translations                []pfTranslation
+	}{c.PFAnchor, c.ToleratedTranslationAnchors, c.ApprovedGuestSubnets, c.CoexistingAnchors, c.CoexistingServices, root, translations})
 	if err != nil {
 		return err
 	}
+	o.PFAnchor = c.PFAnchor
 	o.RootRulesSHA256 = digest(framed)
 	o.AnchorRulesSHA256 = digest([]byte(anchor))
 	return nil
@@ -145,23 +141,6 @@ func observePFWithCommand(ctx context.Context, o *Observation, command func(cont
 type pfTranslation struct {
 	Path  string
 	Rules string
-}
-
-func pfAnchorPath(path string) bool {
-	if path == "" || len(path) >= 1024 || strings.Count(path, "/") >= 8 {
-		return false
-	}
-	for _, part := range strings.Split(path, "/") {
-		if part == "" || part == "." || part == ".." || len(part) >= 64 {
-			return false
-		}
-		for _, c := range part {
-			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-' || c == '.') {
-				return false
-			}
-		}
-	}
-	return true
 }
 
 // pfctl(8), -s Anchors: -v recursively lists all children, including unnamed
@@ -173,7 +152,7 @@ func pfAnchorTopology(ctx context.Context, query func(context.Context, ...string
 	paths := []string{""}
 	seen := map[string]bool{"": true}
 	add := func(path string) error {
-		if !pfAnchorPath(path) || seen[path] || len(paths) >= 65 {
+		if !pfctl.AnchorPath(path) || seen[path] || len(paths) >= 65 {
 			return errors.New("unsupported PF anchor topology")
 		}
 		seen[path] = true
@@ -211,7 +190,7 @@ func pfAnchorTopology(ctx context.Context, query func(context.Context, ...string
 			continue
 		}
 		text, err := query(ctx, "-a", reserved, "-v", "-s", "Anchors")
-		if errors.Is(err, errPFAnchorAbsent) {
+		if errors.Is(err, pfctl.ErrAnchorAbsent) {
 			continue
 		}
 		if err != nil {
@@ -233,10 +212,13 @@ func pfAnchorTopology(ctx context.Context, query func(context.Context, ...string
 	return paths, nil
 }
 
-func observePFTranslations(ctx context.Context, query func(context.Context, ...string) (string, error)) ([]pfTranslation, error) {
+func observePFTranslations(ctx context.Context, c Config, approved []netip.Prefix, hosts []netip.Addr, query func(context.Context, ...string) (string, error)) ([]pfTranslation, error) {
 	paths, err := pfAnchorTopology(ctx, query)
 	if err != nil {
 		return nil, err
+	}
+	if !slices.Contains(paths, c.PFAnchor) {
+		return nil, errors.New("selected filter anchor missing from PF topology")
 	}
 	rules := make([]pfTranslation, len(paths))
 	for pass := range 2 {
@@ -246,9 +228,14 @@ func observePFTranslations(ctx context.Context, query func(context.Context, ...s
 				return nil, err
 			}
 			if path != "" && text != "" {
-				return nil, errors.New("nonempty translation anchor requires unsupported qualification")
+				if !slices.Contains(c.ToleratedTranslationAnchors, path) {
+					return nil, errors.New("nonempty translation anchor is not explicitly tolerated")
+				}
+				if err := validateGuestTranslations(text, approved, hosts); err != nil {
+					return nil, fmt.Errorf("translation anchor %q: %w", path, err)
+				}
 			}
-			if path == "" && !emptyPFTranslationCalls(text, paths) {
+			if path == "" && !rootPFTranslationCalls(text, paths) {
 				return nil, errors.New("unsupported or unobserved PF translation rules")
 			}
 			if pass == 0 {
@@ -268,9 +255,9 @@ func observePFTranslations(ctx context.Context, query func(context.Context, ...s
 	return rules, nil
 }
 
-// Only unconditional root calls into proven-empty anchors are supported.
-// Descendant calls, mappings, tables, interfaces and other syntax fail closed.
-func emptyPFTranslationCalls(text string, paths []string) bool {
+// Only unconditional root translation calls are supported. Every descendant is
+// independently checked; nested calls and unreviewed mappings fail closed.
+func rootPFTranslationCalls(text string, paths []string) bool {
 	for text != "" {
 		line, rest, ok := strings.Cut(text, "\n")
 		if !ok {
@@ -285,7 +272,7 @@ func emptyPFTranslationCalls(text string, paths []string) bool {
 			return false
 		}
 		target = strings.TrimSuffix(strings.TrimSuffix(target, "\""), "/*")
-		if !pfAnchorPath(target) {
+		if !pfctl.AnchorPath(target) {
 			return false
 		}
 		i := sort.SearchStrings(paths, target)

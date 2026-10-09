@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -21,15 +22,21 @@ import (
 	"github.com/jerryfane/macserve/internal/workerclient"
 )
 
+const DefaultPFAnchor = "com.apple/macserve"
+
 type Config struct {
-	ControllerConfig     string `json:"controller_config"`
-	WorkerConfig         string `json:"worker_config"`
-	QualificationFile    string `json:"qualification_file"`
-	BoundaryEvidenceFile string `json:"boundary_evidence_file"`
-	PFPolicyFile         string `json:"pf_policy_file"`
-	PFAnchor             string `json:"pf_anchor"`
-	IntervalSeconds      int    `json:"interval_seconds"`
-	path                 string
+	ControllerConfig            string   `json:"controller_config"`
+	WorkerConfig                string   `json:"worker_config"`
+	QualificationFile           string   `json:"qualification_file"`
+	BoundaryEvidenceFile        string   `json:"boundary_evidence_file"`
+	PFPolicyFile                string   `json:"pf_policy_file"`
+	PFAnchor                    string   `json:"pf_anchor"`
+	ToleratedTranslationAnchors []string `json:"tolerated_translation_anchors,omitempty"`
+	ApprovedGuestSubnets        []string `json:"approved_guest_subnets,omitempty"`
+	CoexistingAnchors           []string `json:"coexisting_anchors,omitempty"`
+	CoexistingServices          []string `json:"coexisting_services,omitempty"`
+	IntervalSeconds             int      `json:"interval_seconds"`
+	path                        string
 }
 
 func decode(data []byte, v any) error {
@@ -74,8 +81,14 @@ func LoadConfig(path string) (Config, error) {
 	if c.IntervalSeconds == 0 {
 		c.IntervalSeconds = 10
 	}
-	if c.IntervalSeconds < 5 || c.IntervalSeconds > 15 || c.PFAnchor != "org.macserve" {
-		return c, errors.New("unsupported maintenance interval or anchor")
+	if c.IntervalSeconds < 5 || c.IntervalSeconds > 15 {
+		return c, errors.New("unsupported maintenance interval")
+	}
+	if err := validatePFConfig(&c); err != nil {
+		return c, err
+	}
+	if err := validateCoexistenceConfig(&c); err != nil {
+		return c, err
 	}
 	for _, p := range []string{c.ControllerConfig, c.WorkerConfig, c.QualificationFile, c.BoundaryEvidenceFile, c.PFPolicyFile} {
 		if !filepath.IsAbs(p) || filepath.Clean(p) != p || p == "/" {
@@ -267,12 +280,25 @@ func Inspect(ctx context.Context, c Config) (Observation, error) {
 		}
 		o.Profiles[p.ID] = digest(raw)
 	}
-	o.InterfacesSHA256, err = controller.InterfaceDigest()
+	var hostAddresses []netip.Addr
+	o.InterfacesSHA256, hostAddresses, err = controller.InterfaceSnapshot()
 	if err != nil {
 		return invalid, err
 	}
-	if err = observePF(ctx, &o); err != nil {
+	if err = observePF(ctx, c, hostAddresses, &o); err != nil {
 		return invalid, err
+	}
+	coexistence, err := ObserveCoexistence(ctx, c)
+	if err != nil {
+		return invalid, err
+	}
+	o.Coexistence = &coexistence
+	interfacesAfter, err := controller.InterfaceDigest()
+	if err != nil {
+		return invalid, err
+	}
+	if interfacesAfter != o.InterfacesSHA256 {
+		return invalid, errors.New("interfaces changed during PF observation")
 	}
 	o.MemoryPressure, err = memoryPressure()
 	if err != nil {

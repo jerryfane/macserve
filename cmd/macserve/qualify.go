@@ -16,21 +16,25 @@ import (
 
 const qualifyUsage = `Usage: macserve qualify COMMAND [options]
 
-All privileged commands require macOS root. No command changes PF, launchd,
-accounts, GUI baselines, owner state or health. Reuse the installed deploy.env.
+All privileged commands require macOS root. Only explicit begin --load-policy
+loads PF, into the configured owned anchor only; main/foreign rules are read-only.
+No command changes launchd, accounts, GUI baselines, owner state or health.
+Reuse the installed deploy.env.
 
 plan --env PATH
   Print required TCP target matrix and mandatory categories without probes.
 stage-policy --file ROOT_PROTECTED_REVIEWED_PF
   Explicit root staging only: archive prior policy/controller config privately,
   install reviewed PF bytes and update only controller policy_sha256. Print the
-  new digest. Does NOT load PF; owner must separately review/apply native policy.
-begin --session /Library/macserve/var/qualification/NAME
+  new digest. Does NOT load PF; begin --load-policy performs the guarded load.
+begin --load-policy --session /Library/macserve/var/qualification/NAME
   --env /Library/macserve/config/deploy.env --allow IP:PORT[,IP:PORT...]
   --udp-canary IP:PORT[,IP:PORT...] --owner-canary /Users/OWNER/private/canary
   [--private-path PATH[,PATH...]] [--previous PROTECTED_PREVIOUS_SESSION]
   Root creates an immutable two-hour challenge and initial PF/live observations.
   Every protected port on loopback, host and tailnet addresses is required.
+  Explicitly loads only our anchor; records main/peer rule digests and configured
+  running service PIDs before/after. Any change refuses the sitting, no rollback.
 canary --session DIR --transport udp|tcp --listen IP:PORT[,IP:PORT...]
   --out NEW_FILE [--duration 120s]
   Actual owner GUI account: controlled receiver, never a service API. TCP accepts
@@ -58,6 +62,7 @@ approve --session DIR
   One explicit root command checks all mandatory categories, artifacts, freshness,
   exact current maintenance bindings and maintenance.Evaluate before installing
   protected approval records. Does not clear owner.pause or activate services.
+  Rechecks coexistence rules and same running service PIDs after qualification.
 `
 
 func runQualify(args []string, stdout, stderr io.Writer) int {
@@ -71,6 +76,7 @@ func runQualify(args []string, stdout, stderr io.Writer) int {
 	session := fs.String("session", "", "protected sitting directory")
 	var env, allow, udp, ownerCanary, private, previous, role, out, listen, transport, job, owner, receipts, category, artifact, reason, file *string
 	var duration *time.Duration
+	var loadPolicy *bool
 	switch command {
 	case "plan":
 		env = fs.String("env", "/Library/macserve/config/deploy.env", "reviewed environment")
@@ -81,6 +87,7 @@ func runQualify(args []string, stdout, stderr io.Writer) int {
 		ownerCanary = fs.String("owner-canary", "", "existing private owner file")
 		private = fs.String("private-path", "", "additional private paths")
 		previous = fs.String("previous", "", "protected previous sitting")
+		loadPolicy = fs.Bool("load-policy", false, "explicitly load reviewed filter into our owned anchor, with coexistence checks")
 	case "probe":
 		role = fs.String("role", "", "job or owner")
 		out = fs.String("out", "", "new report file")
@@ -119,6 +126,10 @@ func runQualify(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "--session is required")
 		return 2
 	}
+	if command == "begin" && !*loadPolicy {
+		fmt.Fprintln(stderr, "begin requires explicit --load-policy; no PF changes performed")
+		return 2
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	var err error
@@ -132,7 +143,7 @@ func runQualify(args []string, stdout, stderr io.Writer) int {
 			err = enc.Encode(v)
 		}
 	case "begin":
-		err = qualification.Begin(ctx, qualification.BeginOptions{Environment: *env, Session: *session, Allow: *allow, UDP: *udp, OwnerCanary: *ownerCanary, PrivatePaths: *private, Previous: *previous})
+		err = qualification.Begin(ctx, qualification.BeginOptions{Environment: *env, Session: *session, Allow: *allow, UDP: *udp, OwnerCanary: *ownerCanary, PrivatePaths: *private, Previous: *previous, LoadPolicy: *loadPolicy})
 	case "probe":
 		err = qualification.Probe(ctx, *session, *role, *out)
 	case "canary":
