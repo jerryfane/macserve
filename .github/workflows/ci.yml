@@ -26,6 +26,12 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
+      - name: ShellCheck
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y shellcheck
+          shellcheck --shell=bash assets/*.sh
       - name: Vet
         run: nice -n 10 go vet -p 2 ./...
       - name: Test
@@ -36,3 +42,5 @@ jobs:
         run: |
           nice -n 10 "${{ runner.temp }}/macserve" --help
           nice -n 10 "${{ runner.temp }}/macserve" maintenance --help
+          nice -n 10 "${{ runner.temp }}/macserve" deploy-install --help
+          nice -n 10 "${{ runner.temp }}/macserve" qualify --help

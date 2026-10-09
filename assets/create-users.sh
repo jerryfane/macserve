@@ -8,7 +8,7 @@ usage() {
     printf '%s\n' 'Usage: /bin/bash assets/create-users.sh --controller-user NAME --controller-uid UID --controller-gid GID --job-user NAME --job-uid UID --job-gid GID --owner-user NAME --owner-uid UID [--apply]'
 }
 apply=false
-controller_user= controller_uid= controller_gid= job_user= job_uid= job_gid= owner_user= owner_uid=
+controller_user='' controller_uid='' controller_gid='' job_user='' job_uid='' job_gid='' owner_user='' owner_uid=''
 seen=' '
 while [ "$#" -gt 0 ]; do
     flag=$1; shift
@@ -116,7 +116,12 @@ for path in "$prefix" "$home"; do
 done
 # There is no rollback: never delete accounts or paths on a partial failure.
 # Run only in an exclusive approved administration window; directory checks are not atomic.
-trap 'status=$?; if [ "$status" -ne 0 ]; then printf "%s\n" "PARTIAL FAILURE: no rollback attempted. Keep services disabled. Inspect only the named new accounts/groups and /Library/macserve plus the proposed job home; reconcile manually before retrying. Existing paths/accounts will cause retry refusal." >&2; fi' EXIT
+report_partial_failure() {
+    if [ "$1" -ne 0 ]; then
+        printf '%s\n' 'PARTIAL FAILURE: no rollback attempted. Keep services disabled. Inspect only the named new accounts/groups and /Library/macserve plus the proposed job home; reconcile manually before retrying. Existing paths/accounts will cause retry refusal.' >&2
+    fi
+}
+trap 'report_partial_failure "$?"' EXIT
 create_identity() {
     local name=$1 uid=$2 gid=$3 shell=$4 userhome=$5
     /usr/bin/dscl . -create "/Groups/$name"

@@ -8,7 +8,7 @@ priority, and you can pause them whenever you need the machine. GitHub integrati
 needs network credentials for your private network. No VM required.
 
 > Status: early development. The private controller API, durable queue, exact source exporter, protected worker,
-> GitHub polling, signed receipts and Linux waiter are implemented. Installation assets are next.
+> GitHub polling, signed receipts, Linux waiter and reviewed deployment tooling are implemented.
 > The protected root execution broker requires a separate non-admin GUI job account and an explicitly
 > qualified process baseline. Execution stays disabled without fresh root-managed network and toolchain
 > qualification. Privileged deployment and background GUI operation have not been qualified by the suite.
@@ -85,6 +85,10 @@ needs network credentials for your private network. No VM required.
   validation and immutable digest-addressed full manifests. Actual command records omit environment secrets.
 - `internal/waiter`: token-only machine request/wait protocol; verifies current App, attempt, signature,
   recipe/toolchain/test pins and a final PR-head reread before returning success.
+- `internal/deploy`: reviewed-env, checksum-verified prebuilt installation, disabled assets, matching configs,
+  generated private keys and a one-time API token; no activation or owner permission changes.
+- `internal/qualification`: actual job/owner probes, controlled receivers, protected evidence/candidate records,
+  explicit owner approval and pending lifecycle/semantic evidence instead of fabricated qualification.
 
 The store requires a dedicated private directory (mode `0700`) and private database files. Default limits are
 50 outstanding jobs, 10 per principal, 24-hour queue expiry, 90-day terminal metadata retention, 64 MiB per
@@ -328,11 +332,13 @@ recipes and GUI/network qualification still require the approved deployment acce
 
 ## Installation assets and host health
 
-[Installation and qualification runbook](docs/install.md) covers the plan-first account script,
-disabled controller/root-worker/root-maintenance LaunchDaemons, job-UID PF anchor template,
-protected configurations and four future owner-approved deployment sittings. Nothing installs,
-starts services, changes owner ACLs or enables PF automatically. Use a reviewed prebuilt binary;
-the deployed host does not need Go.
+[Quick path: four owner-approved deployment sittings](docs/install.md#quick-path) starts with a reviewed
+`v*` release, `deploy.env`, and `assets/install.sh` in plan mode. Tag CI publishes a CGO-disabled,
+`-trimpath` Darwin arm64 binary and `SHA256SUMS` using only `GITHUB_TOKEN`; the deployed host needs no Go.
+Explicit root apply stages disabled controller/worker/maintenance assets, empty profiles, generated keys
+and a one-time API token. The installed `qualify.sh` collects actual account-specific probes and protected
+candidate evidence; approval is a separate root command. Fast-switch/reboot and unperformed recipe/UI
+evidence remain pending. Nothing activates services, changes owner ACLs or enables PF automatically.
 
 Keep the owner's home at **0700**, or **0750 with an owner-private group—not staff—that excludes the job
 account**. Audit ACL grants separately. Qualification requires an `owner_home_denial` probe from the actual

@@ -2,6 +2,196 @@
 
 This is a **future, owner-approved deployment runbook**, not a report that this Mac has been installed or qualified. Repository checks and fixture results do not prove native GUI, PF, FileVault, App authorization or target-recipe behavior. Every administrative action below requires an approved owner sitting. No service should be enabled just to see whether a real build works.
 
+## Quick path
+
+These are future commands for **four separately approved owner sittings**, not permission to run them now. The kit stages disabled services and preserves evidence; it never activates launchd/PF, changes owner ACLs, logs in the job user, or turns an untested boundary into a pass. Use a prebuilt release: no Go toolchain or JSON editing is needed for initial disabled staging.
+
+### Sitting 1: review, plan, install disabled assets
+
+Set `RELEASE_TAG` to an existing, reviewed `v*` release. Download its source and assets on an authorized administrative machine; the example uses GitHub CLI, but downloading the same files through GitHub's release page is equivalent:
+
+```sh
+: "${RELEASE_TAG:?Set the reviewed existing release tag}"
+git clone --depth 1 --branch "$RELEASE_TAG" https://github.com/jerryfane/macserve.git macserve-deploy-kit
+cd macserve-deploy-kit
+gh release download "$RELEASE_TAG" --repo jerryfane/macserve \
+  --pattern macserve-darwin-arm64 --pattern SHA256SUMS
+cat SHA256SUMS
+```
+
+The tag workflow builds Darwin arm64 with CGO disabled and `-trimpath`, then publishes `macserve-darwin-arm64` and `SHA256SUMS` using only `GITHUB_TOKEN`. Review the tag/source/publisher and expected binary digest. A checksum downloaded beside a binary detects corruption, not an independently compromised release. Set `EXPECTED_SHA256` to the reviewed 64-character lowercase digest; do not substitute an unreviewed local hash.
+
+Create and review `deploy.env`. **Every value below is illustrative**, not a claim that an identity, address, port, Xcode or repository ID is suitable or available. Include every current host alias in `HOST_ADDRESSES`, approve the complete protected-port set, and pin real repository IDs out of band:
+
+```sh
+cat > deploy.env <<'ENV'
+CONTROLLER_USER=macservecontroller
+CONTROLLER_UID=6201
+CONTROLLER_GID=6201
+JOB_USER=macservejob
+JOB_UID=6202
+JOB_GID=6202
+OWNER_USER=owner
+OWNER_UID=501
+TAILNET_IP=100.64.0.10
+PORT=8443
+PROTECTED_PORTS=8443,19999
+HOST_ADDRESSES=100.64.0.10,192.0.2.10
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+REPOSITORIES=example-org/example-app:12345
+ENV
+: "${EXPECTED_SHA256:?Set the reviewed release binary digest}"
+/bin/bash assets/install.sh --env deploy.env \
+  --binary macserve-darwin-arm64 --sha256 "$EXPECTED_SHA256"
+```
+
+`deploy.env` is bounded **data**, never shell-sourced: plain `KEY=VALUE`, blank/comment lines, comma-separated lists, and `owner/repo:numeric-id` repository pins. No shell expansions, commands, unknown keys or duplicate keys. Default plan verifies the binary digest and validates/renders the deployment without creating accounts or installation files. It does not prove native identity availability or any security boundary.
+
+After reviewing the source, plan and actual host approvals, stage the reviewed inputs under root-controlled storage. The destination must be new; do not reuse a stale staging directory. These administrative commands are for the approved Darwin sitting only:
+
+```sh
+sudo /bin/mkdir -m 0700 /private/var/root/macserve-deploy-kit
+sudo /bin/cp -R assets deploy.env macserve-darwin-arm64 /private/var/root/macserve-deploy-kit/
+sudo /usr/sbin/chown -R root:wheel /private/var/root/macserve-deploy-kit
+sudo /bin/chmod -R go-w /private/var/root/macserve-deploy-kit
+sudo /bin/bash /private/var/root/macserve-deploy-kit/assets/install.sh \
+  --env /private/var/root/macserve-deploy-kit/deploy.env \
+  --binary /private/var/root/macserve-deploy-kit/macserve-darwin-arm64 \
+  --sha256 "$EXPECTED_SHA256" --apply
+```
+
+Apply refuses existing installation/accounts/targets. It uses the existing account helper, verifies the staged executable, literal-renders and lints all three disabled plists, and writes matching controller/worker/maintenance configs plus `{"profiles":[]}`. It generates separate TLS and receipt keys; private keys are controller-owned `0600`. **The API token is printed once, only after success.** Move it directly into the authorized caller's secret storage: no `tee`, session transcript, shell-history assignment or shared log. Only its digest is installed. Preserve public trust pins from `/Library/macserve/config/deployment-pins.json`; never treat a receipt's own advertised key as an independent trust anchor.
+
+`deployment-pins.json` includes `receipt_key_id`, standard-base64 `receipt_public_key`, opaque service/host IDs and `tls_certificate_sha256` over the certificate's **DER** encoding, not its PEM file text.
+
+No daemon, PF rule, owner-home permission or GUI session was activated. An interrupted apply is not rerunnable recovery: retain evidence and inspect the partial state instead of deleting objects and retrying. Approve/integrate PF and any owner-home restrictions separately using sections 1 and 4 below. The default PF template permits no job egress; an approved-allow probe requires a separately reviewed narrow exception, not a blanket bypass.
+
+To stage a separately reviewed PF policy with narrow exceptions, keep the reviewed file root-controlled and use the explicit configuration-only command below. It archives the previous policy/config, installs the new exact bytes and updates the controller's matching policy digest without hand-editing JSON. **It does not load PF**; the administrator must still review/integrate the live anchor and preserve unrelated owner policy during the approved network window:
+
+```sh
+sudo /Library/macserve/bin/qualify.sh stage-policy \
+  --file /private/var/root/reviewed-macserve-pf.conf
+```
+
+### Sitting 2: actual job GUI, tools and boundary evidence
+
+First establish the approved job GUI login/password and narrowly scoped prompts. With the broker stopped, audit retained GUI PID/start identities and run the existing reset once; `AUDITED_PIDS` is a reviewed list, never a process-list substitution. From the administrator's session:
+
+```sh
+sudo /Library/macserve/bin/macserve worker-reset \
+  --config /Library/macserve/config/worker.json --pids "$AUDITED_PIDS"
+/Library/macserve/bin/qualify.sh plan --env /Library/macserve/config/deploy.env
+```
+
+Create one fresh **nonsecret** owner-home canary from the actual owner session. This command refuses to overwrite an existing file and creates mode `0644`, so the job must be denied by the home boundary, not just a private canary-file mode:
+
+```sh
+(set -C; umask 022; printf '%s\n' 'macserve owner boundary canary' > "$HOME/macserve-boundary-canary.txt")
+```
+
+Use a new session directory for each complete probe round. Review the plan's full TCP matrix, exact allowed endpoint(s) and controlled UDP receivers. Set `ALLOW_ENDPOINTS`, `UDP_ENDPOINTS`, `TCP_CANARY_ENDPOINTS` and `OWNER_CANARY` to actual approved values; endpoints are comma-separated literal `IP:port` (IPv6 `[address]:port`). Never aim the UDP nonce sender at a production UDP service. `TCP_CANARY_ENDPOINTS` contains only unoccupied matrix endpoints that need an accept-and-close test listener; leave existing services untouched. All required TCP targets need live owner controls, not just timeouts:
+
+```sh
+SESSION=/Library/macserve/var/qualification/before-switch
+sudo /Library/macserve/bin/qualify.sh begin --session "$SESSION" \
+  --env /Library/macserve/config/deploy.env --allow "$ALLOW_ENDPOINTS" \
+  --udp-canary "$UDP_ENDPOINTS" --owner-canary "$OWNER_CANARY"
+```
+
+The root-owned challenge is readable by both accounts; private evidence remains root-only. Add `--private-path /absolute/path,...` at `begin` for other explicitly approved local boundaries. **The following is the probe round to repeat for every new session:**
+
+1. In the actual owner GUI, start controlled receiver(s) in separate terminals before either probe. Keep them running across the job and owner probes; `Ctrl-C` after both probes finalizes receipts. Pick a bounded lifetime sufficient for the sitting (maximum two hours):
+
+   ```sh
+   /Library/macserve/bin/qualify.sh canary --session "$SESSION" \
+     --transport udp --listen "$UDP_ENDPOINTS" --out "$HOME/udp-receipts.json" --duration 30m
+   /Library/macserve/bin/qualify.sh canary --session "$SESSION" \
+     --transport tcp --listen "$TCP_CANARY_ENDPOINTS" --out "$HOME/tcp-receipts.json" --duration 30m
+   ```
+
+   A comma-list receiver writes `OUTPUT.1.json`, `OUTPUT.2.json`, etc.; one listener writes `OUTPUT` itself. Use new output names for every session. Skip the TCP receiver command only where reviewed existing listeners already provide all live controls.
+
+   The UDP receiver also reads only the approved nonsecret owner canary before and after the probe window. Both real owner reads must succeed and bracket both account reports; early receiver exit or missing controls blocks owner-home qualification.
+
+2. At the **actual job GUI console**, run the job probe. Set `SESSION` in that terminal to the same protected path; do not use root, `sudo -u`, `su`, or a helper that drops supplementary groups:
+
+   ```sh
+   /Library/macserve/bin/qualify.sh probe --session "$SESSION" \
+     --role job --out "$HOME/job-probe.json"
+   ```
+
+3. At the actual owner GUI console, run controls, then stop the receivers gracefully in their original terminals:
+
+   ```sh
+   /Library/macserve/bin/qualify.sh probe --session "$SESSION" \
+     --role owner --out "$HOME/owner-probe.json"
+   ```
+
+4. As administrator, collect the exact new job/owner report paths and comma-separated UDP receipt paths. `JOB_REPORT`, `OWNER_REPORT` and `UDP_RECEIPTS` name those real files, not sample JSON:
+
+   ```sh
+   sudo /Library/macserve/bin/qualify.sh collect --session "$SESSION" \
+     --job "$JOB_REPORT" --owner "$OWNER_REPORT" --receipts "$UDP_RECEIPTS"
+   sudo /bin/cat "$SESSION/candidate.json"
+   ```
+
+Collection preserves bounded snapshots, hashes, PF counters and current boot/interface/baseline/policy/profile bindings; inspect every artifact and status. Candidate `boundary-evidence.json` and `qualification.json` are **not approvals**. TCP/UDP failures, missing controls, unexpected owner-home access or unsupported native output cannot be overridden by an attestation. Unix permission denial is not a claim that a disabled worker's credential-bearing API was exercised.
+
+Each boundary `artifact_sha256` identifies a preserved `category-<name>.json` manifest of the exact underlying artifact hashes. Session storage is under the accounted `var` tree; do not move generated mutable evidence outside the service budget to avoid accounting.
+
+Read/list probes use nonblocking, no-follow opens. Missing paths and unsupported object types are not permission-denial proof, and a FIFO cannot stall the probe waiting for a peer.
+
+`fast_switch` and `reboot` start **pending**. Finish the pre-switch round, then perform the actual foreground/lock/UI sitting. Begin a new `after-switch` session with the same reviewed endpoint arguments and `--previous /Library/macserve/var/qualification/before-switch`; repeat the entire probe round with fresh filenames. Preserve the real foreground/UI observations, including background job behavior while the owner is foreground, then explicitly attest that artifact:
+
+```sh
+sudo /Library/macserve/bin/qualify.sh attest \
+  --session /Library/macserve/var/qualification/after-switch \
+  --category fast_switch --artifact "$SWITCH_ARTIFACT" \
+  --reason "$REVIEWED_SWITCH_CONCLUSIONS"
+```
+
+The same-boot predecessor must already be collected and remain unchanged. Attestation accepts real owner/root artifacts and records provenance; it is not a test generator. Delegated networking/helpers and any required UI semantics still need genuine owner-reviewed evidence as described in section 4.
+
+### Sitting 3: repository/App enrollment and real recipe evidence
+
+Review the installed numeric repository/public-key pins, actual GitHub App enrollment and trust rules in section 5. The installer does **not** invent App credentials, policies, recipes or test outcomes. An empty registry admits no recipes; tool inspection then records the exact observed Xcode version/build and zero qualified recipes. Adding an actual approved profile changes the exact qualification binding and requires that profile's real recipe/UI evidence. Selected-repository App credential/config provisioning remains an explicit separate enrollment operation, not an installer side effect.
+
+Run approved recipes only as the job user and retain their actual artifacts. Tool inspection may create long-lived job processes: audit them and use the existing reset explicitly, never auto-adopt them. Collect a fresh round after any policy/profile/baseline changes. For the current collected session, record genuine manual categories with:
+
+```sh
+sudo /Library/macserve/bin/qualify.sh attest --session "$SESSION" \
+  --category delegated_boundary --artifact "$DELEGATED_ARTIFACT" \
+  --reason "$REVIEWED_DELEGATED_CONCLUSIONS"
+sudo /Library/macserve/bin/qualify.sh attest --session "$SESSION" \
+  --category tool_profiles --artifact "$RECIPE_ARTIFACT" \
+  --reason "$REVIEWED_RECIPE_CONCLUSIONS"
+```
+
+The second command is needed when enabled profiles require semantic recipe/UI evidence; it cannot repair failed automated tool inspection. Keep profiles empty until real recipes and their trusted writers are approved. `reboot` is still pending before sitting 4, so no production approval is available yet.
+
+### Sitting 4: planned cold reboot, repeat, explicit approval
+
+Arrange physical-console FileVault unlock, an actual fresh job GUI login, approved prompts and a newly audited PID list. Keep admission disabled and use the **same** `worker-reset` command above. Begin a fresh `after-reboot` session with the reviewed endpoint arguments and `--previous` pointing to the preserved preboot collected session. Repeat the full probe round; prior boot-bound reports cannot substitute for it.
+
+```sh
+sudo /Library/macserve/bin/qualify.sh attest \
+  --session /Library/macserve/var/qualification/after-reboot \
+  --category reboot --artifact "$REBOOT_ARTIFACT" \
+  --reason "$REVIEWED_REBOOT_CONCLUSIONS"
+```
+
+To prove fast switching on this boot too, finish that session, perform the real switch sitting, then begin `final-switch` with `--previous /Library/macserve/var/qualification/after-reboot`. Repeat the full round and record current real delegated/tool/switch/reboot artifacts using `attest`. The protected predecessor chain supplies the observed reboot transition and same-boot before/after comparison; artifacts and current observations must still match. A challenge and its probes expire after two hours; predecessors are bounded to seven days. Start a fresh round rather than changing timestamps or carrying forward stale success.
+
+Inspect the final candidate and preserved evidence, then **one explicit owner-approved root command** installs the approval records:
+
+```sh
+sudo /bin/cat /Library/macserve/var/qualification/final-switch/candidate.json
+sudo /Library/macserve/bin/qualify.sh approve \
+  --session /Library/macserve/var/qualification/final-switch
+```
+
+Approval refuses pending/failed categories, changed artifacts or current binding drift and checks the existing maintenance evaluator. It does not manufacture health, clear `owner.pause`, adopt GUI processes, load PF or activate services. Only after all remaining enrollment/health gates and a separate explicit service-start approval may section 6 be followed. Preserve all session directories for review and recovery.
+
 ## Trust boundary and stop conditions
 
 Use only trusted repositories and trusted repository writers. A root broker handles protected leases, exports and cleanup, then executes tools as a separate non-admin GUI user; the credential-bearing controller is a different non-login user. A broker defect is a root risk. This is shared-kernel native execution, not a VM, disposable reset or hostile-code sandbox. Same-UID delayed persistence can run after a clean census and affect a later job. The owner must accept that residual risk explicitly; signatures attest observations, not host integrity or honest tests.
@@ -44,7 +234,9 @@ All ancestors of protected policy, executable and control-state paths must be ro
 | `var` | root:wheel `0711` |
 | `bin/macserve` | reviewed prebuilt Darwin binary, root-owned executable, normally `0755` |
 | `config/controller.json`, `worker.json`, `maintenance.json`, `profiles.json` | root-owned `0644` policy (no embedded secrets); controller configuration and profiles readable by controller |
-| `config/gui-baseline.json`, `qualification.json`, `boundary-evidence.json`, `pf-anchor.conf` | root-approved policy/evidence, no job/controller write; baseline/evidence may be root-private `0600`, PF policy readable `0644` |
+| `config/qualification.json`, `boundary-evidence.json`, `pf-anchor.conf` | root-approved policy/evidence, no job/controller write; evidence `0600`, PF policy readable `0644` |
+| `var/broker/gui-baseline.json` | root-private audited GUI baseline, written by the existing reset command |
+| `var/qualification/<session>` | root-owned session `0755`; public challenge `0644`, preserved evidence/approval artifacts `0600` |
 | `var/controller` and its `secrets` | controller-owned `0700`; secret files `0600` |
 | `var/controller/run/worker.sock` | controller-private executor socket; production peer identity is root, not job UID |
 | `var/broker`, `var/exports` | root-owned `0700`, disjoint protected worker state and sealed exports |
@@ -52,9 +244,9 @@ All ancestors of protected policy, executable and control-state paths must be ro
 | `health` / `health/current.json` | root-owned `0755` directory / atomically published `0644` file |
 | `/Users/<job_user>` | dedicated job-owned `0700` home; entire home, including `Library`, is accounted |
 
-The script creates only empty directories and accounts, not binaries, configurations, secrets or plists. It also creates controller-owned `0700` `var/controller/run` and `var/controller/log`, and root-owned `0700` `var/broker/log`. Controller stdout/stderr go to `var/controller/log/controller.{out,err}.log`; worker/maintenance logs go to `var/broker/log/{worker,maintenance}.{out,err}.log`. Keep these logs private and accounted. The controller uses `/usr/bin/false` and is hidden; the job uses `/bin/zsh`. Account/directory creation is nontransactional: use an exclusive approved administration window.
+`assets/create-users.sh` remains the narrow account/empty-directory helper; `assets/install.sh` verifies the prebuilt binary and adds rendered assets, matching configurations and generated keys without activation. The account helper creates controller-owned `0700` `var/controller/run` and `var/controller/log`, and root-owned `0700` `var/broker/log`. Controller stdout/stderr go to `var/controller/log/controller.{out,err}.log`; worker/maintenance logs go to `var/broker/log/{worker,maintenance}.{out,err}.log`. Keep these logs private and accounted. The controller uses `/usr/bin/false` and is hidden; the job uses `/bin/zsh`. Account/directory creation is nontransactional: use an exclusive approved administration window.
 
-Install a reviewed, checksummed **prebuilt** binary at the fixed path. Verify its digest against a separately trusted release/build record before installation, retain that record, and protect the binary and parents from replacement. Do not install Go or compile the service on the deployed host. Root must never execute a repository-provided helper or build tool. Pinned Xcodes are protected installations; the narrowly supported root:admin group-writable `/Applications` ancestor is acceptable only when the job cannot write through that group. Tool executables themselves remain root-owned and non-group-writable.
+Install a reviewed, checksummed **prebuilt** binary at the fixed path. Verify its digest against a separately trusted release/build record before installation, retain that record, and protect the binary and parents from replacement. Do not install Go or compile the service on the deployed host. Root must never execute target-repository helpers or build tools. Pinned Xcodes are protected installations; the narrowly supported root:admin group-writable `/Applications` ancestor is acceptable only when the job cannot write through that group. Tool executables themselves remain root-owned and non-group-writable.
 
 Install TLS certificate, TLS private key, receipt signing key and App private key as separate files. Public certificates may be root-owned readable policy; all three private keys belong only to the controller's `0700` secrets directory as `0600` files. Never give keys, bearer credentials, owner files or source-fetch credentials to a worker lease. Caller API tokens are high-entropy secrets stored by the caller; controller policy contains only their SHA-256 digests. Make any owner-home access restriction a separately reviewed, reversible ACL operation: record existing ACLs and explicit paths first, do not recursively rewrite the owner home.
 
@@ -62,17 +254,17 @@ Keep the owner's home at **0700**, or **0750 with an owner-private group that is
 
 ### Disabled launchd templates
 
-Render the reviewed Go text/templates `assets/launchd/org.macserve.{controller,worker,maintenance}.plist.tmpl` outside job-writable storage. The controller template accepts `.ControllerUser` and `.ControllerGroup`; worker and maintenance use root/wheel. There is no template-rendering CLI in `macserve`: use a trusted administrative renderer, inspect the output and resolve every template marker before installation. Stage root-owned non-writable plists for the three labels under `/Library/LaunchDaemons` only with approval.
+`assets/install.sh` calls the verified prebuilt binary's `deploy-install` command to render the reviewed `assets/launchd/org.macserve.{controller,worker,maintenance}.plist.tmpl` files and the PF template. Rendering is literal substitution of the recognized markers only: validated controller user/group names, numeric job UID/ports and literal host addresses. Unknown or unresolved `{{`/`}}` markers are refused. Apply runs `/usr/bin/plutil -lint` on all three rendered plists before installing them root-owned under `/Library/LaunchDaemons`.
 
-No deployment Go toolchain is needed: a reviewed administrative literal substitution can replace only `{{.ControllerUser}}` and `{{.ControllerGroup}}` with the script-validated account and group names. Keep all fixed paths/labels/disabled settings intact, reject any remaining `{{`/`}}` markers, and inspect the resulting plist with the platform's syntax validator during the approved sitting. Syntax acceptance does not qualify launchd behavior.
+No deployment Go toolchain or separate JSON/template renderer is needed. Inspect the generated files: plist syntax acceptance does not qualify launchd behavior or grant permission to start services.
 
 All templates have `Disabled=true`, `RunAtLoad=false`, conservative restart throttling, fixed PATH, `GOMAXPROCS=2`, umask `077` and background/nice scheduling. Arguments are `/Library/macserve/bin/macserve <role> --config /Library/macserve/config/<role>.json`, where role is `controller`, `worker` or `maintenance`. Staging is not bootstrap, GUI login or authorization to start. Review launchd's existing per-label enabled overrides too; a disabled plist alone must not be mistaken for proof of a disabled loaded service. Do not bootstrap or enable any label until the gates below are met.
 
 ## 2. Supply matching protected configurations
 
-Use the documented JSON field names below; unknown fields are rejected. Replace all deployment values, use clean absolute paths, and do not paste angle-bracket metavariables as usable JSON. The following is the field contract, not fabricated credentials or a host-qualified example.
+The installer supplies matching initial JSON configurations and `{"profiles":[]}` from the reviewed environment; no hand-written configuration JSON is needed for disabled staging. The contracts below are for inspecting generated policy and separately reviewed enrollment/changes. Unknown fields are rejected. Do not paste angle-bracket metavariables as usable JSON.
 
-**`worker.json`:** `socket` = `/Library/macserve/var/controller/run/worker.sock`; `controller_uid`, `job_uid`, `job_gid`, `owner_uid` = the approved numeric identities; `root` = `/Library/macserve/var/broker`; `export_root` = `/Library/macserve/var/exports`; `workspace_root` = `/Library/macserve/var/workspaces`; `helper_path` = `/Library/macserve/bin/macserve`; `baseline_path` = `/Library/macserve/config/gui-baseline.json`. Optional timing fields are `poll_seconds` (default 2, range 1–30), `heartbeat_seconds` (default 5, range 1–5), `request_timeout_seconds` (default 10, range 1–10). Protect the helper and state first; initialize the protected baseline with `worker-reset` in section 3 before starting the broker.
+**`worker.json`:** `socket` = `/Library/macserve/var/controller/run/worker.sock`; `controller_uid`, `job_uid`, `job_gid`, `owner_uid` = the approved numeric identities; `root` = `/Library/macserve/var/broker`; `export_root` = `/Library/macserve/var/exports`; `workspace_root` = `/Library/macserve/var/workspaces`; `helper_path` = `/Library/macserve/bin/macserve`; `baseline_path` = `/Library/macserve/var/broker/gui-baseline.json`. Optional timing fields are `poll_seconds` (default 2, range 1–30), `heartbeat_seconds` (default 5, range 1–5), `request_timeout_seconds` (default 10, range 1–10). Protect the helper and state first; initialize the protected baseline with `worker-reset` in section 3 before starting the broker.
 
 **`controller.json`:** `root` = `/Library/macserve/var/controller`; `socket` as above; `job_uid`, `owner_uid`; `profiles_file` = `/Library/macserve/config/profiles.json`; `health_file` = `/Library/macserve/health/current.json`; `policy_sha256` = SHA-256 of the approved PF policy file's exact bytes; `listen` = an assigned literal tailnet IP and an approved port; `tls_certificate`, `tls_key` = protected certificate/private-key paths. No wildcard, LAN, public or loopback listener. Optional `allowed_networks` may narrow the supported tailnet ranges, not broaden them. Optional `pause_file` names a protected owner-controlled dispatch pause marker.
 
@@ -110,7 +302,7 @@ The interval defaults to 10 seconds and must be 5–15 seconds. Identities, prof
 | `boot` | current kernel boot identity, matching the protected worker baseline |
 | `interfaces_sha256` | controller network-interface inventory digest |
 | `policy_sha256` | SHA-256 of exact `pf-anchor.conf` bytes; also controller `policy_sha256` |
-| `root_rules_sha256` | SHA-256 of recursive loaded root rules command stdout |
+| `root_rules_sha256` | SHA-256 of framed recursive filter and sorted translation observations, as returned by `maintenance-observe` |
 | `anchor_rules_sha256` | SHA-256 of loaded `org.macserve` rules command stdout |
 | `baseline_sha256` | SHA-256 of exact protected `gui-baseline.json` bytes |
 | `boundary_evidence_sha256` | SHA-256 of exact approved `boundary-evidence.json` bytes |
@@ -129,7 +321,7 @@ After the approved baseline reset and policy integration, the future root-only r
   --config /Library/macserve/config/maintenance.json
 ```
 
-This command collects protected live facts without requiring qualification/evidence files and without writing health. Its JSON fields are `job_uid`, `boot`, `interfaces_sha256`, `policy_sha256`, `root_rules_sha256`, `anchor_rules_sha256`, `baseline_sha256`, `profiles`, `pf_enabled`, `loopback_filtered`, `identity_valid`, `baseline_valid`, `accounted_bytes`, `memory_pressure`. This is **not** boundary evidence or automatic approval. Construct qualification using only the matching identity/digest/profile fields, `schema:1`, the actual `approved_at` timestamp and the separately computed exact-byte `boundary_evidence_sha256`; approve it only after all real probes. Do not copy observation booleans/accounting into qualification or install the observation JSON as qualification: their schemas differ. The command permits hash collection without installing Go on the host.
+This command collects protected live facts without requiring qualification/evidence files and without writing health. Its JSON fields are `job_uid`, `boot`, `interfaces_sha256`, `policy_sha256`, `root_rules_sha256`, `anchor_rules_sha256`, `baseline_sha256`, `profiles`, `pf_enabled`, `loopback_filtered`, `identity_valid`, `baseline_valid`, `accounted_bytes`, `memory_pressure`. This is **not** boundary evidence or automatic approval. `macserve qualify` uses these bindings to generate inspectable candidate records and checks them again at explicit approval. Do not install observation JSON as qualification or copy its observation booleans/accounting into an approval record.
 
 For hash reproducibility, `anchor_rules_sha256` still covers exact stdout from `/sbin/pfctl -a org.macserve -sr`. `root_rules_sha256` now covers JSON framing of `Filter` (exact `/sbin/pfctl -a '*' -sr` stdout) and `Translations` (sorted objects with `Path` and exact `Rules` stdout, including the root). Use `maintenance-observe` to collect this digest; old raw-filter-only approvals must be replaced after requalification. Translation observations include discovered topology, not just root anchor references. Do not hash verbose hit counters; preserve them separately in evidence. Boot identity is SHA-256 of raw `kern.boottime` bytes. Interface/profile digests use the controller inventory and normalized registry; policy/baseline/evidence digests cover exact file bytes.
 
