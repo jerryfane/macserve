@@ -262,10 +262,6 @@ func Inspect(ctx context.Context, c Config) (Observation, error) {
 		}
 		o.Profiles[p.ID] = digest(raw)
 	}
-	o.InterfacesSHA256, err = controller.InterfaceDigest()
-	if err != nil {
-		return invalid, err
-	}
 	o.MemoryPressure, err = memoryPressure()
 	if err != nil {
 		return invalid, err
@@ -283,13 +279,6 @@ func Inspect(ctx context.Context, c Config) (Observation, error) {
 		if err != nil || !bytes.Equal(b, old) {
 			return invalid, fmt.Errorf("approval input changed: %s", p)
 		}
-	}
-	interfacesAfter, err := controller.InterfaceDigest()
-	if err != nil {
-		return invalid, err
-	}
-	if interfacesAfter != o.InterfacesSHA256 {
-		return invalid, errors.New("interfaces changed during observation")
 	}
 	coexistence, err := ObserveCoexistence(ctx, c)
 	if err != nil {

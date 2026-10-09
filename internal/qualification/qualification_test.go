@@ -132,8 +132,8 @@ func receiptFixture() (Challenge, Report, Report, []Receipts) {
 }
 func TestReportBindingAndExpiration(t *testing.T) {
 	now := time.Now().UTC().Add(-time.Minute)
-	c := Challenge{Schema: 2, ID: strings.Repeat("a", 64), Created: now, Expires: now.Add(lifetime), Environment: deploy.Environment{JobUID: 502, OwnerUID: 501}}
-	r := Report{Schema: 2, ChallengeSHA256: "current", Role: "job", UID: 502, Groups: []int{502}, Started: now.Add(time.Second), Finished: now.Add(2 * time.Second)}
+	c := Challenge{Schema: 3, ID: strings.Repeat("a", 64), Created: now, Expires: now.Add(lifetime), Environment: deploy.Environment{JobUID: 502, OwnerUID: 501}}
+	r := Report{Schema: 3, ChallengeSHA256: "current", Role: "job", UID: 502, Groups: []int{502}, Started: now.Add(time.Second), Finished: now.Add(2 * time.Second)}
 	if e := checkReport(r, c, "current", "job"); e != nil {
 		t.Fatal(e)
 	}
@@ -255,6 +255,50 @@ func TestSittingBindingsRejectDeploymentOrProfileChanges(t *testing.T) {
 	other.TCP = nil
 	if compatibleSitting(c, other) {
 		t.Fatal("narrowed target matrix admitted")
+	}
+}
+
+func TestObservationBindingsPreserveNonNetworkBoundaries(t *testing.T) {
+	before := maintenance.Observation{JobUID: 502, Boot: "boot", BaselineSHA256: "baseline", Profiles: map[string]string{"profile": "pin"}, IdentityValid: true, BaselineValid: true}
+	if !sameObservation(before, before) {
+		t.Fatal("unchanged non-network observation refused")
+	}
+	for name, mutate := range map[string]func(*maintenance.Observation){
+		"uid":               func(o *maintenance.Observation) { o.JobUID++ },
+		"boot":              func(o *maintenance.Observation) { o.Boot = "rebooted" },
+		"baseline":          func(o *maintenance.Observation) { o.BaselineSHA256 = "changed" },
+		"profile":           func(o *maintenance.Observation) { o.Profiles = map[string]string{"profile": "changed"} },
+		"identity validity": func(o *maintenance.Observation) { o.IdentityValid = false },
+		"baseline validity": func(o *maintenance.Observation) { o.BaselineValid = false },
+	} {
+		t.Run(name, func(t *testing.T) {
+			after := before
+			mutate(&after)
+			if sameObservation(before, after) {
+				t.Fatal("changed non-network boundary admitted")
+			}
+		})
+	}
+	prior := Challenge{EnvironmentSHA256: "reviewed", Observation: before}
+	next := prior
+	next.Observation.Boot = "rebooted"
+	next.Observation.BaselineSHA256 = "fresh baseline"
+	if !compatibleSitting(prior, next) {
+		t.Fatal("lifecycle refused a new boot and fresh baseline")
+	}
+	next.Observation.JobUID++
+	if compatibleSitting(prior, next) {
+		t.Fatal("lifecycle accepted changed job identity")
+	}
+}
+
+func TestObservationRejectsRemovedInterfaceBinding(t *testing.T) {
+	var c Challenge
+	if err := decode([]byte(`{"schema":3,"observation":{"job_uid":502}}`), &c); err != nil {
+		t.Fatal(err)
+	}
+	if err := decode([]byte(`{"schema":3,"observation":{"job_uid":502,"interfaces_sha256":"legacy"}}`), &c); err == nil {
+		t.Fatal("legacy interface binding accepted in current challenge")
 	}
 }
 
@@ -480,13 +524,25 @@ func TestNonNetworkFailuresStillBlockApproval(t *testing.T) {
 
 func TestOldChallengeAndReportSchemasRejected(t *testing.T) {
 	now := time.Now().UTC().Add(-time.Minute)
-	c := Challenge{Schema: 1, ID: strings.Repeat("a", 64), Created: now, Expires: now.Add(lifetime), Environment: deploy.Environment{JobUID: 502}}
-	if e := fresh(c, now.Add(time.Second)); e == nil {
-		t.Fatal("old challenge admitted")
+	c := Challenge{Schema: 3, ID: strings.Repeat("a", 64), Created: now, Expires: now.Add(lifetime), Environment: deploy.Environment{JobUID: 502}}
+	r := Report{Schema: 3, ChallengeSHA256: "current", Role: "job", UID: 502, Groups: []int{502}, Started: now, Finished: now.Add(time.Second)}
+	if e := fresh(c, now.Add(time.Second)); e != nil {
+		t.Fatal(e)
 	}
-	r := Report{Schema: 1, ChallengeSHA256: "current", Role: "job", UID: 502, Groups: []int{502}, Started: now, Finished: now.Add(time.Second)}
-	if e := checkReport(r, c, "current", "job"); e == nil {
-		t.Fatal("old report admitted")
+	if e := checkReport(r, c, "current", "job"); e != nil {
+		t.Fatal(e)
+	}
+	for _, schema := range []int{1, 2} {
+		old := c
+		old.Schema = schema
+		if e := fresh(old, now.Add(time.Second)); e == nil {
+			t.Fatalf("schema %d challenge admitted", schema)
+		}
+		oldReport := r
+		oldReport.Schema = schema
+		if e := checkReport(oldReport, c, "current", "job"); e == nil {
+			t.Fatalf("schema %d report admitted", schema)
+		}
 	}
 }
 

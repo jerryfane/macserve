@@ -211,7 +211,7 @@ func probe(ctx context.Context, dir, role, out string, uid, euid int) error {
 	}
 	ctx, cancel := context.WithDeadline(ctx, c.Expires)
 	defer cancel()
-	r := Report{Schema: 2, ChallengeSHA256: digest(raw), Role: role, UID: os.Getuid(), Started: time.Now().UTC()}
+	r := Report{Schema: 3, ChallengeSHA256: digest(raw), Role: role, UID: os.Getuid(), Started: time.Now().UTC()}
 	groups, e := actualIdentity(ctx, c, role)
 	if e != nil {
 		r.Refusal = e.Error()
@@ -336,7 +336,7 @@ func Canary(ctx context.Context, dir, listen, transport, out string, duration ti
 		if listen != "" {
 			return errors.New("owner-home controls do not accept a network listener")
 		}
-		r := Receipts{Schema: 2, ChallengeSHA256: digest(raw), UID: os.Getuid(), Started: time.Now().UTC()}
+		r := Receipts{Schema: 3, ChallengeSHA256: digest(raw), UID: os.Getuid(), Started: time.Now().UTC()}
 		r.OwnerBefore = ownerCanaryRead(c.OwnerCanary)
 		end := minTime(time.Now().Add(duration), c.Expires)
 		controlCtx, cancel := context.WithDeadline(ctx, end)
@@ -380,7 +380,7 @@ func Canary(ctx context.Context, dir, listen, transport, out string, duration ti
 		wg.Wait()
 	}()
 	for index, target := range targets {
-		r := Receipts{Schema: 2, ChallengeSHA256: digest(raw), UID: os.Getuid(), Listen: target, Started: time.Now().UTC()}
+		r := Receipts{Schema: 3, ChallengeSHA256: digest(raw), UID: os.Getuid(), Listen: target, Started: time.Now().UTC()}
 		var udp *net.UDPConn
 		var tcp net.Listener
 		if transport == "udp" {

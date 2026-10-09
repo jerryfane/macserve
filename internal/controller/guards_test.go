@@ -3,9 +3,6 @@ package controller
 import (
 	"context"
 	"errors"
-	"net"
-	"net/netip"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -19,15 +16,21 @@ func readyGuard(t *testing.T) (*Guard, *Health, *int64) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := &Health{Schema: 2, JobUID: 502, InterfacesSHA256: digest, BoundaryReceiptSHA256: digest, BoundaryValidated: true, CheckedAt: now, ExpiresAt: now.Add(30 * time.Second), AccountedBytes: 10 << 30, QualifiedProfiles: map[string]string{"unit": digest}}
+	h := &Health{Schema: 3, JobUID: 502, BoundaryReceiptSHA256: digest, BoundaryValidated: true, CheckedAt: now, ExpiresAt: now.Add(30 * time.Second), AccountedBytes: 10 << 30, QualifiedProfiles: map[string]string{"unit": digest}}
 	free := int64(200 << 30)
 	g.readHealth = func(string) (Health, error) { return *h, nil }
 	g.freeBytes = func(string) (int64, error) { return free, nil }
-	g.interfaces = func() (string, error) { return digest, nil }
 	return g, h, &free
 }
+func TestSchema3HealthAdmitsWithoutInterfaceBinding(t *testing.T) {
+	g, _, _ := readyGuard(t)
+	state, err := g.Check(context.Background())
+	if err != nil || !state.Ready || state.CancelActive || len(state.Blockers) != 0 {
+		t.Fatalf("fresh qualified health refused: %+v %v", state, err)
+	}
+}
 func TestReadinessRequiresCurrentQualifiedBoundary(t *testing.T) {
-	for _, scenario := range []string{"stale", "future", "expiry", "unsigned qualification", "old schema", "wrong worker", "interface changed", "profile changed", "unreadable"} {
+	for _, scenario := range []string{"stale", "future", "expiry", "unsigned qualification", "schema 1", "schema 2", "wrong worker", "invalid receipt", "profile changed", "unreadable"} {
 		t.Run(scenario, func(t *testing.T) {
 			g, h, _ := readyGuard(t)
 			switch scenario {
@@ -39,12 +42,14 @@ func TestReadinessRequiresCurrentQualifiedBoundary(t *testing.T) {
 				h.ExpiresAt = h.CheckedAt
 			case "unsigned qualification":
 				h.BoundaryValidated = false
-			case "old schema":
+			case "schema 1":
 				h.Schema = 1
+			case "schema 2":
+				h.Schema = 2
 			case "wrong worker":
 				h.JobUID = 503
-			case "interface changed":
-				h.InterfacesSHA256 = strings.Repeat("b", 64)
+			case "invalid receipt":
+				h.BoundaryReceiptSHA256 = ""
 			case "profile changed":
 				h.QualifiedProfiles["unit"] = strings.Repeat("b", 64)
 			case "unreadable":
@@ -108,110 +113,5 @@ func TestPrivateListenerPolicyRejectsPublicWildcardAndMappedAddresses(t *testing
 	c.AllowedNetworks = []string{"0.0.0.0/0"}
 	if err := c.validate(); err == nil {
 		t.Fatal("public CIDR expanded listener policy")
-	}
-}
-
-type inventoryAddress string
-
-func (a inventoryAddress) Network() string { return "ip" }
-func (a inventoryAddress) String() string  { return string(a) }
-
-func fixtureInventory(interfaces []net.Interface, addresses map[string][]string, includeAddresses bool) (string, []netip.Addr, error) {
-	return interfaceInventory(interfaces, func(iface *net.Interface) ([]net.Addr, error) {
-		var result []net.Addr
-		for _, text := range addresses[iface.Name] {
-			result = append(result, inventoryAddress(text))
-		}
-		return result, nil
-	}, includeAddresses)
-}
-
-func TestInterfaceInventoryIgnoresOnlyCoveredLinkLocalChurn(t *testing.T) {
-	interfaces := []net.Interface{{Name: "lo0", Flags: net.FlagUp | net.FlagLoopback}, {Name: "en0", Flags: net.FlagUp}}
-	addresses := map[string][]string{
-		"lo0": {"127.0.0.1/8", "::1/128"},
-		"en0": {"192.0.2.10/24", "2001:db8::1/64", "fd00::1/64", "100.64.0.10/32"},
-	}
-	digest, hosts, err := fixtureInventory(interfaces, addresses, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []netip.Addr{netip.MustParseAddr("127.0.0.1"), netip.MustParseAddr("::1"), netip.MustParseAddr("192.0.2.10"), netip.MustParseAddr("2001:db8::1"), netip.MustParseAddr("fd00::1"), netip.MustParseAddr("100.64.0.10")}
-	if !slices.Equal(hosts, want) {
-		t.Fatalf("lost relevant hosts: %v", hosts)
-	}
-	for _, linkLocal := range [][]string{
-		{"fe80::1/64", "169.254.1.2/16"},
-		{"febf:ffff::2/10", "169.254.255.255/32"},
-		nil,
-	} {
-		churn := map[string][]string{
-			"lo0": addresses["lo0"],
-			"en0": append(slices.Clone(addresses["en0"]), linkLocal...),
-			"ll0": linkLocal,
-		}
-		withExtra := append(slices.Clone(interfaces), net.Interface{Name: "ll0", Flags: net.FlagUp}, net.Interface{Name: "empty0"})
-		got, gotHosts, err := fixtureInventory(withExtra, churn, true)
-		if err != nil || got != digest || !slices.Equal(gotHosts, hosts) {
-			t.Fatalf("link-local churn changed qualification: %s %v %v", got, gotHosts, err)
-		}
-		digestOnly, _, err := fixtureInventory(withExtra, churn, false)
-		if err != nil || digestOnly != digest {
-			t.Fatalf("digest-only observer diverged: %s %v", digestOnly, err)
-		}
-	}
-	for name, replacement := range map[string]string{
-		"ipv4": "192.0.2.11/24", "prefix": "192.0.2.10/25",
-		"global": "2001:db8::2/64", "ula": "fd00::2/64", "tailnet": "100.64.0.11/32",
-		"loopback": "127.0.0.2/8", "name": "", "flags": "", "new interface": "",
-	} {
-		t.Run(name, func(t *testing.T) {
-			changedInterfaces := slices.Clone(interfaces)
-			changed := map[string][]string{"lo0": slices.Clone(addresses["lo0"]), "en0": slices.Clone(addresses["en0"])}
-			switch name {
-			case "name":
-				changedInterfaces[1].Name = "en1"
-				changed["en1"] = changed["en0"]
-			case "flags":
-				changedInterfaces[1].Flags |= net.FlagMulticast
-			case "new interface":
-				changedInterfaces = append(changedInterfaces, net.Interface{Name: "bridge0", Flags: net.FlagUp})
-				changed["bridge0"] = []string{"198.51.100.1/24"}
-			case "loopback":
-				changed["lo0"][0] = replacement
-			default:
-				index := map[string]int{"ipv4": 0, "prefix": 0, "global": 1, "ula": 2, "tailnet": 3}[name]
-				changed["en0"][index] = replacement
-			}
-			got, _, err := fixtureInventory(changedInterfaces, changed, true)
-			if err != nil {
-				t.Fatal(err)
-			}
-			g, health, _ := readyGuard(t)
-			health.InterfacesSHA256 = digest
-			g.interfaces = func() (string, error) { return got, nil }
-			state, err := g.Check(context.Background())
-			if err != nil || state.Ready || !state.CancelActive {
-				t.Fatalf("relevant inventory drift admitted: %+v %v", state, err)
-			}
-		})
-	}
-}
-
-func TestInterfaceInventoryFailsClosed(t *testing.T) {
-	interfaces := []net.Interface{{Name: "en0", Flags: net.FlagUp}}
-	for _, includeHosts := range []bool{false, true} {
-		for _, text := range []string{"not-an-address", "fe80::1/129", "169.254.1.1/no-prefix", "fe80::1%en0/64"} {
-			digest, hosts, err := fixtureInventory(interfaces, map[string][]string{"en0": {text}}, includeHosts)
-			if err == nil || digest != "" || hosts != nil {
-				t.Fatalf("accepted malformed interface address %q: %s %v %v", text, digest, hosts, err)
-			}
-		}
-		digest, hosts, err := interfaceInventory(interfaces, func(*net.Interface) ([]net.Addr, error) {
-			return nil, errors.New("address query failed")
-		}, includeHosts)
-		if err == nil || digest != "" || hosts != nil {
-			t.Fatalf("accepted unreadable interface: %s %v %v", digest, hosts, err)
-		}
 	}
 }

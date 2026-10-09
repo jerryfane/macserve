@@ -16,14 +16,13 @@ type Qualification struct {
 	ApprovedAt             time.Time         `json:"approved_at"`
 	JobUID                 uint32            `json:"job_uid"`
 	Boot                   string            `json:"boot"`
-	InterfacesSHA256       string            `json:"interfaces_sha256"`
 	BaselineSHA256         string            `json:"baseline_sha256"`
 	BoundaryEvidenceSHA256 string            `json:"boundary_evidence_sha256"`
 	Profiles               map[string]string `json:"profiles"`
 }
 
-// BoundaryEvidence is a protected operator attestation to actual probe artifacts,
-// not independently verified proof that network tests occurred.
+// BoundaryEvidence is a protected operator attestation to actual probe artifacts.
+// Network probes are informational and do not enforce a network boundary.
 type BoundaryEvidence struct {
 	Schema      int                  `json:"schema"`
 	RecordedAt  time.Time            `json:"recorded_at"`
@@ -46,7 +45,6 @@ type Probe struct {
 type Observation struct {
 	JobUID                 uint32            `json:"job_uid"`
 	Boot                   string            `json:"boot"`
-	InterfacesSHA256       string            `json:"interfaces_sha256"`
 	BaselineSHA256         string            `json:"baseline_sha256"`
 	BoundaryEvidenceSHA256 string            `json:"boundary_evidence_sha256,omitempty"`
 	Profiles               map[string]string `json:"profiles"`
@@ -66,14 +64,14 @@ func validDigest(s string) bool {
 // Evaluate does no I/O. Every rejected observation returns an explicitly invalid
 // health record suitable for immediate atomic publication.
 func Evaluate(now time.Time, q Qualification, e BoundaryEvidence, o Observation) (controller.Health, error) {
-	h := controller.Health{Schema: 2, JobUID: o.JobUID, CheckedAt: now, ExpiresAt: now.Add(30 * time.Second), AccountedBytes: -1, MemoryPressure: true}
+	h := controller.Health{Schema: 3, JobUID: o.JobUID, CheckedAt: now, ExpiresAt: now.Add(30 * time.Second), AccountedBytes: -1, MemoryPressure: true}
 	fail := func() (controller.Health, error) {
 		return h, errors.New("maintenance qualification or live observation mismatch")
 	}
-	if q.Schema != 2 || e.Schema != 2 || q.JobUID < 501 || q.JobUID != o.JobUID || e.JobUID != o.JobUID || q.ApprovedAt.IsZero() || q.ApprovedAt.After(now) || e.RecordedAt.IsZero() || e.RecordedAt.After(q.ApprovedAt) || e.Boot != q.Boot || !o.IdentityValid || !o.BaselineValid || o.AccountedBytes < 0 {
+	if q.Schema != 3 || e.Schema != 3 || q.JobUID < 501 || q.JobUID != o.JobUID || e.JobUID != o.JobUID || q.ApprovedAt.IsZero() || q.ApprovedAt.After(now) || e.RecordedAt.IsZero() || e.RecordedAt.After(q.ApprovedAt) || e.Boot != q.Boot || !o.IdentityValid || !o.BaselineValid || o.AccountedBytes < 0 {
 		return fail()
 	}
-	for _, pair := range [][2]string{{q.Boot, o.Boot}, {q.InterfacesSHA256, o.InterfacesSHA256}, {q.BaselineSHA256, o.BaselineSHA256}, {q.BoundaryEvidenceSHA256, o.BoundaryEvidenceSHA256}} {
+	for _, pair := range [][2]string{{q.Boot, o.Boot}, {q.BaselineSHA256, o.BaselineSHA256}, {q.BoundaryEvidenceSHA256, o.BoundaryEvidenceSHA256}} {
 		if !validDigest(pair[0]) || pair[0] != pair[1] {
 			return fail()
 		}
@@ -115,7 +113,6 @@ func Evaluate(now time.Time, q Qualification, e BoundaryEvidence, o Observation)
 			return fail()
 		}
 	}
-	h.InterfacesSHA256 = o.InterfacesSHA256
 	h.BoundaryReceiptSHA256 = o.BoundaryEvidenceSHA256
 	h.BoundaryValidated = true
 	h.AccountedBytes = o.AccountedBytes

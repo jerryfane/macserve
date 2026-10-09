@@ -28,6 +28,15 @@ func verifyArtifacts(dir string, v Candidate) error {
 		if digest(b) != want {
 			return fmt.Errorf("artifact digest mismatch: %s", name)
 		}
+		if strings.HasPrefix(name, "attestation-") && strings.HasSuffix(name, ".json") {
+			var a Attestation
+			if e := decode(b, &a); e != nil {
+				return e
+			}
+			if a.Schema != 3 {
+				return errors.New("unsupported attestation")
+			}
+		}
 	}
 	for _, name := range categories {
 		cat, ok := v.Categories[name]
@@ -63,7 +72,7 @@ func readyAutomatic(v Candidate) error {
 	return nil
 }
 func compatibleSitting(a, b Challenge) bool {
-	return a.EnvironmentSHA256 == b.EnvironmentSHA256 && a.Observation.JobUID == b.Observation.JobUID && a.Observation.InterfacesSHA256 == b.Observation.InterfacesSHA256 && maps.Equal(a.Observation.Profiles, b.Observation.Profiles) && slices.Equal(a.TCP, b.TCP) && slices.Equal(a.UDP, b.UDP) && slices.Equal(a.Allow, b.Allow) && a.OwnerCanary == b.OwnerCanary && slices.Equal(a.PrivatePaths, b.PrivatePaths)
+	return a.EnvironmentSHA256 == b.EnvironmentSHA256 && a.Observation.JobUID == b.Observation.JobUID && maps.Equal(a.Observation.Profiles, b.Observation.Profiles) && slices.Equal(a.TCP, b.TCP) && slices.Equal(a.UDP, b.UDP) && slices.Equal(a.Allow, b.Allow) && a.OwnerCanary == b.OwnerCanary && slices.Equal(a.PrivatePaths, b.PrivatePaths)
 }
 
 // Lifecycle evidence cannot be supplied by an arbitrary old artifact alone. A
@@ -99,7 +108,7 @@ func lifecycle(dir string, current Challenge, category string) error {
 		if e = decode(raw, &prior); e != nil {
 			return e
 		}
-		if prior.Schema != 2 || previous.ChallengeSHA256 != digest(raw) || !compatibleSitting(current, prior) || !sameObservation(prior.Observation, previous.Observation) || previous.Collected.After(next.Created) || current.Created.Sub(previous.Collected) > 7*24*time.Hour {
+		if prior.Schema != 3 || previous.ChallengeSHA256 != digest(raw) || !compatibleSitting(current, prior) || !sameObservation(prior.Observation, previous.Observation) || previous.Collected.After(next.Created) || current.Created.Sub(previous.Collected) > 7*24*time.Hour {
 			return errors.New("previous sitting deployment/time/observation mismatch")
 		}
 		if category == "fast_switch" {
@@ -183,7 +192,7 @@ func Attest(ctx context.Context, dir, category, artifact, reason string) error {
 	if e = preserve(dir, name, b, v.Artifacts); e != nil {
 		return e
 	}
-	a := Attestation{Schema: 2, ChallengeSHA256: digest(raw), Category: category, Recorded: time.Now().UTC(), ReviewerUID: 0, Reason: reason, Artifact: name, ArtifactSHA256: digest(b), Profiles: maps.Clone(v.Observation.Profiles)}
+	a := Attestation{Schema: 3, ChallengeSHA256: digest(raw), Category: category, Recorded: time.Now().UTC(), ReviewerUID: 0, Reason: reason, Artifact: name, ArtifactSHA256: digest(b), Profiles: maps.Clone(v.Observation.Profiles)}
 	ab, _ := encode(a)
 	aname := "attestation-" + category + ".json"
 	if e = preserve(dir, aname, ab, v.Artifacts); e != nil {
