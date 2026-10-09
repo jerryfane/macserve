@@ -43,6 +43,9 @@ func Install(o Options, stdout, stderr io.Writer) error {
 		}
 	}
 	if o.Apply {
+		if err := nativeCommand(5*time.Second, stderr, "/bin/bash", "-c", "test -t 0"); err != nil {
+			return errors.New("--apply requires an interactive terminal for the job password")
+		}
 		for _, path := range []string{o.EnvironmentPath, o.BinaryPath} {
 			if err := hostguard.CheckProtectedPath(path, false); err != nil {
 				return err
@@ -336,6 +339,7 @@ func nativeCommand(timeout time.Duration, output io.Writer, path string, args ..
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Dir = "/"
 	cmd.Env = nativeEnv()
+	cmd.Stdin = os.Stdin
 	cmd.Stdout, cmd.Stderr = output, output
 	cmd.WaitDelay = time.Second
 	if err := cmd.Run(); err != nil {

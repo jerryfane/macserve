@@ -14,11 +14,15 @@ validate_account_groups() {
         case "$gid" in 0|20|80|"$other") fail "privileged/shared supplementary group for $name; keep services disabled and reconcile manually" ;; esac
     done
 }
-create_identity() {
-    local name=$1 uid=$2 gid=$3 shell=$4 userhome=$5
+create_group() {
+    local name=$1 gid=$2
     /usr/bin/dscl . -create "/Groups/$name"
     /usr/bin/dscl . -create "/Groups/$name" PrimaryGroupID "$gid"
     /usr/bin/dscl . -create "/Groups/$name" Password '*'
+}
+create_identity() {
+    local name=$1 uid=$2 gid=$3 shell=$4 userhome=$5
+    create_group "$name" "$gid"
     /usr/bin/dscl . -create "/Users/$name"
     /usr/bin/dscl . -create "/Users/$name" UniqueID "$uid"
     /usr/bin/dscl . -create "/Users/$name" PrimaryGroupID "$gid"
@@ -29,9 +33,55 @@ create_accounts() {
     create_identity "$controller_user" "$controller_uid" "$controller_gid" /usr/bin/false "$prefix/var/controller"
     /usr/bin/dscl . -create "/Users/$controller_user" Password '*'
     /usr/bin/dscl . -create "/Users/$controller_user" IsHidden 1
-    create_identity "$job_user" "$job_uid" "$job_gid" /bin/zsh "$home"
-    /usr/bin/dscl . -create "/Users/$job_user" RealName "$job_real_name"
-    /usr/bin/dscl . -create "/Users/$job_user" AuthenticationAuthority ';ShadowHash;'
+    create_group "$job_user" "$job_gid"
+    /usr/sbin/sysadminctl -addUser "$job_user" -fullName "$job_real_name" -UID "$job_uid" -GID "$job_gid" -shell /bin/zsh -home "$home" -password -
+}
+# sysadminctl can exit successfully without creating the requested account.
+# Verify specific record fields before provisioning or changing directory ownership.
+validate_created_accounts() {
+    local name expected_uid expected_gid other actual gid without_staff has_staff record
+    for name in "$controller_user" "$job_user"; do
+        if [ "$name" = "$controller_user" ]; then
+            expected_uid=$controller_uid expected_gid=$controller_gid other=$job_gid
+        else
+            expected_uid=$job_uid expected_gid=$job_gid other=$controller_gid
+        fi
+        [ "$(/usr/bin/id -u "$name")" = "$expected_uid" ] || fail "incorrect UID for $name"
+        [ "$(/usr/bin/id -g "$name")" = "$expected_gid" ] || fail "incorrect primary group for $name"
+        actual=$(/usr/bin/id -G "$name") || fail "cannot resolve groups for $name"
+        if [ "$name" = "$job_user" ]; then
+            record=$(/usr/bin/dscl . -read "/Users/$name" UniqueID) || fail 'cannot read job UID'
+            [ "$record" = "UniqueID: $job_uid" ] || fail 'incorrect job UID record'
+            record=$(/usr/bin/dscl . -read "/Users/$name" PrimaryGroupID) || fail 'cannot read job primary group'
+            [ "$record" = "PrimaryGroupID: $job_gid" ] || fail 'incorrect job primary group record'
+            record=$(/usr/bin/dscl . -read "/Users/$name" NFSHomeDirectory) || fail 'cannot read job home'
+            [ "$record" = "NFSHomeDirectory: $home" ] || fail 'incorrect job home record'
+            record=$(/usr/bin/dscl . -read "/Users/$name" UserShell) || fail 'cannot read job shell'
+            [ "$record" = 'UserShell: /bin/zsh' ] || fail 'incorrect job shell record'
+            # Refuse admin/other prohibited memberships before removing staff.
+            without_staff='' has_staff=false
+            for gid in $actual; do
+                if [ "$gid" = 20 ]; then has_staff=true; else without_staff="$without_staff $gid"; fi
+            done
+            validate_account_groups "$name" "$other" "$without_staff"
+            if [ "$has_staff" = true ]; then
+                /usr/sbin/dseditgroup -o edit -d "$job_user" -t user staff || fail 'cannot remove new job user from staff'
+                actual=$(/usr/bin/id -G "$name") || fail 'cannot re-read job groups'
+            fi
+        fi
+        validate_account_groups "$name" "$other" "$actual"
+    done
+    # Listing avoids treating an arbitrary -read failure as a missing attribute.
+    local hidden_records hidden_name hidden_value found=false
+    hidden_records=$(/usr/bin/dscl . -list /Users IsHidden) || fail 'cannot enumerate login visibility'
+    while read -r hidden_name hidden_value; do
+        if [ "$hidden_name" = "$job_user" ]; then
+            [ "$found" = false ] || fail 'ambiguous job login visibility'
+            found=true
+            [ -z "$hidden_value" ] || fail 'job user has IsHidden set'
+        fi
+    done <<< "$hidden_records"
+    [ "$found" = true ] || fail 'cannot find job login visibility'
 }
 main() {
 apply=false
@@ -78,12 +128,13 @@ fi
 prefix=/Library/macserve
 home=/Users/$job_user
 printf 'PLAN ONLY until explicit --apply: controller %s uid=%s primary-group=%s gid=%s (nonlogin); job %s uid=%s primary-group=%s gid=%s; existing owner %s uid=%s\n' "$controller_user" "$controller_uid" "$controller_user" "$controller_gid" "$job_user" "$job_uid" "$job_user" "$job_gid" "$owner_user" "$owner_uid"
-printf '%s\n' 'Create root:wheel 0755 /Library/macserve, bin and config; root:wheel 0711 var.' 'Create controller-owned 0700 var/controller, var/controller/secrets, var/controller/run, var/controller/log.' 'Create root:wheel 0700 var/broker, var/broker/log, var/exports; root:wheel 0711 var/workspaces; root:wheel 0755 health.' "Create job-owned 0700 $home. Controller password disabled; job display name: $job_real_name." "Set the job password privately afterward: sudo dscl . -passwd /Users/$job_user" 'No services, PF, owner ACLs, FileVault, auto-login, or GUI login changed. Plan performs no account/home/service inspection.'
+printf '%s\n' 'Create root:wheel 0755 /Library/macserve, bin and config; root:wheel 0711 var.' 'Create controller-owned 0700 var/controller, var/controller/secrets, var/controller/run, var/controller/log.' 'Create root:wheel 0700 var/broker, var/broker/log, var/exports; root:wheel 0711 var/workspaces; root:wheel 0755 health.' "Create job-owned 0700 $home. Controller password disabled; job display name: $job_real_name." 'Create the job account with sysadminctl and enter its password interactively; remove any inherited staff membership and verify identity, groups and login visibility before directory provisioning.' 'No services, PF, owner ACLs, FileVault, auto-login, or GUI login changed. Plan performs no account/home/service inspection.'
 [ "$apply" = true ] || return 0
 # Gate BEFORE any host account or filesystem inspection.
+[ -t 0 ] || fail '--apply requires interactive stdin for the sysadminctl password prompt'
 [ "$(/usr/bin/uname -s)" = Darwin ] || fail '--apply requires Darwin'
 [ "$EUID" -eq 0 ] || fail '--apply requires root'
-for tool in /usr/bin/dscl /usr/bin/dscacheutil /usr/bin/id /usr/bin/stat /usr/bin/install /bin/ls; do
+for tool in /usr/bin/dscl /usr/sbin/sysadminctl /usr/sbin/dseditgroup /usr/bin/dscacheutil /usr/bin/id /usr/bin/stat /usr/bin/install /bin/ls; do
     [ -x "$tool" ] || fail "required system tool unavailable: $tool"
 done
 # Query the search node as well as the local directory: fail closed on directory errors.
@@ -174,20 +225,14 @@ report_partial_failure() {
 }
 trap 'report_partial_failure "$?"' EXIT
 create_accounts
-# A new account must not inherit supplementary privileges from a directory policy.
-for name in "$controller_user" "$job_user"; do
-    actual=$(/usr/bin/id -G "$name")
-    if [ "$name" = "$controller_user" ]; then expected=$controller_gid; other=$job_gid; else expected=$job_gid; other=$controller_gid; fi
-    [ "$(/usr/bin/id -g "$name")" = "$expected" ] || fail "incorrect primary group for $name"
-    validate_account_groups "$name" "$other" "$actual"
-done
+validate_created_accounts
 /usr/bin/install -d -o root -g wheel -m 0755 "$prefix" "$prefix/bin" "$prefix/health"
 /usr/bin/install -d -o root -g wheel -m 0755 "$prefix/config"
 /usr/bin/install -d -o root -g wheel -m 0711 "$prefix/var" "$prefix/var/workspaces"
 /usr/bin/install -d -o "$controller_uid" -g "$controller_gid" -m 0700 "$prefix/var/controller" "$prefix/var/controller/secrets" "$prefix/var/controller/run" "$prefix/var/controller/log"
 /usr/bin/install -d -o root -g wheel -m 0700 "$prefix/var/broker" "$prefix/var/broker/log" "$prefix/var/exports"
 /usr/bin/install -d -o "$job_uid" -g "$job_gid" -m 0700 "$home"
-printf '%s\n' "Created accounts and empty protected directories only. Controller password remains disabled. Set the job password privately afterward: sudo dscl . -passwd /Users/$job_user" 'Install reviewed inputs separately and qualify before enabling anything.'
+printf '%s\n' 'Created accounts and empty protected directories only. Controller password remains disabled; the job password was entered interactively during sysadminctl creation. Verified dedicated primary groups, no prohibited supplementary groups, and no job IsHidden attribute.' 'Install reviewed inputs separately and qualify before enabling anything.'
 }
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     main "$@"

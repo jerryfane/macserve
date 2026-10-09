@@ -370,7 +370,9 @@ macOS root; neither modifies host policy, adopts processes or generates boundary
 
 Job qualification and health identity inspection refuse a missing or unreadable authority with
 `job user not listable at login window`. Account creation uses `JOB_REAL_NAME` (default `macserve build`)
-and leaves interactive password setup to the administrator; see the installation guide.
+and creates the job through `sysadminctl -password -` during interactive administrator apply, never with
+`-admin` or a password value in argv. Any inherited job `staff` membership is removed and rechecked;
+admin membership or a set `IsHidden` attribute refuses. See the installation guide.
 
 `maintenance-observe --coexistence-only --config PATH` reads configured peer service PIDs and opaque main/peer
 PF rule digests without needing a GUI baseline or completed qualification. PF read failures are recorded as
