@@ -41,6 +41,9 @@ func BrokerIdentity(jobUID, jobGID, controllerUID, ownerUID uint32) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	if err := JobLoginListable(ctx, account.Username); err != nil {
+		return err
+	}
 	// This only checks an existing domain. It never creates a GUI login.
 	cmd := exec.CommandContext(ctx, "/bin/launchctl", "print", "gui/"+account.Uid)
 	cmd.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LANG=C", "LC_ALL=C"}

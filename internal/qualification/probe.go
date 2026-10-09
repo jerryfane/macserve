@@ -104,6 +104,11 @@ func actualIdentity(ctx context.Context, c Challenge, role string) ([]int, error
 	if account.Username != name || account.Gid != strconv.Itoa(os.Getgid()) {
 		return nil, errors.New("actual account name/primary group differs from reviewed identity")
 	}
+	if role == "job" {
+		if e := hostguard.JobLoginListable(ctx, name); e != nil {
+			return nil, e
+		}
+	}
 	expected := []int{}
 	for _, s := range append(wanted, account.Gid) {
 		n, e := strconv.Atoi(s)
