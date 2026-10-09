@@ -204,7 +204,19 @@ func ownerCanaryRead(path string) OwnerCanaryControl {
 	ok, detail := readable(path, false)
 	return OwnerCanaryControl{Path: path, At: time.Now().UTC(), Readable: ok, Detail: detail}
 }
+
+var errRootProbe = errors.New("qualification probes must not run with real or effective UID 0")
+
 func Probe(ctx context.Context, dir, role, out string) error {
+	return probe(ctx, dir, role, out, os.Getuid(), os.Geteuid())
+}
+
+func probe(ctx context.Context, dir, role, out string, uid, euid int) error {
+	// Refuse before inspecting the protected session or touching caller paths,
+	// including refusal evidence. Only actual non-root accounts may probe.
+	if uid == 0 || euid == 0 {
+		return errRootProbe
+	}
 	c, raw, e := loadChallenge(dir)
 	if e != nil {
 		return e

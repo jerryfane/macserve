@@ -39,12 +39,15 @@ canary --session DIR --transport udp|tcp --listen IP:PORT[,IP:PORT...]
   Start BEFORE either probe; leave running until BOTH probes finish.
 probe --session DIR --role job|owner --out NEW_FILE
   Run directly in that actual account's existing GUI login with full memberships.
-  Preserves every target/attempt/refusal; no sudo/su impersonation.
+  Preserves non-root target/attempt/refusal evidence; no sudo/su impersonation.
+  Real or effective UID 0 refuses before session access or any --out write.
 collect --session DIR --job JOB_REPORT --owner OWNER_REPORT
   --receipts UDP_RECEIPT[,UDP_RECEIPT...]
   Root snapshots bounded reports, receiver evidence, PF counters and current
   observations into candidate.json, boundary-evidence.json and qualification.json.
   Inspect ALL categories; failures never become success by manual attestation.
+  Incomplete attempts retain separate snapshots and can retry before expiry.
+  Once candidate.json exists, begin a new session rather than recollecting.
 attest --session DIR --category delegated_boundary|tool_profiles|fast_switch|reboot
   --artifact EXISTING_FILE --reason 'Owner-reviewed provenance and conclusions'
   Explicit root review of real owner/root artifacts only. Enabled profiles need

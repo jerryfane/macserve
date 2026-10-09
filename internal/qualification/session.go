@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jerryfane/macserve/internal/controller"
@@ -101,11 +102,42 @@ func sessionLock(dir string) (func(), error) {
 	if e := protectedDirectory(dir); e != nil {
 		return nil, e
 	}
-	p := filepath.Join(dir, ".lock")
-	if e := os.Mkdir(p, 0700); e != nil {
-		return nil, fmt.Errorf("session busy or interrupted: %w", e)
+	return lockSessionFile(dir)
+}
+
+// Keep the inode after closing: unlinking it would permit two independent locks.
+// The kernel releases this lock even when collection exits without cleanup.
+func lockSessionFile(dir string) (func(), error) {
+	f, err := os.OpenFile(filepath.Join(dir, ".lock"), os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0600)
+	if err != nil {
+		return nil, err
 	}
-	return func() { _ = os.Remove(p) }, nil
+	fail := func(err error) (func(), error) { _ = f.Close(); return nil, err }
+	info, err := f.Stat()
+	if err != nil {
+		return fail(err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || stat.Uid != uint32(os.Geteuid()) || stat.Nlink != 1 {
+		return fail(errors.New("unsafe session lock"))
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return fail(fmt.Errorf("session busy: %w", err))
+	}
+	return func() { _ = f.Close() }, nil
+}
+
+func collectionAttempt(dir string) (string, error) {
+	if _, err := os.Lstat(filepath.Join(dir, "candidate.json")); err == nil {
+		return "", errors.New("session already collected; begin a new session")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	id, err := randomID()
+	if err != nil {
+		return "", err
+	}
+	return "collect-" + id + "-", nil
 }
 func Begin(ctx context.Context, o BeginOptions) error {
 	if e := rootOnly(); e != nil {
@@ -298,6 +330,10 @@ func Collect(ctx context.Context, dir, jobPath, ownerPath, receiptPaths string) 
 	if e != nil {
 		return e
 	}
+	attempt, e := collectionAttempt(dir)
+	if e != nil {
+		return e
+	}
 	var job, owner Report
 	jb, e := readArtifact(jobPath, int(c.Environment.JobUID))
 	if e != nil {
@@ -329,47 +365,16 @@ func Collect(ctx context.Context, dir, jobPath, ownerPath, receiptPaths string) 
 	}
 	after, e := snapshot(ctx)
 	if e != nil {
-		_ = saveJSON(filepath.Join(dir, "collect-refusal.json"), struct {
+		saveErr := saveJSON(filepath.Join(dir, attempt+"refusal.json"), struct {
 			Snapshot Snapshot
 			Error    string
 		}{after, e.Error()}, 0600)
-		return e
+		return errors.Join(e, saveErr)
 	}
 	candidate := Candidate{Schema: 1, ChallengeSHA256: digest(raw), Collected: time.Now().UTC(), Observation: after.Observation, Artifacts: map[string]string{"challenge.json": digest(raw), "before.json": digest(beforeBytes)}, Categories: map[string]Category{}}
-	if e = preserve(dir, "job-report.json", jb, candidate.Artifacts); e != nil {
+	receipts, e := collectArtifacts(dir, attempt, c, candidate, jb, ob, after, receiptPaths)
+	if e != nil {
 		return e
-	}
-	if e = preserve(dir, "owner-report.json", ob, candidate.Artifacts); e != nil {
-		return e
-	}
-	ab, _ := encode(after)
-	if e = preserve(dir, "after.json", ab, candidate.Artifacts); e != nil {
-		return e
-	}
-	var receipts []Receipts
-	paths := []string{}
-	if receiptPaths != "" {
-		paths = strings.Split(receiptPaths, ",")
-	}
-	if len(paths) > 128 {
-		return errors.New("too many receipt files")
-	}
-	for i, p := range paths {
-		b, err := readArtifact(p, int(c.Environment.OwnerUID))
-		if err != nil {
-			return err
-		}
-		var r Receipts
-		if err = decode(b, &r); err != nil {
-			return err
-		}
-		if r.Schema != 1 || r.ChallengeSHA256 != digest(raw) || r.UID != int(c.Environment.OwnerUID) || r.Started.Before(c.Created) || r.Finished.Before(r.Started) || r.Finished.After(c.Expires) || r.Finished.After(candidate.Collected) || r.Error != "" || !slices.Contains(c.UDP, r.Listen) {
-			return errors.New("invalid canary receipt document")
-		}
-		if err = preserve(dir, fmt.Sprintf("receipts-%03d.json", i), b, candidate.Artifacts); err != nil {
-			return err
-		}
-		receipts = append(receipts, r)
 	}
 	candidate.Categories = aggregate(c, job, owner, receipts, before, after)
 	evidence := make([]string, 0, len(candidate.Artifacts))
@@ -390,6 +395,50 @@ func Collect(ctx context.Context, dir, jobPath, ownerPath, receiptPaths string) 
 		}
 	}
 	return writeCandidate(dir, c, candidate)
+}
+
+// Snapshot inputs before receipt validation. A failed attempt remains immutable;
+// only a later complete attempt's hashes enter the committed candidate.
+func collectArtifacts(dir, attempt string, c Challenge, candidate Candidate, job, owner []byte, after Snapshot, receiptPaths string) ([]Receipts, error) {
+	if err := preserve(dir, attempt+"job-report.json", job, candidate.Artifacts); err != nil {
+		return nil, err
+	}
+	if err := preserve(dir, attempt+"owner-report.json", owner, candidate.Artifacts); err != nil {
+		return nil, err
+	}
+	ab, err := encode(after)
+	if err != nil {
+		return nil, err
+	}
+	if err := preserve(dir, attempt+"after.json", ab, candidate.Artifacts); err != nil {
+		return nil, err
+	}
+	var receipts []Receipts
+	var paths []string
+	if receiptPaths != "" {
+		paths = strings.Split(receiptPaths, ",")
+	}
+	if len(paths) > 128 {
+		return nil, errors.New("too many receipt files")
+	}
+	for i, p := range paths {
+		b, err := readArtifact(p, int(c.Environment.OwnerUID))
+		if err != nil {
+			return nil, err
+		}
+		if err = preserve(dir, attempt+fmt.Sprintf("receipts-%03d.json", i), b, candidate.Artifacts); err != nil {
+			return nil, err
+		}
+		var r Receipts
+		if err = decode(b, &r); err != nil {
+			return nil, err
+		}
+		if r.Schema != 1 || r.ChallengeSHA256 != candidate.ChallengeSHA256 || r.UID != int(c.Environment.OwnerUID) || r.Started.Before(c.Created) || r.Finished.Before(r.Started) || r.Finished.After(c.Expires) || r.Finished.After(candidate.Collected) || r.Error != "" || !slices.Contains(c.UDP, r.Listen) {
+			return nil, errors.New("invalid canary receipt document")
+		}
+		receipts = append(receipts, r)
+	}
+	return receipts, nil
 }
 func rows(r Report, category string, targets []string, attempts int) (bool, int) {
 	expected := map[string]bool{}

@@ -5,7 +5,29 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
+	"unicode"
 )
+
+// foldedJSONKey matches encoding/json's case-insensitive field matching,
+// including Unicode simple-fold aliases such as long s and the Kelvin sign.
+func foldedJSONKey(key string) string {
+	return strings.Map(func(r rune) rune {
+		if r <= unicode.MaxASCII {
+			if r >= 'a' && r <= 'z' {
+				return r - ('a' - 'A')
+			}
+			return r
+		}
+		for {
+			next := unicode.SimpleFold(r)
+			if next <= r {
+				return next
+			}
+			r = next
+		}
+	}, key)
+}
 
 func uniqueJSON(raw []byte) error {
 	d := json.NewDecoder(bytes.NewReader(raw))
@@ -32,7 +54,11 @@ func uniqueJSON(raw []byte) error {
 					return e
 				}
 				s, ok := key.(string)
-				if !ok || seen[s] {
+				if !ok {
+					return errors.New("invalid JSON field")
+				}
+				s = foldedJSONKey(s)
+				if seen[s] {
 					return errors.New("duplicate JSON field")
 				}
 				seen[s] = true

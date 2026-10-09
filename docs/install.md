@@ -73,6 +73,8 @@ sudo /Library/macserve/bin/qualify.sh stage-policy \
   --file /private/var/root/reviewed-macserve-pf.conf
 ```
 
+Qualification JSON, including the controller configuration read by `stage-policy`, rejects duplicate keys under Go's case-insensitive field matching (including Unicode simple-fold aliases). Staging requires the canonical `policy_sha256` key and refuses ambiguous input rather than reordering keys and changing another field's meaning.
+
 ### Sitting 2: actual job GUI, tools and boundary evidence
 
 First establish the approved job GUI login/password and narrowly scoped prompts. With the broker stopped, audit retained GUI PID/start identities and run the existing reset once; `AUDITED_PIDS` is a reviewed list, never a process-list substitution. From the administrator's session:
@@ -120,6 +122,8 @@ The root-owned challenge is readable by both accounts; private evidence remains 
      --role job --out "$HOME/job-probe.json"
    ```
 
+   A probe with real or effective UID 0 refuses before reading the session or touching `--out`; it creates no root-owned refusal report. Non-root identity refusals may still produce a report.
+
 3. At the actual owner GUI console, run controls, then stop the receivers gracefully in their original terminals:
 
    ```sh
@@ -136,6 +140,10 @@ The root-owned challenge is readable by both accounts; private evidence remains 
    ```
 
 Collection preserves bounded snapshots, hashes, PF counters and current boot/interface/baseline/policy/profile bindings; inspect every artifact and status. Candidate `boundary-evidence.json` and `qualification.json` are **not approvals**. TCP/UDP failures, missing controls, unexpected owner-home access or unsupported native output cannot be overridden by an attestation. Unix permission denial is not a claim that a disabled worker's credential-bearing API was exercised.
+
+An incomplete collection can be retried in the same unexpired session after resolving its input error. Collection snapshots use immutable `collect-<random-id>-*` names, including receipt bytes that fail validation; evidence already saved by failed attempts remains available for inspection. Only the successful attempt's input hashes enter the candidate. Partial summary files are not a commit: `candidate.json` is published last. Once it exists, recollection refuses; begin a new session for another probe round, even if the completed candidate contains failed categories.
+
+The persistent `.lock` file uses a nonblocking advisory lock, released by the kernel when the process exits. Do not delete it during collection. An old-version `.lock` directory or an unsafe lock object is refused, not automatically removed; preserve that session for reviewed recovery. Retries do not extend challenge expiry or relax live-binding checks.
 
 Each boundary `artifact_sha256` identifies a preserved `category-<name>.json` manifest of the exact underlying artifact hashes. Session storage is under the accounted `var` tree; do not move generated mutable evidence outside the service budget to avoid accounting.
 
@@ -220,7 +228,7 @@ bash assets/create-users.sh \
 
 The default plan makes no account/home/service queries and changes nothing; it is not proof that names or IDs are available. Account/group names and numeric IDs must be explicit. The script accepts canonical decimal IDs 501–999999999 for controller/job UIDs and GIDs and the existing owner UID; owner/controller/job UIDs must be distinct. Names are 1–31 lowercase ASCII letters/digits/underscores starting with a letter, with reserved names refused. Each service account has a same-named dedicated primary group. The job must not share a primary group with the owner/controller, including their supplementary memberships; `staff`, admin/root aliases and existing identities are not substitutes.
 
-The job account must belong to neither `staff` (GID 20) nor `admin`, including supplementary memberships. A dedicated primary group alone is insufficient; native identity checks refuse either membership. Verify the actual GUI session's effective UID and full group list during qualification, not only a helper that drops supplementary groups.
+Both newly created service accounts are checked for supplementary `wheel`/root (GID 0), `staff` (GID 20), `admin` (GID 80), and the other service account's primary GID before provisioning directories. A dedicated primary group alone is insufficient. Unexpected membership leaves a partial account creation requiring reviewed recovery, not automatic deletion. Verify the actual GUI session's effective UID and full group list during qualification, not only a helper that drops supplementary groups.
 
 Only during sitting 1 may an administrator run the same reviewed command with `--apply`, as root on Darwin. Apply checks prerequisites and collisions before mutation and refuses existing paths including `/Library/macserve` and the proposed job home. Do not repeatedly apply after a partial failure: retain the plan/output, audit exactly which new objects were created, and arrange a reviewed recovery. Never delete an existing account or reuse an unrelated directory to make a check pass. Passwords are disabled on creation; establish the job password privately through owner-approved interactive UI/password administration, never argv, shell history or logs. The controller remains non-login, non-admin with a disabled password. No owner ACL changes are implicit.
 
