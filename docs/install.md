@@ -35,6 +35,7 @@ CONTROLLER_USER=macservectl
 CONTROLLER_UID=6201
 CONTROLLER_GID=6201
 JOB_USER=macservejob
+JOB_REAL_NAME=macserve build
 JOB_UID=6202
 JOB_GID=6202
 OWNER_USER=owner
@@ -52,6 +53,8 @@ ENV
 ```
 
 `deploy.env` is bounded **data**, never shell-sourced: plain `KEY=VALUE`, blank/comment lines, comma-separated lists, and `owner/repo:numeric-id` repository pins. No shell expansions, commands, unknown keys or duplicate keys. Default plan verifies the binary digest and validates/renders the deployment without creating accounts or installation files. It does not prove native identity availability or any security boundary.
+
+`JOB_REAL_NAME` is the optional GUI job account display name (`RealName`), defaulting to `macserve build` when omitted. Spaces are allowed in the unquoted data value; an explicitly empty value is refused. The job account is created with `AuthenticationAuthority` set to `;ShadowHash;`, not `Password '*'`. The controller remains hidden (`IsHidden 1`) with a disabled password.
 
 `HOST_ADDRESSES` also accepts canonical IPv6 link-local addresses with or without a `%scope` and canonical IPv4 link-local addresses. A scope is supported only for IPv6 link-local hosts: 1–63 ASCII letters, digits, underscores, dots or hyphens. Link-local entries are validated but omitted from the per-host inventory and TCP target expansion. This omission establishes no deny rule or isolation guarantee. Scoped non-link-local addresses, malformed addresses and exact duplicates remain refused. Tailnet/listener validation is unchanged; the raw reviewed environment is preserved and hashed exactly.
 
@@ -80,6 +83,14 @@ sudo /bin/bash /private/var/root/macserve-deploy-kit/assets/install.sh \
 Apply refuses existing installation/accounts/targets. It uses the existing account helper, verifies the staged executable, literal-renders and lints all three disabled plists, and writes matching controller/worker/maintenance configs plus `{"profiles":[]}`. It generates separate TLS and receipt keys; private keys are controller-owned `0600`. **The API token is printed once, only after success.** Move it directly into the authorized caller's secret storage: no `tee`, session transcript, shell-history assignment or shared log. Only its digest is installed. Preserve public trust pins from `/Library/macserve/config/deployment-pins.json`; never treat a receipt's own advertised key as an independent trust anchor.
 
 `deployment-pins.json` includes `receipt_key_id`, standard-base64 `receipt_public_key`, opaque service/host IDs and `tls_certificate_sha256` over the certificate's **DER** encoding, not its PEM file text.
+
+After account creation, set the job password privately with `sudo dscl . -passwd /Users/<job>`, replacing `<job>` with the reviewed `JOB_USER`. For the illustrative account above:
+
+```sh
+sudo dscl . -passwd /Users/macservejob
+```
+
+Enter the password only at the interactive prompt, never as an additional argument, shell-history value or log entry. This does not establish a GUI login; log in as the job account during the approved sitting.
 
 No daemon, PF rule, owner-home permission or GUI session was activated. An interrupted apply is not rerunnable recovery: retain evidence and inspect partial state instead of deleting objects and retrying. Before deployment mutation, apply durably saves `before.json` under a new root-private `/private/var/root/.macserve-install-evidence-*` directory; final `coexistence.json` records before/after observations and any installation error where possible. Owner-home restrictions remain a separately approved prerequisite; there is no service PF policy to stage or load.
 
@@ -228,6 +239,7 @@ Review `assets/create-users.sh` before running it. From the reviewed source chec
 bash assets/create-users.sh \
   --controller-user "$CONTROLLER_USER" --controller-uid "$CONTROLLER_UID" --controller-gid "$CONTROLLER_GID" \
   --job-user "$JOB_USER" --job-uid "$JOB_UID" --job-gid "$JOB_GID" \
+  --job-real-name "${JOB_REAL_NAME:-macserve build}" \
   --owner-user "$OWNER_USER" --owner-uid "$OWNER_UID"
 ```
 
@@ -235,7 +247,9 @@ The default plan makes no account/home/service queries and changes nothing; it i
 
 Both newly created service accounts are checked for supplementary `wheel`/root (GID 0), `staff` (GID 20), `admin` (GID 80), and the other service account's primary GID before provisioning directories. A dedicated primary group alone is insufficient. Unexpected membership leaves a partial account creation requiring reviewed recovery, not automatic deletion. Verify the actual GUI session's effective UID and full group list during qualification, not only a helper that drops supplementary groups.
 
-Only during sitting 1 may an administrator run the same reviewed command with `--apply`, as root on Darwin. Apply checks prerequisites and collisions before mutation and refuses existing paths including `/Library/macserve` and the proposed job home. Do not repeatedly apply after a partial failure: retain the plan/output, audit exactly which new objects were created, and arrange a reviewed recovery. Never delete an existing account or reuse an unrelated directory to make a check pass. Passwords are disabled on creation; establish the job password privately through owner-approved interactive UI/password administration, never argv, shell history or logs. The controller remains non-login, non-admin with a disabled password. No owner ACL changes are implicit.
+Only during sitting 1 may an administrator run the same reviewed command with `--apply`, as root on Darwin. Apply checks prerequisites and collisions before mutation and refuses existing paths including `/Library/macserve` and the proposed job home. Do not repeatedly apply after a partial failure: retain the plan/output, audit exactly which new objects were created, and arrange a reviewed recovery. Never delete an existing account or reuse an unrelated directory to make a check pass. The job receives `RealName` (default `macserve build`, overridden by `--job-real-name`) and `AuthenticationAuthority ';ShadowHash;'`; set its password afterward with `sudo dscl . -passwd /Users/<job>` using the reviewed account name and interactive prompt, never a password argument, shell history or logs. The controller remains hidden, non-login, non-admin with `Password '*'`. No owner ACL changes are implicit.
+
+Job qualification and native health identity checks read `AuthenticationAuthority` with `dscl` and require the literal `;ShadowHash;` marker. A missing marker or failed read refuses with `job user not listable at login window`; failed health observations remain invalid. The metadata read itself needs no root privileges. This check does not replace the existing dedicated-group, actual GUI login or qualification requirements.
 
 ### Installation layout
 

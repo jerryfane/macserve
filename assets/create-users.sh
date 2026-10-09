@@ -5,7 +5,7 @@ export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 umask 077
 fail() { printf 'REFUSED: %s\n' "$*" >&2; exit 1; }
 usage() {
-    printf '%s\n' 'Usage: /bin/bash assets/create-users.sh --controller-user NAME --controller-uid UID --controller-gid GID --job-user NAME --job-uid UID --job-gid GID --owner-user NAME --owner-uid UID [--apply]'
+    printf '%s\n' 'Usage: /bin/bash assets/create-users.sh --controller-user NAME --controller-uid UID --controller-gid GID --job-user NAME [--job-real-name NAME] --job-uid UID --job-gid GID --owner-user NAME --owner-uid UID [--apply]'
 }
 # Pure membership check, also usable by callers that already resolved group IDs.
 validate_account_groups() {
@@ -14,16 +14,36 @@ validate_account_groups() {
         case "$gid" in 0|20|80|"$other") fail "privileged/shared supplementary group for $name; keep services disabled and reconcile manually" ;; esac
     done
 }
+create_identity() {
+    local name=$1 uid=$2 gid=$3 shell=$4 userhome=$5
+    /usr/bin/dscl . -create "/Groups/$name"
+    /usr/bin/dscl . -create "/Groups/$name" PrimaryGroupID "$gid"
+    /usr/bin/dscl . -create "/Groups/$name" Password '*'
+    /usr/bin/dscl . -create "/Users/$name"
+    /usr/bin/dscl . -create "/Users/$name" UniqueID "$uid"
+    /usr/bin/dscl . -create "/Users/$name" PrimaryGroupID "$gid"
+    /usr/bin/dscl . -create "/Users/$name" NFSHomeDirectory "$userhome"
+    /usr/bin/dscl . -create "/Users/$name" UserShell "$shell"
+}
+create_accounts() {
+    create_identity "$controller_user" "$controller_uid" "$controller_gid" /usr/bin/false "$prefix/var/controller"
+    /usr/bin/dscl . -create "/Users/$controller_user" Password '*'
+    /usr/bin/dscl . -create "/Users/$controller_user" IsHidden 1
+    create_identity "$job_user" "$job_uid" "$job_gid" /bin/zsh "$home"
+    /usr/bin/dscl . -create "/Users/$job_user" RealName "$job_real_name"
+    /usr/bin/dscl . -create "/Users/$job_user" AuthenticationAuthority ';ShadowHash;'
+}
 main() {
 apply=false
 controller_user='' controller_uid='' controller_gid='' job_user='' job_uid='' job_gid='' owner_user='' owner_uid=''
+job_real_name='macserve build'
 seen=' '
 while [ "$#" -gt 0 ]; do
     flag=$1; shift
     case "$flag" in
         --help) usage; exit 0 ;;
         --apply) [ "$apply" = false ] || fail 'duplicate --apply'; apply=true; continue ;;
-        --controller-user|--controller-uid|--controller-gid|--job-user|--job-uid|--job-gid|--owner-user|--owner-uid) ;;
+        --controller-user|--controller-uid|--controller-gid|--job-user|--job-real-name|--job-uid|--job-gid|--owner-user|--owner-uid) ;;
         *) fail "unknown option: $flag" ;;
     esac
     case "$seen" in *" $flag "*) fail "duplicate option: $flag" ;; esac
@@ -35,8 +55,11 @@ while [ "$#" -gt 0 ]; do
         --controller-gid) controller_gid=$value ;; --job-user) job_user=$value ;;
         --job-uid) job_uid=$value ;; --job-gid) job_gid=$value ;;
         --owner-user) owner_user=$value ;; --owner-uid) owner_uid=$value ;;
+        --job-real-name) job_real_name=$value ;;
     esac
 done
+[ -n "$job_real_name" ] || fail 'job real name must not be empty'
+case "$job_real_name" in *[$'\001'-$'\037'$'\177']*) fail 'job real name must not contain control characters' ;; esac
 for name in "$controller_user" "$job_user" "$owner_user"; do
     [[ "$name" =~ ^[a-z][a-z0-9_]{0,30}$ ]] || fail 'names must be 1..31 lowercase ASCII letters/digits/underscores, starting with a letter'
     case "$name" in root|wheel|admin|staff|daemon|nobody|operator|everyone|guest) fail 'reserved account/group name' ;; esac
@@ -55,8 +78,8 @@ fi
 prefix=/Library/macserve
 home=/Users/$job_user
 printf 'PLAN ONLY until explicit --apply: controller %s uid=%s primary-group=%s gid=%s (nonlogin); job %s uid=%s primary-group=%s gid=%s; existing owner %s uid=%s\n' "$controller_user" "$controller_uid" "$controller_user" "$controller_gid" "$job_user" "$job_uid" "$job_user" "$job_gid" "$owner_user" "$owner_uid"
-printf '%s\n' 'Create root:wheel 0755 /Library/macserve, bin and config; root:wheel 0711 var.' 'Create controller-owned 0700 var/controller, var/controller/secrets, var/controller/run, var/controller/log.' 'Create root:wheel 0700 var/broker, var/broker/log, var/exports; root:wheel 0711 var/workspaces; root:wheel 0755 health.' "Create job-owned 0700 $home. Both passwords disabled; set job password privately later using approved UI/passwd." 'No services, PF, owner ACLs, FileVault, auto-login, or GUI login changed. Plan performs no account/home/service inspection.'
-[ "$apply" = true ] || exit 0
+printf '%s\n' 'Create root:wheel 0755 /Library/macserve, bin and config; root:wheel 0711 var.' 'Create controller-owned 0700 var/controller, var/controller/secrets, var/controller/run, var/controller/log.' 'Create root:wheel 0700 var/broker, var/broker/log, var/exports; root:wheel 0711 var/workspaces; root:wheel 0755 health.' "Create job-owned 0700 $home. Controller password disabled; job display name: $job_real_name." "Set the job password privately afterward: sudo dscl . -passwd /Users/$job_user" 'No services, PF, owner ACLs, FileVault, auto-login, or GUI login changed. Plan performs no account/home/service inspection.'
+[ "$apply" = true ] || return 0
 # Gate BEFORE any host account or filesystem inspection.
 [ "$(/usr/bin/uname -s)" = Darwin ] || fail '--apply requires Darwin'
 [ "$EUID" -eq 0 ] || fail '--apply requires root'
@@ -150,21 +173,7 @@ report_partial_failure() {
     fi
 }
 trap 'report_partial_failure "$?"' EXIT
-create_identity() {
-    local name=$1 uid=$2 gid=$3 shell=$4 userhome=$5
-    /usr/bin/dscl . -create "/Groups/$name"
-    /usr/bin/dscl . -create "/Groups/$name" PrimaryGroupID "$gid"
-    /usr/bin/dscl . -create "/Groups/$name" Password '*'
-    /usr/bin/dscl . -create "/Users/$name"
-    /usr/bin/dscl . -create "/Users/$name" UniqueID "$uid"
-    /usr/bin/dscl . -create "/Users/$name" PrimaryGroupID "$gid"
-    /usr/bin/dscl . -create "/Users/$name" NFSHomeDirectory "$userhome"
-    /usr/bin/dscl . -create "/Users/$name" UserShell "$shell"
-    /usr/bin/dscl . -create "/Users/$name" Password '*'
-}
-create_identity "$controller_user" "$controller_uid" "$controller_gid" /usr/bin/false "$prefix/var/controller"
-/usr/bin/dscl . -create "/Users/$controller_user" IsHidden 1
-create_identity "$job_user" "$job_uid" "$job_gid" /bin/zsh "$home"
+create_accounts
 # A new account must not inherit supplementary privileges from a directory policy.
 for name in "$controller_user" "$job_user"; do
     actual=$(/usr/bin/id -G "$name")
@@ -178,7 +187,7 @@ done
 /usr/bin/install -d -o "$controller_uid" -g "$controller_gid" -m 0700 "$prefix/var/controller" "$prefix/var/controller/secrets" "$prefix/var/controller/run" "$prefix/var/controller/log"
 /usr/bin/install -d -o root -g wheel -m 0700 "$prefix/var/broker" "$prefix/var/broker/log" "$prefix/var/exports"
 /usr/bin/install -d -o "$job_uid" -g "$job_gid" -m 0700 "$home"
-printf '%s\n' 'Created accounts and empty protected directories only. Both passwords remain disabled. Install reviewed inputs separately and qualify before enabling anything.'
+printf '%s\n' "Created accounts and empty protected directories only. Controller password remains disabled. Set the job password privately afterward: sudo dscl . -passwd /Users/$job_user" 'Install reviewed inputs separately and qualify before enabling anything.'
 }
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     main "$@"

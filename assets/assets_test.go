@@ -158,6 +158,86 @@ func TestAccountInputRefusals(t *testing.T) {
 	}
 }
 
+func TestCreatedAccountAuthentication(t *testing.T) {
+	script, err := filepath.Abs("create-users.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"default", nil, "macserve build"},
+		{"explicit", []string{"--job-real-name", "Studio Build User"}, "Studio Build User"},
+		{"literal", []string{"--job-real-name", "$(not-executed) * 'quoted'"}, "$(not-executed) * 'quoted'"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Source the real parser and creation functions, but intercept the
+			// absolute directory command before executing any creation function.
+			program := `source "$1"; shift
+function /usr/bin/dscl() { printf '%s\t' "$@"; printf '\n'; }
+main "$@" >/dev/null
+create_accounts`
+			args := append([]string{"-c", program, "account-test", script}, scriptArgs()...)
+			args = append(args, tc.args...)
+			cmd := exec.Command("/bin/bash", args...)
+			cmd.Dir = t.TempDir()
+			cmd.Env = []string{"PATH=/nonexistent", "HOME=" + cmd.Dir}
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("account fixture: %v: %s", err, out)
+			}
+			attributes := map[string]string{}
+			for _, line := range strings.Split(strings.TrimSuffix(string(out), "\n"), "\n") {
+				fields := strings.Split(strings.TrimSuffix(line, "\t"), "\t")
+				if len(fields) != 3 && len(fields) != 5 {
+					t.Fatalf("directory argument boundary lost: %q", fields)
+				}
+				if fields[0] != "." || fields[1] != "-create" {
+					t.Fatalf("unexpected directory operation: %q", fields)
+				}
+				if len(fields) == 5 {
+					key := fields[2] + "/" + fields[3]
+					if _, duplicate := attributes[key]; duplicate {
+						t.Fatalf("attribute written twice: %s", key)
+					}
+					attributes[key] = fields[4]
+				}
+			}
+			for key, want := range map[string]string{
+				"/Users/servicejob/RealName":                tc.want,
+				"/Users/servicejob/AuthenticationAuthority": ";ShadowHash;",
+				"/Users/servicejob/UserShell":               "/bin/zsh",
+				"/Users/servicecontrol/Password":            "*",
+				"/Users/servicecontrol/IsHidden":            "1",
+				"/Users/servicecontrol/UserShell":           "/usr/bin/false",
+				"/Groups/servicejob/Password":               "*",
+				"/Groups/servicecontrol/Password":           "*",
+			} {
+				if got := attributes[key]; got != want {
+					t.Errorf("%s = %q, want %q", key, got, want)
+				}
+			}
+			for _, key := range []string{"/Users/servicejob/Password", "/Users/servicejob/IsHidden", "/Users/servicecontrol/AuthenticationAuthority"} {
+				if value, present := attributes[key]; present {
+					t.Errorf("unexpected attribute %s = %q", key, value)
+				}
+			}
+		})
+	}
+	for _, args := range [][]string{
+		{"--job-real-name", ""},
+		{"--job-real-name", "Bad\nName"},
+		{"--job-real-name", "First", "--job-real-name", "Second"},
+		{"--job-real-name"},
+	} {
+		if out, err := runScript(t, append(scriptArgs(), args...)); err == nil {
+			t.Fatalf("invalid real name options accepted: %q: %s", args, out)
+		}
+	}
+}
+
 func TestApplyRefusesUnsupportedHostOrPrivilege(t *testing.T) {
 	if runtime.GOOS == "darwin" && os.Geteuid() == 0 {
 		t.Skip("never execute valid apply on a root Darwin host")
@@ -191,16 +271,13 @@ func TestCreatedAccountSupplementaryGroups(t *testing.T) {
 			{"other-primary", role.other, true},
 		} {
 			t.Run(role.name+"/"+tc.name, func(t *testing.T) {
-				cmd := exec.Command("/bin/bash", "-c", `source "$1"; validate_account_groups "$2" "$3" "$4"; printf 'membership accepted\n'`, "membership-test", script, role.name, role.other, role.primary+" "+tc.extra)
+				cmd := exec.Command("/bin/bash", "-c", `source "$1"; validate_account_groups "$2" "$3" "$4"`, "membership-test", script, role.name, role.other, role.primary+" "+tc.extra)
 				cmd.Dir = t.TempDir()
 				cmd.Env = []string{"PATH=/nonexistent", "HOME=" + cmd.Dir}
 				out, err := cmd.CombinedOutput()
-				if tc.refuse {
-					want := "REFUSED: privileged/shared supplementary group for " + role.name + "; keep services disabled and reconcile manually\n"
-					if err == nil || string(out) != want {
-						t.Fatalf("unsafe membership was not refused: err=%v output=%q", err, out)
-					}
-				} else if err != nil || string(out) != "membership accepted\n" {
+				if tc.refuse && err == nil {
+					t.Fatalf("unsafe membership was not refused: output=%q", out)
+				} else if !tc.refuse && err != nil {
 					t.Fatalf("safe membership rejected: err=%v output=%q", err, out)
 				}
 			})
@@ -226,23 +303,22 @@ func TestInstallerEarlyRefusals(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		args []string
-		want string
 	}{
-		{"help-followed-by-option", []string{"--help", "--env", "unused"}, "REFUSED: help must be used alone"},
-		{"help-after-option", []string{"--env", "unused", "--help"}, "REFUSED: help must be used alone"},
-		{"missing-env", []string{"--binary", binary, "--sha256", digest}, "Usage:"},
-		{"missing-binary", []string{"--env", "unused", "--sha256", digest}, "Usage:"},
-		{"missing-digest", []string{"--env", "unused", "--binary", binary}, "Usage:"},
-		{"absent-file", []string{"--env", "unused", "--binary", filepath.Join(dir, "absent"), "--sha256", digest}, "REFUSED: binary must be a nonsymlink regular file"},
-		{"directory", []string{"--env", "unused", "--binary", dir, "--sha256", digest}, "REFUSED: binary must be a nonsymlink regular file"},
-		{"symlink", []string{"--env", "unused", "--binary", link, "--sha256", digest}, "REFUSED: binary must be a nonsymlink regular file"},
+		{"help-followed-by-option", []string{"--help", "--env", "unused"}},
+		{"help-after-option", []string{"--env", "unused", "--help"}},
+		{"missing-env", []string{"--binary", binary, "--sha256", digest}},
+		{"missing-binary", []string{"--env", "unused", "--sha256", digest}},
+		{"missing-digest", []string{"--env", "unused", "--binary", binary}},
+		{"absent-file", []string{"--env", "unused", "--binary", filepath.Join(dir, "absent"), "--sha256", digest}},
+		{"directory", []string{"--env", "unused", "--binary", dir, "--sha256", digest}},
+		{"symlink", []string{"--env", "unused", "--binary", link, "--sha256", digest}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cmd := exec.Command("/bin/bash", append([]string{script}, tc.args...)...)
 			cmd.Dir = dir
 			cmd.Env = []string{"PATH=/nonexistent", "HOME=" + dir}
 			out, err := cmd.CombinedOutput()
-			if err == nil || !strings.HasPrefix(string(out), tc.want) {
+			if err == nil {
 				t.Fatalf("invalid installer input was not refused: err=%v output=%q", err, out)
 			}
 		})

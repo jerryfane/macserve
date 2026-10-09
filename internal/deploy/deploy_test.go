@@ -99,6 +99,39 @@ func TestEnvironmentRejectsAmbiguousAndExecutableData(t *testing.T) {
 	}
 }
 
+func TestEnvironmentJobRealName(t *testing.T) {
+	for _, tc := range []struct {
+		name, entry, want string
+	}{
+		{"omitted", "", "macserve build"},
+		{"explicit", "JOB_REAL_NAME=Studio Build User\n", "Studio Build User"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, err := ParseEnvironment([]byte(reviewedEnvironment + tc.entry))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if e.JobRealName != tc.want {
+				t.Fatalf("job real name = %q, want %q", e.JobRealName, tc.want)
+			}
+		})
+	}
+	for _, entry := range []string{
+		"JOB_REAL_NAME=\n",
+		"JOB_REAL_NAME= Studio Build User\n",
+		"JOB_REAL_NAME=Studio Build User \n",
+		"JOB_REAL_NAME=\"Studio Build User\"\n",
+		"JOB_REAL_NAME=$(id)\n",
+		"JOB_REAL_NAME=Studio\x01Build\n",
+		"JOB_REAL_NAME=Studio\x7fBuild\n",
+		"JOB_REAL_NAME=First\nJOB_REAL_NAME=Second\n",
+	} {
+		if _, err := ParseEnvironment([]byte(reviewedEnvironment + entry)); err == nil {
+			t.Fatalf("unsafe or ambiguous display name accepted: %q", entry)
+		}
+	}
+}
+
 func TestEnvironmentRetainsLinkLocalProbeTargets(t *testing.T) {
 	base, _ := fixture(t)
 	for _, hosts := range []string{

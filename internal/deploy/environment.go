@@ -22,6 +22,7 @@ type Environment struct {
 	ControllerUser               string
 	ControllerUID, ControllerGID uint32
 	JobUser                      string
+	JobRealName                  string
 	JobUID, JobGID               uint32
 	OwnerUser                    string
 	OwnerUID                     uint32
@@ -52,7 +53,7 @@ func ParseEnvironment(data []byte) (Environment, error) {
 	for _, k := range keys {
 		allowed[k] = true
 	}
-	for _, k := range strings.Fields("COEXISTING_ANCHORS COEXISTING_SERVICES") {
+	for _, k := range strings.Fields("COEXISTING_ANCHORS COEXISTING_SERVICES JOB_REAL_NAME") {
 		allowed[k] = true
 	}
 	for n, line := range strings.Split(string(data), "\n") {
@@ -72,6 +73,18 @@ func ParseEnvironment(data []byte) (Environment, error) {
 		}
 	}
 	e.ControllerUser, e.JobUser, e.OwnerUser = values["CONTROLLER_USER"], values["JOB_USER"], values["OWNER_USER"]
+	e.JobRealName = "macserve build"
+	if name, present := values["JOB_REAL_NAME"]; present {
+		if name == "" {
+			return e, errors.New("JOB_REAL_NAME must not be empty")
+		}
+		for _, r := range name {
+			if r < 0x20 || r == 0x7f {
+				return e, errors.New("JOB_REAL_NAME must not contain control characters")
+			}
+		}
+		e.JobRealName = name
+	}
 	for _, name := range []string{e.ControllerUser, e.JobUser, e.OwnerUser} {
 		if !accountName.MatchString(name) || strings.Contains(" root wheel admin staff daemon nobody operator everyone guest ", " "+name+" ") {
 			return e, errors.New("invalid or reserved identity name")

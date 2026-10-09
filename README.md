@@ -362,11 +362,15 @@ job GUI identity with its full groups: directory access and reading an approved 
 be denied while owner read controls succeed. The installer never changes owner-home permissions.
 
 `macserve maintenance --config PATH` publishes short-lived root-owned health after checking protected
-qualification/evidence bindings, exact GUI baseline identities, profile
+qualification/evidence bindings, the job's `;ShadowHash;` authentication authority, exact GUI baseline identities, profile
 digests, memory pressure and mutable storage including the entire job home. Failed observations publish
 invalid health; startup/shutdown invalidate it. Probe cadence is measured from probe start, not completion.
 `maintenance-observe` collects live inputs without approving the host or writing health. Both require
 macOS root; neither modifies host policy, adopts processes or generates boundary-test evidence.
+
+Job qualification and health identity inspection refuse a missing or unreadable authority with
+`job user not listable at login window`. Account creation uses `JOB_REAL_NAME` (default `macserve build`)
+and leaves interactive password setup to the administrator; see the installation guide.
 
 `maintenance-observe --coexistence-only --config PATH` reads configured peer service PIDs and opaque main/peer
 PF rule digests without needing a GUI baseline or completed qualification. PF read failures are recorded as
