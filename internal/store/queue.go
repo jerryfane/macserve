@@ -92,6 +92,29 @@ func profileBytes(admission model.Admission) ([]byte, error) {
 	return data, nil
 }
 
+// Replay compares a request with its admitted snapshot without inserting work.
+// The single lookup is the replay's linearization point: pruning afterward
+// cannot turn the snapshot into a new admission.
+func (s *Store) Replay(ctx context.Context, principal, key string, request model.Request) (model.Job, error) {
+	original, err := s.Lookup(ctx, principal, key)
+	if err != nil {
+		return model.Job{}, err
+	}
+	request.Repo = strings.ToLower(request.Repo)
+	request.SHA = strings.ToLower(request.SHA)
+	if request.TimeoutSeconds == 0 {
+		request.TimeoutSeconds = original.Profile.DefaultTimeoutSeconds
+	}
+	_, digest, err := requestBytes(request)
+	if err != nil {
+		return model.Job{}, err
+	}
+	if original.RequestDigest != digest {
+		return model.Job{}, ErrConflict
+	}
+	return original, nil
+}
+
 // Enqueue checks idempotency before capacity and current profile validation. A
 // retry keeps its first profile snapshot even when the supplied profile changed.
 func (s *Store) Enqueue(ctx context.Context, principal, key string, admission model.Admission, now time.Time) (model.Job, bool, error) {
@@ -172,7 +195,7 @@ func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time) (m
 		return model.Job{}, err
 	}
 	var blocked bool
-	if err := tx.QueryRowContext(ctx, "SELECT paused OR quarantined OR EXISTS(SELECT 1 FROM jobs WHERE state IN ("+activeStates+")) FROM service_state WHERE singleton=1").Scan(&blocked); err != nil {
+	if err := tx.QueryRowContext(ctx, "SELECT paused OR quarantined OR "+sourceCleanupPending+" OR EXISTS(SELECT 1 FROM jobs WHERE state IN ("+activeStates+")) FROM service_state WHERE singleton=1").Scan(&blocked); err != nil {
 		return model.Job{}, err
 	}
 	if blocked {

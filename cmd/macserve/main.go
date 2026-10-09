@@ -45,16 +45,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "worker":
 		return runWorker(args[1:], stdout, stderr)
 	case "controller":
-		if len(args) == 2 && (args[1] == "-h" || args[1] == "--help") {
-			fmt.Fprintf(stdout, "Usage: macserve %s\n\nThis command is not implemented yet; no service is started.\n", args[0])
-			return 0
-		}
-		if len(args) != 1 {
-			fmt.Fprintf(stderr, "macserve %s: unexpected arguments %q\n", args[0], args[1:])
-			return 2
-		}
-		fmt.Fprintf(stderr, "macserve %s: not implemented yet; no service started\n", args[0])
-		return 1
+		return runController(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "macserve: unknown command %q\n", args[0])
 		usage(stderr)
@@ -66,7 +57,7 @@ func usage(w io.Writer) {
 	fmt.Fprint(w, `Usage: macserve <command>
 
 Commands:
-  controller  Queue, API and evidence service (not implemented yet)
+  controller  Private API, durable queue and worker coordination
   worker      Protected root execution broker via the private controller socket
   worker-reset  Reset job-user persistence and record audited GUI baseline PIDs
 
