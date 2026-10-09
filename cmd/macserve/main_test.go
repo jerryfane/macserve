@@ -14,7 +14,7 @@ func TestCommandExitStatus(t *testing.T) {
 		{name: "missing command", want: 2},
 		{name: "help", args: []string{"--help"}, want: 0},
 		{name: "controller unavailable", args: []string{"controller"}, want: 1},
-		{name: "worker unavailable", args: []string{"worker"}, want: 1},
+		{name: "worker missing config", args: []string{"worker"}, want: 2},
 		{name: "controller help", args: []string{"controller", "--help"}, want: 0},
 		{name: "worker short help", args: []string{"worker", "-h"}, want: 0},
 		{name: "unsupported command", args: []string{"archive"}, want: 2},
@@ -22,6 +22,11 @@ func TestCommandExitStatus(t *testing.T) {
 		{name: "unexpected operand", args: []string{"controller", "start"}, want: 2},
 		{name: "extra help argument", args: []string{"--help", "worker"}, want: 2},
 		{name: "extra command help argument", args: []string{"worker", "--help", "start"}, want: 2},
+		{name: "reset requires explicit pids", args: []string{"worker-reset", "--config", "/example/worker.json"}, want: 2},
+		{name: "reset rejects unsafe pid", args: []string{"worker-reset", "--config", "/example/worker.json", "--pids", "0"}, want: 2},
+		{name: "reset help", args: []string{"worker-reset", "--help"}, want: 0},
+		{name: "private exec rejects incomplete request", args: []string{"_job-exec"}, want: 1},
+		{name: "private signal rejects incomplete request", args: []string{"_job-signal"}, want: 1},
 	}
 
 	for _, tt := range tests {

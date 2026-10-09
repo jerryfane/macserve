@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/jerryfane/macserve/internal/worker"
 )
 
 func main() {
@@ -17,6 +19,22 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	switch args[0] {
+	case "_job-exec", "_job-signal", "_job-login-items":
+		var err error
+		if args[0] == "_job-exec" {
+			err = worker.PrivateJobExec(args[1:])
+		} else if args[0] == "_job-login-items" {
+			err = worker.PrivateJobLoginItems(args[1:])
+		} else {
+			err = worker.PrivateJobSignal(args[1:])
+		}
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		return 0
+	case "worker-reset":
+		return runWorkerReset(args[1:], stdout, stderr)
 	case "-h", "--help":
 		if len(args) != 1 {
 			fmt.Fprintln(stderr, "macserve: help does not accept arguments")
@@ -24,7 +42,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		}
 		usage(stdout)
 		return 0
-	case "controller", "worker":
+	case "worker":
+		return runWorker(args[1:], stdout, stderr)
+	case "controller":
 		if len(args) == 2 && (args[1] == "-h" || args[1] == "--help") {
 			fmt.Fprintf(stdout, "Usage: macserve %s\n\nThis command is not implemented yet; no service is started.\n", args[0])
 			return 0
@@ -47,7 +67,8 @@ func usage(w io.Writer) {
 
 Commands:
   controller  Queue, API and evidence service (not implemented yet)
-  worker      Native build and test execution (not implemented yet)
+  worker      Protected root execution broker via the private controller socket
+  worker-reset  Reset job-user persistence and record audited GUI baseline PIDs
 
 Use macserve <command> --help for command help.
 `)
