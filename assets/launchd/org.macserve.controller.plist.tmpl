@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>org.macserve.controller</string>
+<key>ProgramArguments</key><array><string>/Library/macserve/bin/macserve</string><string>controller</string><string>--config</string><string>/Library/macserve/config/controller.json</string></array>
+<key>UserName</key><string>{{.ControllerUser}}</string>
+<key>GroupName</key><string>{{.ControllerGroup}}</string>
+<key>Disabled</key><true/>
+<key>RunAtLoad</key><false/>
+<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+<key>ThrottleInterval</key><integer>60</integer>
+<key>ProcessType</key><string>Background</string>
+<key>Nice</key><integer>10</integer>
+<key>Umask</key><integer>63</integer>
+<key>WorkingDirectory</key><string>/Library/macserve/var/controller</string>
+<key>EnvironmentVariables</key><dict><key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin</string><key>GOMAXPROCS</key><string>2</string></dict>
+<key>StandardOutPath</key><string>/Library/macserve/var/controller/log/controller.out.log</string>
+<key>StandardErrorPath</key><string>/Library/macserve/var/controller/log/controller.err.log</string>
+</dict></plist>

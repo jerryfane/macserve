@@ -46,6 +46,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runWorker(args[1:], stdout, stderr)
 	case "controller":
 		return runController(args[1:], stdout, stderr)
+	case "maintenance":
+		return runMaintenance(args[1:], stdout, stderr, false)
+	case "maintenance-observe":
+		return runMaintenance(args[1:], stdout, stderr, true)
 	case "wait":
 		return runWait(args[1:], stdout, stderr)
 	default:
@@ -63,6 +67,8 @@ Commands:
   worker      Protected root execution broker via the private controller socket
   worker-reset  Reset job-user persistence and record audited GUI baseline PIDs
   wait        Request exact-head GitHub evidence and verify pinned receipts
+  maintenance Observe qualified host boundaries and publish fail-closed health
+  maintenance-observe Collect live qualification inputs without approving them
 
 Use macserve <command> --help for command help.
 `)

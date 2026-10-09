@@ -101,8 +101,9 @@ The root worker takes `--config` with a root-owned JSON file under root-controll
 Fields are `socket`, `controller_uid`, `job_uid`, `job_gid`, `owner_uid`, `root`, `export_root`,
 `workspace_root`, `helper_path`, `baseline_path`, and optional `poll_seconds`, `heartbeat_seconds`,
 `request_timeout_seconds`. Paths are absolute. Owner, job and controller UIDs must differ and be non-root.
-The job account must be non-admin, with a dedicated primary group: no `staff` or group shared with the owner
-or controller, including their supplementary memberships. The helper is a protected executable.
+The job account must belong to neither `staff` (GID 20) nor `admin`, including supplementary groups.
+Its dedicated primary group must not be shared with the owner or controller, including their supplementary
+memberships. The helper is a protected executable.
 Control and export roots are disjoint,
 root-private (`0700`); the separate root-owned workspace parent must allow job traversal (for example `0711`),
 but not replacement of other job directories. Only each individual workspace is transferred to the job UID.
@@ -325,17 +326,46 @@ screenshots/source and full manifests stay behind authenticated downloads; a com
 give an uncredentialed Linux job arbitrary artifact access. Real App authorization, branch protection, target
 recipes and GUI/network qualification still require the approved deployment acceptance window.
 
+## Installation assets and host health
+
+[Installation and qualification runbook](docs/install.md) covers the plan-first account script,
+disabled controller/root-worker/root-maintenance LaunchDaemons, job-UID PF anchor template,
+protected configurations and four future owner-approved deployment sittings. Nothing installs,
+starts services, changes owner ACLs or enables PF automatically. Use a reviewed prebuilt binary;
+the deployed host does not need Go.
+
+Keep the owner's home at **0700**, or **0750 with an owner-private group—not staff—that excludes the job
+account**. Audit ACL grants separately. Qualification requires an `owner_home_denial` probe from the actual
+job GUI identity with its full groups: directory access and reading an approved nonsecret home canary must
+be denied while owner read controls succeed. The installer never changes owner-home permissions.
+
+`macserve maintenance --config PATH` publishes short-lived root-owned health after checking protected
+qualification/evidence bindings, live PF and interface state, exact GUI baseline identities, profile
+digests, memory pressure and mutable storage including the entire job home. Failed observations publish
+invalid health; startup/shutdown invalidate it. Probe cadence is measured from probe start, not completion.
+`maintenance-observe` collects live inputs without approving the host or writing health. Both require
+macOS root; neither modifies host policy, adopts processes or generates boundary-test evidence.
+
+The observer supports literal static filtering rules and verifiable loopback filtering. Stock root NAT/rdr
+anchor calls are supported by enumerating and inspecting their descendants, including reserved `_pf`
+children; every descendant translation ruleset must be empty. Opaque/unreadable or changing topology and
+actual translation mappings still refuse qualification. The root-rule digest now binds translation topology
+and output as well as filter rules, requiring requalification. Do not remove owner policy to pass checks.
+Normal build directory churn is tolerated by the approximate mutable-budget census, not treated as an
+isolation failure. Root-protected qualification still requires real approved boundary/owner-home/GUI/reboot
+probes; fixtures and local checks are not native host qualification.
+
 ## Development
 
 Use the Go version declared in `go.mod`. SQLite uses a pure-Go driver; no external database is required.
 
 ```sh
-go vet ./...
-go test ./...
-go run ./cmd/macserve --help
+GOMAXPROCS=2 nice -n 10 go vet -p 2 ./...
+GOMAXPROCS=2 nice -n 10 go test -p 2 ./...
+GOMAXPROCS=2 nice -n 10 go run -p 2 ./cmd/macserve --help
 ```
 
-`macserve --help` and `macserve <command> --help` exit 0. Both service commands require `--config`; invalid or
+`macserve --help` and `macserve <command> --help` exit 0. Service commands require `--config`; invalid or
 missing arguments exit 2. Runtime safety failures exit 1. Help goes to stdout and errors to stderr.
 
 CI pins third-party actions to immutable commit SHAs and runs vet, tests and a CLI build on GitHub-hosted
