@@ -14,7 +14,7 @@ func approvedFixture() (time.Time, Qualification, BoundaryEvidence, Observation)
 	o := Observation{JobUID: 550, Boot: d, InterfacesSHA256: d, PolicySHA256: d, RootRulesSHA256: d, AnchorRulesSHA256: d, BaselineSHA256: d, BoundaryEvidenceSHA256: d, Profiles: map[string]string{"build": d}, PFEnabled: true, LoopbackFiltered: true, IdentityValid: true, BaselineValid: true, AccountedBytes: 1234}
 	q := Qualification{Schema: 1, ApprovedAt: now, JobUID: o.JobUID, Boot: d, InterfacesSHA256: d, PolicySHA256: d, RootRulesSHA256: d, AnchorRulesSHA256: d, BaselineSHA256: d, BoundaryEvidenceSHA256: d, Profiles: map[string]string{"build": d}}
 	e := BoundaryEvidence{Schema: 1, RecordedAt: now.Add(-time.Minute), JobUID: o.JobUID, Boot: d}
-	for _, category := range []string{"tcp_denial", "udp_denial", "approved_allow", "delegated_boundary", "unix_socket_boundary", "owner_unaffected", "fast_switch", "reboot", "tool_profiles"} {
+	for _, category := range []string{"tcp_denial", "udp_denial", "approved_allow", "delegated_boundary", "unix_socket_boundary", "owner_unaffected", "fast_switch", "reboot", "tool_profiles", "owner_home_denial"} {
 		e.Probes = append(e.Probes, Probe{Category: category, ArtifactSHA256: d, Passed: true, Attempts: 3, PFHitDelta: 3, AuthorizedControlSuccesses: 3})
 	}
 	return now, q, e, o
@@ -44,6 +44,29 @@ func TestEvidenceRequiresActualProbeAttestationFields(t *testing.T) {
 			h, err := Evaluate(now, q, e, o)
 			if err == nil || h.BoundaryValidated {
 				t.Fatal("invalid evidence admitted")
+			}
+		})
+	}
+}
+
+func TestOwnerHomeDenialRequiredForQualification(t *testing.T) {
+	for _, mode := range []string{"missing", "readable", "no-owner-control", "failed", "denied"} {
+		t.Run(mode, func(t *testing.T) {
+			now, q, e, o := approvedFixture()
+			probe := &e.Probes[len(e.Probes)-1]
+			switch mode {
+			case "missing":
+				e.Probes = e.Probes[:len(e.Probes)-1]
+			case "readable":
+				probe.CanaryReceipts = 1
+			case "no-owner-control":
+				probe.AuthorizedControlSuccesses = 0
+			case "failed":
+				probe.Passed = false
+			}
+			h, err := Evaluate(now, q, e, o)
+			if (err == nil) != (mode == "denied") || h.BoundaryValidated != (mode == "denied") {
+				t.Fatalf("owner home %s: health=%+v error=%v", mode, h, err)
 			}
 		})
 	}

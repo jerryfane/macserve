@@ -101,8 +101,9 @@ The root worker takes `--config` with a root-owned JSON file under root-controll
 Fields are `socket`, `controller_uid`, `job_uid`, `job_gid`, `owner_uid`, `root`, `export_root`,
 `workspace_root`, `helper_path`, `baseline_path`, and optional `poll_seconds`, `heartbeat_seconds`,
 `request_timeout_seconds`. Paths are absolute. Owner, job and controller UIDs must differ and be non-root.
-The job account must be non-admin, with a dedicated primary group: no `staff` or group shared with the owner
-or controller, including their supplementary memberships. The helper is a protected executable.
+The job account must belong to neither `staff` (GID 20) nor `admin`, including supplementary groups.
+Its dedicated primary group must not be shared with the owner or controller, including their supplementary
+memberships. The helper is a protected executable.
 Control and export roots are disjoint,
 root-private (`0700`); the separate root-owned workspace parent must allow job traversal (for example `0711`),
 but not replacement of other job directories. Only each individual workspace is transferred to the job UID.
@@ -333,6 +334,11 @@ protected configurations and four future owner-approved deployment sittings. Not
 starts services, changes owner ACLs or enables PF automatically. Use a reviewed prebuilt binary;
 the deployed host does not need Go.
 
+Keep the owner's home at **0700**, or **0750 with an owner-private group—not staff—that excludes the job
+account**. Audit ACL grants separately. Qualification requires an `owner_home_denial` probe from the actual
+job GUI identity with its full groups: directory access and reading an approved nonsecret home canary must
+be denied while owner read controls succeed. The installer never changes owner-home permissions.
+
 `macserve maintenance --config PATH` publishes short-lived root-owned health after checking protected
 qualification/evidence bindings, live PF and interface state, exact GUI baseline identities, profile
 digests, memory pressure and mutable storage including the entire job home. Failed observations publish
@@ -340,11 +346,14 @@ invalid health; startup/shutdown invalidate it. Probe cadence is measured from p
 `maintenance-observe` collects live inputs without approving the host or writing health. Both require
 macOS root; neither modifies host policy, adopts processes or generates boundary-test evidence.
 
-The observer deliberately supports a narrow PF surface: literal static rules, verifiable loopback
-filtering and empty translation-rule output. Opaque NAT/rdr anchors are refused, not assumed empty.
-Do not remove existing owner policy to pass these checks. Root-protected operator attestations must
-come from actual approved TCP/UDP/canary/delegated-socket/GUI/reboot probes; fixture tests are not host
-qualification. Native deployment remains unqualified until those acceptance checks succeed.
+The observer supports literal static filtering rules and verifiable loopback filtering. Stock root NAT/rdr
+anchor calls are supported by enumerating and inspecting their descendants, including reserved `_pf`
+children; every descendant translation ruleset must be empty. Opaque/unreadable or changing topology and
+actual translation mappings still refuse qualification. The root-rule digest now binds translation topology
+and output as well as filter rules, requiring requalification. Do not remove owner policy to pass checks.
+Normal build directory churn is tolerated by the approximate mutable-budget census, not treated as an
+isolation failure. Root-protected qualification still requires real approved boundary/owner-home/GUI/reboot
+probes; fixtures and local checks are not native host qualification.
 
 ## Development
 

@@ -16,7 +16,8 @@ func TestNativeJobPrimaryGroupIsDedicated(t *testing.T) {
 		missingOwner, groupFailure               bool
 		wantError                                bool
 	}{
-		{name: "dedicated primary with standard supplementary staff", jobGID: 502, primary: "502", jobGroups: []string{"502", "20"}},
+		{name: "dedicated primary", jobGID: 502, primary: "502", jobGroups: []string{"502"}},
+		{name: "supplementary staff", jobGID: 502, primary: "502", jobGroups: []string{"502", "20"}, wantError: true},
 		{name: "stock staff primary", jobGID: 20, primary: "20", wantError: true},
 		{name: "mismatched configured primary", jobGID: 502, primary: "504", wantError: true},
 		{name: "owner shared primary", jobGID: 502, primary: "502", ownerPrimary: "502", wantError: true},

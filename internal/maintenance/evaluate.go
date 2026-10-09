@@ -93,7 +93,7 @@ func Evaluate(now time.Time, q Qualification, e BoundaryEvidence, o Observation)
 			return fail()
 		}
 	}
-	required := map[string]bool{"tcp_denial": false, "udp_denial": false, "approved_allow": false, "delegated_boundary": false, "unix_socket_boundary": false, "owner_unaffected": false, "fast_switch": false, "reboot": false, "tool_profiles": false}
+	required := map[string]bool{"tcp_denial": false, "udp_denial": false, "approved_allow": false, "delegated_boundary": false, "unix_socket_boundary": false, "owner_unaffected": false, "owner_home_denial": false, "fast_switch": false, "reboot": false, "tool_profiles": false}
 	for _, p := range e.Probes {
 		seen, known := required[p.Category]
 		if !known || seen || !p.Passed || !validDigest(p.ArtifactSHA256) || p.Attempts < 1 || p.PFHitDelta < 0 || p.AuthorizedControlSuccesses < 0 || p.CanaryReceipts < 0 {
@@ -103,6 +103,9 @@ func Evaluate(now time.Time, q Qualification, e BoundaryEvidence, o Observation)
 			return fail()
 		}
 		if p.Category == "udp_denial" && (p.PFHitDelta == 0 || p.AuthorizedControlSuccesses == 0 || p.CanaryReceipts != 0) {
+			return fail()
+		}
+		if p.Category == "owner_home_denial" && (p.AuthorizedControlSuccesses == 0 || p.CanaryReceipts != 0) {
 			return fail()
 		}
 		required[p.Category] = true

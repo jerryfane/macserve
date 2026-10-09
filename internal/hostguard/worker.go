@@ -82,8 +82,8 @@ func nativeJobIdentity(jobUID, jobGID, controllerUID, ownerUID uint32, lookup fu
 		return nil, errors.New("job account must not belong to privileged groups")
 	}
 	for _, group := range groups {
-		if group == admin.Gid || group == "0" {
-			return nil, errors.New("job account must not belong to privileged groups")
+		if group == admin.Gid || group == "0" || group == "20" {
+			return nil, errors.New("job account must not belong to staff, admin or root groups")
 		}
 	}
 	for _, uid := range []uint32{controllerUID, ownerUID} {
