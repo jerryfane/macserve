@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/jerryfane/macserve/internal/maintenance"
 )
 
 const MaxEnvironment = 64 << 10
@@ -29,6 +31,11 @@ type Environment struct {
 	HostAddresses                []string
 	DeveloperDir                 string
 	Repositories                 map[string]int64
+	PFAnchor                     string
+	CoexistingAnchors            []string
+	CoexistingServices           []string
+	ToleratedTranslationAnchors  []string
+	ApprovedGuestSubnets         []string
 }
 
 var accountName = regexp.MustCompile(`^[a-z][a-z0-9_]{0,30}$`)
@@ -47,12 +54,16 @@ func ParseEnvironment(data []byte) (Environment, error) {
 	for _, k := range keys {
 		allowed[k] = true
 	}
+	for _, k := range strings.Fields("PF_ANCHOR COEXISTING_ANCHORS COEXISTING_SERVICES TOLERATED_TRANSLATION_ANCHORS APPROVED_GUEST_SUBNETS") {
+		allowed[k] = true
+	}
 	for n, line := range strings.Split(string(data), "\n") {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		k, v, ok := strings.Cut(line, "=")
-		if !ok || !allowed[k] || values[k] != "" || v == "" || strings.TrimSpace(v) != v || strings.ContainsAny(v, "\t\"'`$\\{};<>!\n") {
+		_, duplicate := values[k]
+		if !ok || !allowed[k] || duplicate || strings.TrimSpace(v) != v || strings.ContainsAny(v, "\t\"'`$\\{};<>!\n") {
 			return e, fmt.Errorf("invalid, duplicate or unknown environment entry on line %d", n+1)
 		}
 		values[k] = v
@@ -131,6 +142,25 @@ func ParseEnvironment(data []byte) (Environment, error) {
 		e.Repositories[name] = int64(n)
 		seenIDs[n] = true
 	}
+	list := func(key string) []string {
+		if values[key] == "" {
+			return nil
+		}
+		return strings.Split(values[key], ",")
+	}
+	firewall := maintenance.Config{
+		PFAnchor:                    values["PF_ANCHOR"],
+		CoexistingAnchors:           list("COEXISTING_ANCHORS"),
+		CoexistingServices:          list("COEXISTING_SERVICES"),
+		ToleratedTranslationAnchors: list("TOLERATED_TRANSLATION_ANCHORS"),
+		ApprovedGuestSubnets:        list("APPROVED_GUEST_SUBNETS"),
+	}
+	if err := maintenance.ValidateFirewallConfig(&firewall); err != nil {
+		return e, fmt.Errorf("deploy firewall policy: %w", err)
+	}
+	e.PFAnchor = firewall.PFAnchor
+	e.CoexistingAnchors, e.CoexistingServices = firewall.CoexistingAnchors, firewall.CoexistingServices
+	e.ToleratedTranslationAnchors, e.ApprovedGuestSubnets = firewall.ToleratedTranslationAnchors, firewall.ApprovedGuestSubnets
 	return e, nil
 }
 func canonicalNumber(s string, max uint64) (uint64, error) {

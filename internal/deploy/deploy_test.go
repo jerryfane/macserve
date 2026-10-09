@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -95,6 +96,61 @@ func TestEnvironmentRejectsAmbiguousAndExecutableData(t *testing.T) {
 	}
 	if _, err := LoadEnvironment(alias); err == nil {
 		t.Fatal("accepted symlink environment")
+	}
+}
+
+func TestEnvironmentFirewallPolicy(t *testing.T) {
+	options := "PF_ANCHOR=com.apple/build-service\nCOEXISTING_ANCHORS=com.apple/guest-b,com.apple/guest-a\nCOEXISTING_SERVICES=com.example.router-b,com.example.router-a\nTOLERATED_TRANSLATION_ANCHORS=com.apple/guest-a\nAPPROVED_GUEST_SUBNETS=172.20.40.128/25\n"
+	e, err := ParseEnvironment([]byte(reviewedEnvironment + options))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, assets := fixture(t)
+	rendered, err := renderAssets(e, assets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	material, err := makeMaterial(e, []byte(reviewedEnvironment+options), rendered, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config maintenance.Config
+	for _, file := range material.Files {
+		if file.Path == Prefix+"/config/maintenance.json" {
+			if err := json.Unmarshal(file.Data, &config); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if config.PFAnchor != "com.apple/build-service" ||
+		!slices.Equal(config.CoexistingAnchors, []string{"com.apple/guest-a", "com.apple/guest-b"}) ||
+		!slices.Equal(config.CoexistingServices, []string{"com.example.router-a", "com.example.router-b"}) ||
+		!slices.Equal(config.ToleratedTranslationAnchors, []string{"com.apple/guest-a"}) ||
+		!slices.Equal(config.ApprovedGuestSubnets, []string{"172.20.40.128/25"}) {
+		t.Fatalf("installed maintenance policy differs from reviewed environment: %+v", config)
+	}
+	for _, suffix := range []string{"", "PF_ANCHOR=\nCOEXISTING_ANCHORS=\nCOEXISTING_SERVICES=\nTOLERATED_TRANSLATION_ANCHORS=\nAPPROVED_GUEST_SUBNETS=\n"} {
+		defaults, err := ParseEnvironment([]byte(reviewedEnvironment + suffix))
+		if err != nil || defaults.PFAnchor != maintenance.DefaultPFAnchor || len(defaults.CoexistingAnchors)+len(defaults.CoexistingServices)+len(defaults.ToleratedTranslationAnchors)+len(defaults.ApprovedGuestSubnets) != 0 {
+			t.Fatalf("omitted/empty optional policy: %+v %v", defaults, err)
+		}
+	}
+	for _, suffix := range []string{
+		"PF_ANCHOR=com.apple/*\n",
+		"PF_ANCHOR=\nPF_ANCHOR=com.apple/service\n",
+		"COEXISTING_ANCHORS=com.apple/macserve\n",
+		"COEXISTING_ANCHORS=com.apple/macserve/child\n",
+		"COEXISTING_ANCHORS=com.apple/peer,com.apple/peer\n",
+		"COEXISTING_SERVICES=system/com.example.router\n",
+		"COEXISTING_SERVICES=com.example.router,\n",
+		"TOLERATED_TRANSLATION_ANCHORS=com.apple/guest-a\n",
+		"APPROVED_GUEST_SUBNETS=172.20.40.128/25\n",
+		"TOLERATED_TRANSLATION_ANCHORS=com.apple/guest-a\nAPPROVED_GUEST_SUBNETS=172.20.40.129/25\n",
+		"TOLERATED_TRANSLATION_ANCHORS=com.apple/guest-a\nAPPROVED_GUEST_SUBNETS=127.0.0.0/8\n",
+	} {
+		if _, err := ParseEnvironment([]byte(reviewedEnvironment + suffix)); err == nil {
+			t.Fatalf("unsafe firewall policy accepted: %q", suffix)
+		}
 	}
 }
 func TestRenderRejectsStaleMarkersAndActivation(t *testing.T) {

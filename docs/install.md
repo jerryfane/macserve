@@ -47,6 +47,18 @@ ENV
 
 `deploy.env` is bounded **data**, never shell-sourced: plain `KEY=VALUE`, blank/comment lines, comma-separated lists, and `owner/repo:numeric-id` repository pins. No shell expansions, commands, unknown keys or duplicate keys. Default plan verifies the binary digest and validates/renders the deployment without creating accounts or installation files. It does not prove native identity availability or any security boundary.
 
+Optional firewall keys are `PF_ANCHOR` (default `com.apple/macserve`), `COEXISTING_ANCHORS`, `COEXISTING_SERVICES`, `TOLERATED_TRANSLATION_ANCHORS`, and `APPROVED_GUEST_SUBNETS`. Lists are comma-separated exact values; omission or an empty value means an empty list (or the default anchor). They use the same validation and canonical ordering as the corresponding maintenance JSON fields described below, including guest-range pairing and owned-anchor exclusions. Installation renders them directly into `maintenance.json`; no root JSON editing is needed. For example:
+
+```text
+PF_ANCHOR=com.apple/macserve
+COEXISTING_ANCHORS=com.apple/guest-router
+COEXISTING_SERVICES=com.example.guest-router
+TOLERATED_TRANSLATION_ANCHORS=com.apple/guest-router
+APPROVED_GUEST_SUBNETS=172.20.40.128/25
+```
+
+These illustrative ranges are not discovered or approved automatically. Live qualification still refuses host-overlapping sources, unsupported translations, missing peers, and stopped/restarted services.
+
 After reviewing the source, plan and actual host approvals, stage the reviewed inputs under root-controlled storage. The destination must be new; do not reuse a stale staging directory. These administrative commands are for the approved Darwin sitting only:
 
 ```sh

@@ -39,6 +39,15 @@ type Config struct {
 	path                        string
 }
 
+// ValidateFirewallConfig normalizes and validates the shared JSON/deploy.env
+// firewall policy. Live host addresses and loaded rules are checked by Inspect.
+func ValidateFirewallConfig(c *Config) error {
+	if err := validatePFConfig(c); err != nil {
+		return err
+	}
+	return validateCoexistenceConfig(c)
+}
+
 func decode(data []byte, v any) error {
 	d := json.NewDecoder(bytes.NewReader(data))
 	d.DisallowUnknownFields()
@@ -84,10 +93,7 @@ func LoadConfig(path string) (Config, error) {
 	if c.IntervalSeconds < 5 || c.IntervalSeconds > 15 {
 		return c, errors.New("unsupported maintenance interval")
 	}
-	if err := validatePFConfig(&c); err != nil {
-		return c, err
-	}
-	if err := validateCoexistenceConfig(&c); err != nil {
+	if err := ValidateFirewallConfig(&c); err != nil {
 		return c, err
 	}
 	for _, p := range []string{c.ControllerConfig, c.WorkerConfig, c.QualificationFile, c.BoundaryEvidenceFile, c.PFPolicyFile} {
