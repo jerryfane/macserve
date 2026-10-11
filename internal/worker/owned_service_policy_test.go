@@ -39,6 +39,14 @@ func TestOwnedServiceReferencesResolveOnlyExactRootDaemons(t *testing.T) {
 			if len(problems) != 0 || len(paths) != 2 {
 				t.Fatalf("owned reference must be attributable without treating daemon as third-party signed code: %v", problems)
 			}
+			separated := text + "\n========================\nRecords for UID 0 : CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC\n========================\n"
+			withSeparators, err := parseBackgroundItems(separated, testJobUID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, problems := registrationPaths(withSeparators); len(problems) != 0 {
+				t.Fatalf("native section separators prevented attribution: %v", problems)
+			}
 			for name, mutation := range map[string]string{
 				"extra-unresolved":   strings.Replace(text, " #1: 16."+label, " #1: 16."+label+"\n #2: 16.test.example.absent", 1),
 				"extra-reviewed-app": strings.Replace(text, " #1: 16."+label, " #1: 16."+label+"\n #2: 2.test.example.fixture", 1),

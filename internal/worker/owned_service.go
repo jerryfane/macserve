@@ -118,7 +118,7 @@ func ownedReferences(output string, census BTMCensus) ([]BTMRecord, error) {
 			}
 			continue
 		}
-		if !root {
+		if !root || strings.Trim(line, "=") == "" {
 			continue
 		}
 		if btmRecordHeader.MatchString(line) {
