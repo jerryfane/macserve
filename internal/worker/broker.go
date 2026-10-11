@@ -25,9 +25,10 @@ type ProcessIdentity struct {
 }
 
 type GUIBaseline struct {
-	JobUID    uint32            `json:"job_uid"`
-	Boot      string            `json:"boot"`
-	Processes []ProcessIdentity `json:"processes"`
+	JobUID            uint32            `json:"job_uid"`
+	Boot              string            `json:"boot"`
+	Processes         []ProcessIdentity `json:"processes"`
+	PersistenceSHA256 string            `json:"persistence_sha256"`
 }
 
 type processScope struct {
@@ -195,6 +196,7 @@ func NewNativeRunner(options Options) (Runner, error) {
 	// Baseline inspection is deliberately deferred: sealed pending evidence must
 	// remain deliverable even when a reboot or GUI restart requires reconciliation.
 	runner.baselinePath = options.BaselinePath
+	runner.persistencePath = options.PersistencePath
 	runner.persistence = nativePersistenceInspector(options)
 	runner.scope = &processScope{uid: runner.uid, sample: identityProcesses, interval: 50 * time.Millisecond, grace: 500 * time.Millisecond}
 	runner.scope.signal = func(ctx context.Context, p processSample, sig syscall.Signal) error {

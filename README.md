@@ -117,7 +117,7 @@ execution and retries without inventing process or simulator ownership.
 
 The root worker takes `--config` with a root-owned JSON file under root-controlled, non-writable ancestors.
 Fields are `socket`, `controller_uid`, `job_uid`, `job_gid`, `owner_uid`, `root`, `export_root`,
-`workspace_root`, `helper_path`, `baseline_path`, and optional `poll_seconds`, `heartbeat_seconds`,
+`workspace_root`, `helper_path`, `baseline_path`, **`persistence_path`**, and optional `poll_seconds`, `heartbeat_seconds`,
 `request_timeout_seconds`. Paths are absolute. Owner, job and controller UIDs must differ and be non-root.
 The job account must belong to neither `staff` (GID 20) nor `admin`, including supplementary groups.
 Its dedicated primary group must not be shared with the owner or controller, including their supplementary
@@ -131,11 +131,11 @@ applies only when the job account is not a member of that group. Tool executable
 This exception does not relax configuration, helper or control-state protection.
 
 An actual GUI login must already exist; `launchctl asuser` does not create one. The sole administrator
-initialization/reset command, with the broker stopped, is:
+GUI-baseline initialization/reset command, with the broker stopped, is:
 `macserve worker-reset --config /absolute/worker.json --pids PID,PID`.
 Explicitly audit the current trusted job-UID GUI PIDs before supplying this list: reset terminates other
-job-UID processes, removes job-home LaunchAgents entries, crontab and legacy login items, and rechecks.
-It records `job_uid`, kernel `boot` identity, and each selected `pid` with its exact kernel `start` identity.
+job-UID processes, removes job-home LaunchAgents entries and crontab, and rechecks legacy login items without deleting them.
+It records `job_uid`, kernel `boot`, exact selected `pid`/`start` identities, and the accepted persistence manifest digest.
 It never adopts unselected processes or signals owner/controller processes. Missing/reused baseline
 processes or changed boot refuse admission without creating quarantine; audit and use the same reset.
 
@@ -143,7 +143,7 @@ Before every registration/claim poll, recovery first cleans up recorded owned re
 admission. Pending completion replay precedes recovery. A refusal leaves queued jobs untouched: the
 worker logs its reason, waits the normal poll interval and retries; cancellation exits. Execute rechecks
 admission after claim in case host state changed. Positive observation of a job-home LaunchAgents entry,
-nonempty crontab, legacy/modern login registration or leftover process outside the audited baseline creates
+nonempty crontab, legacy login item, changed reviewed background census/code or leftover process outside the audited baseline creates
 the single durable `admission-quarantine.json` marker. Positive residuals after cleanup do likewise.
 Cancellation, deadlines, I/O and inspection-command errors refuse admission without creating a marker.
 Before registration/claim, the client atomically publishes `<root>/admission-status.json` (the worker config's
@@ -151,10 +151,18 @@ broker-private `root`, mode `0600`) with `state` (`admitting` or `not_admitting`
 Status-write errors also block registration/claim and retry on the normal poll. This file is only the last
 observation, not a live heartbeat or a second quarantine authority; it may be stale after shutdown and
 requires no administrator clear. Editing/removing it cannot bypass recovery or clear quarantine.
-The fixed probes have deadlines and output bounds. Modern registration inspection requires an
-explicitly empty job-UID section from `sfltool dumpbtm`; missing/unfamiliar output is a transient refusal,
-not proof of absence. GUI scripting permissions and any long-lived probe-created processes must be
-prepared and explicitly audited beforehand; inspection never adopts a new process.
+The fixed probes have deadlines and output bounds. Native SessionLoginItems/GUI-domain startup and host-wide
+BTM enumeration each get a bounded 30 seconds for cold/loaded hosts, independent of the former five-second
+AppleEvents budget. Metadata/cron probes retain five seconds; the enclosing two-minute operation deadline
+always wins. Timeout, including partial output reporting zero items, is refusal rather than an empty census.
+Modern registration inspection requires a complete,
+recognized job-UID `sfltool dumpbtm` census matching the separately accepted protected manifest; missing,
+unfamiliar or incomplete output is refusal, never absence. There is no automatic adoption or name/team/type
+allowlist. The GUI process baseline and reviewed registration authority are independent and both must pass.
+Legacy inspection uses CoreServices `LSSharedFileListSessionLoginItems` after dropping root credentials in
+the existing job GUI domain. It does not send System Events AppleEvents or request Automation permission.
+API creation/snapshot failure is never an empty list. **Nonzero legacy items refuse reset and admission;
+macserve no longer deletes them automatically.** Scoped remediation requires a separate owner decision.
 
 Recipe/simulator writers are stopped before pinned `xcresulttool` extraction; another UID barrier precedes
 parsing and sealing. Raw logs and sealed exports are outside job-writable storage. Unproven quiescence blocks
@@ -169,19 +177,59 @@ only exact added UDIDs are removed. Baseline devices and unrelated workspaces ar
 Unknown legacy ownership is never guessed: a predeployment old record lacking inventory can recover
 only when inspection proves the inventory empty.
 
-Residual modern BTM registrations retain quarantine. The owner must resolve them and rerun the same
-reset; macserve never runs host-wide `sfltool resetbtm` or changes owner registrations. Any failed or
-unknown reset verification retains an existing marker. Pending completions and sealed evidence are
-preserved; startup replays a pending completion before recovery. No registration or lease occurs before
+Unreviewed, unresolved or changed modern BTM registrations refuse admission. The owner must review attributable
+eligible components or approve scoped remediation; reset itself never imports registrations. macserve never
+runs host-wide `sfltool resetbtm` or changes owner registrations. Failed/unknown reset retains an existing marker.
+Pending completions and sealed evidence are preserved; startup replays a pending completion before recovery. No registration or lease occurs before
 recovery succeeds. Transient unclean completion fences the old controller epoch; verified recovery
 automatically registers a fresh epoch, without a second administrator clear command.
 
-**Trusted-native limit:** this service is for trusted repositories, not hostile contributors. A clean census
-is a snapshot, not confinement: a delayed same-UID launchd/cron or other persistence mechanism can start after
-the checks and affect a later job. Native shared-kernel execution and trusted GUI services do not provide VM
-reset isolation. This residual risk is accepted by the operator; preflight checks do not eliminate it.
-Root/GUI deployment, Unix/account boundaries and background UI operation require separate host qualification
-before real repository enrollment. These native probes have not been qualified on a deployed host.
+**Trusted-native limit:** this service is for trusted repositories, not hostile contributors. A matching census
+is a snapshot, not confinement: delayed same-UID mechanisms and explicitly approved extensions can run after
+checks or process job-controlled inputs. Signed code is not necessarily harmless. Native shared-kernel execution
+and trusted GUI services do not provide VM reset isolation. Root/GUI deployment, account boundaries and
+background UI operation still require separate host qualification before enrollment.
+
+### Reviewed persistence policy — unreleased migration
+
+This policy change is not permission to deploy, grant security permissions, remove apps or start/reset a host.
+Existing worker configurations must explicitly add a separate clean absolute `persistence_path`; deployment
+material now uses `/Library/macserve/var/broker/reviewed-persistence.json`. There is no legacy-config fallback
+and no generated allowlist. Old GUI baselines lack the reviewed digest and require a fresh reset/qualification.
+
+With admission disabled and under separately approved root administration:
+
+1. Run `macserve worker-persistence inspect --config /absolute/worker.json --out /root/private-candidate.json`.
+   This is read-only native inspection plus creation of a new mode-0600 private candidate, **not acceptance**.
+   Unresolved candidates retain private problems and exit nonzero; they cannot be accepted.
+2. Privately review every registration, nested executable, relationship and integrity binding. Do not publish
+   candidate contents. App/developer containers are explicit records, not ignored decoration. An unresolved
+   embedded reference remains ineligible even if its container looks ordinary; attribution must precede any
+   separate policy decision. Daemon/login/autostart and unknown registration kinds remain ineligible.
+3. Only after explicit review, run `macserve worker-persistence accept --config /absolute/worker.json
+   --candidate /root/private-candidate.json --reviewed-sha256 REVIEWED_SHA256`. Acceptance holds the stopped
+   broker's exclusive lock and requires an independently repeated live census/code match. It does not clear
+   quarantine, reset processes, approve qualification or start services.
+4. Perform the separately approved PID-baseline reset and fresh qualification. Manifest replacement invalidates
+   the baseline binding and previous health/qualification; app, extension or OS updates are not auto-adopted.
+
+Eligible app/nested-code classifications are only a review schema, never trust by category. Every executable
+binding requires matching bundle/team signature identity, non-ad-hoc Apple-anchored signature verification and designated
+requirement; protected root ownership/modes/deny-only ACLs; and a canonical app-tree digest including nested
+bytes, names, links and permissions. Links cannot escape the app tree. New, missing, changed, unprotected or
+incomplete state refuses. The parser intentionally supports a bounded observed schema, not arbitrary future
+`dumpbtm` formats. Native code verification and complete account qualification still need host evidence.
+The per-UID census **header UUID is part of the exact reviewed identity**, not a decorative field. Stability
+across reboot/store migration is an operational assumption requiring host evidence. A changed header UUID
+refuses admission and requires explicit re-review/acceptance followed by baseline reset and requalification;
+macserve never strips or silently refreshes it.
+
+The new pinned `github.com/ebitengine/purego v0.9.1` dependency is Darwin-only and binds only the deprecated
+CoreServices session-list census plus CoreFoundation count/lifetime operations. It preserves the
+`CGO_ENABLED=0` Linux-to-Darwin release build; there is no runtime compilation, extra installed native helper,
+AppleEvents fallback or removal binding. Read-only native positive/empty snapshots establish operation on the
+tested OS, not equivalence across all future System Events/OS implementations or global launch mechanisms.
+The independent BTM/LaunchAgents/crontab/process checks remain mandatory; unavailable legacy APIs fail closed.
 
 ## Controller configuration and control
 

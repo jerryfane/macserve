@@ -57,7 +57,7 @@ func TestWorkerClientCompletesWithEmptyLogArtifacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	engine := &emptyLogExecutor{file: file, acknowledged: make(chan struct{})}
-	client, err := workerclient.New(workerclient.Config{Root: filepath.Join(root, "control"), ExportRoot: filepath.Join(root, "exports"), WorkspaceRoot: filepath.Join(root, "workspaces"), HelperPath: filepath.Join(root, "helper"), BaselinePath: filepath.Join(root, "baseline.json"), JobUID: uint32(os.Geteuid()) + 1000, JobGID: uint32(os.Getegid()) + 1000, OwnerUID: uint32(os.Geteuid()) + 2000, Socket: f.controller.options.Socket, ControllerUID: uint32(os.Geteuid()), PollSeconds: 1, HeartbeatSeconds: 1}, engine)
+	client, err := workerclient.New(workerclient.Config{Root: filepath.Join(root, "control"), ExportRoot: filepath.Join(root, "exports"), WorkspaceRoot: filepath.Join(root, "workspaces"), HelperPath: filepath.Join(root, "helper"), BaselinePath: filepath.Join(root, "baseline.json"), PersistencePath: filepath.Join(root, "reviewed-persistence.json"), JobUID: uint32(os.Geteuid()) + 1000, JobGID: uint32(os.Getegid()) + 1000, OwnerUID: uint32(os.Geteuid()) + 2000, Socket: f.controller.options.Socket, ControllerUID: uint32(os.Geteuid()), PollSeconds: 1, HeartbeatSeconds: 1}, engine)
 	if err != nil {
 		t.Fatal(err)
 	}

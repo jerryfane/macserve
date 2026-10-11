@@ -99,6 +99,7 @@ type Options struct {
 	ControllerUID     uint32
 	HelperPath        string
 	BaselinePath      string
+	PersistencePath   string
 	Runner            Runner
 	CleanupTimeout    time.Duration
 	MaxWorkspaceBytes int64

@@ -24,6 +24,7 @@ type Config struct {
 	OwnerUID              uint32 `json:"owner_uid"`
 	HelperPath            string `json:"helper_path"`
 	BaselinePath          string `json:"baseline_path"`
+	PersistencePath       string `json:"persistence_path"`
 	PollSeconds           int    `json:"poll_seconds"`
 	HeartbeatSeconds      int    `json:"heartbeat_seconds"`
 	RequestTimeoutSeconds int    `json:"request_timeout_seconds"`
@@ -55,7 +56,7 @@ func LoadConfig(path string) (Config, error) {
 }
 
 func normalize(cfg Config) (Config, error) {
-	for _, path := range []string{cfg.Socket, cfg.Root, cfg.ExportRoot, cfg.WorkspaceRoot, cfg.HelperPath, cfg.BaselinePath} {
+	for _, path := range []string{cfg.Socket, cfg.Root, cfg.ExportRoot, cfg.WorkspaceRoot, cfg.HelperPath, cfg.BaselinePath, cfg.PersistencePath} {
 		if !filepath.IsAbs(path) || filepath.Clean(path) != path || path == string(filepath.Separator) {
 			return cfg, fmt.Errorf("worker paths must be explicit clean absolute paths")
 		}
@@ -72,9 +73,14 @@ func normalize(cfg Config) (Config, error) {
 			}
 		}
 	}
-	for _, path := range []string{cfg.Socket, cfg.HelperPath, cfg.BaselinePath} {
+	for _, path := range []string{cfg.Socket, cfg.HelperPath, cfg.BaselinePath, cfg.PersistencePath} {
 		if inside(cfg.WorkspaceRoot, path) {
 			return cfg, errors.New("broker control path must not be inside workspace storage")
+		}
+	}
+	for _, path := range []string{cfg.Socket, cfg.Root, cfg.ExportRoot, cfg.WorkspaceRoot, cfg.HelperPath, cfg.BaselinePath} {
+		if path == cfg.PersistencePath {
+			return cfg, errors.New("persistence authority must be a separate protected file")
 		}
 	}
 	if err := hostguard.DistinctJobIdentity(cfg.JobUID, cfg.JobGID, cfg.ControllerUID, cfg.OwnerUID); err != nil {

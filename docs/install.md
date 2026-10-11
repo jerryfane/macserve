@@ -101,13 +101,25 @@ No daemon, PF rule, owner-home permission or GUI session was activated. An inter
 
 ### Sitting 2: actual job GUI, tools and boundary evidence
 
-First establish the approved job GUI login/password and narrowly scoped prompts. With the broker stopped, audit retained GUI PID/start identities and run the existing reset once; `AUDITED_PIDS` is a reviewed list, never a process-list substitution. From the administrator's session:
+First establish the approved job GUI login/password. Before PID reset, separately inspect and explicitly accept the reviewed persistence manifest as described below. This does not authorize Automation/TCC grants. With the broker stopped and the manifest accepted, audit retained GUI PID/start identities; `AUDITED_PIDS` is a reviewed list, never a process-list substitution.
 
 ```sh
 sudo /Library/macserve/bin/macserve worker-reset \
   --config /Library/macserve/config/worker.json --pids "$AUDITED_PIDS"
 /Library/macserve/bin/qualify.sh plan --env /Library/macserve/config/deploy.env
 ```
+
+**Reviewed-registration migration (unreleased; deployment remains separately gated):** `worker.json` now requires a separate `persistence_path`, normally `/Library/macserve/var/broker/reviewed-persistence.json`. Existing installed configs/binaries must be migrated only through a reviewed owner-approved rollout, not by rerunning the fresh-install helper or silently accepting old schemas. Deployment creates no trusted registration list.
+
+Before reset, an approved administrator runs `macserve worker-persistence inspect --config /Library/macserve/config/worker.json --out /private/var/root/registration-candidate.json`. This creates an exclusive mode-0600 candidate, not authority. Keep the candidate private; review each registration and exact nested code binding. Any unresolved reference, unknown/autostart kind, unsigned/ad-hoc code, unsafe ownership/ACL/link, or incomplete inspection prohibits acceptance. An ordinary-looking developer/container with an absent embedded target still refuses; it is not an exception merely because installed apps are required.
+
+Only after that review, `macserve worker-persistence accept --config /Library/macserve/config/worker.json --candidate /private/var/root/registration-candidate.json --reviewed-sha256 REVIEWED_SHA256` may write the configured authority. The exact reviewed digest must match a fresh native inspection while the stopped broker's lock is held. Neither command resets processes, removes registrations, clears quarantine, approves qualification nor starts services. Reset subsequently records this authority's digest in the boot/PID baseline; maintenance rejects a changed manifest, and fresh baseline/boundary qualification remains mandatory.
+
+Legacy SessionLoginItems inspection now uses the Darwin-only pinned purego/CoreServices bridge, without System Events AppleEvents or a permission grant. The deprecated API must return a real non-null snapshot; unavailable APIs refuse. **Nonzero items refuse both reset and admission without automatic deletion.** Removal semantics were not qualified and no removal function is bound. Scoped legacy remediation is a separate owner decision. Read-only positive/empty native observations do not prove all future OS/System Events coverage or deployment safety; the independent BTM, LaunchAgents, cron and process checks remain required.
+
+Native BTM enumeration and the CoreServices job-GUI probe each have a 30-second bound to allow cold/loaded native services; metadata/cron probes keep their five-second bound. The enclosing two-minute reset/admission deadline still wins. Timeout or partial output is never interpreted as an empty census; this allowance does not reinstate AppleEvents or grant permissions.
+
+The exact manifest includes the per-UID BTM **header UUID**. Its stability across reboot or BTM-store migration must be established during host qualification, not assumed from one dump. If it changes, admission refuses until explicit re-review/acceptance, baseline reset and requalification. Do not edit the manifest or discard the UUID to force a match.
 
 Create one fresh **nonsecret** owner-home canary from the actual owner session. This command refuses to overwrite an existing file and creates mode `0644`, so the job must be denied by the home boundary, not just a private canary-file mode:
 
@@ -459,7 +471,7 @@ For a crash, reboot, GUI drift, missing baseline PID or cleanup uncertainty:
 
 1. Block new admission and request pause/cancellation where possible. When the controller is reachable, poll for quiescence; an accepted pause is not enough. Stop only the dedicated broker under the approved service procedure before reset. A stopped/crashed broker is not proof its old job processes are gone; preserve unresolved ownership for reset rather than pretending it is quiescent.
 2. Preserve protected broker records, queue database with its transactional companions, pending completions, sealed exports, manifests and probe evidence. Inventory unresolved work, recorded simulator UDIDs and protected pre-create inventories; do not delete records to bypass quarantine.
-3. Investigate persistence, current job-UID processes and provenance, retaining evidence of the cause. Approve reset's job-only LaunchAgents/crontab/legacy-login-item removal and termination of nonretained exact same-UID processes. Resolve residual modern BTM registrations only through owner-approved scoped job-account remediation; no host-wide `sfltool resetbtm`, owner registration changes, indiscriminate PID signaling or shared-cache/service cleanup.
+3. Investigate persistence, current job-UID processes and provenance, retaining evidence of the cause. Approve reset's job-only LaunchAgents/crontab removal and termination of nonretained exact same-UID processes. Legacy login items are census-only: nonzero refuses and requires separately approved scoped remediation. Review eligible modern registrations through the separate digest-pinned inspect/accept flow; unknown or unresolved records cannot be adopted. No host-wide `sfltool resetbtm`, owner registration changes, indiscriminate PID signaling or shared-cache/service cleanup.
 4. Explicitly audit every retained trusted current GUI PID/start identity and run the same future root command used for initialization:
 
    ```sh

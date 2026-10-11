@@ -7,10 +7,17 @@ import (
 
 // ObserveGUIBaseline checks every audited process without adopting or rejecting
 // additional active-job processes. It never signals processes or writes state.
-func ObserveGUIBaseline(ctx context.Context, path string, uid uint32) (string, error) {
+func ObserveGUIBaseline(ctx context.Context, path, persistencePath string, uid uint32) (string, error) {
 	baseline, err := loadBaseline(path, uid)
 	if err != nil {
 		return "", err
+	}
+	digest, err := PersistenceDigest(persistencePath, uid)
+	if err != nil {
+		return "", err
+	}
+	if baseline.PersistenceSHA256 != digest {
+		return "", errors.New("reviewed persistence changed; baseline reset and requalification required")
 	}
 	samples, err := identityProcesses(ctx)
 	if err != nil {
