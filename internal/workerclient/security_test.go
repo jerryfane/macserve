@@ -16,7 +16,7 @@ import (
 )
 
 func TestProtectedBrokerConfigurationSeparatesIdentityAndStorage(t *testing.T) {
-	base := Config{Socket: "/service/controller.sock", ControllerUID: 503, OwnerUID: 501, JobUID: 502, JobGID: 20, Root: "/service/control", ExportRoot: "/service/exports", WorkspaceRoot: "/service/workspaces", HelperPath: "/service/bin/macserve", BaselinePath: "/service/control/gui-baseline.json"}
+	base := Config{Socket: "/service/controller.sock", ControllerUID: 503, OwnerUID: 501, JobUID: 502, JobGID: 20, Root: "/service/control", ExportRoot: "/service/exports", WorkspaceRoot: "/service/workspaces", HelperPath: "/service/bin/macserve", BaselinePath: "/service/control/gui-baseline.json", PersistencePath: "/service/control/reviewed-persistence.json"}
 	for name, mutate := range map[string]func(*Config){
 		"missing-job":        func(c *Config) { c.JobUID = 0 },
 		"owner-job":          func(c *Config) { c.JobUID = c.OwnerUID },

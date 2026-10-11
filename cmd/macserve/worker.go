@@ -82,7 +82,7 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 }
 
 func executionOptions(config workerclient.Config) worker.Options {
-	return worker.Options{Root: config.Root, ExportRoot: config.ExportRoot, WorkspaceRoot: config.WorkspaceRoot, JobUID: config.JobUID, JobGID: config.JobGID, OwnerUID: config.OwnerUID, ControllerUID: config.ControllerUID, HelperPath: config.HelperPath, BaselinePath: config.BaselinePath}
+	return worker.Options{Root: config.Root, ExportRoot: config.ExportRoot, WorkspaceRoot: config.WorkspaceRoot, JobUID: config.JobUID, JobGID: config.JobGID, OwnerUID: config.OwnerUID, ControllerUID: config.ControllerUID, HelperPath: config.HelperPath, BaselinePath: config.BaselinePath, PersistencePath: config.PersistencePath}
 }
 
 func runWorkerReset(args []string, stdout, stderr io.Writer) int {

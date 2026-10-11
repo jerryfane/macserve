@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -31,6 +30,13 @@ func (r *nativeRunner) loadBaseline() error {
 	if err != nil {
 		return err
 	}
+	digest, err := PersistenceDigest(r.persistencePath, uint32(r.uid))
+	if err != nil {
+		return err
+	}
+	if baseline.PersistenceSHA256 != digest {
+		return errors.New("reviewed persistence changed; baseline reset and requalification required")
+	}
 	r.scope.baseline = baseline
 	return nil
 }
@@ -38,7 +44,7 @@ func (r *nativeRunner) loadBaseline() error {
 // Admission observes without terminating or adopting unexpected processes.
 // Delayed same-UID persistence after this snapshot remains a native trust limit.
 func (r *nativeRunner) Admission(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return err
@@ -151,18 +157,13 @@ func nativePersistenceInspector(options Options) func(context.Context) error {
 			return err
 		}
 		// launchctl selects the existing GUI domain; the fixed private helper
-		// drops all root credentials before osascript or its scripting additions load.
+		// drops all root credentials before loading CoreServices.
 		out, diagnostic, err = inspectCommand(ctx, nil, "/bin/launchctl", "asuser", strconv.FormatUint(uint64(options.JobUID), 10), options.HelperPath, "_job-login-items", strconv.FormatUint(uint64(options.JobUID), 10), strconv.FormatUint(uint64(options.JobGID), 10))
 		if err := inspectLoginItems(out, diagnostic, err); err != nil {
 			return err
 		}
-		// Legacy System Events enumeration does not cover SMAppService. Require
-		// an explicit empty per-UID Background Task Management census as well.
-		out, diagnostic, err = inspectCommand(ctx, nil, "/usr/bin/sfltool", "dumpbtm")
-		if err != nil || strings.TrimSpace(diagnostic) != "" {
-			return errors.Join(err, errors.New("background login registration inspection unavailable"))
-		}
-		return inspectBackgroundItems(out, options.JobUID)
+		// SessionLoginItems does not cover SMAppService; BTM is independent.
+		return verifyPersistence(ctx, options)
 	}
 }
 
@@ -235,50 +236,13 @@ func inspectCrontab(out, diagnostic string, commandErr error, username string) e
 	return errors.Join(commandErr, errors.New("job-user crontab inspection unavailable"))
 }
 
-var (
-	backgroundUID  = regexp.MustCompile(`^Records for UID (-?[0-9]+) : [[:xdigit:]-]+$`)
-	backgroundItem = regexp.MustCompile(`^#[0-9]+:`)
-)
-
-// dumpbtm has no stable machine-readable schema. Recognized section metadata
-// does not imply a registration; records are positive contamination, whereas
-// missing sections and unsupported target-section syntax are inspection errors.
-func inspectBackgroundItems(output string, uid uint32) error {
-	found, target := false, false
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if match := backgroundUID.FindStringSubmatch(line); match != nil {
-			target = match[1] == strconv.FormatUint(uint64(uid), 10)
-			if target {
-				if found {
-					return errors.New("duplicate background registration UID census")
-				}
-				found = true
-			}
-			continue
-		}
-		if !target || line == "" || strings.Trim(line, "=") == "" {
-			continue
-		}
-		if backgroundItem.MatchString(line) {
-			return fmt.Errorf("%w: modern background registration remains; resolve it before rerunning worker-reset", ErrContamination)
-		}
-		switch line {
-		case "ServiceManagement migrated: true", "ServiceManagement migrated: false", "Items:", "Items: 0":
-			continue
-		default:
-			return errors.New("background registration census syntax unsupported")
-		}
-	}
-	if !found {
-		return errors.New("explicit job-UID background registration census unavailable")
-	}
-	return nil
-}
-
 func PrivateJobLoginItems(args []string) error {
 	if len(args) != 2 {
 		return errors.New("invalid private login inspection arguments")
 	}
-	return PrivateJobExec(append(append([]string{}, args...), "/", "/usr/bin/osascript", "-e", `tell application "System Events" to count login items`))
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	return PrivateJobExec(append(append([]string{}, args...), "/", executable, "_legacy-login-count"))
 }

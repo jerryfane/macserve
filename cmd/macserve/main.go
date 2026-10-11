@@ -19,6 +19,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	switch args[0] {
+	case "_legacy-login-count":
+		if len(args) != 1 {
+			return 2
+		}
+		count, err := worker.LegacyLoginItemCount()
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		fmt.Fprintln(stdout, count)
+		return 0
 	case "_job-exec", "_job-signal", "_job-login-items":
 		var err error
 		if args[0] == "_job-exec" {
@@ -35,6 +46,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "worker-reset":
 		return runWorkerReset(args[1:], stdout, stderr)
+	case "worker-persistence":
+		return runWorkerPersistence(args[1:], stdout, stderr)
 	case "-h", "--help":
 		if len(args) != 1 {
 			fmt.Fprintln(stderr, "macserve: help does not accept arguments")
@@ -70,6 +83,7 @@ Commands:
   controller  Private API, durable queue and worker coordination
   worker      Protected root execution broker via the private controller socket
   worker-reset  Reset job-user persistence and record audited GUI baseline PIDs
+  worker-persistence Inspect private registration candidates or accept an exact reviewed digest
   wait        Request exact-head GitHub evidence and verify pinned receipts
   maintenance Observe qualified host boundaries and publish fail-closed health
   maintenance-observe Collect live qualification inputs without approving them

@@ -36,21 +36,22 @@ type processSample struct {
 type processSampler func(context.Context) ([]processSample, error)
 
 type nativeRunner struct {
-	command        func(Command) *exec.Cmd
-	sample         processSampler
-	inspect        processSampler
-	pollInterval   time.Duration
-	sampleInterval time.Duration
-	sampleTimeout  time.Duration
-	termGrace      time.Duration
-	killGrace      time.Duration
-	drainTimeout   time.Duration
-	uid            int
-	launchDir      string
-	scope          *processScope
-	signalProcess  func(context.Context, processSample, syscall.Signal) error
-	baselinePath   string
-	persistence    func(context.Context) error
+	command         func(Command) *exec.Cmd
+	sample          processSampler
+	inspect         processSampler
+	pollInterval    time.Duration
+	sampleInterval  time.Duration
+	sampleTimeout   time.Duration
+	termGrace       time.Duration
+	killGrace       time.Duration
+	drainTimeout    time.Duration
+	uid             int
+	launchDir       string
+	scope           *processScope
+	signalProcess   func(context.Context, processSample, syscall.Signal) error
+	baselinePath    string
+	persistencePath string
+	persistence     func(context.Context) error
 }
 
 // newProcessRunner is the process/pipes implementation. Production construction

@@ -243,7 +243,11 @@ func Inspect(ctx context.Context, c Config) (Observation, error) {
 		return invalid, err
 	}
 	o.BaselineSHA256 = digest(baseline)
-	o.Boot, err = worker.ObserveGUIBaseline(ctx, wc.BaselinePath, wc.JobUID)
+	persistence, err := protectedRead(wc.PersistencePath)
+	if err != nil {
+		return invalid, err
+	}
+	o.Boot, err = worker.ObserveGUIBaseline(ctx, wc.BaselinePath, wc.PersistencePath, wc.JobUID)
 	if err != nil {
 		return invalid, err
 	}
@@ -274,7 +278,7 @@ func Inspect(ctx context.Context, c Config) (Observation, error) {
 		return invalid, err
 	}
 	// Protected records cannot be silently replaced between their digest and use.
-	for p, old := range map[string][]byte{wc.BaselinePath: baseline} {
+	for p, old := range map[string][]byte{wc.BaselinePath: baseline, wc.PersistencePath: persistence} {
 		b, err := protectedRead(p)
 		if err != nil || !bytes.Equal(b, old) {
 			return invalid, fmt.Errorf("approval input changed: %s", p)

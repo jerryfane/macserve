@@ -47,6 +47,10 @@ func ResetGUIBaseline(ctx context.Context, options Options, pids []int) error {
 		if err := runner.persistence(ctx); err != nil {
 			return err
 		}
+		baseline.PersistenceSHA256, err = PersistenceDigest(options.PersistencePath, options.JobUID)
+		if err != nil {
+			return err
+		}
 		return saveBaseline(options.BaselinePath, baseline)
 	})
 }
@@ -135,7 +139,7 @@ func (s *processScope) resetBaseline(ctx context.Context, pids []int, boot func(
 }
 
 // All command arguments are fixed or trusted account configuration. launchctl
-// selects the job GUI domain; the helper drops credentials before osascript loads.
+// selects the job GUI domain; the helper drops credentials before CoreServices loads.
 func resetPersistence(ctx context.Context, options Options, home, username string, command func(context.Context, *syscall.Credential, string, ...string) (string, string, error)) error {
 	if err := resetLaunchAgents(ctx, home); err != nil {
 		return err
@@ -151,9 +155,11 @@ func resetPersistence(ctx context.Context, options Options, home, username strin
 			return errors.Join(err, errors.New("job-user crontab removal failed"))
 		}
 	}
-	_, diagnostic, err = command(ctx, nil, "/bin/launchctl", "asuser", strconv.FormatUint(uint64(options.JobUID), 10), options.HelperPath, "_job-exec", strconv.FormatUint(uint64(options.JobUID), 10), strconv.FormatUint(uint64(options.JobGID), 10), "/", "/usr/bin/osascript", "-e", `tell application "System Events" to delete every login item`)
-	if err != nil || strings.TrimSpace(diagnostic) != "" {
-		return errors.Join(err, errors.New("job-user legacy login item removal failed"))
+	// Native removal has not been qualified. Never delete or silently adopt a
+	// legacy item: administrators must resolve it before this reset can proceed.
+	out, diagnostic, err = command(ctx, nil, "/bin/launchctl", "asuser", strconv.FormatUint(uint64(options.JobUID), 10), options.HelperPath, "_job-login-items", strconv.FormatUint(uint64(options.JobUID), 10), strconv.FormatUint(uint64(options.JobGID), 10))
+	if err := inspectLoginItems(out, diagnostic, err); err != nil {
+		return err
 	}
 	return ctx.Err()
 }

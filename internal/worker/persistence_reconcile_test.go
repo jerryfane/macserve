@@ -75,14 +75,6 @@ func TestPersistenceCensusClassifiesOnlyObservedItems(t *testing.T) {
 		{"login-unknown", inspectLoginItems("", "", nil), false, false},
 		{"login-warning", inspectLoginItems("2\n", "denied", nil), false, false},
 		{"login-cancel", inspectLoginItems("2\n", "", context.Canceled), false, false},
-		{"empty-btm", inspectBackgroundItems("Records for UID 12345 : ABCD-1234\n================\n", testJobUID), false, true},
-		{"signed-after", inspectBackgroundItems("Records for UID 12345 : ABCD-1234\nServiceManagement migrated: true\nItems:\nRecords for UID -2 : FFFFEEEE\n#1: System item\n", testJobUID), false, true},
-		{"signed-before", inspectBackgroundItems("Records for UID -2 : FFFFEEEE\n#1: System item\nRecords for UID 12345 : ABCD-1234\nServiceManagement migrated: false\nItems: 0\n", testJobUID), false, true},
-		{"btm-entry", inspectBackgroundItems("Records for UID 12345 : ABCD-1234\nItems:\n#1: Login Item\n", testJobUID), true, false},
-		{"btm-unknown", inspectBackgroundItems("Records for UID 12345 : ABCD-1234\nunknown data\n", testJobUID), false, false},
-		{"btm-duplicate", inspectBackgroundItems("Records for UID 12345 : ABCD-1234\nRecords for UID 12345 : ABCD-1234\n", testJobUID), false, false},
-		{"btm-missing", inspectBackgroundItems("Records for UID 999 : ABCD-1234\n", testJobUID), false, false},
-		{"btm-empty", inspectBackgroundItems("", testJobUID), false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if (tc.err == nil) != tc.allowed || errors.Is(tc.err, ErrContamination) != tc.contaminated {
@@ -337,7 +329,7 @@ func TestResetClearsOnlyAfterFullCleanRecheck(t *testing.T) {
 			err := engine.reset(ctx, func(context.Context) error {
 				switch mode {
 				case "btm":
-					runner.failure = inspectBackgroundItems("Records for UID 12345 : ABCD\n#1: Persistent modern registration\n", testJobUID)
+					runner.failure = ErrContamination
 				case "inspect":
 					runner.failure = syscall.EPERM
 				case "cleanup":
@@ -423,5 +415,28 @@ func TestResetPersistenceStopsOnUnobservableCrontab(t *testing.T) {
 		})
 	if !errors.Is(err, syscall.EPERM) || errors.Is(err, ErrContamination) {
 		t.Fatalf("partial failed census classified as observed crontab: %v", err)
+	}
+}
+
+func TestResetPersistenceRefusesLegacyWithoutDeleting(t *testing.T) {
+	home := t.TempDir()
+	deleted := false
+	command := func(_ context.Context, _ *syscall.Credential, executable string, args ...string) (string, string, error) {
+		if executable == "/usr/bin/crontab" {
+			return "", "", nil
+		}
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "delete every login item") {
+			deleted = true
+			return "", "", nil
+		}
+		if strings.Contains(joined, "_job-login-items") {
+			return "1\n", "", nil
+		}
+		return "", "", errors.New("unexpected command")
+	}
+	err := resetPersistence(context.Background(), Options{JobUID: testJobUID, JobGID: testJobUID, HelperPath: "/protected/helper"}, home, "fixture", command)
+	if deleted || !errors.Is(err, ErrContamination) {
+		t.Fatalf("legacy item removed or accepted: deleted=%v error=%v", deleted, err)
 	}
 }
