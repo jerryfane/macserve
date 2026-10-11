@@ -118,11 +118,20 @@ func RootConfig(path string) error { return protectedPath(path, false) }
 // CheckProtectedPath enforces root ownership, non-writable ancestors and native
 // ACL protection. Deny-only ACLs cannot grant writes; other ACLs require review.
 func CheckProtectedPath(path string, directory bool) error {
+	return checkProtectedPathACL(context.Background(), path, directory, true)
+}
+
+// CheckProtectedPathNoACL excludes even deny-only ACLs for owned service inputs.
+func CheckProtectedPathNoACL(ctx context.Context, path string, directory bool) error {
+	return checkProtectedPathACL(ctx, path, directory, false)
+}
+
+func checkProtectedPathACL(parent context.Context, path string, directory, allowDeny bool) error {
 	if err := protectedPath(path, directory); err != nil {
 		return err
 	}
 	for current := path; ; current = filepath.Dir(current) {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 		cmd := exec.CommandContext(ctx, "/bin/ls", "-lde", current)
 		cmd.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LANG=C", "LC_ALL=C", "HOME=/private/var/root"}
 		output, err := cmd.Output()
@@ -130,15 +139,26 @@ func CheckProtectedPath(path string, directory bool) error {
 		if err != nil {
 			return fmt.Errorf("cannot inspect protected input ACL: %w", err)
 		}
-		for _, line := range strings.Split(strings.TrimSuffix(string(output), "\n"), "\n")[1:] {
-			if !strings.Contains(line, " deny ") {
-				return fmt.Errorf("ACL requires manual review: %s", current)
-			}
+		if err := checkProtectedACL(output, allowDeny); err != nil {
+			return fmt.Errorf("%w: %s", err, current)
 		}
 		if current == filepath.Dir(current) {
 			return nil
 		}
 	}
+}
+
+func checkProtectedACL(output []byte, allowDeny bool) error {
+	lines := strings.Split(strings.TrimSuffix(string(output), "\n"), "\n")
+	if len(lines[0]) == 0 {
+		return errors.New("protected input ACL inspection unavailable")
+	}
+	for _, line := range lines[1:] {
+		if !allowDeny || !strings.Contains(line, " deny ") {
+			return errors.New("ACL requires manual review")
+		}
+	}
+	return nil
 }
 
 func protectedPath(path string, directory bool) error {

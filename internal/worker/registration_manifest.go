@@ -101,12 +101,16 @@ func PersistenceDigest(path string, uid uint32) (string, error) {
 	return persistenceHash(data), nil
 }
 
-func backgroundCensus(ctx context.Context, uid uint32) (BTMCensus, error) {
+func backgroundCensus(ctx context.Context, options Options) (BTMCensus, error) {
 	out, diagnostic, err := inspectCommand(ctx, nil, "/usr/bin/sfltool", "dumpbtm")
 	if err != nil || strings.TrimSpace(diagnostic) != "" {
 		return BTMCensus{}, errors.New("background census unavailable")
 	}
-	return parseBackgroundItems(out, uid)
+	census, err := parseBackgroundItems(out, options.JobUID)
+	if err != nil {
+		return census, err
+	}
+	return withoutOwnServices(ctx, census, options.HelperPath, verifyOwnService)
 }
 
 func collectPersistence(ctx context.Context, options Options) (PersistenceManifest, error) {
@@ -119,7 +123,7 @@ func collectPersistence(ctx context.Context, options Options) (PersistenceManife
 		return m, errors.New("OS build unavailable")
 	}
 	m.OSBuild = strings.TrimSpace(build)
-	m.Census, err = backgroundCensus(ctx, options.JobUID)
+	m.Census, err = backgroundCensus(ctx, options)
 	if err != nil {
 		return m, err
 	}
@@ -164,7 +168,7 @@ func collectPersistence(ctx context.Context, options Options) (PersistenceManife
 	if err := ctx.Err(); err != nil {
 		return m, err
 	}
-	second, err := backgroundCensus(ctx, options.JobUID)
+	second, err := backgroundCensus(ctx, options)
 	if err != nil {
 		return m, err
 	}
