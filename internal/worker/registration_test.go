@@ -309,3 +309,85 @@ func TestReviewAuthorityRejectsPartialPublicOrAmbiguousFiles(t *testing.T) {
 		t.Fatal("qualification binding did not change")
 	}
 }
+
+func TestPersistenceDigestRejectsCanonicalProblems(t *testing.T) {
+	root := privateRootFixture(t)
+	path := filepath.Join(root, "review.json")
+	for name, poison := range map[string]func(*PersistenceManifest){
+		"declared": func(m *PersistenceManifest) { m.Problems = []string{"native code verification unavailable"} },
+		"derived":  func(m *PersistenceManifest) { m.Census.Records[2].Embedded = []string{"16.test.example.absent"} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := registrationFixture(t)
+			valid, err := persistenceBytes(m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, valid, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := PersistenceDigest(path, testJobUID); err != nil {
+				t.Fatalf("valid authority refused: %v", err)
+			}
+			poison(&m)
+			canonical, err := persistenceBytes(m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, canonical, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if digest, err := PersistenceDigest(path, testJobUID); err == nil || digest != "" {
+				t.Fatalf("problem-carrying canonical authority supplied a qualification digest: %q %v", digest, err)
+			}
+		})
+	}
+}
+
+func TestVerifyPersistenceRefusesAuthoritySwapDuringCollection(t *testing.T) {
+	root := privateRootFixture(t)
+	path := filepath.Join(root, "review.json")
+	for _, swap := range []bool{false, true} {
+		t.Run(map[bool]string{false: "unchanged", true: "swapped"}[swap], func(t *testing.T) {
+			expected := registrationFixture(t)
+			data, err := persistenceBytes(expected)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			collected := false
+			err = verifyPersistence(context.Background(), Options{JobUID: testJobUID, PersistencePath: path},
+				func(context.Context, Options) (PersistenceManifest, error) {
+					collected = true
+					if swap {
+						replacement := registrationFixture(t)
+						replacement.OSBuild = "different-reviewed-build"
+						other, err := persistenceBytes(replacement)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if err := os.WriteFile(path+".replacement", other, 0600); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.Rename(path+".replacement", path); err != nil {
+							t.Fatal(err)
+						}
+					}
+					// Inventory still matches the initially read authority. Only
+					// the final on-disk authority read can detect the replacement.
+					return expected, nil
+				})
+			if !collected {
+				t.Fatal("inventory collection was not reached")
+			}
+			if swap && (err == nil || errors.Is(err, ErrContamination)) {
+				t.Fatalf("authority replacement not refused as inspection instability: %v", err)
+			}
+			if !swap && err != nil {
+				t.Fatalf("unchanged authority refused: %v", err)
+			}
+		})
+	}
+}

@@ -52,8 +52,10 @@ func LegacyLoginItemCount() (int64, error) {
 	if err != nil || address == 0 {
 		return 0, errors.New("session login list type unavailable")
 	}
-	// The exported symbol is a CFStringRef variable, not the CFString itself.
-	kind := *(*uintptr)(unsafe.Pointer(address))
+	// Dlsym returns the address of an exported CFStringRef variable. Read the
+	// pointer bits through the address variable, then dereference that foreign
+	// pointer once; do not convert an integer value to unsafe.Pointer.
+	kind := **(**uintptr)(unsafe.Pointer(&address))
 	if kind == 0 {
 		return 0, errors.New("session login list type is null")
 	}

@@ -75,6 +75,7 @@ func TestPersistenceCensusClassifiesOnlyObservedItems(t *testing.T) {
 		{"login-unknown", inspectLoginItems("", "", nil), false, false},
 		{"login-warning", inspectLoginItems("2\n", "denied", nil), false, false},
 		{"login-cancel", inspectLoginItems("2\n", "", context.Canceled), false, false},
+		{"login-timeout-after-empty-output", inspectLoginItems("0\n", "", context.DeadlineExceeded), false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if (tc.err == nil) != tc.allowed || errors.Is(tc.err, ErrContamination) != tc.contaminated {

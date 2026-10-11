@@ -126,7 +126,16 @@ func (e *Engine) checkQuarantine() error {
 // Only these fixed, read-only commands are used. They do not use the job Runner,
 // which permits recipes; probes have fixed environments, output bounds and deadlines.
 func inspectCommand(ctx context.Context, credential *syscall.Credential, executable string, args ...string) (string, string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	// Metadata/cron probes stay short. A cold CoreServices GUI-domain connection
+	// or host-wide BTM enumeration gets 30s, rather than the old AppleEvents 5s.
+	// The enclosing admission/reset deadline still wins, and partial output on
+	// any deadline remains an inspection failure, never an empty census.
+	timeout := 5 * time.Second
+	if executable == "/usr/bin/sfltool" && len(args) == 1 && args[0] == "dumpbtm" ||
+		executable == "/bin/launchctl" && len(args) == 6 && args[0] == "asuser" && args[3] == "_job-login-items" {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, executable, args...)
 	cmd.Dir = "/"
@@ -163,7 +172,7 @@ func nativePersistenceInspector(options Options) func(context.Context) error {
 			return err
 		}
 		// SessionLoginItems does not cover SMAppService; BTM is independent.
-		return verifyPersistence(ctx, options)
+		return verifyPersistence(ctx, options, collectPersistence)
 	}
 }
 

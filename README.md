@@ -151,7 +151,11 @@ broker-private `root`, mode `0600`) with `state` (`admitting` or `not_admitting`
 Status-write errors also block registration/claim and retry on the normal poll. This file is only the last
 observation, not a live heartbeat or a second quarantine authority; it may be stale after shutdown and
 requires no administrator clear. Editing/removing it cannot bypass recovery or clear quarantine.
-The fixed probes have deadlines and output bounds. Modern registration inspection requires a complete,
+The fixed probes have deadlines and output bounds. Native SessionLoginItems/GUI-domain startup and host-wide
+BTM enumeration each get a bounded 30 seconds for cold/loaded hosts, independent of the former five-second
+AppleEvents budget. Metadata/cron probes retain five seconds; the enclosing two-minute operation deadline
+always wins. Timeout, including partial output reporting zero items, is refusal rather than an empty census.
+Modern registration inspection requires a complete,
 recognized job-UID `sfltool dumpbtm` census matching the separately accepted protected manifest; missing,
 unfamiliar or incomplete output is refusal, never absence. There is no automatic adoption or name/team/type
 allowlist. The GUI process baseline and reviewed registration authority are independent and both must pass.
@@ -215,6 +219,10 @@ requirement; protected root ownership/modes/deny-only ACLs; and a canonical app-
 bytes, names, links and permissions. Links cannot escape the app tree. New, missing, changed, unprotected or
 incomplete state refuses. The parser intentionally supports a bounded observed schema, not arbitrary future
 `dumpbtm` formats. Native code verification and complete account qualification still need host evidence.
+The per-UID census **header UUID is part of the exact reviewed identity**, not a decorative field. Stability
+across reboot/store migration is an operational assumption requiring host evidence. A changed header UUID
+refuses admission and requires explicit re-review/acceptance followed by baseline reset and requalification;
+macserve never strips or silently refreshes it.
 
 The new pinned `github.com/ebitengine/purego v0.9.1` dependency is Darwin-only and binds only the deprecated
 CoreServices session-list census plus CoreFoundation count/lifetime operations. It preserves the

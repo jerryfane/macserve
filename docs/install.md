@@ -117,6 +117,10 @@ Only after that review, `macserve worker-persistence accept --config /Library/ma
 
 Legacy SessionLoginItems inspection now uses the Darwin-only pinned purego/CoreServices bridge, without System Events AppleEvents or a permission grant. The deprecated API must return a real non-null snapshot; unavailable APIs refuse. **Nonzero items refuse both reset and admission without automatic deletion.** Removal semantics were not qualified and no removal function is bound. Scoped legacy remediation is a separate owner decision. Read-only positive/empty native observations do not prove all future OS/System Events coverage or deployment safety; the independent BTM, LaunchAgents, cron and process checks remain required.
 
+Native BTM enumeration and the CoreServices job-GUI probe each have a 30-second bound to allow cold/loaded native services; metadata/cron probes keep their five-second bound. The enclosing two-minute reset/admission deadline still wins. Timeout or partial output is never interpreted as an empty census; this allowance does not reinstate AppleEvents or grant permissions.
+
+The exact manifest includes the per-UID BTM **header UUID**. Its stability across reboot or BTM-store migration must be established during host qualification, not assumed from one dump. If it changes, admission refuses until explicit re-review/acceptance, baseline reset and requalification. Do not edit the manifest or discard the UUID to force a match.
+
 Create one fresh **nonsecret** owner-home canary from the actual owner session. This command refuses to overwrite an existing file and creates mode `0644`, so the job must be denied by the home boundary, not just a private canary-file mode:
 
 ```sh

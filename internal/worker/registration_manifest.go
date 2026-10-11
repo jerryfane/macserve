@@ -176,12 +176,15 @@ func collectPersistence(ctx context.Context, options Options) (PersistenceManife
 	return m, nil
 }
 
-func verifyPersistence(ctx context.Context, options Options) error {
+// verifyPersistence brackets a collected inventory with real protected-authority
+// reads. The native caller supplies collectPersistence, just as reset supplies
+// its native command runner; the observation cannot replace either authority read.
+func verifyPersistence(ctx context.Context, options Options, collect func(context.Context, Options) (PersistenceManifest, error)) error {
 	expected, accepted, err := readPersistence(options.PersistencePath, options.JobUID)
 	if err != nil {
 		return err
 	}
-	current, err := collectPersistence(ctx, options)
+	current, err := collect(ctx, options)
 	if err != nil {
 		return err
 	}
