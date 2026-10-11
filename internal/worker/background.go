@@ -21,6 +21,8 @@ type BTMCensus struct {
 	Identifier string            `json:"identifier"`
 	Metadata   map[string]string `json:"metadata"`
 	Records    []BTMRecord       `json:"records"`
+	// Ephemeral attribution from UID -2; never stored as reviewed authority.
+	OwnServices []BTMRecord `json:"-"`
 }
 
 var btmHeader = regexp.MustCompile(`^Records for UID (-?[0-9]+) : ([[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12})$`)
@@ -137,7 +139,9 @@ func parseBackgroundItems(output string, uid uint32) (BTMCensus, error) {
 	for i := range census.Records {
 		sort.Strings(census.Records[i].Embedded)
 	}
-	return census, nil
+	var err error
+	census.OwnServices, err = ownedReferences(output, census)
+	return census, err
 }
 
 // registrationPaths resolves only the audited schema's app and nested-code forms.
@@ -156,6 +160,14 @@ func registrationPaths(census BTMCensus) (map[string]string, []string) {
 	for _, r := range census.Records {
 		f, id := r.Fields, r.Fields["Identifier"]
 		refuse := func(reason string) { problems = append(problems, id+": "+reason) }
+		if own, err := ownContainer(r, census.OwnServices); err != nil {
+			refuse(err.Error())
+			continue
+		} else if own {
+			// Structural attribution only. Native collection must verify files
+			// before removing these from the reviewed third-party census.
+			continue
+		}
 		if f["Flags"] != "[  ] (0)" && f["Flags"] != "[ sandboxed ] (0x40)" {
 			refuse("unsupported flags")
 			continue

@@ -205,7 +205,7 @@ With admission disabled and under separately approved root administration:
 2. Privately review every registration, nested executable, relationship and integrity binding. Do not publish
    candidate contents. App/developer containers are explicit records, not ignored decoration. An unresolved
    embedded reference remains ineligible even if its container looks ordinary; attribution must precede any
-   separate policy decision. Daemon/login/autostart and unknown registration kinds remain ineligible.
+   separate policy decision. Third-party daemon/login/autostart and unknown registration kinds remain ineligible.
 3. Only after explicit review, run `macserve worker-persistence accept --config /absolute/worker.json
    --candidate /root/private-candidate.json --reviewed-sha256 REVIEWED_SHA256`. Acceptance holds the stopped
    broker's exclusive lock and requires an independently repeated live census/code match. It does not clear
@@ -213,7 +213,7 @@ With admission disabled and under separately approved root administration:
 4. Perform the separately approved PID-baseline reset and fresh qualification. Manifest replacement invalidates
    the baseline binding and previous health/qualification; app, extension or OS updates are not auto-adopted.
 
-Eligible app/nested-code classifications are only a review schema, never trust by category. Every executable
+Eligible third-party app/nested-code classifications are only a review schema, never trust by category. Every such executable
 binding requires matching bundle/team signature identity, non-ad-hoc Apple-anchored signature verification and designated
 requirement; protected root ownership/modes/deny-only ACLs; and a canonical app-tree digest including nested
 bytes, names, links and permissions. Links cannot escape the app tree. New, missing, changed, unprotected or
@@ -230,6 +230,30 @@ CoreServices session-list census plus CoreFoundation count/lifetime operations. 
 AppleEvents fallback or removal binding. Read-only native positive/empty snapshots establish operation on the
 tested OS, not equivalence across all future System Events/OS implementations or global launch mechanisms.
 The independent BTM/LaunchAgents/crontab/process checks remain mandatory; unavailable legacy APIs fail closed.
+
+**Owned-service attribution (unreleased change):** the full root BTM dump may link a job-user developer
+notification container to UID `-2` legacy-daemon records for macserve itself. Only the exact identifiers
+`16.org.macserve.controller`, `16.org.macserve.worker`, and `16.org.macserve.maintenance` qualify for this
+separate live check. The record URL must be `/Library/LaunchDaemons/<label>.plist`, and its executable path
+must equal configured `helper_path`. The plist and helper, including their parents, must be root-owned,
+non-symlink, not group/other-writable and have **no ACLs**, even deny-only ones. The XML plist's `Label` and
+`ProgramArguments[0]` must match; any `Program` override must name the same executable. Open-file `fstat`
+device/inode identity (`os.SameFile`) must match `helper_path` to `os.Executable()`.
+
+Every embedded reference in an own-service container must resolve uniquely to a verified owned record,
+with the matching parent relationship. Mixed, unknown, duplicate or unresolved references refuse. Only
+after these checks is that container omitted from the third-party review census; the linked root records
+are not persisted as approvals. Checks run again on each native census, including the post-inspection
+snapshot. Thus later registration of the other owned labels does not auto-adopt third-party records or
+invalidate the manifest solely for owned notification metadata. The job-UID header UUID remains bound.
+
+This narrowly recognizes protected infrastructure, not any app name, developer name, team or signature.
+Ad-hoc macserve code is permitted here because the check binds the protected helper to the checking
+executable—not because an ad-hoc signature proves provenance. There is no new digest pin or claimed
+installed-binary digest verification. The threat is job-UID-created persistence; root tampering, including
+replacement of the executable path or protected configuration, is outside this boundary. `os.Executable`
+plus `fstat` is not an attestation against a hostile root replacing a running image. All third-party manifest,
+signature, process and other persistence controls remain mandatory. This does not authorize deployment.
 
 ## Controller configuration and control
 
