@@ -118,7 +118,7 @@ func collectPersistence(ctx context.Context, options Options) (PersistenceManife
 	if runtime.GOOS != "darwin" {
 		return m, errors.New("native registration inspection requires macOS")
 	}
-	writers, err := registrationWriterPolicy(options)
+	writers, err := registrationWriterPolicy(ctx, options)
 	if err != nil {
 		return m, err
 	}
@@ -131,6 +131,30 @@ func collectPersistence(ctx context.Context, options Options) (PersistenceManife
 	if err != nil {
 		return m, err
 	}
+	if err := collectRegistrationCode(ctx, &m, writers, protectedTreeACL, protectedTreeDigest, codeCommand); err != nil {
+		return m, err
+	}
+	if _, err := registrationWriterPolicy(ctx, options); err != nil {
+		return m, err
+	}
+	if err := ctx.Err(); err != nil {
+		return m, err
+	}
+	second, err := backgroundCensus(ctx, options)
+	if err != nil {
+		return m, err
+	}
+	firstJSON, _ := json.Marshal(m.Census)
+	secondJSON, _ := json.Marshal(second)
+	if !bytes.Equal(firstJSON, secondJSON) {
+		return m, errors.New("background registrations changed during inspection")
+	}
+	return m, nil
+}
+
+// Collect successful measurements separately from failures so only measured
+// trees enter the signing-race recheck. Failed trees remain candidate Problems.
+func collectRegistrationCode(ctx context.Context, m *PersistenceManifest, writers registrationWriters, treeACL func(context.Context, string, registrationWriters) error, treeDigest func(context.Context, string, registrationWriters) (string, error), command func(context.Context, ...string) (string, error)) error {
 	paths, problems := registrationPaths(m.Census)
 	m.Problems = problems
 	trees := map[string]string{}
@@ -150,16 +174,21 @@ func collectPersistence(ctx context.Context, options Options) (PersistenceManife
 			root = byID[parent].Fields["URL"]
 		}
 		if _, ok := trees[root]; !ok && treeErrors[root] == nil {
-			treeErrors[root] = protectedTreeACL(ctx, root, writers)
+			treeErrors[root] = treeACL(ctx, root, writers)
 			if treeErrors[root] == nil {
-				trees[root], treeErrors[root] = protectedTreeDigest(ctx, root, writers)
+				digest, err := treeDigest(ctx, root, writers)
+				if err != nil {
+					treeErrors[root] = err
+				} else {
+					trees[root] = digest
+				}
 			}
 		}
 		if treeErrors[root] != nil {
 			m.Problems = append(m.Problems, id+": protected code tree unavailable: "+treeErrors[root].Error())
 			continue
 		}
-		code, err := verifyRegisteredCode(ctx, path, r, writers)
+		code, err := verifyRegisteredCode(ctx, path, r, writers, command)
 		// Preserve a successfully measured tree even if subsequent signature
 		// inspection fails; changed bytes are positive evidence, not just an
 		// inability to inspect the signing identity.
@@ -172,33 +201,18 @@ func collectPersistence(ctx context.Context, options Options) (PersistenceManife
 	// Signing commands must not bridge a changed tree or mutable ancestry.
 	// Recheck ACLs too: a newly granted writer need not change any code bytes.
 	for root, before := range trees {
-		if err := protectedTreeACL(ctx, root, writers); err != nil {
-			return m, err
+		if err := treeACL(ctx, root, writers); err != nil {
+			return err
 		}
-		after, err := protectedTreeDigest(ctx, root, writers)
+		after, err := treeDigest(ctx, root, writers)
 		if err != nil {
-			return m, err
+			return err
 		}
 		if before != after {
-			return m, errors.New("registered code tree changed during inspection")
+			return errors.New("registered code tree changed during inspection")
 		}
 	}
-	if _, err := registrationWriterPolicy(options); err != nil {
-		return m, err
-	}
-	if err := ctx.Err(); err != nil {
-		return m, err
-	}
-	second, err := backgroundCensus(ctx, options)
-	if err != nil {
-		return m, err
-	}
-	firstJSON, _ := json.Marshal(m.Census)
-	secondJSON, _ := json.Marshal(second)
-	if !bytes.Equal(firstJSON, secondJSON) {
-		return m, errors.New("background registrations changed during inspection")
-	}
-	return m, nil
+	return nil
 }
 
 // verifyPersistence brackets a collected inventory with real protected-authority

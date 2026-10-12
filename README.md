@@ -213,21 +213,34 @@ With admission disabled and under separately approved root administration:
 4. Perform the separately approved PID-baseline reset and fresh qualification. Manifest replacement invalidates
    the baseline binding and previous health/qualification; app, extension or OS updates are not auto-adopted.
 
+Both `worker-persistence inspect` and `accept` have a fixed six-minute inspection deadline, with no
+user override and below the ten-minute ceiling. The full native collector initially exceeded the
+former 120-second limit; a complete warm collection measured 113.7 seconds. Six minutes is three
+times that measured runtime rounded up, allowing cold-cache variation without removing a bound.
+Expiry still fails closed: an incomplete inspection cannot authorize acceptance. Each unique parent
+tree is measured once per pass; the mandatory post-signature tree and ACL rechecks remain intact.
+
 Eligible third-party app/nested-code classifications are only a review schema, never trust by category. Every such executable
 binding requires matching bundle/team signature identity, non-ad-hoc Apple-anchored signature verification and designated
 requirement; a registration-only writer policy; and a canonical app-tree digest including nested bytes, names,
 ownership, links and permissions. For the code tree **and every ancestor**, ownership must be root or configured
-`owner_uid` (UID 501 in the reviewed deployment). Only root, that owner and the verified `admin` group (GID 80)
-may write through modes or ACLs, including inherited user/group ACL entries. `staff` (GID 20), job/controller
-groups and everyone are not allowed writers. Both service accounts' actual primary and supplementary memberships
-are checked: membership in `wheel`/root, `staff` or `admin` refuses, rather than turning a service account into an
-allowed writer. Unavailable identities/memberships and unknown ACL principals/rights fail closed; deny entries
-never cancel an otherwise unsafe grant or mode. This policy does **not** relax root-only broker/configuration,
+`owner_uid` (UID 501 in the reviewed deployment). Only root, that owner and the verified `wheel` (GID 0)
+and `admin` (GID 80) groups may write through modes or ACLs, including unambiguous inherited grants.
+`staff` (GID 20), job/controller groups and everyone are not allowed writers. Both service accounts'
+actual primary, supplementary and nested memberships are checked: native Directory Services membership
+queries supplement the group list, so membership in `wheel`/root, `staff` or `admin` refuses rather than
+turning a service account into an allowed writer. Root/owner/job/controller identities must be distinct
+and the named groups must resolve to their expected GIDs. Unavailable identities/memberships and unknown
+ACL principals/rights fail closed; deny entries never cancel an unsafe grant or mode. This policy does **not** relax root-only broker/configuration,
 manifest or owned-service protection.
 
-Tree roots and all ancestors must be non-symlinks and are rechecked around inspection. Existing internal bundle
-links remain supported only when they resolve inside the protected tree. The full tree and ACL policy are checked
-again after signature inspection. New, missing, changed, unprotected or incomplete state refuses. Owner/admin
+Tree roots and all ancestors must be non-symlinks and are rechecked around inspection. Signed executable
+containment uses filesystem directory identity and descriptor-confined access, not case-folded path text:
+`Plugins` and `PlugIns` may identify the same directory only when the filesystem says they do. Existing internal
+bundle links remain supported only when they resolve inside the protected tree. Strict, deep signature checking
+uses the inline requirement `=anchor apple generic`. The full tree and ACL policy are checked again after
+signature inspection. A failed initial tree measurement stays an unresolved private-candidate Problem, never
+a cached digest or accepted authority. New, missing, changed, unprotected or incomplete state refuses. Owner/wheel/admin
 write permission is **not automatic update approval**: every app/extension update that changes the bound tree
 requires explicit re-review/acceptance, baseline reset and fresh qualification, even with the same signer/team.
 The parser intentionally supports a bounded observed schema, not arbitrary future `dumpbtm` or ACL formats.

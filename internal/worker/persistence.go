@@ -132,6 +132,7 @@ func inspectCommand(ctx context.Context, credential *syscall.Credential, executa
 	// any deadline remains an inspection failure, never an empty census.
 	timeout := 5 * time.Second
 	if executable == "/usr/bin/sfltool" && len(args) == 1 && args[0] == "dumpbtm" ||
+		executable == "/usr/bin/dsmemberutil" ||
 		executable == "/bin/launchctl" && len(args) == 6 && args[0] == "asuser" && args[3] == "_job-login-items" {
 		timeout = 30 * time.Second
 	}

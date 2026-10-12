@@ -12,6 +12,15 @@ import (
 	"github.com/jerryfane/macserve/internal/workerclient"
 )
 
+// The full native collector measured 113.7s warm and exceeded the former 120s
+// limit cold. Three times that measurement rounded up allows cold-cache variation
+// within a fixed fail-closed bound below ten minutes; no CLI override exists.
+const workerPersistenceInspectionTimeout = 6 * time.Minute
+
+func workerPersistenceInspectionContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(parent, workerPersistenceInspectionTimeout)
+}
+
 func runWorkerPersistence(args []string, stdout, stderr io.Writer) int {
 	const usage = "Usage: macserve worker-persistence inspect --config /absolute/worker.json --out /root/private-candidate.json\n       macserve worker-persistence accept --config /absolute/worker.json --candidate /root/private-candidate.json --reviewed-sha256 SHA256\n"
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
@@ -48,7 +57,7 @@ func runWorkerPersistence(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := workerPersistenceInspectionContext(context.Background())
 	defer cancel()
 	if args[0] == "inspect" {
 		digest, err := worker.ReviewPersistence(ctx, executionOptions(cfg), *candidate)

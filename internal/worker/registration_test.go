@@ -281,6 +281,7 @@ func TestRegisteredTreeACLAllowsOnlyReviewedWriters(t *testing.T) {
 		"owner":         "user:owner allow write,append,writeattr,writeextattr,writesecurity,chown",
 		"admin":         "group:admin allow add_file,add_subdirectory,delete_child,file_inherit,directory_inherit",
 		"root":          "user:root allow write",
+		"wheel":         "group:wheel allow write,append,add_file,delete_child",
 		"job-read-only": "user:job allow read,readattr,readsecurity",
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -295,7 +296,6 @@ func TestRegisteredTreeACLAllowsOnlyReviewedWriters(t *testing.T) {
 		"job-group":            "group:job allow append",
 		"inherited-job-group":  "group:job inherited allow delete_child,directory_inherit",
 		"staff":                "group:staff allow write",
-		"wheel":                "group:wheel allow write",
 		"everyone":             "group:everyone allow delete",
 		"unknown-user":         "user:unresolved deny write",
 		"unknown-group":        "group:unresolved allow read",
@@ -321,6 +321,15 @@ func TestRegisteredTreeACLAllowsOnlyReviewedWriters(t *testing.T) {
 }
 
 func TestRegisteredOwnerBundleAndAdminAncestorsRequireRereview(t *testing.T) {
+	testRegisteredOwnerBundleAndTrustedAncestorsRequireRereview(t, 80)
+}
+
+func TestRegisteredWheelWritableTreeAndAncestorsRequireRereview(t *testing.T) {
+	testRegisteredOwnerBundleAndTrustedAncestorsRequireRereview(t, 0)
+}
+
+func testRegisteredOwnerBundleAndTrustedAncestorsRequireRereview(t *testing.T, gid int) {
+	t.Helper()
 	root := privateRootFixture(t)
 	path := filepath.Join(root, "Applications", "Fixture.app")
 	if err := os.MkdirAll(path, 0755); err != nil {
@@ -328,7 +337,7 @@ func TestRegisteredOwnerBundleAndAdminAncestorsRequireRereview(t *testing.T) {
 	}
 	applications := filepath.Dir(path)
 	for dir, uid := range map[string]int{applications: 0, path: 501} {
-		if err := os.Chown(dir, uid, 80); err != nil {
+		if err := os.Chown(dir, uid, gid); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.Chmod(dir, 0775); err != nil {
@@ -339,7 +348,7 @@ func TestRegisteredOwnerBundleAndAdminAncestorsRequireRereview(t *testing.T) {
 	if err := os.WriteFile(file, []byte("reviewed owner app"), 0664); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chown(file, 501, 80); err != nil {
+	if err := os.Chown(file, 501, gid); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(file, 0664); err != nil {
@@ -356,13 +365,13 @@ func TestRegisteredOwnerBundleAndAdminAncestorsRequireRereview(t *testing.T) {
 	if err := os.Symlink("code", link); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Lchown(link, 501, 80); err != nil {
+	if err := os.Lchown(link, 501, gid); err != nil {
 		t.Fatal(err)
 	}
 	writers := registrationWritersFixture()
 	before, err := protectedTreeDigest(context.Background(), path, writers)
 	if err != nil {
-		t.Fatalf("reviewable owner/admin bundle refused: %v", err)
+		t.Fatalf("reviewable owner/trusted-group bundle refused: %v", err)
 	}
 	accepted := registrationFixture(t)
 	id := "2.test.example.fixture"
@@ -409,7 +418,7 @@ func TestRegisteredTreeRejectsUntrustedOwnersAndWritableAncestors(t *testing.T) 
 			})
 		}
 	}
-	for _, gid := range []int{0, 20, 6202, 6201} {
+	for _, gid := range []int{20, 6202, 6201} {
 		t.Run("writable-group/"+strconv.Itoa(gid), func(t *testing.T) {
 			root := privateRootFixture(t)
 			path := filepath.Join(root, "Fixture.app")
@@ -423,7 +432,7 @@ func TestRegisteredTreeRejectsUntrustedOwnersAndWritableAncestors(t *testing.T) 
 				t.Fatal(err)
 			}
 			if _, err := protectedTreeDigest(context.Background(), path, registrationWritersFixture()); err == nil {
-				t.Fatal("non-admin writable ancestor accepted")
+				t.Fatal("untrusted group-writable ancestor accepted")
 			}
 		})
 	}
@@ -549,7 +558,7 @@ func TestRegistrationWriterMembershipsFailClosed(t *testing.T) {
 						}
 						return []string{account.Uid}, nil
 					}
-					err := registrationWriterIdentities(options, lookup, lookupGroup, memberships)
+					err := registrationWriterIdentities(options, lookup, lookupGroup, memberships, func(*user.User, string) (bool, error) { return false, nil })
 					if (err == nil) != (gid == "dedicated") {
 						t.Fatalf("membership decision for %q: %v", gid, err)
 					}
@@ -684,5 +693,282 @@ func TestVerifyPersistenceRefusesAuthoritySwapDuringCollection(t *testing.T) {
 				t.Fatalf("unchanged authority refused: %v", err)
 			}
 		})
+	}
+}
+
+func TestRegistrationWriterNestedMembershipsFailClosed(t *testing.T) {
+	options := Options{OwnerUID: 501, JobUID: 6202, ControllerUID: 6201}
+	lookup := func(id string) (*user.User, error) {
+		return &user.User{Uid: id, Gid: id, Username: "fixture" + id}, nil
+	}
+	lookupGroup := func(name string) (*user.Group, error) {
+		return &user.Group{Name: name, Gid: map[string]string{"wheel": "0", "staff": "20", "admin": "80"}[name]}, nil
+	}
+	directGroups := func(account *user.User) ([]string, error) {
+		// The privileged membership is nested and absent from GroupIds.
+		return []string{account.Gid, "6300"}, nil
+	}
+	for _, role := range []string{"6202", "6201"} {
+		for _, gid := range []string{"0", "20", "80"} {
+			for _, result := range []string{"member", "unavailable", "not-member"} {
+				t.Run(role+"/"+gid+"/"+result, func(t *testing.T) {
+					member := func(account *user.User, group string) (bool, error) {
+						if account.Uid == "0" || account.Uid == "501" {
+							t.Fatal("trusted updater membership treated as a service identity")
+						}
+						if account.Uid == role && group == gid {
+							if result == "unavailable" {
+								return false, errors.New("nested directory membership unavailable")
+							}
+							return result == "member", nil
+						}
+						return false, nil
+					}
+					err := registrationWriterIdentities(options, lookup, lookupGroup, directGroups, member)
+					if (err == nil) != (result == "not-member") {
+						t.Fatalf("nested membership %s: %v", result, err)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestCollectRegistrationCodeRetainsFailedTreesAsProblems(t *testing.T) {
+	root := privateRootFixture(t)
+	path := filepath.Join(root, "Fixture.app")
+	if err := os.Mkdir(path, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../outside", filepath.Join(path, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	m := registrationFixture(t)
+	m.Code = map[string]RegisteredCode{}
+	m.Census.Records[0].Fields["URL"] = path
+	digestCalls := 0
+	digest := func(ctx context.Context, path string, writers registrationWriters) (string, error) {
+		digestCalls++
+		return protectedTreeDigest(ctx, path, writers)
+	}
+	acl := func(context.Context, string, registrationWriters) error { return nil }
+	command := func(context.Context, ...string) (string, error) {
+		t.Fatal("failed tree reached code-signature inspection")
+		return "", nil
+	}
+	if err := collectRegistrationCode(context.Background(), &m, registrationWritersFixture(), acl, digest, command); err != nil {
+		t.Fatalf("failed tree aborted private candidate collection: %v", err)
+	}
+	if digestCalls != 1 || len(m.Code) != 0 || len(m.Problems) != 2 {
+		t.Fatalf("failed shared tree was rechecked or lost: calls=%d code=%d problems=%v", digestCalls, len(m.Code), m.Problems)
+	}
+	for _, problem := range m.Problems {
+		if !strings.Contains(problem, "protected code tree unavailable: registered tree link escapes or is unresolved") {
+			t.Fatalf("tree failure lost from candidate: %q", problem)
+		}
+	}
+	data, err := persistenceBytes(m)
+	if err != nil || !strings.Contains(string(data), "registered tree link escapes or is unresolved") {
+		t.Fatalf("private candidate cannot retain failed inspection: %v", err)
+	}
+	if err := matchPersistence(registrationFixture(t), m); err == nil {
+		t.Fatal("unresolved private candidate accepted")
+	}
+}
+
+func signedBundleFixture(t *testing.T) (string, string, BTMRecord) {
+	t.Helper()
+	root := privateRootFixture(t)
+	path := filepath.Join(root, "Fixture.app", "Contents", "PlugIns", "Preview.appex")
+	executable := filepath.Join(path, "Contents", "MacOS", "preview")
+	if err := os.MkdirAll(filepath.Dir(executable), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(executable, []byte("signed fixture code"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	record := BTMRecord{Fields: map[string]string{"Bundle Identifier": "test.example.preview", "Team Identifier": "TESTTEAM01"}}
+	return path, executable, record
+}
+
+// Model codesign's distinction between an inline requirement (=...) and a
+// filename, rather than accepting an arbitrary successful verification command.
+func fixtureSignatureCommand(t *testing.T, executable string, verified *bool) func(context.Context, ...string) (string, error) {
+	t.Helper()
+	return func(_ context.Context, args ...string) (string, error) {
+		if len(args) != 0 && args[0] == "--display" {
+			return "Executable=" + executable + "\nIdentifier=test.example.preview\nTeamIdentifier=TESTTEAM01\nCDHash=" + strings.Repeat("a", 40) + "\nAuthority=Example Apple chain\ndesignated => identifier test.example.preview\n", nil
+		}
+		strict, deep, inline := false, false, false
+		for i, arg := range args {
+			switch arg {
+			case "--strict":
+				strict = true
+			case "--deep":
+				deep = true
+			case "--test-requirement":
+				inline = i+1 < len(args) && args[i+1] == "=anchor apple generic"
+			}
+		}
+		if len(args) == 0 || args[0] != "--verify" || !strict || !deep || !inline {
+			return "", errors.New("strict deep inline Apple-anchor verification required")
+		}
+		*verified = true
+		return "", nil
+	}
+}
+
+func TestVerifyRegisteredCodeUsesInlineAppleRequirement(t *testing.T) {
+	path, executable, record := signedBundleFixture(t)
+	verified := false
+	code, err := verifyRegisteredCode(context.Background(), path, record, registrationWritersFixture(), fixtureSignatureCommand(t, executable, &verified))
+	if err != nil || !verified || code.Executable != executable {
+		t.Fatalf("signed bundle did not pass strict inline requirement verification: verified=%t code=%+v err=%v", verified, code, err)
+	}
+}
+
+func TestVerifyRegisteredCodeAcceptsCaseInsensitiveBundleIdentity(t *testing.T) {
+	path, executable, record := signedBundleFixture(t)
+	alias := strings.Replace(executable, "/PlugIns/", "/Plugins/", 1)
+	original, err := os.Stat(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alternate, err := os.Stat(alias)
+	if os.IsNotExist(err) {
+		t.Skip("requires a case-insensitive filesystem; no string-folding substitute")
+	}
+	if err != nil || !os.SameFile(original, alternate) {
+		t.Fatalf("case alias fixture: %v", err)
+	}
+	verified := false
+	if _, err := verifyRegisteredCode(context.Background(), path, record, registrationWritersFixture(), fixtureSignatureCommand(t, alias, &verified)); err != nil || !verified {
+		t.Fatalf("same bundle filesystem identity refused: verified=%t err=%v", verified, err)
+	}
+}
+
+func TestVerifyRegisteredCodeRefusesOutsideAndSymlinkExecutables(t *testing.T) {
+	for _, kind := range []string{"outside-hardlink", "case-sensitive-sibling", "symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			path, executable, record := signedBundleFixture(t)
+			other := filepath.Join(filepath.Dir(path), "outside")
+			switch kind {
+			case "case-sensitive-sibling":
+				other = strings.Replace(executable, "/PlugIns/", "/Plugins/", 1)
+				if _, err := os.Stat(other); err == nil {
+					t.Skip("case-insensitive filesystem has no distinct case-only sibling")
+				} else if !os.IsNotExist(err) {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(filepath.Dir(other), 0755); err != nil {
+					t.Fatal(err)
+				}
+				fallthrough
+			case "outside-hardlink":
+				if err := os.Link(executable, other); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink":
+				other = filepath.Join(path, "alias")
+				if err := os.Symlink(executable, other); err != nil {
+					t.Fatal(err)
+				}
+			}
+			verified := false
+			if _, err := verifyRegisteredCode(context.Background(), path, record, registrationWritersFixture(), fixtureSignatureCommand(t, other, &verified)); err == nil || verified {
+				t.Fatalf("outside or symlink code reached verification: verified=%t err=%v", verified, err)
+			}
+		})
+	}
+}
+
+func TestVerifyRegisteredCodeRefusesAncestryReplacementDuringVerification(t *testing.T) {
+	path, executable, record := signedBundleFixture(t)
+	verified := false
+	signature := fixtureSignatureCommand(t, executable, &verified)
+	command := func(ctx context.Context, args ...string) (string, error) {
+		out, err := signature(ctx, args...)
+		if verified {
+			if err := os.Rename(path, path+".old"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(executable), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(executable, []byte("signed fixture code"), 0755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return out, err
+	}
+	if _, err := verifyRegisteredCode(context.Background(), path, record, registrationWritersFixture(), command); err == nil || !strings.Contains(err.Error(), "changed during inspection") {
+		t.Fatalf("bundle replaced during verification was not refused: %v", err)
+	}
+}
+
+func TestCollectRegistrationCodeRechecksSuccessfulTrees(t *testing.T) {
+	path, executable, _ := signedBundleFixture(t)
+	m := registrationFixture(t)
+	m.Code = map[string]RegisteredCode{}
+	m.Census.Records = m.Census.Records[:1]
+	m.Census.Records[0].Fields["URL"] = filepath.Dir(filepath.Dir(filepath.Dir(path)))
+	m.Census.Records[0].Fields["Bundle Identifier"] = "test.example.preview"
+	m.Census.Records[0].Fields["Identifier"] = "2.test.example.preview"
+	verified := false
+	signature := fixtureSignatureCommand(t, executable, &verified)
+	command := func(ctx context.Context, args ...string) (string, error) {
+		out, err := signature(ctx, args...)
+		if verified {
+			if err := os.WriteFile(executable, []byte("updated by trusted writer"), 0755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return out, err
+	}
+	acl := func(context.Context, string, registrationWriters) error { return nil }
+	err := collectRegistrationCode(context.Background(), &m, registrationWritersFixture(), acl, protectedTreeDigest, command)
+	if err == nil || err.Error() != "registered code tree changed during inspection" || !verified {
+		t.Fatalf("successfully measured tree was not rechecked: verified=%t err=%v problems=%v", verified, err, m.Problems)
+	}
+}
+
+func TestOpenedRegisteredExecutableRejectsDescriptorSwap(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "code")
+	if err := os.WriteFile(path, []byte("same bytes"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := checkOpenedRegisteredExecutable(root, "code", expected); err != nil {
+		t.Fatalf("unchanged descriptor refused: %v", err)
+	}
+	// Retain the original inode so the filesystem cannot reuse it for the
+	// replacement. The inspected name, bytes, owner and permissions are equal.
+	if err := os.Rename(path, filepath.Join(dir, "original")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("same bytes"), expected.Mode().Perm()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, expected.ModTime(), expected.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(expected, replacement) || expected.Mode() != replacement.Mode() || expected.Size() != replacement.Size() {
+		t.Fatal("fixture did not replace executable with equivalent metadata")
+	}
+	if err := checkOpenedRegisteredExecutable(root, "code", expected); err == nil || err.Error() != "signed executable changed during inspection" {
+		t.Fatalf("replacement descriptor accepted: %v", err)
 	}
 }
