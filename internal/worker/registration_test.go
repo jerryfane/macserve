@@ -277,12 +277,11 @@ func TestRegisteredTreeACLAllowsOnlyReviewedWriters(t *testing.T) {
 	writers := registrationWritersFixture()
 	listing := "/Applications/Fixture.app:\ntotal 1\n-rw-r--r--+ 1 owner admin 1 Jan 1 00:00 code\n"
 	for name, acl := range map[string]string{
-		"deny":           "group:everyone deny delete",
-		"inherited-deny": "group:staff inherited deny write,delete",
-		"owner":          "user:owner allow write,append,writeattr,writeextattr,writesecurity,chown",
-		"admin":          "group:admin inherited allow add_file,add_subdirectory,delete_child,file_inherit,directory_inherit",
-		"root":           "user:root allow write",
-		"job-read-only":  "user:job allow read,readattr,readsecurity",
+		"deny":          "group:everyone deny delete",
+		"owner":         "user:owner allow write,append,writeattr,writeextattr,writesecurity,chown",
+		"admin":         "group:admin allow add_file,add_subdirectory,delete_child,file_inherit,directory_inherit",
+		"root":          "user:root allow write",
+		"job-read-only": "user:job allow read,readattr,readsecurity",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := validateTreeACL(listing+" 0: "+acl+"\n", writers); err != nil {
@@ -458,6 +457,68 @@ func TestRegistrationAncestryRecheckRejectsSymlinkSwap(t *testing.T) {
 	}
 	if _, err := protectedTreeDigest(context.Background(), path, writers); err == nil {
 		t.Fatal("symlink ancestry accepted on new inspection")
+	}
+}
+
+func TestRegistrationACLRejectsAmbiguousPrincipalTokens(t *testing.T) {
+	writers := registrationWritersFixture()
+	for _, entry := range []string{
+		"group:admin inherited allow write",
+		"user:owner inherited allow write",
+		"group:staff inherited deny write",
+		"group:admin allow allow write",
+		"group:admin deny allow write",
+		"group:admin unexpected allow write",
+		"user:owner inherited inherited allow write",
+		"group:admin\tinherited allow write",
+	} {
+		if err := writers.checkACL(" 0: " + entry); err == nil {
+			t.Errorf("ambiguous ACL accepted: %q", entry)
+		}
+	}
+}
+
+func TestRegistrationAncestryRejectsIdenticalMetadataReplacement(t *testing.T) {
+	root := privateRootFixture(t)
+	ancestor := filepath.Join(root, "ancestor")
+	path := filepath.Join(ancestor, "Fixture.app")
+	if err := os.MkdirAll(path, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writers := registrationWritersFixture()
+	before, err := registrationPath(path, true, writers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.Stat(ancestor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parked := filepath.Join(root, "parked")
+	if err := os.Rename(ancestor, parked); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(ancestor, original.Mode().Perm()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(parked, "Fixture.app"), path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(ancestor, original.ModTime(), original.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := os.Stat(ancestor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacement.Mode() != original.Mode() || replacement.ModTime() != original.ModTime() {
+		t.Fatal("replacement metadata differs")
+	}
+	if os.SameFile(original, replacement) {
+		t.Fatal("fixture did not replace ancestor inode")
+	}
+	if err := recheckRegistrationPath(before, writers); err == nil {
+		t.Fatal("identical-metadata replacement ancestor accepted")
 	}
 }
 

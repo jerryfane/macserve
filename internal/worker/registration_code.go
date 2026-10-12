@@ -401,7 +401,7 @@ func protectedTreeDigest(ctx context.Context, path string, writers registrationW
 }
 
 var listedMode = regexp.MustCompile(`^[bcdlps-][rwxStTs-]{9}([+@ ])`)
-var registrationACL = regexp.MustCompile(`^[ \t]+[0-9]+: (user|group):(.+?)( inherited)? (allow|deny) ([a-z_,]+)$`)
+var registrationACL = regexp.MustCompile(`^[ \t]+[0-9]+: (user|group):([A-Za-z0-9_.-]+)( inherited)? (allow|deny) ([a-z_,]+)$`)
 
 func (writers registrationWriters) checkACL(line string) error {
 	match := registrationACL.FindStringSubmatch(line)
@@ -409,6 +409,12 @@ func (writers registrationWriters) checkACL(line string) error {
 		return errors.New("unsupported registration ACL entry")
 	}
 	mutating := false
+	// ls does not quote principals: "admin inherited" can be a literal name,
+	// indistinguishable from an inheritance marker on "admin". Refuse that
+	// ambiguity rather than resolve the shorter, potentially trusted name.
+	if match[3] != "" {
+		return errors.New("ambiguous inherited registration ACL principal")
+	}
 	for _, right := range strings.Split(match[5], ",") {
 		switch right {
 		case "read", "list", "execute", "search", "readattr", "readextattr", "readsecurity", "synchronize",
