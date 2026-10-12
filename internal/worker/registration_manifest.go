@@ -118,6 +118,10 @@ func collectPersistence(ctx context.Context, options Options) (PersistenceManife
 	if runtime.GOOS != "darwin" {
 		return m, errors.New("native registration inspection requires macOS")
 	}
+	writers, err := registrationWriterPolicy(options)
+	if err != nil {
+		return m, err
+	}
 	build, diagnostic, err := inspectCommand(ctx, nil, "/usr/bin/sw_vers", "-buildVersion")
 	if err != nil || strings.TrimSpace(diagnostic) != "" || strings.TrimSpace(build) == "" {
 		return m, errors.New("OS build unavailable")
@@ -146,16 +150,16 @@ func collectPersistence(ctx context.Context, options Options) (PersistenceManife
 			root = byID[parent].Fields["URL"]
 		}
 		if _, ok := trees[root]; !ok && treeErrors[root] == nil {
-			treeErrors[root] = protectedTreeACL(ctx, root)
+			treeErrors[root] = protectedTreeACL(ctx, root, writers)
 			if treeErrors[root] == nil {
-				trees[root], treeErrors[root] = protectedTreeDigest(ctx, root)
+				trees[root], treeErrors[root] = protectedTreeDigest(ctx, root, writers)
 			}
 		}
 		if treeErrors[root] != nil {
 			m.Problems = append(m.Problems, id+": protected code tree unavailable: "+treeErrors[root].Error())
 			continue
 		}
-		code, err := verifyRegisteredCode(ctx, path, r)
+		code, err := verifyRegisteredCode(ctx, path, r, writers)
 		// Preserve a successfully measured tree even if subsequent signature
 		// inspection fails; changed bytes are positive evidence, not just an
 		// inability to inspect the signing identity.
@@ -164,6 +168,23 @@ func collectPersistence(ctx context.Context, options Options) (PersistenceManife
 		if err != nil {
 			m.Problems = append(m.Problems, id+": "+err.Error())
 		}
+	}
+	// Signing commands must not bridge a changed tree or mutable ancestry.
+	// Recheck ACLs too: a newly granted writer need not change any code bytes.
+	for root, before := range trees {
+		if err := protectedTreeACL(ctx, root, writers); err != nil {
+			return m, err
+		}
+		after, err := protectedTreeDigest(ctx, root, writers)
+		if err != nil {
+			return m, err
+		}
+		if before != after {
+			return m, errors.New("registered code tree changed during inspection")
+		}
+	}
+	if _, err := registrationWriterPolicy(options); err != nil {
+		return m, err
 	}
 	if err := ctx.Err(); err != nil {
 		return m, err
