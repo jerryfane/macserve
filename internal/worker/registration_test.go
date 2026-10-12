@@ -3,8 +3,11 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -197,12 +200,29 @@ func privateRootFixture(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	home, err = filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
 	path, err := os.MkdirTemp(home, "macserve-registration-test-")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(path) })
 	return path
+}
+
+func registrationWritersFixture() registrationWriters {
+	return registrationWriters{ownerUID: 501, resolve: func(kind, principal string) (uint32, error) {
+		identities := map[string]uint32{
+			"user:root": 0, "user:owner": 501, "user:job": 6202, "user:controller": 6201,
+			"group:wheel": 0, "group:staff": 20, "group:admin": 80, "group:job": 6202,
+		}
+		if id, ok := identities[kind+":"+principal]; ok {
+			return id, nil
+		}
+		return 0, errors.New("unresolved synthetic principal")
+	}}
 }
 
 func TestProtectedCodeTreeDetectsTamperWritePermissionAndLinkEscape(t *testing.T) {
@@ -215,30 +235,31 @@ func TestProtectedCodeTreeDetectsTamperWritePermissionAndLinkEscape(t *testing.T
 	if err := os.WriteFile(file, []byte("original"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	before, err := protectedTreeDigest(context.Background(), path)
+	writers := registrationWritersFixture()
+	before, err := protectedTreeDigest(context.Background(), path, writers)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(file, []byte("modified"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	after, err := protectedTreeDigest(context.Background(), path)
+	after, err := protectedTreeDigest(context.Background(), path, writers)
 	if err != nil || after == before {
 		t.Fatalf("tamper missed: %v", err)
 	}
 	if err := os.Chmod(file, 0666); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := protectedTreeDigest(context.Background(), path); err == nil {
+	if _, err := protectedTreeDigest(context.Background(), path, writers); err == nil {
 		t.Fatal("writable code accepted")
 	}
 	if err := os.Chmod(file, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chown(file, 12345, 12345); err != nil {
+	if err := os.Chown(file, 6202, 6202); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := protectedTreeDigest(context.Background(), path); err == nil {
+	if _, err := protectedTreeDigest(context.Background(), path, writers); err == nil {
 		t.Fatal("job-owned code accepted")
 	}
 	if err := os.Chown(file, 0, 0); err != nil {
@@ -247,19 +268,293 @@ func TestProtectedCodeTreeDetectsTamperWritePermissionAndLinkEscape(t *testing.T
 	if err := os.Symlink("../outside", filepath.Join(path, "escape")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := protectedTreeDigest(context.Background(), path); err == nil {
+	if _, err := protectedTreeDigest(context.Background(), path, writers); err == nil {
 		t.Fatal("escaping/unresolved link accepted")
 	}
 }
 
-func TestRegisteredTreeACLRejectsGrantsAndIncompleteListings(t *testing.T) {
-	valid := "/Applications/Fixture.app:\ntotal 1\n-rw-r--r--+ 1 root wheel 1 Jan 1 00:00 code\n 0: group:everyone deny delete\n"
-	if err := validateTreeACL(valid); err != nil {
+func TestRegisteredTreeACLAllowsOnlyReviewedWriters(t *testing.T) {
+	writers := registrationWritersFixture()
+	listing := "/Applications/Fixture.app:\ntotal 1\n-rw-r--r--+ 1 owner admin 1 Jan 1 00:00 code\n"
+	for name, acl := range map[string]string{
+		"deny":          "group:everyone deny delete",
+		"owner":         "user:owner allow write,append,writeattr,writeextattr,writesecurity,chown",
+		"admin":         "group:admin allow add_file,add_subdirectory,delete_child,file_inherit,directory_inherit",
+		"root":          "user:root allow write",
+		"job-read-only": "user:job allow read,readattr,readsecurity",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateTreeACL(listing+" 0: "+acl+"\n", writers); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	for name, acl := range map[string]string{
+		"job":                  "user:job allow write",
+		"controller":           "user:controller allow writesecurity",
+		"job-group":            "group:job allow append",
+		"inherited-job-group":  "group:job inherited allow delete_child,directory_inherit",
+		"staff":                "group:staff allow write",
+		"wheel":                "group:wheel allow write",
+		"everyone":             "group:everyone allow delete",
+		"unknown-user":         "user:unresolved deny write",
+		"unknown-group":        "group:unresolved allow read",
+		"unknown-right":        "user:owner allow future_right",
+		"unknown-denied-right": "group:everyone deny future_right",
+		"mixed":                "group:everyone deny delete allow write",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateTreeACL(listing+" 0: "+acl+"\n", writers); err == nil {
+				t.Fatal("unsafe or unknown ACL accepted")
+			}
+		})
+	}
+	for _, invalid := range []string{
+		listing,
+		listing + " 0: group:everyone deny delete\nunknown\n",
+		listing + " 0: user:job deny write\n 1: user:job allow write\n",
+	} {
+		if err := validateTreeACL(invalid, writers); err == nil {
+			t.Fatal("incomplete, ambiguous or still-granting ACL accepted")
+		}
+	}
+}
+
+func TestRegisteredOwnerBundleAndAdminAncestorsRequireRereview(t *testing.T) {
+	root := privateRootFixture(t)
+	path := filepath.Join(root, "Applications", "Fixture.app")
+	if err := os.MkdirAll(path, 0755); err != nil {
 		t.Fatal(err)
 	}
-	for _, invalid := range []string{strings.Replace(valid, " deny delete", " allow write", 1), strings.Split(valid, " 0:")[0], strings.Replace(valid, " deny delete", " deny delete allow write", 1), valid + "unknown\n"} {
-		if err := validateTreeACL(invalid); err == nil {
-			t.Fatal("granting or unknown ACL accepted")
+	applications := filepath.Dir(path)
+	for dir, uid := range map[string]int{applications: 0, path: 501} {
+		if err := os.Chown(dir, uid, 80); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(dir, 0775); err != nil {
+			t.Fatal(err)
+		}
+	}
+	file := filepath.Join(path, "code")
+	if err := os.WriteFile(file, []byte("reviewed owner app"), 0664); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(file, 501, 80); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(file, 0664); err != nil {
+		t.Fatal(err)
+	}
+	staffFile := filepath.Join(path, "resource")
+	if err := os.WriteFile(staffFile, []byte("owner:staff, not staff-writable"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(staffFile, 501, 20); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(path, "Current")
+	if err := os.Symlink("code", link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Lchown(link, 501, 80); err != nil {
+		t.Fatal(err)
+	}
+	writers := registrationWritersFixture()
+	before, err := protectedTreeDigest(context.Background(), path, writers)
+	if err != nil {
+		t.Fatalf("reviewable owner/admin bundle refused: %v", err)
+	}
+	accepted := registrationFixture(t)
+	id := "2.test.example.fixture"
+	code := accepted.Code[id]
+	code.TreeSHA256 = before
+	accepted.Code[id] = code
+	if err := os.WriteFile(file, []byte("updated owner app!"), 0664); err != nil {
+		t.Fatal(err)
+	}
+	after, err := protectedTreeDigest(context.Background(), path, writers)
+	if err != nil || after == before {
+		t.Fatalf("owner update did not change review binding: %v", err)
+	}
+	current := registrationFixture(t)
+	code.TreeSHA256 = after
+	current.Code[id] = code
+	if err := matchPersistence(accepted, current); !errors.Is(err, ErrContamination) {
+		t.Fatalf("owner app update did not require re-review: %v", err)
+	}
+}
+
+func TestRegisteredTreeRejectsUntrustedOwnersAndWritableAncestors(t *testing.T) {
+	for _, target := range []string{"code", "directory", "ancestor"} {
+		for _, uid := range []int{6202, 6201, 502} {
+			t.Run(target+"/"+strconv.Itoa(uid), func(t *testing.T) {
+				root := privateRootFixture(t)
+				path := filepath.Join(root, "Fixture.app")
+				dir := filepath.Join(path, "directory")
+				if err := os.MkdirAll(dir, 0755); err != nil {
+					t.Fatal(err)
+				}
+				file := filepath.Join(path, "code")
+				if err := os.WriteFile(file, []byte("code"), 0444); err != nil {
+					t.Fatal(err)
+				}
+				item := map[string]string{"code": file, "directory": dir, "ancestor": root}[target]
+				// Ownership is unsafe even without a write mode: owners can chmod.
+				if err := os.Chown(item, uid, uid); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := protectedTreeDigest(context.Background(), path, registrationWritersFixture()); err == nil {
+					t.Fatal("untrusted code/ancestor owner accepted")
+				}
+			})
+		}
+	}
+	for _, gid := range []int{0, 20, 6202, 6201} {
+		t.Run("writable-group/"+strconv.Itoa(gid), func(t *testing.T) {
+			root := privateRootFixture(t)
+			path := filepath.Join(root, "Fixture.app")
+			if err := os.Mkdir(path, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chown(root, 501, gid); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(root, 0770); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := protectedTreeDigest(context.Background(), path, registrationWritersFixture()); err == nil {
+				t.Fatal("non-admin writable ancestor accepted")
+			}
+		})
+	}
+}
+
+func TestRegistrationAncestryRecheckRejectsSymlinkSwap(t *testing.T) {
+	root := privateRootFixture(t)
+	ancestor := filepath.Join(root, "Applications")
+	path := filepath.Join(ancestor, "Fixture.app")
+	if err := os.MkdirAll(path, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writers := registrationWritersFixture()
+	before, err := registrationPath(path, true, writers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recheckRegistrationPath(before, writers); err != nil {
+		t.Fatal(err)
+	}
+	moved := filepath.Join(root, "moved")
+	if err := os.Rename(ancestor, moved); err != nil {
+		t.Fatal(err)
+	}
+	// The app inode and bytes are unchanged; only ancestor traversal changed.
+	if err := os.Symlink(moved, ancestor); err != nil {
+		t.Fatal(err)
+	}
+	if err := recheckRegistrationPath(before, writers); err == nil {
+		t.Fatal("symlink-swapped ancestry accepted")
+	}
+	if _, err := protectedTreeDigest(context.Background(), path, writers); err == nil {
+		t.Fatal("symlink ancestry accepted on new inspection")
+	}
+}
+
+func TestRegistrationACLRejectsAmbiguousPrincipalTokens(t *testing.T) {
+	writers := registrationWritersFixture()
+	for _, entry := range []string{
+		"group:admin inherited allow write",
+		"user:owner inherited allow write",
+		"group:staff inherited deny write",
+		"group:admin allow allow write",
+		"group:admin deny allow write",
+		"group:admin unexpected allow write",
+		"user:owner inherited inherited allow write",
+		"group:admin\tinherited allow write",
+	} {
+		if err := writers.checkACL(" 0: " + entry); err == nil {
+			t.Errorf("ambiguous ACL accepted: %q", entry)
+		}
+	}
+}
+
+func TestRegistrationAncestryRejectsIdenticalMetadataReplacement(t *testing.T) {
+	root := privateRootFixture(t)
+	ancestor := filepath.Join(root, "ancestor")
+	path := filepath.Join(ancestor, "Fixture.app")
+	if err := os.MkdirAll(path, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writers := registrationWritersFixture()
+	before, err := registrationPath(path, true, writers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.Stat(ancestor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parked := filepath.Join(root, "parked")
+	if err := os.Rename(ancestor, parked); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(ancestor, original.Mode().Perm()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(parked, "Fixture.app"), path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(ancestor, original.ModTime(), original.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := os.Stat(ancestor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacement.Mode() != original.Mode() || replacement.ModTime() != original.ModTime() {
+		t.Fatal("replacement metadata differs")
+	}
+	if os.SameFile(original, replacement) {
+		t.Fatal("fixture did not replace ancestor inode")
+	}
+	if err := recheckRegistrationPath(before, writers); err == nil {
+		t.Fatal("identical-metadata replacement ancestor accepted")
+	}
+}
+
+func TestRegistrationWriterMembershipsFailClosed(t *testing.T) {
+	options := Options{OwnerUID: 501, JobUID: 6202, ControllerUID: 6201}
+	for _, role := range []uint32{options.JobUID, options.ControllerUID} {
+		for _, primary := range []bool{false, true} {
+			for _, gid := range []string{"0", "20", "80", "unknown", "unavailable", "dedicated"} {
+				t.Run(fmt.Sprintf("%d/%t/%s", role, primary, gid), func(t *testing.T) {
+					lookup := func(id string) (*user.User, error) {
+						group := id
+						if primary && id == strconv.FormatUint(uint64(role), 10) && gid != "dedicated" {
+							group = gid
+						}
+						return &user.User{Uid: id, Gid: group, Username: "fixture" + id}, nil
+					}
+					lookupGroup := func(name string) (*user.Group, error) {
+						return &user.Group{Name: name, Gid: map[string]string{"wheel": "0", "staff": "20", "admin": "80"}[name]}, nil
+					}
+					memberships := func(account *user.User) ([]string, error) {
+						if account.Uid == strconv.FormatUint(uint64(role), 10) {
+							if gid == "unavailable" {
+								return nil, errors.New("directory services unavailable")
+							}
+							if !primary && gid != "dedicated" {
+								return []string{account.Uid, gid}, nil
+							}
+						}
+						return []string{account.Uid}, nil
+					}
+					err := registrationWriterIdentities(options, lookup, lookupGroup, memberships)
+					if (err == nil) != (gid == "dedicated") {
+						t.Fatalf("membership decision for %q: %v", gid, err)
+					}
+				})
+			}
 		}
 	}
 }

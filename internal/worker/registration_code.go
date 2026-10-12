@@ -11,14 +11,13 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
-
-	"github.com/jerryfane/macserve/internal/hostguard"
 )
 
 type RegisteredCode struct {
@@ -100,9 +99,167 @@ func signatureIdentity(output string) (RegisteredCode, error) {
 	return code, nil
 }
 
-func verifyRegisteredCode(ctx context.Context, path string, record BTMRecord) (RegisteredCode, error) {
+// Registration code has a deliberately separate writer policy from broker
+// configuration and macserve's own services. Never use it for trusted state.
+type registrationWriters struct {
+	ownerUID uint32
+	resolve  func(kind, principal string) (uint32, error)
+}
+
+func registrationWriterPolicy(options Options) (registrationWriters, error) {
+	if err := registrationWriterIdentities(options, user.LookupId, user.LookupGroup, (*user.User).GroupIds); err != nil {
+		return registrationWriters{}, err
+	}
+	return registrationWriters{ownerUID: options.OwnerUID, resolve: registrationPrincipal}, nil
+}
+
+func registrationWriterIdentities(options Options, lookup func(string) (*user.User, error), lookupGroup func(string) (*user.Group, error), groupIDs func(*user.User) ([]string, error)) error {
+	if options.OwnerUID == 0 || options.JobUID == 0 || options.ControllerUID == 0 || options.OwnerUID == options.JobUID || options.OwnerUID == options.ControllerUID || options.JobUID == options.ControllerUID {
+		return errors.New("registration writers require distinct owner, job and controller identities")
+	}
+	for name, gid := range map[string]string{"wheel": "0", "staff": "20", "admin": "80"} {
+		group, err := lookupGroup(name)
+		if err != nil || group == nil || group.Gid != gid {
+			return errors.New("registration writer group identity unavailable")
+		}
+	}
+	for _, uid := range []uint32{0, options.OwnerUID, options.JobUID, options.ControllerUID} {
+		id := strconv.FormatUint(uint64(uid), 10)
+		account, err := lookup(id)
+		if err != nil || account == nil || account.Uid != id || account.Username == "" {
+			return errors.New("registration writer account identity unavailable")
+		}
+		if uid == 0 || uid == options.OwnerUID {
+			continue
+		}
+		groups, err := groupIDs(account)
+		if err != nil || len(groups) == 0 {
+			return errors.New("registration service account memberships unavailable")
+		}
+		// Include the primary group explicitly: directory membership results
+		// must not be assumed to include it, especially for staff.
+		for i := 0; i <= len(groups); i++ {
+			gid := account.Gid
+			if i < len(groups) {
+				gid = groups[i]
+			}
+			value, err := strconv.ParseUint(gid, 10, 32)
+			if err != nil {
+				return errors.New("registration service account membership is unknown")
+			}
+			if value == 0 || value == 20 || value == 80 {
+				return errors.New("registration job and controller must not belong to wheel, staff or admin")
+			}
+		}
+	}
+	return nil
+}
+
+func registrationPrincipal(kind, principal string) (uint32, error) {
+	var id string
+	_, numeric := strconv.ParseUint(principal, 10, 32)
+	switch kind {
+	case "user":
+		var account *user.User
+		var err error
+		if numeric == nil {
+			account, err = user.LookupId(principal)
+		} else {
+			account, err = user.Lookup(principal)
+		}
+		if err != nil || account == nil {
+			return 0, errors.New("registration ACL user identity unavailable")
+		}
+		id = account.Uid
+	case "group":
+		var group *user.Group
+		var err error
+		if numeric == nil {
+			group, err = user.LookupGroupId(principal)
+		} else {
+			group, err = user.LookupGroup(principal)
+		}
+		if err != nil || group == nil {
+			return 0, errors.New("registration ACL group identity unavailable")
+		}
+		id = group.Gid
+	default:
+		return 0, errors.New("unsupported registration ACL principal")
+	}
+	value, err := strconv.ParseUint(id, 10, 32)
+	if err != nil {
+		return 0, errors.New("registration ACL identity is not numeric")
+	}
+	return uint32(value), nil
+}
+
+func (writers registrationWriters) checkMode(info os.FileInfo) error {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || (st.Uid != 0 && st.Uid != writers.ownerUID) {
+		return errors.New("registered code ownership is outside root and owner")
+	}
+	// Symlink modes are not access controls; link ownership and the resolved
+	// target's protection are checked, and escaping links remain forbidden.
+	if info.Mode()&os.ModeSymlink == 0 && (info.Mode().Perm()&0002 != 0 || info.Mode().Perm()&0020 != 0 && st.Gid != 80) {
+		return errors.New("registered code has writers outside root, owner and admin")
+	}
+	return nil
+}
+
+type registrationPathEntry struct {
+	path string
+	info os.FileInfo
+}
+
+func registrationPath(path string, directory bool, writers registrationWriters) ([]registrationPathEntry, error) {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return nil, errors.New("registration requires a clean absolute path")
+	}
+	var entries []registrationPathEntry
+	for current := path; ; current = filepath.Dir(current) {
+		info, err := os.Lstat(current)
+		if err != nil {
+			return nil, err
+		}
+		validType := info.IsDir()
+		if current == path && !directory {
+			validType = info.Mode().IsRegular()
+		}
+		if !validType {
+			return nil, errors.New("registered path or ancestor is not a non-symlink directory/file")
+		}
+		if err := writers.checkMode(info); err != nil {
+			return nil, err
+		}
+		entries = append(entries, registrationPathEntry{path: current, info: info})
+		if current == "/" {
+			return entries, nil
+		}
+	}
+}
+
+func recheckRegistrationPath(entries []registrationPathEntry, writers registrationWriters) error {
+	for _, entry := range entries {
+		info, err := os.Lstat(entry.path)
+		if err != nil {
+			return err
+		}
+		before, ok := entry.info.Sys().(*syscall.Stat_t)
+		after, afterOK := info.Sys().(*syscall.Stat_t)
+		if !ok || !afterOK || !os.SameFile(entry.info, info) || entry.info.Mode() != info.Mode() || before.Uid != after.Uid || before.Gid != after.Gid {
+			return errors.New("registered path or ancestor changed during inspection")
+		}
+		if err := writers.checkMode(info); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func verifyRegisteredCode(ctx context.Context, path string, record BTMRecord, writers registrationWriters) (RegisteredCode, error) {
 	var code RegisteredCode
-	if err := hostguard.RootDirectory(path); err != nil {
+	ancestry, err := registrationPath(path, true, writers)
+	if err != nil {
 		return code, err
 	}
 	out, err := codeCommand(ctx, "--display", "--verbose=4", "--requirements", "-", "--", path)
@@ -120,23 +277,28 @@ func verifyRegisteredCode(ctx context.Context, path string, record BTMRecord) (R
 	if err != nil || rel == "." || !filepath.IsLocal(rel) {
 		return code, errors.New("signed executable is outside registered bundle")
 	}
-	if err := hostguard.RootConfig(code.Executable); err != nil {
+	executableAncestry, err := registrationPath(code.Executable, false, writers)
+	if err != nil {
 		return code, err
 	}
 	if _, err := codeCommand(ctx, "--verify", "--strict", "--deep", "--test-requirement", "anchor apple generic", "--verbose=0", "--", path); err != nil {
 		return code, err
 	}
-	return code, nil
+	if err := recheckRegistrationPath(executableAncestry, writers); err != nil {
+		return code, err
+	}
+	return code, recheckRegistrationPath(ancestry, writers)
 }
 
 // Hash names, ownership, modes, link text and all regular bytes beneath a
 // protected bundle. os.Root forbids symlink traversal outside this tree; WalkDir
-// itself never follows links. Root-owned privileged updaters remain trusted, but
+// itself never follows links. Root, owner and administrator updaters are trusted,
 // changed files during a read are refused, and any later change invalidates the
 // accepted digest. One app tree is hashed once even when several nested services
 // are registered. This deliberately does not trust only a parent app's signature.
-func protectedTreeDigest(ctx context.Context, path string) (string, error) {
-	if err := hostguard.RootDirectory(path); err != nil {
+func protectedTreeDigest(ctx context.Context, path string, writers registrationWriters) (string, error) {
+	ancestry, err := registrationPath(path, true, writers)
+	if err != nil {
 		return "", err
 	}
 	root, err := os.OpenRoot(path)
@@ -144,11 +306,15 @@ func protectedTreeDigest(ctx context.Context, path string) (string, error) {
 		return "", err
 	}
 	defer root.Close()
+	openedRoot, err := root.Stat(".")
+	if err != nil || !os.SameFile(ancestry[0].info, openedRoot) {
+		return "", errors.New("registered tree root changed during open")
+	}
 	h := sha256.New()
 	buffer := make([]byte, 128<<10)
 	var total int64
 	entries := 0
-	err = filepath.WalkDir(path, func(full string, entry fs.DirEntry, walkErr error) error {
+	err = fs.WalkDir(root.FS(), ".", func(rel string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -159,22 +325,15 @@ func protectedTreeDigest(ctx context.Context, path string) (string, error) {
 		if entries > 1<<20 {
 			return errors.New("registered tree entry bound exceeded")
 		}
-		rel, err := filepath.Rel(path, full)
-		if err != nil {
-			return err
-		}
 		info, err := root.Lstat(rel)
 		if err != nil {
 			return err
 		}
-		st, ok := info.Sys().(*syscall.Stat_t)
-		if !ok || st.Uid != 0 {
-			return errors.New("registered code tree is not root-owned")
+		if err := writers.checkMode(info); err != nil {
+			return err
 		}
+		st := info.Sys().(*syscall.Stat_t)
 		link := info.Mode()&os.ModeSymlink != 0
-		if !link && info.Mode().Perm()&0022 != 0 {
-			return errors.New("registered code tree is writable outside root")
-		}
 		fmt.Fprintf(h, "%s\x00%d\x00%d\x00%d\x00", rel, info.Mode(), st.Uid, st.Gid)
 		switch {
 		case link:
@@ -223,7 +382,11 @@ func protectedTreeDigest(ctx context.Context, path string) (string, error) {
 				}
 			}
 			after, err := file.Stat()
-			if err != nil || read != info.Size() || after.Size() != info.Size() || after.ModTime() != info.ModTime() || after.Mode() != info.Mode() {
+			if err != nil {
+				return err
+			}
+			afterStat, ok := after.Sys().(*syscall.Stat_t)
+			if !ok || read != info.Size() || after.Size() != info.Size() || after.ModTime() != info.ModTime() || after.Mode() != info.Mode() || afterStat.Uid != st.Uid || afterStat.Gid != st.Gid {
 				return errors.New("registered file changed during inspection")
 			}
 		default:
@@ -234,13 +397,51 @@ func protectedTreeDigest(ctx context.Context, path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return hex.EncodeToString(h.Sum(nil)), recheckRegistrationPath(ancestry, writers)
 }
 
 var listedMode = regexp.MustCompile(`^[bcdlps-][rwxStTs-]{9}([+@ ])`)
-var denyOnlyACL = regexp.MustCompile(`^[ \t]+[0-9]+: .+ deny [a-z_,]+$`)
+var registrationACL = regexp.MustCompile(`^[ \t]+[0-9]+: (user|group):([A-Za-z0-9_.-]+)( inherited)? (allow|deny) ([a-z_,]+)$`)
 
-func validateTreeACL(output string) error {
+func (writers registrationWriters) checkACL(line string) error {
+	match := registrationACL.FindStringSubmatch(line)
+	if match == nil {
+		return errors.New("unsupported registration ACL entry")
+	}
+	mutating := false
+	// ls does not quote principals: "admin inherited" can be a literal name,
+	// indistinguishable from an inheritance marker on "admin". Refuse that
+	// ambiguity rather than resolve the shorter, potentially trusted name.
+	if match[3] != "" {
+		return errors.New("ambiguous inherited registration ACL principal")
+	}
+	for _, right := range strings.Split(match[5], ",") {
+		switch right {
+		case "read", "list", "execute", "search", "readattr", "readextattr", "readsecurity", "synchronize",
+			"file_inherit", "directory_inherit", "limit_inherit", "only_inherit":
+		case "write", "append", "add_file", "add_subdirectory", "delete", "delete_child", "writeattr", "writeextattr", "writesecurity", "chown":
+			mutating = true
+		default:
+			return errors.New("unknown registration ACL right")
+		}
+	}
+	// everyone is a native special principal, not a directory-services group.
+	everyone := match[1] == "group" && match[2] == "everyone"
+	allowed := false
+	if !everyone {
+		id, err := writers.resolve(match[1], match[2])
+		if err != nil {
+			return err
+		}
+		allowed = match[1] == "user" && (id == 0 || id == writers.ownerUID) || match[1] == "group" && id == 80
+	}
+	if match[4] == "allow" && mutating && !allowed {
+		return errors.New("registration ACL grants writes outside root, owner and admin")
+	}
+	return nil
+}
+
+func validateTreeACL(output string, writers registrationWriters) error {
 	scanner := bufio.NewScanner(strings.NewReader(output))
 	scanner.Buffer(make([]byte, 4096), 256<<10)
 	needsACL, sawACL := false, false
@@ -248,8 +449,11 @@ func validateTreeACL(output string) error {
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") {
-			if !entryOpen || !denyOnlyACL.MatchString(line) {
-				return errors.New("registered tree ACL grants access or is unsupported")
+			if !entryOpen {
+				return errors.New("registered tree ACL has no listed object")
+			}
+			if err := writers.checkACL(line); err != nil {
+				return err
 			}
 			sawACL = true
 			continue
@@ -283,13 +487,28 @@ func validateTreeACL(output string) error {
 	return nil
 }
 
-func protectedTreeACL(ctx context.Context, path string) error {
-	// Reuse the native protected-input ancestor policy, then inspect all children
-	// in one bounded command rather than launching one process per tree entry.
-	if err := hostguard.CheckProtectedPath(path, true); err != nil {
+func protectedTreeACL(ctx context.Context, path string, writers registrationWriters) error {
+	ancestry, err := registrationPath(path, true, writers)
+	if err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, "/bin/ls", "-laebR", path)
+	// The recursive census does not cover all ancestors. Inspect each one,
+	// including inherited ACL entries, and bracket commands with identity checks.
+	for _, entry := range ancestry {
+		if err := registrationACLCommand(ctx, writers, "-ldeb", entry.path); err != nil {
+			return err
+		}
+	}
+	if err := registrationACLCommand(ctx, writers, "-laebR", path); err != nil {
+		return err
+	}
+	return recheckRegistrationPath(ancestry, writers)
+}
+
+func registrationACLCommand(ctx context.Context, writers registrationWriters, args ...string) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/bin/ls", args...)
 	cmd.Dir = "/"
 	cmd.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL=C"}
 	cmd.WaitDelay = 100 * time.Millisecond
@@ -298,5 +517,5 @@ func protectedTreeACL(ctx context.Context, path string) error {
 	if err := cmd.Run(); err != nil || out.err != nil || diagnostic.err != nil || diagnostic.Len() != 0 || out.Len() == 0 {
 		return errors.New("registered tree ACL census unavailable")
 	}
-	return validateTreeACL(out.String())
+	return validateTreeACL(out.String(), writers)
 }

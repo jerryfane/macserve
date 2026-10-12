@@ -215,10 +215,23 @@ With admission disabled and under separately approved root administration:
 
 Eligible third-party app/nested-code classifications are only a review schema, never trust by category. Every such executable
 binding requires matching bundle/team signature identity, non-ad-hoc Apple-anchored signature verification and designated
-requirement; protected root ownership/modes/deny-only ACLs; and a canonical app-tree digest including nested
-bytes, names, links and permissions. Links cannot escape the app tree. New, missing, changed, unprotected or
-incomplete state refuses. The parser intentionally supports a bounded observed schema, not arbitrary future
-`dumpbtm` formats. Native code verification and complete account qualification still need host evidence.
+requirement; a registration-only writer policy; and a canonical app-tree digest including nested bytes, names,
+ownership, links and permissions. For the code tree **and every ancestor**, ownership must be root or configured
+`owner_uid` (UID 501 in the reviewed deployment). Only root, that owner and the verified `admin` group (GID 80)
+may write through modes or ACLs, including inherited user/group ACL entries. `staff` (GID 20), job/controller
+groups and everyone are not allowed writers. Both service accounts' actual primary and supplementary memberships
+are checked: membership in `wheel`/root, `staff` or `admin` refuses, rather than turning a service account into an
+allowed writer. Unavailable identities/memberships and unknown ACL principals/rights fail closed; deny entries
+never cancel an otherwise unsafe grant or mode. This policy does **not** relax root-only broker/configuration,
+manifest or owned-service protection.
+
+Tree roots and all ancestors must be non-symlinks and are rechecked around inspection. Existing internal bundle
+links remain supported only when they resolve inside the protected tree. The full tree and ACL policy are checked
+again after signature inspection. New, missing, changed, unprotected or incomplete state refuses. Owner/admin
+write permission is **not automatic update approval**: every app/extension update that changes the bound tree
+requires explicit re-review/acceptance, baseline reset and fresh qualification, even with the same signer/team.
+The parser intentionally supports a bounded observed schema, not arbitrary future `dumpbtm` or ACL formats.
+Native code verification and complete account qualification still need host evidence.
 The per-UID census **header UUID is part of the exact reviewed identity**, not a decorative field. Stability
 across reboot/store migration is an operational assumption requiring host evidence. A changed header UUID
 refuses admission and requires explicit re-review/acceptance followed by baseline reset and requalification;
