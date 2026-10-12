@@ -328,14 +328,8 @@ func verifyRegisteredCode(ctx context.Context, path string, record BTMRecord, wr
 	if err != nil || !os.SameFile(ancestry[0].info, openedRoot) {
 		return code, errors.New("registered tree root changed during open")
 	}
-	executable, err := root.Open(relative)
-	if err != nil {
+	if err := checkOpenedRegisteredExecutable(root, relative, executableAncestry[0].info); err != nil {
 		return code, err
-	}
-	openedExecutable, statErr := executable.Stat()
-	closeErr := executable.Close()
-	if statErr != nil || closeErr != nil || !os.SameFile(executableAncestry[0].info, openedExecutable) {
-		return code, errors.New("signed executable changed during inspection")
 	}
 	if _, err := command(ctx, "--verify", "--strict", "--deep", "--test-requirement", "=anchor apple generic", "--verbose=0", "--", path); err != nil {
 		return code, err
@@ -344,6 +338,21 @@ func verifyRegisteredCode(ctx context.Context, path string, record BTMRecord, wr
 		return code, err
 	}
 	return code, recheckRegistrationPath(ancestry, writers)
+}
+
+// Pin the descriptor actually opened beneath the verified root, not just the
+// pathname observed before open. A replacement may preserve all mode metadata.
+func checkOpenedRegisteredExecutable(root *os.Root, relative string, expected os.FileInfo) error {
+	executable, err := root.Open(relative)
+	if err != nil {
+		return err
+	}
+	opened, statErr := executable.Stat()
+	closeErr := executable.Close()
+	if statErr != nil || closeErr != nil || !os.SameFile(expected, opened) {
+		return errors.New("signed executable changed during inspection")
+	}
+	return nil
 }
 
 // Hash names, ownership, modes, link text and all regular bytes beneath a

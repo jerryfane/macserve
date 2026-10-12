@@ -931,3 +931,44 @@ func TestCollectRegistrationCodeRechecksSuccessfulTrees(t *testing.T) {
 		t.Fatalf("successfully measured tree was not rechecked: verified=%t err=%v problems=%v", verified, err, m.Problems)
 	}
 }
+
+func TestOpenedRegisteredExecutableRejectsDescriptorSwap(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "code")
+	if err := os.WriteFile(path, []byte("same bytes"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := checkOpenedRegisteredExecutable(root, "code", expected); err != nil {
+		t.Fatalf("unchanged descriptor refused: %v", err)
+	}
+	// Retain the original inode so the filesystem cannot reuse it for the
+	// replacement. The inspected name, bytes, owner and permissions are equal.
+	if err := os.Rename(path, filepath.Join(dir, "original")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("same bytes"), expected.Mode().Perm()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, expected.ModTime(), expected.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(expected, replacement) || expected.Mode() != replacement.Mode() || expected.Size() != replacement.Size() {
+		t.Fatal("fixture did not replace executable with equivalent metadata")
+	}
+	if err := checkOpenedRegisteredExecutable(root, "code", expected); err == nil || err.Error() != "signed executable changed during inspection" {
+		t.Fatalf("replacement descriptor accepted: %v", err)
+	}
+}
