@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"io"
 	"testing"
+	"time"
 )
 
 func TestCommandExitStatus(t *testing.T) {
@@ -28,6 +30,8 @@ func TestCommandExitStatus(t *testing.T) {
 		{name: "private exec rejects incomplete request", args: []string{"_job-exec"}, want: 1},
 		{name: "private signal rejects incomplete request", args: []string{"_job-signal"}, want: 1},
 		{name: "begin rejects obsolete firewall load", args: []string{"qualify", "begin", "--session", "/example/session", "--load-policy"}, want: 2},
+		{name: "persistence inspect rejects deadline override", args: []string{"worker-persistence", "inspect", "--config", "/example/worker.json", "--out", "/example/candidate.json", "--timeout", "10m"}, want: 2},
+		{name: "persistence accept rejects deadline override", args: []string{"worker-persistence", "accept", "--config", "/example/worker.json", "--candidate", "/example/candidate.json", "--reviewed-sha256", "fixture", "--timeout", "10m"}, want: 2},
 	}
 
 	for _, tt := range tests {
@@ -36,5 +40,32 @@ func TestCommandExitStatus(t *testing.T) {
 				t.Errorf("run(%q) exit status = %d, want %d", tt.args, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestWorkerPersistenceInspectionDeadline(t *testing.T) {
+	start := time.Now()
+	ctx, cancel := workerPersistenceInspectionContext(context.Background())
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	if !ok || deadline.Before(start.Add(6*time.Minute)) || deadline.After(time.Now().Add(6*time.Minute)) {
+		t.Fatalf("inspection must use its fixed six-minute deadline: %v, present=%t", deadline, ok)
+	}
+	if deadline.After(time.Now().Add(10 * time.Minute)) {
+		t.Fatal("inspection deadline exceeds ten-minute ceiling")
+	}
+	cancel()
+	if ctx.Err() != context.Canceled {
+		t.Fatalf("inspection ignores cancellation: %v", ctx.Err())
+	}
+
+	// An already-expired caller demonstrates fail-closed expiry without a
+	// six-minute sleep or replacing the production timeout.
+	expired, expire := context.WithDeadline(context.Background(), start.Add(-time.Second))
+	defer expire()
+	ctx, cancel = workerPersistenceInspectionContext(expired)
+	defer cancel()
+	if ctx.Err() != context.DeadlineExceeded {
+		t.Fatalf("inspection extended an expired caller deadline: %v", ctx.Err())
 	}
 }

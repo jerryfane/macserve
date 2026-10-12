@@ -106,14 +106,34 @@ type registrationWriters struct {
 	resolve  func(kind, principal string) (uint32, error)
 }
 
-func registrationWriterPolicy(options Options) (registrationWriters, error) {
-	if err := registrationWriterIdentities(options, user.LookupId, user.LookupGroup, (*user.User).GroupIds); err != nil {
+func registrationWriterPolicy(ctx context.Context, options Options) (registrationWriters, error) {
+	member := func(account *user.User, gid string) (bool, error) {
+		return registrationGroupMember(ctx, account.Uid, gid)
+	}
+	if err := registrationWriterIdentities(options, user.LookupId, user.LookupGroup, (*user.User).GroupIds, member); err != nil {
 		return registrationWriters{}, err
 	}
 	return registrationWriters{ownerUID: options.OwnerUID, resolve: registrationPrincipal}, nil
 }
 
-func registrationWriterIdentities(options Options, lookup func(string) (*user.User, error), lookupGroup func(string) (*user.Group, error), groupIDs func(*user.User) ([]string, error)) error {
+// Directory Services membership resolves nested groups; GroupIds alone does not
+// establish that a service identity is outside the trusted writer groups.
+func registrationGroupMember(ctx context.Context, uid, gid string) (bool, error) {
+	out, diagnostic, err := inspectCommand(ctx, nil, "/usr/bin/dsmemberutil", "checkmembership", "-u", uid, "-g", gid)
+	if err != nil || strings.TrimSpace(diagnostic) != "" {
+		return false, errors.New("registration service account memberships unavailable")
+	}
+	switch strings.TrimSpace(out) {
+	case "user is a member of the group":
+		return true, nil
+	case "user is not a member of the group":
+		return false, nil
+	default:
+		return false, errors.New("registration service account memberships unavailable")
+	}
+}
+
+func registrationWriterIdentities(options Options, lookup func(string) (*user.User, error), lookupGroup func(string) (*user.Group, error), groupIDs func(*user.User) ([]string, error), member func(*user.User, string) (bool, error)) error {
 	if options.OwnerUID == 0 || options.JobUID == 0 || options.ControllerUID == 0 || options.OwnerUID == options.JobUID || options.OwnerUID == options.ControllerUID || options.JobUID == options.ControllerUID {
 		return errors.New("registration writers require distinct owner, job and controller identities")
 	}
@@ -148,6 +168,15 @@ func registrationWriterIdentities(options Options, lookup func(string) (*user.Us
 				return errors.New("registration service account membership is unknown")
 			}
 			if value == 0 || value == 20 || value == 80 {
+				return errors.New("registration job and controller must not belong to wheel, staff or admin")
+			}
+		}
+		for _, gid := range []string{"0", "20", "80"} {
+			belongs, err := member(account, gid)
+			if err != nil {
+				return errors.New("registration service account memberships unavailable")
+			}
+			if belongs {
 				return errors.New("registration job and controller must not belong to wheel, staff or admin")
 			}
 		}
@@ -200,8 +229,8 @@ func (writers registrationWriters) checkMode(info os.FileInfo) error {
 	}
 	// Symlink modes are not access controls; link ownership and the resolved
 	// target's protection are checked, and escaping links remain forbidden.
-	if info.Mode()&os.ModeSymlink == 0 && (info.Mode().Perm()&0002 != 0 || info.Mode().Perm()&0020 != 0 && st.Gid != 80) {
-		return errors.New("registered code has writers outside root, owner and admin")
+	if info.Mode()&os.ModeSymlink == 0 && (info.Mode().Perm()&0002 != 0 || info.Mode().Perm()&0020 != 0 && st.Gid != 0 && st.Gid != 80) {
+		return errors.New("registered code has writers outside root, owner, wheel and admin")
 	}
 	return nil
 }
@@ -256,13 +285,13 @@ func recheckRegistrationPath(entries []registrationPathEntry, writers registrati
 	return nil
 }
 
-func verifyRegisteredCode(ctx context.Context, path string, record BTMRecord, writers registrationWriters) (RegisteredCode, error) {
+func verifyRegisteredCode(ctx context.Context, path string, record BTMRecord, writers registrationWriters, command func(context.Context, ...string) (string, error)) (RegisteredCode, error) {
 	var code RegisteredCode
 	ancestry, err := registrationPath(path, true, writers)
 	if err != nil {
 		return code, err
 	}
-	out, err := codeCommand(ctx, "--display", "--verbose=4", "--requirements", "-", "--", path)
+	out, err := command(ctx, "--display", "--verbose=4", "--requirements", "-", "--", path)
 	if err != nil {
 		return code, err
 	}
@@ -273,15 +302,42 @@ func verifyRegisteredCode(ctx context.Context, path string, record BTMRecord, wr
 	if code.Identifier != record.Fields["Bundle Identifier"] || code.Team != record.Fields["Team Identifier"] {
 		return code, errors.New("registered bundle identity does not match its signed code")
 	}
-	rel, err := filepath.Rel(path, code.Executable)
-	if err != nil || rel == "." || !filepath.IsLocal(rel) {
-		return code, errors.New("signed executable is outside registered bundle")
-	}
 	executableAncestry, err := registrationPath(code.Executable, false, writers)
 	if err != nil {
 		return code, err
 	}
-	if _, err := codeCommand(ctx, "--verify", "--strict", "--deep", "--test-requirement", "anchor apple generic", "--verbose=0", "--", path); err != nil {
+	// Compare directory identities, not path spelling: codesign can report
+	// Plugins where BTM reports PlugIns on a case-insensitive filesystem. A
+	// same-spelled directory on a case-sensitive filesystem is not equivalent.
+	relative := ""
+	for _, entry := range executableAncestry[1:] {
+		if os.SameFile(ancestry[0].info, entry.info) {
+			relative, err = filepath.Rel(entry.path, code.Executable)
+			break
+		}
+	}
+	if err != nil || relative == "." || !filepath.IsLocal(relative) {
+		return code, errors.New("signed executable is outside registered bundle")
+	}
+	root, err := os.OpenRoot(path)
+	if err != nil {
+		return code, err
+	}
+	defer root.Close()
+	openedRoot, err := root.Stat(".")
+	if err != nil || !os.SameFile(ancestry[0].info, openedRoot) {
+		return code, errors.New("registered tree root changed during open")
+	}
+	executable, err := root.Open(relative)
+	if err != nil {
+		return code, err
+	}
+	openedExecutable, statErr := executable.Stat()
+	closeErr := executable.Close()
+	if statErr != nil || closeErr != nil || !os.SameFile(executableAncestry[0].info, openedExecutable) {
+		return code, errors.New("signed executable changed during inspection")
+	}
+	if _, err := command(ctx, "--verify", "--strict", "--deep", "--test-requirement", "=anchor apple generic", "--verbose=0", "--", path); err != nil {
 		return code, err
 	}
 	if err := recheckRegistrationPath(executableAncestry, writers); err != nil {
@@ -292,7 +348,7 @@ func verifyRegisteredCode(ctx context.Context, path string, record BTMRecord, wr
 
 // Hash names, ownership, modes, link text and all regular bytes beneath a
 // protected bundle. os.Root forbids symlink traversal outside this tree; WalkDir
-// itself never follows links. Root, owner and administrator updaters are trusted,
+// itself never follows links. Root, owner, wheel and administrator updaters are trusted,
 // changed files during a read are refused, and any later change invalidates the
 // accepted digest. One app tree is hashed once even when several nested services
 // are registered. This deliberately does not trust only a parent app's signature.
@@ -433,10 +489,10 @@ func (writers registrationWriters) checkACL(line string) error {
 		if err != nil {
 			return err
 		}
-		allowed = match[1] == "user" && (id == 0 || id == writers.ownerUID) || match[1] == "group" && id == 80
+		allowed = match[1] == "user" && (id == 0 || id == writers.ownerUID) || match[1] == "group" && (id == 0 || id == 80)
 	}
 	if match[4] == "allow" && mutating && !allowed {
-		return errors.New("registration ACL grants writes outside root, owner and admin")
+		return errors.New("registration ACL grants writes outside root, owner, wheel and admin")
 	}
 	return nil
 }
