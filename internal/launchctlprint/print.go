@@ -133,7 +133,7 @@ func Parse(text string) (Snapshot, error) {
 			// LWCR's empty indexed value is printed as `0 = <tabs>]`.
 			// The close belongs to its array, not the enclosing service.
 			prefix := strings.Trim(value[:bracket], " \t")
-			if prefix != "" && (prefix[0] != '"' || !validKey(prefix)) {
+			if prefix != "" {
 				return Snapshot{}, errInvalid
 			}
 			if stack[depth-1] != '[' || strings.Trim(value[bracket+1:], " \t") != "" {

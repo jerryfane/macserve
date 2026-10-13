@@ -300,9 +300,11 @@ func keyringLaunchOutput(t *testing.T) string {
 }
 
 func TestCoexistenceRejectsScalarArrayReparenting(t *testing.T) {
-	probe := "system/org.gitmoot.keyring = {\n\tmetadata = [\n\t\t0 = foo ]\n\tstate = running\n\tpid = 2908\n}\n"
-	if _, err := coexistenceServicePID("org.gitmoot.keyring", probe); err == nil {
-		t.Fatal("scalar suffix reparented nested service authority")
+	for _, value := range []string{"foo", `"s"`} {
+		probe := "system/org.gitmoot.keyring = {\n\tmetadata = [\n\t\t0 = " + value + " ]\n\tstate = running\n\tpid = 2908\n}\n"
+		if _, err := coexistenceServicePID("org.gitmoot.keyring", probe); err == nil {
+			t.Fatalf("scalar %s suffix reparented nested service authority", value)
+		}
 	}
 	if pid, err := coexistenceServicePID("org.gitmoot.keyring", keyringLaunchOutput(t)); err != nil || pid != 2908 {
 		t.Fatalf("real empty-value array close refused: pid=%d err=%v", pid, err)
@@ -315,15 +317,14 @@ func TestCoexistenceLaunchctlBalancedCapture(t *testing.T) {
 		return strings.Replace(capture, "\tdomain = system\n", body+"\tdomain = system\n", 1)
 	}
 	accepted := map[string]string{
-		"actual keyring":               capture,
-		"quoted equals dictionaries":   strings.ReplaceAll(capture, "\" => ", "\" = "),
-		"unquoted arrow containers":    strings.Replace(capture, "\tLWCR = {\n", "\tLWCR => {\n", 1),
-		"nested health spoof":          insert("\tmetadata => {\n\t\t\"state\" => stopped\n\t\t\"pid\" = 999\n\t\tvalues => [\n\t\t\t0 = {\n\t\t\t\tstate = waiting\n\t\t\t\tpid = 888\n\t\t\t}\n\t\t\t1 = \"state = running; pid = 777; ] }\"\n\t\t]\n\t}\n"),
-		"environment health spoof":     strings.Replace(capture, "\t\tOSLogRateLimit => 64\n", "\t\tstate => stopped\n\t\tpid => 999\n\t\tDESCRIPTION => \"state = running; pid = 777; ] }\"\n", 1),
-		"array scalar same-line close": strings.Replace(capture, "0 = \t\t\t\t]", "0 = \"quoted ] and }\" ]", 1),
-		"array bare elements":          strings.Replace(capture, "0 = \t\t\t\t]", "\"quoted ] and }\"\n\t\t\t\t]", 1),
-		"empty inline containers":      insert("\tmetadata = {\n\t\t\"array\" => []\n\t\t\"dictionary\" = { }\n\t}\n"),
-		"maximum nesting":              insert(strings.Repeat("\tmetadata = {\n", 15) + strings.Repeat("\t}\n", 15)),
+		"actual keyring":             capture,
+		"quoted equals dictionaries": strings.ReplaceAll(capture, "\" => ", "\" = "),
+		"unquoted arrow containers":  strings.Replace(capture, "\tLWCR = {\n", "\tLWCR => {\n", 1),
+		"nested health spoof":        insert("\tmetadata => {\n\t\t\"state\" => stopped\n\t\t\"pid\" = 999\n\t\tvalues => [\n\t\t\t0 = {\n\t\t\t\tstate = waiting\n\t\t\t\tpid = 888\n\t\t\t}\n\t\t\t1 = \"state = running; pid = 777; ] }\"\n\t\t]\n\t}\n"),
+		"environment health spoof":   strings.Replace(capture, "\t\tOSLogRateLimit => 64\n", "\t\tstate => stopped\n\t\tpid => 999\n\t\tDESCRIPTION => \"state = running; pid = 777; ] }\"\n", 1),
+		"array bare elements":        strings.Replace(capture, "0 = \t\t\t\t]", "\"quoted ] and }\"\n\t\t\t\t]", 1),
+		"empty inline containers":    insert("\tmetadata = {\n\t\t\"array\" => []\n\t\t\"dictionary\" = { }\n\t}\n"),
+		"maximum nesting":            insert(strings.Repeat("\tmetadata = {\n", 15) + strings.Repeat("\t}\n", 15)),
 	}
 	for name, text := range accepted {
 		t.Run(name, func(t *testing.T) {
@@ -333,6 +334,7 @@ func TestCoexistenceLaunchctlBalancedCapture(t *testing.T) {
 		})
 	}
 	refused := map[string]string{
+		"array scalar same-line close":          strings.Replace(capture, "0 = \t\t\t\t]", "0 = \"quoted ] and }\" ]", 1),
 		"LWCR state cannot replace root":        strings.Replace(insert("\tmetadata => {\n\t\tstate = running\n\t\tpid = 999\n\t}\n"), "\tstate = running\n", "", 1),
 		"LWCR PID cannot replace root":          strings.Replace(insert("\tmetadata => {\n\t\tstate = running\n\t\tpid = 999\n\t}\n"), "\tpid = 2908\n", "", 1),
 		"environment state cannot replace root": strings.Replace(strings.Replace(capture, "\t\tOSLogRateLimit => 64\n", "\t\tstate => running\n", 1), "\tstate = running\n", "", 1),
