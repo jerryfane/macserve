@@ -13,10 +13,10 @@ import (
 	"os/exec"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/jerryfane/macserve/internal/launchctlprint"
 	"github.com/jerryfane/macserve/internal/pfctl"
 )
 
@@ -232,103 +232,18 @@ func coexistenceMainDigest(filter, translation string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// Accept the newline-terminated `launchctl print system/LABEL` dictionary, with
-// one unquoted depth-one `state = running` and one canonical positive `pid = N`.
-// Nested dictionaries and quoted values may contain health-looking text, but
-// never provide the service's state/PID. Unsupported or truncated syntax fails.
+// The shared parser validates the entire balanced snapshot before root fields
+// can authorize a running service. Bind that authority to the requested target.
 func coexistenceServicePID(label, text string) (int, error) {
 	bad := errors.New("service is not verifiably running with one canonical PID")
-	if !coexistenceServiceLabel(label) || len(text) > 1<<20 {
+	if !coexistenceServiceLabel(label) {
 		return 0, bad
 	}
-	first, text, complete := strings.Cut(text, "\n")
-	if !complete || first != "system/"+label+" = {" {
+	snapshot, err := launchctlprint.Parse(text)
+	if err != nil || snapshot.Target != "system/"+label {
 		return 0, bad
 	}
-	depth, pid := 1, 0
-	stateSeen, pidSeen := false, false
-	for text != "" {
-		line, rest, complete := strings.Cut(text, "\n")
-		if !complete {
-			return 0, bad
-		}
-		text = rest
-		trimmed := strings.TrimSpace(line)
-		braces, ok := coexistenceLineSyntax(line)
-		if !ok {
-			return 0, bad
-		}
-		if trimmed == "" {
-			continue
-		}
-		if trimmed == "}" {
-			depth--
-			if depth == 0 {
-				if text != "" || !stateSeen || !pidSeen {
-					return 0, bad
-				}
-				return pid, nil
-			}
-			continue
-		}
-		if line[0] != ' ' && line[0] != '\t' {
-			return 0, bad
-		}
-		key, value, property := strings.Cut(strings.TrimLeft(line, " \t"), " = ")
-		if depth == 1 {
-			if !property || key == "" || key != strings.TrimSpace(key) || strings.ContainsAny(key, "\"{}\\\t") {
-				return 0, bad
-			}
-			switch key {
-			case "state":
-				if stateSeen || value != "running" {
-					return 0, bad
-				}
-				stateSeen = true
-			case "pid":
-				parsed, err := strconv.ParseInt(value, 10, 32)
-				if pidSeen || err != nil || parsed <= 0 || strconv.FormatInt(parsed, 10) != value {
-					return 0, bad
-				}
-				pid, pidSeen = int(parsed), true
-			}
-		}
-		if braces != 0 {
-			if braces != 1 || !property || !strings.HasSuffix(trimmed, " = {") || depth >= 16 {
-				return 0, bad
-			}
-			depth++
-		}
-	}
-	return 0, bad
-}
-
-// Quotes are line-local. Braces inside quoted strings are data, not dictionaries;
-// unquoted closing braces are accepted only as a standalone dictionary close.
-func coexistenceLineSyntax(line string) (int, bool) {
-	quoted, escaped := false, false
-	braces := 0
-	for _, c := range line {
-		if c < ' ' && c != '\t' || c == 127 {
-			return 0, false
-		}
-		if escaped {
-			escaped = false
-			continue
-		}
-		if c == '\\' && quoted {
-			escaped = true
-			continue
-		}
-		if c == '"' {
-			quoted = !quoted
-		} else if !quoted && c == '{' {
-			braces++
-		} else if !quoted && c == '}' && strings.TrimSpace(line) != "}" {
-			return 0, false
-		}
-	}
-	return braces, !quoted && !escaped
+	return snapshot.PID, nil
 }
 
 func validCoexistenceState(state CoexistenceState) error {

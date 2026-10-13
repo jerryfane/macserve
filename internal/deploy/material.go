@@ -92,6 +92,8 @@ func renderAssets(e Environment, assets map[string][]byte) (map[string][]byte, e
 func disabledPlist(data []byte) error {
 	d := xml.NewDecoder(bytes.NewReader(data))
 	disabled, runAtLoad := 0, 0
+	depth := 0
+	rootSeen, dictSeen := false, false
 	for {
 		token, err := d.Token()
 		if err == io.EOF {
@@ -100,14 +102,49 @@ func disabledPlist(data []byte) error {
 		if err != nil {
 			return err
 		}
+		if _, ok := token.(xml.EndElement); ok {
+			depth--
+			continue
+		}
 		start, ok := token.(xml.StartElement)
-		if !ok || start.Name.Local != "key" {
+		if !ok {
+			if text, ok := token.(xml.CharData); ok && depth < 2 && strings.TrimSpace(string(text)) != "" {
+				return errors.New("invalid launchd plist content")
+			}
+			continue
+		}
+		depth++
+		if depth == 1 {
+			if rootSeen || start.Name.Local != "plist" {
+				return errors.New("invalid launchd plist root")
+			}
+			rootSeen = true
+		}
+		if depth == 2 {
+			if dictSeen || start.Name.Local != "dict" {
+				return errors.New("invalid launchd plist dictionary")
+			}
+			dictSeen = true
+		}
+		if depth != 3 || start.Name.Local != "key" {
 			continue
 		}
 		var key string
-		if err := d.DecodeElement(&key, &start); err != nil {
-			return err
+		for {
+			part, err := d.Token()
+			if err != nil {
+				return err
+			}
+			if text, ok := part.(xml.CharData); ok {
+				key += string(text)
+				continue
+			}
+			if end, ok := part.(xml.EndElement); ok && end.Name == start.Name {
+				break
+			}
+			return errors.New("invalid launchd plist key")
 		}
+		depth--
 		if key != "Disabled" && key != "RunAtLoad" {
 			continue
 		}
@@ -125,6 +162,15 @@ func disabledPlist(data []byte) error {
 		if !ok {
 			return errors.New("invalid launchd activation flag")
 		}
+		var contents struct {
+			Inner string `xml:",innerxml"`
+		}
+		if err := d.DecodeElement(&contents, &value); err != nil {
+			return err
+		}
+		if contents.Inner != "" {
+			return errors.New("invalid launchd activation flag content")
+		}
 		if key == "Disabled" {
 			disabled++
 			if value.Name.Local != "true" {
@@ -137,7 +183,7 @@ func disabledPlist(data []byte) error {
 			}
 		}
 	}
-	if disabled != 1 || runAtLoad != 1 {
+	if !rootSeen || !dictSeen || disabled != 1 || runAtLoad != 1 {
 		return errors.New("launchd requires unique Disabled=true and RunAtLoad=false")
 	}
 	return nil
