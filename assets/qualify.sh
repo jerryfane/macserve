@@ -1,5 +1,7 @@
 #!/bin/bash
 # Thin wrapper for the installed, root-reviewed executable. Never source deploy.env.
+# begin/collect/attest/approve run a 480s full persistence scan; macserve owns the 540s outer
+# deadline. Keep this wrapper as exec so signals reach that cancellation path.
 set -euo pipefail
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export GOMAXPROCS=2

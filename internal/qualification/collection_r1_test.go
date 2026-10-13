@@ -2,6 +2,7 @@ package qualification
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,6 +38,52 @@ func TestCollectionRejectsPreviousReceiptSchemas(t *testing.T) {
 		if schema != 3 && (err == nil || !strings.Contains(err.Error(), "invalid canary receipt document")) {
 			t.Fatalf("schema %d receipt did not fail schema validation: %v", schema, err)
 		}
+	}
+}
+
+func TestCollectionAcceptsFullUDPMatrixAndOwnerControl(t *testing.T) {
+	now := time.Now().UTC()
+	for _, count := range []int{129, 130} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			dir, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := Challenge{Created: now.Add(-time.Minute), Expires: now.Add(time.Hour), Environment: deploy.Environment{OwnerUID: uint32(os.Getuid())}}
+			for i := range 128 {
+				c.UDP = append(c.UDP, fmt.Sprintf("127.0.0.1:%d", 10000+i))
+			}
+			candidate := Candidate{Schema: 3, ChallengeSHA256: strings.Repeat("a", 64), Collected: now, Artifacts: map[string]string{}}
+			paths := make([]string, 0, count)
+			for i := range count {
+				receipt := Receipts{Schema: 3, ChallengeSHA256: candidate.ChallengeSHA256, UID: os.Getuid(), Started: c.Created, Finished: now}
+				if i < len(c.UDP) {
+					receipt.Listen = c.UDP[i]
+				}
+				raw, err := encode(receipt)
+				if err != nil {
+					t.Fatal(err)
+				}
+				path := filepath.Join(dir, fmt.Sprintf("input-%03d.json", i))
+				if err := os.WriteFile(path, raw, 0600); err != nil {
+					t.Fatal(err)
+				}
+				paths = append(paths, path)
+			}
+			receipts, err := collectArtifacts(dir, "attempt-", c, candidate, []byte("{}"), []byte("{}"), Snapshot{At: now}, strings.Join(paths, ","))
+			if count == 129 {
+				if err != nil || len(receipts) != count || receipts[128].Listen != "" || len(candidate.Artifacts) != count+3 {
+					t.Fatalf("full UDP matrix and owner-home receipt not preserved: receipts=%d artifacts=%d err=%v", len(receipts), len(candidate.Artifacts), err)
+				}
+				for i, endpoint := range c.UDP {
+					if receipts[i].Listen != endpoint {
+						t.Fatalf("receipt %d lost endpoint binding", i)
+					}
+				}
+			} else if err == nil || err.Error() != "too many receipt files" {
+				t.Fatalf("receipt bound exceeded without refusal: %v", err)
+			}
+		})
 	}
 }
 

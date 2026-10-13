@@ -648,7 +648,7 @@ func TestPersistenceDigestRejectsCanonicalProblems(t *testing.T) {
 	}
 }
 
-func TestVerifyPersistenceRefusesAuthoritySwapDuringCollection(t *testing.T) {
+func TestPersistenceAttestationRefusesAuthoritySwapDuringCollection(t *testing.T) {
 	root := privateRootFixture(t)
 	path := filepath.Join(root, "review.json")
 	for _, swap := range []bool{false, true} {
@@ -662,7 +662,7 @@ func TestVerifyPersistenceRefusesAuthoritySwapDuringCollection(t *testing.T) {
 				t.Fatal(err)
 			}
 			collected := false
-			err = verifyPersistence(context.Background(), Options{JobUID: testJobUID, PersistencePath: path},
+			err = verifyPersistenceAttestation(context.Background(), Options{JobUID: testJobUID, PersistencePath: path}, false,
 				func(context.Context, Options) (PersistenceManifest, error) {
 					collected = true
 					if swap {

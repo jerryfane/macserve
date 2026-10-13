@@ -6,12 +6,15 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/jerryfane/macserve/internal/worker"
 )
 
 func approvedFixture() (time.Time, Qualification, BoundaryEvidence, Observation) {
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	d := digest([]byte("approved"))
 	o := Observation{JobUID: 550, Boot: d, BaselineSHA256: d, BoundaryEvidenceSHA256: d, Profiles: map[string]string{"build": d}, IdentityValid: true, BaselineValid: true, AccountedBytes: 1234}
+	o.Persistence = worker.PersistenceAttestationMetadata{Valid: true, LastVerified: now}
 	q := Qualification{Schema: 3, ApprovedAt: now, JobUID: o.JobUID, Boot: d, BaselineSHA256: d, BoundaryEvidenceSHA256: d, Profiles: map[string]string{"build": d}}
 	e := BoundaryEvidence{Schema: 3, RecordedAt: now.Add(-time.Minute), JobUID: o.JobUID, Boot: d}
 	before := CoexistenceState{RecordedAt: now.Add(-2 * time.Minute), MainRulesStatus: "available", MainRulesSHA256: d}
@@ -29,13 +32,16 @@ func approvedFixture() (time.Time, Qualification, BoundaryEvidence, Observation)
 }
 func TestQualificationInvalidatesChangedLiveFacts(t *testing.T) {
 	mutations := map[string]func(*Observation){
-		"boot":             func(o *Observation) { o.Boot = digest([]byte("new boot")) },
-		"baseline":         func(o *Observation) { o.BaselineSHA256 = digest([]byte("new baseline")) },
-		"evidence":         func(o *Observation) { o.BoundaryEvidenceSHA256 = digest([]byte("new evidence")) },
-		"profile":          func(o *Observation) { o.Profiles["build"] = digest([]byte("new recipe")) },
-		"identity":         func(o *Observation) { o.IdentityValid = false },
-		"baseline invalid": func(o *Observation) { o.BaselineValid = false },
-		"accounting":       func(o *Observation) { o.AccountedBytes = -1 },
+		"boot":                func(o *Observation) { o.Boot = digest([]byte("new boot")) },
+		"baseline":            func(o *Observation) { o.BaselineSHA256 = digest([]byte("new baseline")) },
+		"evidence":            func(o *Observation) { o.BoundaryEvidenceSHA256 = digest([]byte("new evidence")) },
+		"profile":             func(o *Observation) { o.Profiles["build"] = digest([]byte("new recipe")) },
+		"identity":            func(o *Observation) { o.IdentityValid = false },
+		"baseline invalid":    func(o *Observation) { o.BaselineValid = false },
+		"accounting":          func(o *Observation) { o.AccountedBytes = -1 },
+		"attestation missing": func(o *Observation) { o.Persistence = worker.PersistenceAttestationMetadata{} },
+		"attestation revoked": func(o *Observation) { o.Persistence.Valid = false; o.Persistence.NeedsReview = true },
+		"attestation future":  func(o *Observation) { o.Persistence.LastVerified = o.Persistence.LastVerified.Add(time.Minute) },
 	}
 	for name, mutate := range mutations {
 		t.Run(name, func(t *testing.T) {

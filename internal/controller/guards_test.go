@@ -17,6 +17,8 @@ func readyGuard(t *testing.T) (*Guard, *Health, *int64) {
 		t.Fatal(err)
 	}
 	h := &Health{Schema: 3, JobUID: 502, BoundaryReceiptSHA256: digest, BoundaryValidated: true, CheckedAt: now, ExpiresAt: now.Add(30 * time.Second), AccountedBytes: 10 << 30, QualifiedProfiles: map[string]string{"unit": digest}}
+	h.PersistenceValid = true
+	h.PersistenceLastVerified = now
 	free := int64(200 << 30)
 	g.readHealth = func(string) (Health, error) { return *h, nil }
 	g.freeBytes = func(string) (int64, error) { return free, nil }
@@ -58,6 +60,27 @@ func TestReadinessRequiresCurrentQualifiedBoundary(t *testing.T) {
 			state, err := g.Check(context.Background())
 			if err != nil || state.Ready || !state.CancelActive {
 				t.Fatalf("unsafe boundary admitted: %+v %v", state, err)
+			}
+		})
+	}
+}
+func TestPersistenceAttestationPausesAdmission(t *testing.T) {
+	for _, scenario := range []string{"missing", "revoked", "review", "future"} {
+		t.Run(scenario, func(t *testing.T) {
+			g, h, _ := readyGuard(t)
+			switch scenario {
+			case "missing":
+				h.PersistenceLastVerified = time.Time{}
+			case "revoked":
+				h.PersistenceValid = false
+			case "review":
+				h.PersistenceNeedsReview = true
+			case "future":
+				h.PersistenceLastVerified = h.CheckedAt.Add(time.Minute)
+			}
+			state, err := g.Check(context.Background())
+			if err != nil || state.Ready || state.CancelActive {
+				t.Fatalf("attestation must pause admission without cancelling a job: %+v %v", state, err)
 			}
 		})
 	}

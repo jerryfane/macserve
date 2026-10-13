@@ -5,6 +5,8 @@ import (
 	"io"
 	"testing"
 	"time"
+
+	"github.com/jerryfane/macserve/internal/worker"
 )
 
 func TestCommandExitStatus(t *testing.T) {
@@ -48,11 +50,11 @@ func TestWorkerPersistenceInspectionDeadline(t *testing.T) {
 	ctx, cancel := workerPersistenceInspectionContext(context.Background())
 	defer cancel()
 	deadline, ok := ctx.Deadline()
-	if !ok || deadline.Before(start.Add(6*time.Minute)) || deadline.After(time.Now().Add(6*time.Minute)) {
-		t.Fatalf("inspection must use its fixed six-minute deadline: %v, present=%t", deadline, ok)
+	if !ok || deadline.Before(start.Add(9*time.Minute)) || deadline.After(time.Now().Add(9*time.Minute)) {
+		t.Fatalf("public persistence operations must use their fixed nine-minute deadline: %v, present=%t", deadline, ok)
 	}
-	if deadline.After(time.Now().Add(10 * time.Minute)) {
-		t.Fatal("inspection deadline exceeds ten-minute ceiling")
+	if workerPersistenceInspectionTimeout < worker.PersistenceFullScanTimeout+time.Minute {
+		t.Fatal("public persistence deadline leaves no full-scan publication/cleanup allowance")
 	}
 	cancel()
 	if ctx.Err() != context.Canceled {
@@ -60,7 +62,7 @@ func TestWorkerPersistenceInspectionDeadline(t *testing.T) {
 	}
 
 	// An already-expired caller demonstrates fail-closed expiry without a
-	// six-minute sleep or replacing the production timeout.
+	// nine-minute sleep or replacing the production timeout.
 	expired, expire := context.WithDeadline(context.Background(), start.Add(-time.Second))
 	defer expire()
 	ctx, cancel = workerPersistenceInspectionContext(expired)

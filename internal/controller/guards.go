@@ -26,15 +26,19 @@ const (
 // qualification is bound to non-network protections, not interface inventory.
 // The controller cannot manufacture readiness from a live worker.
 type Health struct {
-	Schema                int               `json:"schema"`
-	JobUID                uint32            `json:"job_uid"`
-	BoundaryReceiptSHA256 string            `json:"boundary_receipt_sha256"`
-	BoundaryValidated     bool              `json:"boundary_validated"`
-	CheckedAt             time.Time         `json:"checked_at"`
-	ExpiresAt             time.Time         `json:"expires_at"`
-	AccountedBytes        int64             `json:"accounted_bytes"`
-	MemoryPressure        bool              `json:"memory_pressure"`
-	QualifiedProfiles     map[string]string `json:"qualified_profiles"`
+	Schema                  int               `json:"schema"`
+	JobUID                  uint32            `json:"job_uid"`
+	BoundaryReceiptSHA256   string            `json:"boundary_receipt_sha256"`
+	BoundaryValidated       bool              `json:"boundary_validated"`
+	CheckedAt               time.Time         `json:"checked_at"`
+	ExpiresAt               time.Time         `json:"expires_at"`
+	AccountedBytes          int64             `json:"accounted_bytes"`
+	MemoryPressure          bool              `json:"memory_pressure"`
+	QualifiedProfiles       map[string]string `json:"qualified_profiles"`
+	PersistenceLastVerified time.Time         `json:"persistence_last_verified"`
+	PersistenceValid        bool              `json:"persistence_valid"`
+	PersistenceNeedsReview  bool              `json:"persistence_needs_review"`
+	PersistenceReason       string            `json:"persistence_reason,omitempty"`
 }
 type GuardOptions struct {
 	Root, HealthFile, PauseFile string
@@ -109,6 +113,9 @@ func (g *Guard) Check(ctx context.Context) (GateState, error) {
 		state.UsedBytes = health.AccountedBytes
 		if health.Schema != 3 || health.JobUID != g.options.JobUID || !health.BoundaryValidated || !digestString(health.BoundaryReceiptSHA256) || health.CheckedAt.After(now.Add(5*time.Second)) || now.Sub(health.CheckedAt) > 45*time.Second || !health.ExpiresAt.After(now) || health.ExpiresAt.Sub(health.CheckedAt) > 45*time.Second || !health.ExpiresAt.After(health.CheckedAt) {
 			fail("isolation_unavailable", true)
+		}
+		if !health.PersistenceValid || health.PersistenceNeedsReview || health.PersistenceLastVerified.IsZero() || health.PersistenceLastVerified.After(now) {
+			fail("persistence_attestation_unavailable", false)
 		}
 		if health.AccountedBytes < 0 || health.AccountedBytes > ServiceBudgetBytes {
 			fail("service_disk_budget_exceeded", true)

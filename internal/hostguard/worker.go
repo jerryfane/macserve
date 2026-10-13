@@ -118,7 +118,13 @@ func RootConfig(path string) error { return protectedPath(path, false) }
 // CheckProtectedPath enforces root ownership, non-writable ancestors and native
 // ACL protection. Deny-only ACLs cannot grant writes; other ACLs require review.
 func CheckProtectedPath(path string, directory bool) error {
-	return checkProtectedPathACL(context.Background(), path, directory, true)
+	return CheckProtectedPathContext(context.Background(), path, directory)
+}
+
+// CheckProtectedPathContext preserves deny-only ACL policy within the caller's
+// observation deadline.
+func CheckProtectedPathContext(ctx context.Context, path string, directory bool) error {
+	return checkProtectedPathACL(ctx, path, directory, true)
 }
 
 // CheckProtectedPathNoACL excludes even deny-only ACLs for owned service inputs.
@@ -127,6 +133,9 @@ func CheckProtectedPathNoACL(ctx context.Context, path string, directory bool) e
 }
 
 func checkProtectedPathACL(parent context.Context, path string, directory, allowDeny bool) error {
+	if err := parent.Err(); err != nil {
+		return err
+	}
 	if err := protectedPath(path, directory); err != nil {
 		return err
 	}

@@ -160,7 +160,9 @@ func fresh(c Challenge, now time.Time) error {
 	return nil
 }
 func sameObservation(a, b maintenance.Observation) bool {
-	return a.JobUID == b.JobUID && a.Boot == b.Boot && a.BaselineSHA256 == b.BaselineSHA256 && maps.Equal(a.Profiles, b.Profiles) && b.IdentityValid && b.BaselineValid
+	return a.JobUID == b.JobUID && a.Boot == b.Boot && a.BaselineSHA256 == b.BaselineSHA256 && maps.Equal(a.Profiles, b.Profiles) && b.IdentityValid && b.BaselineValid &&
+		a.Persistence.Valid && !a.Persistence.NeedsReview && a.Persistence.RevokedAt.IsZero() && !a.Persistence.LastVerified.IsZero() &&
+		b.Persistence.Valid && !b.Persistence.NeedsReview && b.Persistence.RevokedAt.IsZero() && !b.Persistence.LastVerified.IsZero()
 }
 func rootOnly() error {
 	if runtime.GOOS != "darwin" || os.Getuid() != 0 || os.Geteuid() != 0 {

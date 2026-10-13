@@ -152,6 +152,16 @@ func udpProbe(ctx context.Context, target string, p Packet) (bool, string) {
 		return false, e.Error()
 	}
 	defer conn.Close()
+	closed := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		conn.Close()
+		close(closed)
+	})
+	defer func() {
+		if !stop() {
+			<-closed
+		}
+	}()
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 	b, _ := json.Marshal(p)
 	if _, e = conn.Write(b); e != nil {
@@ -198,6 +208,57 @@ func ownerCanaryRead(path string) OwnerCanaryControl {
 	return OwnerCanaryControl{Path: path, At: time.Now().UTC(), Readable: ok, Detail: detail}
 }
 
+// networkMatrix retains serial evidence order while bounding in-flight work.
+// Transport functions own their per-probe deadlines; all workers are joined.
+func networkMatrix(ctx context.Context, c Challenge, challengeDigest, role string, tcp func(context.Context, string) (bool, string), udp func(context.Context, string, Packet) (bool, string)) ([]Result, error) {
+	results := make([]Result, 0, 3*len(c.TCP)+3*len(c.UDP)+len(c.Allow))
+	for _, target := range c.TCP {
+		for attempt := 1; attempt <= 3; attempt++ {
+			results = append(results, Result{Category: "network_reachability", Target: target, Attempt: attempt, Detail: "TCP: "})
+		}
+	}
+	for _, target := range c.UDP {
+		for attempt := 1; attempt <= 3; attempt++ {
+			nonce, err := randomID()
+			if err != nil {
+				return nil, err
+			}
+			results = append(results, Result{Category: "network_reachability", Target: target, Attempt: attempt, Detail: "UDP: ", Nonce: nonce})
+		}
+	}
+	for _, target := range c.Allow {
+		results = append(results, Result{Category: "network_reachability", Target: target, Attempt: 1, Detail: "authorized TCP endpoint: "})
+	}
+	jobs := make(chan int)
+	var workers sync.WaitGroup
+	for range min(16, len(results)) {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for index := range jobs {
+				row := &results[index]
+				if err := ctx.Err(); err != nil {
+					row.Detail += err.Error()
+					continue
+				}
+				var detail string
+				if row.Nonce != "" {
+					row.Success, detail = udp(ctx, row.Target, Packet{challengeDigest, role, row.Attempt, row.Nonce})
+				} else {
+					row.Success, detail = tcp(ctx, row.Target)
+				}
+				row.Detail += detail
+			}
+		}()
+	}
+	for index := range results {
+		jobs <- index
+	}
+	close(jobs)
+	workers.Wait()
+	return results, nil
+}
+
 var errRootProbe = errors.New("qualification probes must not run with real or effective UID 0")
 
 func Probe(ctx context.Context, dir, role, out string) error {
@@ -233,26 +294,12 @@ func probe(ctx context.Context, dir, role, out string, uid, euid int) error {
 		remaining -= min(remaining, len(detail))
 		r.Results = append(r.Results, Result{category, target, attempt, ok, detail, nonce})
 	}
-	for _, target := range c.TCP {
-		for attempt := 1; attempt <= 3; attempt++ {
-			ok, detail := tcpProbe(ctx, target)
-			add("network_reachability", target, attempt, ok, "TCP: "+detail, "")
-		}
+	network, err := networkMatrix(ctx, c, digest(raw), role, tcpProbe, udpProbe)
+	if err != nil {
+		return err
 	}
-	for _, target := range c.UDP {
-		for attempt := 1; attempt <= 3; attempt++ {
-			nonce, err := randomID()
-			if err != nil {
-				return err
-			}
-			p := Packet{digest(raw), role, attempt, nonce}
-			ok, detail := udpProbe(ctx, target, p)
-			add("network_reachability", target, attempt, ok, "UDP: "+detail, nonce)
-		}
-	}
-	for _, target := range c.Allow {
-		ok, detail := tcpProbe(ctx, target)
-		add("network_reachability", target, 1, ok, "authorized TCP endpoint: "+detail, "")
+	for _, row := range network {
+		add(row.Category, row.Target, row.Attempt, row.Success, row.Detail, row.Nonce)
 	}
 	if role == "job" {
 		d := net.Dialer{Timeout: 2 * time.Second}
