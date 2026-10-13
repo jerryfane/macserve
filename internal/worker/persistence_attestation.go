@@ -28,6 +28,8 @@ const PersistenceOperationTimeout = 9 * time.Minute
 
 const persistenceAttestationFile = "persistence-attestation.json"
 
+const persistenceAttestationLockTimeout = time.Second
+
 var errPersistenceAttestationRevoked = errors.New("persistence attestation unavailable or revoked; reviewed acceptance and reset required")
 
 // Build identity is immutable process metadata, not a filesystem trust cache.
@@ -81,16 +83,20 @@ func attestationBinding(options Options, accepted []byte) (persistenceAttestatio
 	return persistenceAttestationBinding{Version: 1, Build: persistenceAttestationBuild, ManifestSHA256: persistenceHash(accepted), Boot: boot, JobUID: options.JobUID, JobGID: options.JobGID, OwnerUID: options.OwnerUID, ControllerUID: options.ControllerUID, HelperPath: options.HelperPath}, nil
 }
 
-// Publication uses a separate, short-lived cross-process lock, never worker.lock.
-// The expensive scan runs unlocked; its initial revision must still match when
-// publishing. A scan begun before a revocation or review cannot overwrite it.
-func withAttestationLock(options Options, operation func(*os.Root) error) error {
+// The scan lock serializes expensive inspections across processes. Publication
+// has its own short-lived lock, so admission, revocation and review never wait
+// for a full scan. Protected atomic snapshots do not require either lock.
+func withAttestationRoot(ctx context.Context, options Options, operation func(*os.Root) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	parent := filepath.Dir(options.PersistencePath)
-	if !filepath.IsAbs(options.PersistencePath) || filepath.Clean(options.PersistencePath) != options.PersistencePath || filepath.Base(options.PersistencePath) == persistenceAttestationFile || filepath.Base(options.PersistencePath) == persistenceAttestationFile+".lock" {
+	name := filepath.Base(options.PersistencePath)
+	if !filepath.IsAbs(options.PersistencePath) || filepath.Clean(options.PersistencePath) != options.PersistencePath || name == persistenceAttestationFile || name == persistenceAttestationFile+".lock" || name == persistenceAttestationFile+".scan.lock" {
 		return errors.New("invalid persistence attestation authority path")
 	}
 	if runtime.GOOS == "darwin" {
-		if err := hostguard.CheckProtectedPath(parent, true); err != nil {
+		if err := hostguard.CheckProtectedPathContext(ctx, parent, true); err != nil {
 			return err
 		}
 	} else {
@@ -103,29 +109,78 @@ func withAttestationLock(options Options, operation func(*os.Root) error) error 
 		return err
 	}
 	defer root.Close()
-	name := persistenceAttestationFile + ".lock"
-	lock, err := root.OpenFile(name, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	defer lock.Close()
-	info, err := lock.Stat()
-	if err != nil {
-		return err
-	}
-	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || st.Uid != 0 || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || st.Nlink != 1 {
-		return errors.New("unprotected persistence attestation lock")
-	}
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
-		return err
-	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 	return operation(root)
 }
 
+func withAttestationLock(options Options, operation func(*os.Root) error) error {
+	return withAttestationLockContext(context.Background(), options, operation)
+}
+
+func withAttestationLockContext(ctx context.Context, options Options, operation func(*os.Root) error) error {
+	return withAttestationFileLock(ctx, options, persistenceAttestationFile+".lock", persistenceAttestationLockTimeout, operation)
+}
+
+func withAttestationFileLock(ctx context.Context, options Options, name string, wait time.Duration, operation func(*os.Root) error) error {
+	waitCtx, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
+	return withAttestationRoot(waitCtx, options, func(root *os.Root) error {
+		lock, err := root.OpenFile(name, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0600)
+		if err != nil {
+			return err
+		}
+		defer lock.Close()
+		info, err := lock.Stat()
+		if err != nil {
+			return err
+		}
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || st.Uid != 0 || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || st.Nlink != 1 {
+			return errors.New("unprotected persistence attestation lock")
+		}
+		var retry *time.Ticker
+		for {
+			if err := waitCtx.Err(); err != nil {
+				return err
+			}
+			err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+			if err == nil {
+				break
+			}
+			if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) && !errors.Is(err, syscall.EINTR) {
+				return err
+			}
+			if retry == nil {
+				retry = time.NewTicker(10 * time.Millisecond)
+				defer retry.Stop()
+			}
+			select {
+			case <-waitCtx.Done():
+				return waitCtx.Err()
+			case <-retry.C:
+			}
+		}
+		defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+		if err := waitCtx.Err(); err != nil {
+			return err
+		}
+		return operation(root)
+	})
+}
+
 func readAttestation(options Options) (persistenceAttestation, []byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), persistenceAdmissionTimeout)
+	defer cancel()
+	return readAttestationContext(ctx, options)
+}
+
+func readAttestationContext(ctx context.Context, options Options) (persistenceAttestation, []byte, error) {
 	var record persistenceAttestation
+	if err := ctx.Err(); err != nil {
+		return record, nil, err
+	}
 	path := filepath.Join(filepath.Dir(options.PersistencePath), persistenceAttestationFile)
 	if _, err := os.Lstat(path); os.IsNotExist(err) {
 		return record, nil, nil
@@ -134,7 +189,7 @@ func readAttestation(options Options) (persistenceAttestation, []byte, error) {
 	}
 	var err error
 	if runtime.GOOS == "darwin" {
-		err = hostguard.CheckProtectedPath(path, false)
+		err = hostguard.CheckProtectedPathContext(ctx, path, false)
 	} else {
 		err = hostguard.RootConfig(path)
 	}
@@ -171,7 +226,7 @@ func readAttestation(options Options) (persistenceAttestation, []byte, error) {
 	if record.Valid && (record.LastVerified.IsZero() || !record.RevokedAt.IsZero() || record.Reason != "") {
 		return record, nil, errors.New("incomplete persistence attestation")
 	}
-	return record, data, nil
+	return record, data, ctx.Err()
 }
 
 func writeAttestation(root *os.Root, record persistenceAttestation) error {
@@ -187,12 +242,16 @@ func writeAttestation(root *os.Root, record persistenceAttestation) error {
 	return durableFile(root, persistenceAttestationFile, data)
 }
 
-// PersistenceAttestationStatus reads fresh protected metadata and its current
-// boot/identity/manifest binding. Age alone never grants or revokes admission.
+// PersistenceAttestationStatus reads protected atomic snapshots without waiting
+// for either writer lock. Bracketing the authority binding detects concurrent
+// publication; an unstable snapshot refuses readiness rather than retrying.
+// Age alone never grants or revokes admission.
 func PersistenceAttestationStatus(options Options) (PersistenceAttestationMetadata, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	var status PersistenceAttestationMetadata
-	err := withAttestationLock(options, func(_ *os.Root) error {
-		record, data, err := readAttestation(options)
+	err := withAttestationRoot(ctx, options, func(_ *os.Root) error {
+		record, data, err := readAttestationContext(ctx, options)
 		if err != nil {
 			return err
 		}
@@ -201,52 +260,103 @@ func PersistenceAttestationStatus(options Options) (PersistenceAttestationMetada
 			status.Reason = "missing"
 			return nil
 		}
-		_, accepted, err := readPersistence(options.PersistencePath, options.JobUID)
+		_, accepted, err := readPersistenceContext(ctx, options.PersistencePath, options.JobUID)
 		if err != nil {
-			status.Valid = false
 			return err
 		}
 		binding, err := attestationBinding(options, accepted)
 		if err != nil {
-			status.Valid = false
 			return err
+		}
+		latest, _, err := readAttestationContext(ctx, options)
+		if err != nil {
+			return err
+		}
+		_, after, err := readPersistenceContext(ctx, options.PersistencePath, options.JobUID)
+		if err != nil {
+			return err
+		}
+		if latest.Revision != record.Revision || !bytes.Equal(accepted, after) {
+			return errors.New("persistence authority or attestation changed during status read")
 		}
 		if record.Valid && record.Binding != binding {
 			status.Valid, status.NeedsReview, status.Reason = false, true, "authority_changed"
 		}
-		return nil
+		return ctx.Err()
 	})
+	if err != nil {
+		status.Valid = false
+	}
 	return status, err
 }
 
+// Reviewed acceptance deliberately establishes reset_required. No automatic
+// failure, even a confirmed mismatch, may undo that operator-owned marker.
+func attestationReasonPrecedence(reason string) int {
+	switch reason {
+	case "reset_required":
+		return 4
+	case "mismatch":
+		return 3
+	case "authority_changed":
+		return 2
+	case "inspection_unavailable":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func revokeAttestation(root *os.Root, record persistenceAttestation, cause error) error {
+	reason := "inspection_unavailable"
+	if errors.Is(cause, ErrContamination) {
+		reason = "mismatch"
+	}
+	if record.NeedsReview && attestationReasonPrecedence(record.Reason) >= attestationReasonPrecedence(reason) {
+		return nil
+	}
+	record.Valid, record.NeedsReview = false, true
+	record.RevokedAt = time.Now().UTC()
+	record.Reason = reason
+	return writeAttestation(root, record)
+}
+
 func revokePersistenceAttestation(options Options, cause error) error {
-	return withAttestationLock(options, func(root *os.Root) error {
-		record, _, err := readAttestation(options)
+	ctx, cancel := context.WithTimeout(context.Background(), persistenceAttestationLockTimeout)
+	defer cancel()
+	return withAttestationLockContext(ctx, options, func(root *os.Root) error {
+		record, _, err := readAttestationContext(ctx, options)
 		if err != nil {
 			return err
 		}
-		// Keep the first failure and last successful verification, including
-		// when a later scanner merely finds that admission was already revoked.
-		if record.NeedsReview && record.Reason != "reset_required" {
+		return revokeAttestation(root, record, cause)
+	})
+}
+
+// Only the revision actually inspected may be revoked. In particular, a stale
+// failed scan or hot observation cannot revoke a newer verified publication.
+func revokePersistenceAttestationRevision(ctx context.Context, options Options, revision string, cause error) error {
+	return withAttestationLockContext(ctx, options, func(root *os.Root) error {
+		record, _, err := readAttestationContext(ctx, options)
+		if err != nil {
+			return err
+		}
+		if record.Revision != revision {
 			return nil
 		}
-		record.Valid, record.NeedsReview = false, true
-		record.RevokedAt = time.Now().UTC()
-		record.Reason = "inspection_unavailable"
-		if errors.Is(cause, ErrContamination) {
-			record.Reason = "mismatch"
-		}
-		return writeAttestation(root, record)
+		return revokeAttestation(root, record, cause)
 	})
 }
 
 func markPersistenceReviewed(options Options) error {
-	return withAttestationLock(options, func(root *os.Root) error {
-		record, _, err := readAttestation(options)
+	ctx, cancel := context.WithTimeout(context.Background(), persistenceAttestationLockTimeout)
+	defer cancel()
+	return withAttestationLockContext(ctx, options, func(root *os.Root) error {
+		record, _, err := readAttestationContext(ctx, options)
 		if err != nil {
 			return err
 		}
-		_, accepted, err := readPersistence(options.PersistencePath, options.JobUID)
+		_, accepted, err := readPersistenceContext(ctx, options.PersistencePath, options.JobUID)
 		if err != nil {
 			return err
 		}
@@ -267,63 +377,78 @@ func VerifyPersistenceAttestation(ctx context.Context, options Options) error {
 	return verifyPersistenceAttestation(ctx, options, false, collectPersistence)
 }
 
-func verifyPersistenceAttestation(ctx context.Context, options Options, reset bool, collect func(context.Context, Options) (PersistenceManifest, error)) (result error) {
-	ctx, cancel := context.WithTimeout(ctx, PersistenceFullScanTimeout)
+func verifyPersistenceAttestation(ctx context.Context, options Options, reset bool, collect func(context.Context, Options) (PersistenceManifest, error)) error {
+	ctx, cancel := context.WithTimeout(ctx, PersistenceOperationTimeout)
 	defer cancel()
-	defer func() {
-		if result != nil && !errors.Is(result, errPersistenceAttestationRevoked) {
-			result = errors.Join(result, revokePersistenceAttestation(options, result))
-		}
-	}()
-	var initial []byte
-	var accepted []byte
-	var expected PersistenceManifest
-	var binding persistenceAttestationBinding
-	err := withAttestationLock(options, func(_ *os.Root) error {
-		record, data, err := readAttestation(options)
+	// A contending invocation does not inspect or revoke anything. Its bounded
+	// wait precedes the full 480-second collector budget, within the 540-second
+	// operation budget shared with explicit reset.
+	return withAttestationFileLock(ctx, options, persistenceAttestationFile+".scan.lock", persistenceAdmissionTimeout, func(_ *os.Root) (result error) {
+		scanCtx, cancel := context.WithTimeout(ctx, PersistenceFullScanTimeout)
+		defer cancel()
+		var revision string
+		var checked bool
+		defer func() {
+			if result != nil && checked && !errors.Is(result, errPersistenceAttestationRevoked) {
+				// Preserve full-scan failure evidence even after its deadline,
+				// without allowing cleanup to block behind a stuck publisher.
+				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(scanCtx), persistenceAttestationLockTimeout)
+				defer cancel()
+				result = errors.Join(result, revokePersistenceAttestationRevision(cleanupCtx, options, revision, result))
+			}
+		}()
+		var accepted []byte
+		var expected PersistenceManifest
+		var binding persistenceAttestationBinding
+		err := withAttestationLockContext(scanCtx, options, func(_ *os.Root) error {
+			record, _, err := readAttestationContext(scanCtx, options)
+			if err != nil {
+				return err
+			}
+			if record.NeedsReview && !(reset && record.Reason == "reset_required") {
+				return errPersistenceAttestationRevoked
+			}
+			revision, checked = record.Revision, true
+			expected, accepted, err = readPersistenceContext(scanCtx, options.PersistencePath, options.JobUID)
+			if err != nil {
+				return err
+			}
+			binding, err = attestationBinding(options, accepted)
+			return err
+		})
 		if err != nil {
 			return err
 		}
-		if record.NeedsReview && !(reset && record.Reason == "reset_required") {
-			return errPersistenceAttestationRevoked
-		}
-		initial = data
-		expected, accepted, err = readPersistence(options.PersistencePath, options.JobUID)
+		current, err := collect(scanCtx, options)
 		if err != nil {
 			return err
 		}
-		binding, err = attestationBinding(options, accepted)
-		return err
-	})
-	if err != nil {
-		return err
-	}
-	current, err := collect(ctx, options)
-	if err != nil {
-		return err
-	}
-	if err := matchPersistence(expected, current); err != nil {
-		return err
-	}
-	return withAttestationLock(options, func(root *os.Root) error {
-		if err := ctx.Err(); err != nil {
+		if err := matchPersistence(expected, current); err != nil {
 			return err
 		}
-		_, latest, err := readAttestation(options)
-		if err != nil {
-			return err
-		}
-		_, after, err := readPersistence(options.PersistencePath, options.JobUID)
-		if err != nil {
-			return err
-		}
-		afterBinding, err := attestationBinding(options, after)
-		if err != nil {
-			return err
-		}
-		if !bytes.Equal(latest, initial) || !bytes.Equal(after, accepted) || afterBinding != binding {
-			return errors.New("persistence authority or attestation changed during inspection")
-		}
-		return writeAttestation(root, persistenceAttestation{PersistenceAttestationMetadata: PersistenceAttestationMetadata{Valid: true, LastVerified: time.Now().UTC()}, Binding: binding})
+		return withAttestationLockContext(scanCtx, options, func(root *os.Root) error {
+			if err := scanCtx.Err(); err != nil {
+				return err
+			}
+			latest, _, err := readAttestationContext(scanCtx, options)
+			if err != nil {
+				return err
+			}
+			_, after, err := readPersistenceContext(scanCtx, options.PersistencePath, options.JobUID)
+			if err != nil {
+				return err
+			}
+			afterBinding, err := attestationBinding(options, after)
+			if err != nil {
+				return err
+			}
+			if latest.Revision != revision || !bytes.Equal(after, accepted) || afterBinding != binding {
+				return errors.New("persistence authority or attestation changed during inspection")
+			}
+			if err := scanCtx.Err(); err != nil {
+				return err
+			}
+			return writeAttestation(root, persistenceAttestation{PersistenceAttestationMetadata: PersistenceAttestationMetadata{Valid: true, LastVerified: time.Now().UTC()}, Binding: binding})
+		})
 	})
 }

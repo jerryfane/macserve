@@ -121,7 +121,7 @@ func registrationWriterPolicy(ctx context.Context, options Options) (registratio
 func registrationGroupMember(ctx context.Context, uid, gid string) (bool, error) {
 	out, diagnostic, err := inspectCommand(ctx, nil, "/usr/bin/dsmemberutil", "checkmembership", "-u", uid, "-g", gid)
 	if err != nil || strings.TrimSpace(diagnostic) != "" {
-		return false, errors.New("registration service account memberships unavailable")
+		return false, errors.Join(err, errors.New("registration service account memberships unavailable"))
 	}
 	switch strings.TrimSpace(out) {
 	case "user is a member of the group":
@@ -135,7 +135,7 @@ func registrationGroupMember(ctx context.Context, uid, gid string) (bool, error)
 
 func registrationWriterIdentities(options Options, lookup func(string) (*user.User, error), lookupGroup func(string) (*user.Group, error), groupIDs func(*user.User) ([]string, error), member func(*user.User, string) (bool, error)) error {
 	if options.OwnerUID == 0 || options.JobUID == 0 || options.ControllerUID == 0 || options.OwnerUID == options.JobUID || options.OwnerUID == options.ControllerUID || options.JobUID == options.ControllerUID {
-		return errors.New("registration writers require distinct owner, job and controller identities")
+		return fmt.Errorf("%w: registration writers require distinct owner, job and controller identities", ErrContamination)
 	}
 	for name, gid := range map[string]string{"wheel": "0", "staff": "20", "admin": "80"} {
 		group, err := lookupGroup(name)
@@ -154,7 +154,7 @@ func registrationWriterIdentities(options Options, lookup func(string) (*user.Us
 		}
 		groups, err := groupIDs(account)
 		if err != nil || len(groups) == 0 {
-			return errors.New("registration service account memberships unavailable")
+			return errors.Join(err, errors.New("registration service account memberships unavailable"))
 		}
 		// Include the primary group explicitly: directory membership results
 		// must not be assumed to include it, especially for staff.
@@ -168,16 +168,16 @@ func registrationWriterIdentities(options Options, lookup func(string) (*user.Us
 				return errors.New("registration service account membership is unknown")
 			}
 			if value == 0 || value == 20 || value == 80 {
-				return errors.New("registration job and controller must not belong to wheel, staff or admin")
+				return fmt.Errorf("%w: registration job and controller must not belong to wheel, staff or admin", ErrContamination)
 			}
 		}
 		for _, gid := range []string{"0", "20", "80"} {
 			belongs, err := member(account, gid)
 			if err != nil {
-				return errors.New("registration service account memberships unavailable")
+				return errors.Join(err, errors.New("registration service account memberships unavailable"))
 			}
 			if belongs {
-				return errors.New("registration job and controller must not belong to wheel, staff or admin")
+				return fmt.Errorf("%w: registration job and controller must not belong to wheel, staff or admin", ErrContamination)
 			}
 		}
 	}
@@ -224,13 +224,16 @@ func registrationPrincipal(kind, principal string) (uint32, error) {
 
 func (writers registrationWriters) checkMode(info os.FileInfo) error {
 	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || (st.Uid != 0 && st.Uid != writers.ownerUID) {
-		return errors.New("registered code ownership is outside root and owner")
+	if !ok {
+		return errors.New("registered code ownership unavailable")
+	}
+	if st.Uid != 0 && st.Uid != writers.ownerUID {
+		return fmt.Errorf("%w: registered code ownership is outside root and owner", ErrContamination)
 	}
 	// Symlink modes are not access controls; link ownership and the resolved
 	// target's protection are checked, and escaping links remain forbidden.
 	if info.Mode()&os.ModeSymlink == 0 && (info.Mode().Perm()&0002 != 0 || info.Mode().Perm()&0020 != 0 && st.Gid != 0 && st.Gid != 80) {
-		return errors.New("registered code has writers outside root, owner, wheel and admin")
+		return fmt.Errorf("%w: registered code has writers outside root, owner, wheel and admin", ErrContamination)
 	}
 	return nil
 }
@@ -248,6 +251,9 @@ func registrationPath(path string, directory bool, writers registrationWriters) 
 	for current := path; ; current = filepath.Dir(current) {
 		info, err := os.Lstat(current)
 		if err != nil {
+			if os.IsNotExist(err) {
+				return nil, fmt.Errorf("%w: registered path or ancestor missing: %w", ErrContamination, err)
+			}
 			return nil, err
 		}
 		validType := info.IsDir()
@@ -255,7 +261,7 @@ func registrationPath(path string, directory bool, writers registrationWriters) 
 			validType = info.Mode().IsRegular()
 		}
 		if !validType {
-			return nil, errors.New("registered path or ancestor is not a non-symlink directory/file")
+			return nil, fmt.Errorf("%w: registered path or ancestor is not a non-symlink directory/file", ErrContamination)
 		}
 		if err := writers.checkMode(info); err != nil {
 			return nil, err
@@ -271,12 +277,18 @@ func recheckRegistrationPath(entries []registrationPathEntry, writers registrati
 	for _, entry := range entries {
 		info, err := os.Lstat(entry.path)
 		if err != nil {
+			if os.IsNotExist(err) {
+				return fmt.Errorf("%w: registered path or ancestor disappeared: %w", ErrContamination, err)
+			}
 			return err
 		}
 		before, ok := entry.info.Sys().(*syscall.Stat_t)
 		after, afterOK := info.Sys().(*syscall.Stat_t)
-		if !ok || !afterOK || !os.SameFile(entry.info, info) || entry.info.Mode() != info.Mode() || before.Uid != after.Uid || before.Gid != after.Gid {
-			return errors.New("registered path or ancestor changed during inspection")
+		if !ok || !afterOK {
+			return errors.New("registered path or ancestor identity unavailable")
+		}
+		if !os.SameFile(entry.info, info) || entry.info.Mode() != info.Mode() || before.Uid != after.Uid || before.Gid != after.Gid {
+			return fmt.Errorf("%w: registered path or ancestor changed during inspection", ErrContamination)
 		}
 		if err := writers.checkMode(info); err != nil {
 			return err
@@ -501,7 +513,7 @@ func (writers registrationWriters) checkACL(line string) error {
 		allowed = match[1] == "user" && (id == 0 || id == writers.ownerUID) || match[1] == "group" && (id == 0 || id == 80)
 	}
 	if match[4] == "allow" && mutating && !allowed {
-		return errors.New("registration ACL grants writes outside root, owner, wheel and admin")
+		return fmt.Errorf("%w: registration ACL grants writes outside root, owner, wheel and admin", ErrContamination)
 	}
 	return nil
 }

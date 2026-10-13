@@ -125,21 +125,44 @@ func (e *Engine) checkQuarantine() error {
 	return nil
 }
 
+// This private marker selects admission shares without shortening cold full-scan
+// command budgets or exposing a timeout override to callers.
+type persistenceAdmissionContextKey struct{}
+
 // Only these fixed, read-only commands are used. They do not use the job Runner,
 // which permits recipes; probes have fixed environments, output bounds and deadlines.
 func inspectCommand(ctx context.Context, credential *syscall.Credential, executable string, args ...string) (string, string, error) {
-	// Metadata/cron probes stay short. A cold CoreServices GUI-domain connection
-	// or host-wide BTM enumeration gets 30s, rather than the old AppleEvents 5s.
-	// The enclosing admission/reset deadline still wins, and partial output on
-	// any deadline remains an inspection failure, never an empty census.
+	// Allocate short fixed shares of the single 30s admission budget: cron and
+	// metadata 2s each, six membership probes 1s each, login items 6s and BTM 8s.
+	// The caller's remaining deadline always wins; no probe renews admission.
+	// Partial output on expiry is unavailable inspection, never a clean census.
+	hot, _ := ctx.Value(persistenceAdmissionContextKey{}).(bool)
 	timeout := 5 * time.Second
-	if executable == "/usr/bin/sfltool" && len(args) == 1 && args[0] == "dumpbtm" ||
-		executable == "/usr/bin/dsmemberutil" ||
-		executable == "/bin/launchctl" && len(args) == 6 && args[0] == "asuser" && args[3] == "_job-login-items" {
+	if hot {
+		timeout = 2 * time.Second
+	}
+	switch {
+	case executable == "/usr/bin/sfltool" && len(args) == 1 && args[0] == "dumpbtm":
 		timeout = 30 * time.Second
+		if hot {
+			timeout = 8 * time.Second
+		}
+	case executable == "/usr/bin/dsmemberutil":
+		timeout = 30 * time.Second
+		if hot {
+			timeout = time.Second
+		}
+	case executable == "/bin/launchctl" && len(args) == 6 && args[0] == "asuser" && args[3] == "_job-login-items":
+		timeout = 30 * time.Second
+		if hot {
+			timeout = 6 * time.Second
+		}
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return "", "", err
+	}
 	cmd := exec.CommandContext(ctx, executable, args...)
 	cmd.Dir = "/"
 	cmd.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL=C"}
@@ -202,8 +225,11 @@ func inspectLaunchAgents(home string) error {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		if err != nil {
 			return errors.Join(err, errors.New("LaunchAgents inspection unavailable"))
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%w: LaunchAgents path is not a non-symlink directory", ErrContamination)
 		}
 	}
 	dir, err := root.Open("Library/LaunchAgents")

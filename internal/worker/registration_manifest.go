@@ -40,10 +40,17 @@ func persistenceHash(data []byte) string {
 }
 
 func readPersistence(path string, uid uint32) (PersistenceManifest, []byte, error) {
+	return readPersistenceContext(context.Background(), path, uid)
+}
+
+func readPersistenceContext(ctx context.Context, path string, uid uint32) (PersistenceManifest, []byte, error) {
 	var m PersistenceManifest
+	if err := ctx.Err(); err != nil {
+		return m, nil, err
+	}
 	var protectionErr error
 	if runtime.GOOS == "darwin" {
-		protectionErr = hostguard.CheckProtectedPath(path, false)
+		protectionErr = hostguard.CheckProtectedPathContext(ctx, path, false)
 	} else {
 		// Native inspection/acceptance are Darwin-only. Portable readers/tests
 		// still enforce the root-owned, non-writable authority file contract.
@@ -251,7 +258,7 @@ func ReviewPersistence(ctx context.Context, options Options, output string) (str
 	if err := hostguard.BrokerIdentity(options.JobUID, options.JobGID, options.ControllerUID, options.OwnerUID); err != nil {
 		return "", err
 	}
-	if output == options.PersistencePath || output == options.BaselinePath || output == options.HelperPath || output == filepath.Join(filepath.Dir(options.PersistencePath), persistenceAttestationFile) || output == filepath.Join(filepath.Dir(options.PersistencePath), persistenceAttestationFile+".lock") {
+	if output == options.PersistencePath || output == options.BaselinePath || output == options.HelperPath || output == filepath.Join(filepath.Dir(options.PersistencePath), persistenceAttestationFile) || output == filepath.Join(filepath.Dir(options.PersistencePath), persistenceAttestationFile+".lock") || output == filepath.Join(filepath.Dir(options.PersistencePath), persistenceAttestationFile+".scan.lock") {
 		return "", errors.New("candidate must be separate from trusted state")
 	}
 	if !filepath.IsAbs(output) || filepath.Clean(output) != output {

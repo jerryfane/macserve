@@ -51,7 +51,10 @@ func TestLaunchAgentInspectionRefusesEntriesAndUnknownPaths(t *testing.T) {
 			if (err == nil) != allowed {
 				t.Fatalf("inspection %s: %v", mode, err)
 			}
-			if errors.Is(err, ErrContamination) != (mode == "entry") {
+			// An observed symlink or non-directory is unsafe state, unlike an
+			// unavailable home whose LaunchAgents state cannot be inspected.
+			contaminated := mode == "entry" || mode == "symlink" || mode == "not-directory"
+			if errors.Is(err, ErrContamination) != contaminated {
 				t.Fatalf("incorrect positive contamination classification: %v", err)
 			}
 		})

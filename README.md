@@ -151,11 +151,13 @@ broker-private `root`, mode `0600`) with `state` (`admitting` or `not_admitting`
 Status-write errors also block registration/claim and retry on the normal poll. This file is only the last
 observation, not a live heartbeat or a second quarantine authority; it may be stale after shutdown and
 requires no administrator clear. Editing/removing it cannot bypass recovery or clear quarantine.
-The fixed probes have deadlines and output bounds. Native SessionLoginItems/GUI-domain startup and host-wide
-BTM enumeration each get a bounded 30 seconds for cold/loaded hosts, independent of the former five-second
-AppleEvents budget. Metadata/cron probes retain five seconds. Cheap admission has an enclosing
-30-second bound; explicit full persistence verification has a separate fixed 480-second bound.
-Timeout, including partial output reporting zero items, is refusal rather than an empty census.
+The fixed probes have deadlines and output bounds. Full inspection allows 30 seconds for native
+SessionLoginItems/GUI-domain startup and host-wide BTM enumeration, and five seconds for metadata/cron.
+Hot admission instead shares one fixed 30-second budget: two seconds each for its before/after authority
+observations, cron, OS metadata and the entire root/ancestor ACL stage; six seconds for login items,
+eight for BTM, and one second for each of six membership checks. Each share is clamped by the enclosing
+deadline. Timeout or unavailable/partial output refuses this admission, never proves an empty census,
+and does not by itself durably revoke the attestation. Full persistence collection has its own 480-second bound.
 Modern registration inspection requires a complete,
 recognized job-UID `sfltool dumpbtm` census matching the separately accepted protected manifest; missing,
 unfamiliar or incomplete output is refusal, never absence. There is no automatic adoption or name/team/type
@@ -250,15 +252,22 @@ They freshly check the exact accepted BTM records/identities, zero legacy items,
 group membership, and each registration root and ancestor's ownership, mode and ACL, alongside the
 existing GUI process checks. They also require a protected durable full-scan attestation bound to the
 accepted manifest, boot and relevant identities/version, stored as `persistence-attestation.json`
-beside the protected accepted manifest (with a separate `.lock` file). No FSEvents watcher or TTL cache
-substitutes for these live checks.
+beside the protected accepted manifest. A short-lived `.lock` protects publication; a separate
+`.scan.lock` serializes full scans across processes from initial observation through publication.
+Lock acquisition polls nonblocking with a context deadline; health reads atomic records without acquiring
+either lock. No FSEvents watcher or TTL cache substitutes for live checks.
 
 Root maintenance performs one full scan every six hours in a background task, independently of its
 eight-second health observation. A full scan has a fixed 480-second deadline, does not hold the worker
-admission lock, and never overlaps another periodic scan in that maintenance process. Missing attestation
-fails admission closed and schedules an initial scan. A mismatch or scan error durably revokes the
-attestation; subsequent maintenance cannot silently heal it. Preserve evidence, explicitly review/accept
-changed registrations as needed, reset the GUI baseline, then requalify. Reset does not implicitly erase
+admission lock, and never overlaps another full attestation scan, even in another process. Scan-lock
+contention refuses that invocation without changing authority. Missing attestation fails admission closed
+and schedules an initial scan. A full-scan mismatch or collection error durably revokes only the revision
+that scan checked; a stale scan cannot revoke a newer publication or review. Hot-path transient failures
+refuse only that admission. Positive hot mismatches revoke; the reason precedence preserves an existing
+`reset_required` marker over `mismatch`, then `authority_changed`, then `inspection_unavailable`. Revocation preserves the last
+successful verification timestamp. Periodic success cannot silently heal revocation: preserve evidence,
+review and accept the current registrations, reset the GUI baseline, then requalify. Acceptance writes
+`reset_required`; only a successful explicit reset completes that recovery. Reset does not implicitly erase
 an unrelated admission quarantine. Explicit inspection, acceptance, reset, and qualification retain
 full verification; qualification `begin`, `collect`, `attest`, and `approve` run it before the cheap
 observation, under a 540-second outer command deadline. Maintenance launchd shutdown allows 600 seconds
