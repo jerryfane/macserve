@@ -299,6 +299,16 @@ func keyringLaunchOutput(t *testing.T) string {
 	return string(text)
 }
 
+func TestCoexistenceRejectsScalarArrayReparenting(t *testing.T) {
+	probe := "system/org.gitmoot.keyring = {\n\tmetadata = [\n\t\t0 = foo ]\n\tstate = running\n\tpid = 2908\n}\n"
+	if _, err := coexistenceServicePID("org.gitmoot.keyring", probe); err == nil {
+		t.Fatal("scalar suffix reparented nested service authority")
+	}
+	if pid, err := coexistenceServicePID("org.gitmoot.keyring", keyringLaunchOutput(t)); err != nil || pid != 2908 {
+		t.Fatalf("real empty-value array close refused: pid=%d err=%v", pid, err)
+	}
+}
+
 func TestCoexistenceLaunchctlBalancedCapture(t *testing.T) {
 	capture := keyringLaunchOutput(t)
 	insert := func(body string) string {

@@ -130,8 +130,19 @@ func disabledPlist(data []byte) error {
 			continue
 		}
 		var key string
-		if err := d.DecodeElement(&key, &start); err != nil {
-			return err
+		for {
+			part, err := d.Token()
+			if err != nil {
+				return err
+			}
+			if text, ok := part.(xml.CharData); ok {
+				key += string(text)
+				continue
+			}
+			if end, ok := part.(xml.EndElement); ok && end.Name == start.Name {
+				break
+			}
+			return errors.New("invalid launchd plist key")
 		}
 		depth--
 		if key != "Disabled" && key != "RunAtLoad" {

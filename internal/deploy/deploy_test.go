@@ -222,6 +222,13 @@ func TestRenderRejectsStaleMarkersAndActivation(t *testing.T) {
 	}
 }
 
+func TestDisabledPlistRejectsNestedKeyMarkup(t *testing.T) {
+	probe := "<plist><dict><key>Dis<key>Disabled</key>abled</key><true/><key>RunAtLoad</key><false/></dict></plist>"
+	if err := disabledPlist([]byte(probe)); err == nil {
+		t.Fatal("nested key markup accepted as activation authority")
+	}
+}
+
 func TestDisabledPlistBindsActivationToRootDictionary(t *testing.T) {
 	flags := "<key>Disabled</key><true/><key>RunAtLoad</key><false/>"
 	for name, text := range map[string]string{
