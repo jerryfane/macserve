@@ -47,7 +47,13 @@ func snapshot(ctx context.Context) (Snapshot, error) {
 	if e != nil {
 		return s, e
 	}
+	if e = maintenance.VerifyPersistence(ctx, config); e != nil {
+		return s, e
+	}
 	s.Observation, e = maintenance.Inspect(ctx, config)
+	if e == nil && (!s.Observation.Persistence.Valid || s.Observation.Persistence.NeedsReview || !s.Observation.Persistence.RevokedAt.IsZero()) {
+		e = errors.New("persistence attestation changed during qualification")
+	}
 	return s, e
 }
 func sessionLock(dir string) (func(), error) {
@@ -393,7 +399,8 @@ func collectArtifacts(dir, attempt string, c Challenge, candidate Candidate, job
 	if receiptPaths != "" {
 		paths = strings.Split(receiptPaths, ",")
 	}
-	if len(paths) > 128 {
+	// The full 128-endpoint UDP matrix also requires an owner-home control.
+	if len(paths) > 129 {
 		return nil, errors.New("too many receipt files")
 	}
 	for i, p := range paths {

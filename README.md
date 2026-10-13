@@ -153,8 +153,9 @@ observation, not a live heartbeat or a second quarantine authority; it may be st
 requires no administrator clear. Editing/removing it cannot bypass recovery or clear quarantine.
 The fixed probes have deadlines and output bounds. Native SessionLoginItems/GUI-domain startup and host-wide
 BTM enumeration each get a bounded 30 seconds for cold/loaded hosts, independent of the former five-second
-AppleEvents budget. Metadata/cron probes retain five seconds; the enclosing two-minute operation deadline
-always wins. Timeout, including partial output reporting zero items, is refusal rather than an empty census.
+AppleEvents budget. Metadata/cron probes retain five seconds. Cheap admission has an enclosing
+30-second bound; explicit full persistence verification has a separate fixed 480-second bound.
+Timeout, including partial output reporting zero items, is refusal rather than an empty census.
 Modern registration inspection requires a complete,
 recognized job-UID `sfltool dumpbtm` census matching the separately accepted protected manifest; missing,
 unfamiliar or incomplete output is refusal, never absence. There is no automatic adoption or name/team/type
@@ -243,6 +244,44 @@ signature inspection. A failed initial tree measurement stays an unresolved priv
 a cached digest or accepted authority. New, missing, changed, unprotected or incomplete state refuses. Owner/wheel/admin
 write permission is **not automatic update approval**: every app/extension update that changes the bound tree
 requires explicit re-review/acceptance, baseline reset and fresh qualification, even with the same signer/team.
+
+Hot registration/claim, pre-job and post-job checks do **not** walk or hash registration descendants.
+They freshly check the exact accepted BTM records/identities, zero legacy items, LaunchAgents/crontab,
+group membership, and each registration root and ancestor's ownership, mode and ACL, alongside the
+existing GUI process checks. They also require a protected durable full-scan attestation bound to the
+accepted manifest, boot and relevant identities/version, stored as `persistence-attestation.json`
+beside the protected accepted manifest (with a separate `.lock` file). No FSEvents watcher or TTL cache
+substitutes for these live checks.
+
+Root maintenance performs one full scan every six hours in a background task, independently of its
+eight-second health observation. A full scan has a fixed 480-second deadline, does not hold the worker
+admission lock, and never overlaps another periodic scan in that maintenance process. Missing attestation
+fails admission closed and schedules an initial scan. A mismatch or scan error durably revokes the
+attestation; subsequent maintenance cannot silently heal it. Preserve evidence, explicitly review/accept
+changed registrations as needed, reset the GUI baseline, then requalify. Reset does not implicitly erase
+an unrelated admission quarantine. Explicit inspection, acceptance, reset, and qualification retain
+full verification; qualification `begin`, `collect`, `attest`, and `approve` run it before the cheap
+observation, under a 540-second outer command deadline. Maintenance launchd shutdown allows 600 seconds
+for cancellation and protected revocation publication.
+The periodic operation also has a 540-second outer deadline, leaving publication/revocation headroom
+outside the worker's 480-second collector deadline.
+
+The 480-second full-scan budget is three times an observed cold 157.806467208-second full registration
+collection, rounded up to eight minutes. The corresponding cheap registration portion took
+0.160902417 seconds. That native read-only replay covered all 16 accepted registrations (apps plus nested
+plug-ins/extensions), with zero full-collector problems including final rechecks. It ran as the owner using
+the accepted v016 census as a raw-input substitute and the installed helper for executable context.
+These are registration-check measurements, **not** a full login-items/admission timing: root-only
+legacy-item and job-home checks were not exercised, nor was a fresh root BTM census collected.
+
+**Residual trusted-writer window:** root, the owner, and trusted admin/wheel writers can change protected
+code between full scans without changing its registration-root metadata or BTM identity. Such descendant
+changes are not detected by the hot path until the next full scan (normally within six hours, plus scan
+time; an unavailable/stopped maintenance service can delay that scan). This is the approved boundary
+against job/controller writers, not immediate detection of trusted-writer updates or hostile root.
+Health reports the last successful full verification time, never relabels a health tick as a full scan,
+and does not treat the six-hour schedule as a cached-success TTL.
+
 The parser intentionally supports a bounded observed schema, not arbitrary future `dumpbtm` or ACL formats.
 Native code verification and complete account qualification still need host evidence.
 The per-UID census **header UUID is part of the exact reviewed identity**, not a decorative field. Stability

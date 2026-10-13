@@ -260,16 +260,21 @@ func TestSittingBindingsRejectDeploymentOrProfileChanges(t *testing.T) {
 
 func TestObservationBindingsPreserveNonNetworkBoundaries(t *testing.T) {
 	before := maintenance.Observation{JobUID: 502, Boot: "boot", BaselineSHA256: "baseline", Profiles: map[string]string{"profile": "pin"}, IdentityValid: true, BaselineValid: true}
+	before.Persistence.Valid = true
+	before.Persistence.LastVerified = time.Now().UTC()
 	if !sameObservation(before, before) {
 		t.Fatal("unchanged non-network observation refused")
 	}
 	for name, mutate := range map[string]func(*maintenance.Observation){
-		"uid":               func(o *maintenance.Observation) { o.JobUID++ },
-		"boot":              func(o *maintenance.Observation) { o.Boot = "rebooted" },
-		"baseline":          func(o *maintenance.Observation) { o.BaselineSHA256 = "changed" },
-		"profile":           func(o *maintenance.Observation) { o.Profiles = map[string]string{"profile": "changed"} },
-		"identity validity": func(o *maintenance.Observation) { o.IdentityValid = false },
-		"baseline validity": func(o *maintenance.Observation) { o.BaselineValid = false },
+		"uid":                 func(o *maintenance.Observation) { o.JobUID++ },
+		"boot":                func(o *maintenance.Observation) { o.Boot = "rebooted" },
+		"baseline":            func(o *maintenance.Observation) { o.BaselineSHA256 = "changed" },
+		"profile":             func(o *maintenance.Observation) { o.Profiles = map[string]string{"profile": "changed"} },
+		"identity validity":   func(o *maintenance.Observation) { o.IdentityValid = false },
+		"baseline validity":   func(o *maintenance.Observation) { o.BaselineValid = false },
+		"persistence revoked": func(o *maintenance.Observation) { o.Persistence.Valid = false },
+		"persistence review":  func(o *maintenance.Observation) { o.Persistence.NeedsReview = true },
+		"persistence missing": func(o *maintenance.Observation) { o.Persistence.LastVerified = time.Time{} },
 	} {
 		t.Run(name, func(t *testing.T) {
 			after := before

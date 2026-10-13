@@ -41,10 +41,12 @@ func (r *nativeRunner) loadBaseline() error {
 	return nil
 }
 
+const persistenceAdmissionTimeout = 30 * time.Second
+
 // Admission observes without terminating or adopting unexpected processes.
 // Delayed same-UID persistence after this snapshot remains a native trust limit.
 func (r *nativeRunner) Admission(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, persistenceAdmissionTimeout)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return err
@@ -151,30 +153,34 @@ func inspectCommand(ctx context.Context, credential *syscall.Credential, executa
 
 func nativePersistenceInspector(options Options) func(context.Context) error {
 	return func(ctx context.Context) error {
-		if runtime.GOOS != "darwin" {
-			return errors.New("native persistence inspection requires supported macOS")
-		}
-		account, err := user.LookupId(strconv.FormatUint(uint64(options.JobUID), 10))
-		if err != nil || !filepath.IsAbs(accountHome(account)) {
-			return errors.Join(err, errors.New("job account home unavailable"))
-		}
-		if err := inspectLaunchAgents(account.HomeDir); err != nil {
-			return err
-		}
-		credential := &syscall.Credential{Uid: options.JobUID, Gid: options.JobGID, Groups: []uint32{}}
-		out, diagnostic, err := inspectCommand(ctx, credential, "/usr/bin/crontab", "-l")
-		if err := inspectCrontab(out, diagnostic, err, account.Username); err != nil {
-			return err
-		}
-		// launchctl selects the existing GUI domain; the fixed private helper
-		// drops all root credentials before loading CoreServices.
-		out, diagnostic, err = inspectCommand(ctx, nil, "/bin/launchctl", "asuser", strconv.FormatUint(uint64(options.JobUID), 10), options.HelperPath, "_job-login-items", strconv.FormatUint(uint64(options.JobUID), 10), strconv.FormatUint(uint64(options.JobGID), 10))
-		if err := inspectLoginItems(out, diagnostic, err); err != nil {
-			return err
-		}
-		// SessionLoginItems does not cover SMAppService; BTM is independent.
-		return verifyPersistence(ctx, options, collectPersistence)
+		return verifyHotPersistence(ctx, options, inspectHotPersistence)
 	}
+}
+
+// Read-only hot inspection: fresh account surfaces, census and trusted writer
+// roots. Full signed-code/tree verification is recorded separately.
+func inspectHotPersistence(ctx context.Context, options Options, expected PersistenceManifest) error {
+	if runtime.GOOS != "darwin" {
+		return errors.New("native persistence inspection requires supported macOS")
+	}
+	account, err := user.LookupId(strconv.FormatUint(uint64(options.JobUID), 10))
+	if err != nil || !filepath.IsAbs(accountHome(account)) {
+		return errors.Join(err, errors.New("job account home unavailable"))
+	}
+	if err := inspectLaunchAgents(account.HomeDir); err != nil {
+		return err
+	}
+	credential := &syscall.Credential{Uid: options.JobUID, Gid: options.JobGID, Groups: []uint32{}}
+	out, diagnostic, err := inspectCommand(ctx, credential, "/usr/bin/crontab", "-l")
+	if err := inspectCrontab(out, diagnostic, err, account.Username); err != nil {
+		return err
+	}
+	// The fixed helper drops credentials before CoreServices; BTM is separate.
+	out, diagnostic, err = inspectCommand(ctx, nil, "/bin/launchctl", "asuser", strconv.FormatUint(uint64(options.JobUID), 10), options.HelperPath, "_job-login-items", strconv.FormatUint(uint64(options.JobUID), 10), strconv.FormatUint(uint64(options.JobGID), 10))
+	if err := inspectLoginItems(out, diagnostic, err); err != nil {
+		return err
+	}
+	return inspectRegistrationAdmission(ctx, options, expected, backgroundCensus)
 }
 
 func accountHome(account *user.User) string {

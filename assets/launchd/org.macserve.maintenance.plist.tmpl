@@ -9,6 +9,8 @@
 <key>RunAtLoad</key><false/>
 <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
 <key>ThrottleInterval</key><integer>60</integer>
+<!-- Allow the bounded full scan to cancel and durably revoke before shutdown. -->
+<key>ExitTimeOut</key><integer>600</integer>
 <key>ProcessType</key><string>Background</string>
 <key>Nice</key><integer>10</integer>
 <key>Umask</key><integer>63</integer>

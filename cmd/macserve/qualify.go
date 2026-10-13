@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jerryfane/macserve/internal/qualification"
+	"github.com/jerryfane/macserve/internal/worker"
 )
 
 const qualifyUsage = `Usage: macserve qualify COMMAND [options]
@@ -121,6 +122,8 @@ func runQualify(args []string, stdout, stderr io.Writer) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	ctx, cancel := qualificationCommandContext(ctx, command)
+	defer cancel()
 	var err error
 	switch command {
 	case "plan":
@@ -152,4 +155,15 @@ func runQualify(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "qualify %s: evidence operation completed; no service or health activation\n", command)
 	}
 	return 0
+}
+
+// Qualification snapshots need collector plus publication headroom; other
+// commands retain their own existing probe/canary bounds and caller deadline.
+func qualificationCommandContext(parent context.Context, command string) (context.Context, context.CancelFunc) {
+	switch command {
+	case "begin", "collect", "attest", "approve":
+		return context.WithTimeout(parent, worker.PersistenceOperationTimeout)
+	default:
+		return context.WithCancel(parent)
+	}
 }

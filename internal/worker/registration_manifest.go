@@ -114,6 +114,8 @@ func backgroundCensus(ctx context.Context, options Options) (BTMCensus, error) {
 }
 
 func collectPersistence(ctx context.Context, options Options) (PersistenceManifest, error) {
+	ctx, cancel := context.WithTimeout(ctx, PersistenceFullScanTimeout)
+	defer cancel()
 	m := PersistenceManifest{Version: 1, JobUID: options.JobUID, Code: map[string]RegisteredCode{}}
 	if runtime.GOOS != "darwin" {
 		return m, errors.New("native registration inspection requires macOS")
@@ -215,37 +217,9 @@ func collectRegistrationCode(ctx context.Context, m *PersistenceManifest, writer
 	return nil
 }
 
-// verifyPersistence brackets a collected inventory with real protected-authority
-// reads. The native caller supplies collectPersistence, just as reset supplies
-// its native command runner; the observation cannot replace either authority read.
-func verifyPersistence(ctx context.Context, options Options, collect func(context.Context, Options) (PersistenceManifest, error)) error {
-	expected, accepted, err := readPersistence(options.PersistencePath, options.JobUID)
-	if err != nil {
-		return err
-	}
-	current, err := collect(ctx, options)
-	if err != nil {
-		return err
-	}
-	if err := matchPersistence(expected, current); err != nil {
-		return err
-	}
-	// Do not authorize using a manifest replaced while native inspection ran.
-	_, after, err := readPersistence(options.PersistencePath, options.JobUID)
-	if err != nil {
-		return err
-	}
-	if !bytes.Equal(after, accepted) {
-		return errors.New("persistence authority changed during inspection")
-	}
-	return nil
-}
-
 func matchPersistence(expected, current PersistenceManifest) error {
-	expectedCensus, _ := json.Marshal(expected.Census)
-	currentCensus, _ := json.Marshal(current.Census)
-	if expected.OSBuild != current.OSBuild || !bytes.Equal(expectedCensus, currentCensus) {
-		return fmt.Errorf("%w: background registration census or OS build changed", ErrContamination)
+	if err := matchPersistenceCensus(expected, current.OSBuild, current.Census); err != nil {
+		return err
 	}
 	for id, code := range current.Code {
 		if reviewed, ok := expected.Code[id]; ok && code.TreeSHA256 != "" && code.TreeSHA256 != reviewed.TreeSHA256 {
@@ -272,10 +246,12 @@ func matchPersistence(expected, current PersistenceManifest) error {
 // ReviewPersistence writes only an exclusive root-private candidate. It never
 // imports authority, removes persistence, changes quarantine or signals a PID.
 func ReviewPersistence(ctx context.Context, options Options, output string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, PersistenceOperationTimeout)
+	defer cancel()
 	if err := hostguard.BrokerIdentity(options.JobUID, options.JobGID, options.ControllerUID, options.OwnerUID); err != nil {
 		return "", err
 	}
-	if output == options.PersistencePath || output == options.BaselinePath || output == options.HelperPath {
+	if output == options.PersistencePath || output == options.BaselinePath || output == options.HelperPath || output == filepath.Join(filepath.Dir(options.PersistencePath), persistenceAttestationFile) || output == filepath.Join(filepath.Dir(options.PersistencePath), persistenceAttestationFile+".lock") {
 		return "", errors.New("candidate must be separate from trusted state")
 	}
 	if !filepath.IsAbs(output) || filepath.Clean(output) != output {
@@ -317,6 +293,8 @@ func ReviewPersistence(ctx context.Context, options Options, output string) (str
 // must supply the digest of the exact individually reviewed candidate. A second
 // live inspection must match it, under the same exclusive broker ownership lock.
 func AcceptPersistence(ctx context.Context, options Options, candidate, reviewedSHA256 string) error {
+	ctx, cancel := context.WithTimeout(ctx, PersistenceOperationTimeout)
+	defer cancel()
 	if len(reviewedSHA256) != 64 {
 		return errors.New("explicit reviewed candidate SHA256 required")
 	}
@@ -368,5 +346,8 @@ func AcceptPersistence(ctx context.Context, options Options, candidate, reviewed
 		return err
 	}
 	defer parent.Close()
-	return durableFile(parent, filepath.Base(options.PersistencePath), data)
+	if err := durableFile(parent, filepath.Base(options.PersistencePath), data); err != nil {
+		return err
+	}
+	return markPersistenceReviewed(options)
 }

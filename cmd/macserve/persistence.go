@@ -5,17 +5,15 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"time"
 
 	"github.com/jerryfane/macserve/internal/hostguard"
 	"github.com/jerryfane/macserve/internal/worker"
 	"github.com/jerryfane/macserve/internal/workerclient"
 )
 
-// The full native collector measured 113.7s warm and exceeded the former 120s
-// limit cold. Three times that measurement rounded up allows cold-cache variation
-// within a fixed fail-closed bound below ten minutes; no CLI override exists.
-const workerPersistenceInspectionTimeout = 6 * time.Minute
+// A full scan has its own eight-minute bound. Public review/accept/reset leave
+// one additional minute for fixed account and protected-authority overhead.
+const workerPersistenceInspectionTimeout = worker.PersistenceOperationTimeout
 
 func workerPersistenceInspectionContext(parent context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(parent, workerPersistenceInspectionTimeout)

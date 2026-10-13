@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/jerryfane/macserve/internal/hostguard"
 	"github.com/jerryfane/macserve/internal/worker"
@@ -123,7 +122,7 @@ func runWorkerReset(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := workerPersistenceInspectionContext(context.Background())
 	defer cancel()
 	if err := worker.ResetGUIBaseline(ctx, executionOptions(config), pids); err != nil {
 		fmt.Fprintln(stderr, err)

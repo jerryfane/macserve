@@ -103,13 +103,30 @@ func Run(ctx context.Context, c Config) error {
 		return err
 	}
 	invalid := func() error {
-		h, _ := Evaluate(time.Now(), Qualification{}, BoundaryEvidence{}, Observation{})
+		o := Observation{}
+		if opts, err := persistenceOptions(c); err == nil {
+			o.Persistence, err = worker.PersistenceAttestationStatus(opts)
+			if err != nil {
+				o.Persistence.Valid = false
+			}
+		}
+		h, _ := Evaluate(time.Now(), Qualification{}, BoundaryEvidence{}, o)
 		return publish(health, h)
 	}
 	if err := invalid(); err != nil {
 		return err
 	}
 	defer invalid()
+	monitorCtx, stopMonitor := context.WithCancel(ctx)
+	monitorDone := make(chan struct{})
+	go func() {
+		defer close(monitorDone)
+		monitorPersistence(monitorCtx, c.path)
+	}()
+	defer func() {
+		stopMonitor()
+		<-monitorDone
+	}()
 	for {
 		started := time.Now()
 		current, err := LoadConfig(c.path)
@@ -121,7 +138,7 @@ func Run(ctx context.Context, c Config) error {
 			h, err = observe(probeCtx, current)
 			cancel()
 		}
-		if err != nil {
+		if err != nil && h.CheckedAt.IsZero() {
 			h, _ = Evaluate(time.Now(), Qualification{}, BoundaryEvidence{}, Observation{})
 		}
 		if err = publish(health, h); err != nil {
@@ -163,7 +180,19 @@ func publish(path string, h controller.Health) error {
 	return os.Rename(f.Name(), path)
 }
 func observe(ctx context.Context, c Config) (controller.Health, error) {
-	invalid := controller.Health{}
+	invalid, _ := Evaluate(time.Now(), Qualification{}, BoundaryEvidence{}, Observation{})
+	opts, err := persistenceOptions(c)
+	if err != nil {
+		return invalid, err
+	}
+	status, statusErr := worker.PersistenceAttestationStatus(opts)
+	if statusErr != nil {
+		status.Valid = false
+	}
+	invalid, _ = Evaluate(time.Now(), Qualification{}, BoundaryEvidence{}, Observation{Persistence: status})
+	if statusErr != nil {
+		return invalid, statusErr
+	}
 	qdata, err := protectedRead(c.QualificationFile)
 	if err != nil {
 		return invalid, err
@@ -252,6 +281,16 @@ func Inspect(ctx context.Context, c Config) (Observation, error) {
 		return invalid, err
 	}
 	o.BaselineValid = true
+	opts, err := persistenceOptions(c)
+	if err != nil {
+		return invalid, err
+	}
+	o.Persistence, err = worker.PersistenceAttestationStatus(opts)
+	if err != nil {
+		// Missing/unreadable evidence is never readiness. Preserve the last
+		// successful timestamp, when available, without claiming a fresh scan.
+		o.Persistence.Valid = false
+	}
 	if err = hostguard.RootConfig(cc.ProfilesFile); err != nil {
 		return invalid, err
 	}

@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/jerryfane/macserve/internal/hostguard"
 )
@@ -30,7 +29,7 @@ func ResetGUIBaseline(ctx context.Context, options Options, pids []int) error {
 		return fmt.Errorf("stop the broker before administrator reset: %w", err)
 	}
 	defer engine.Close()
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, PersistenceOperationTimeout)
 	defer cancel()
 	runner := engine.options.Runner.(*nativeRunner)
 	return engine.reset(ctx, func(ctx context.Context) error {
@@ -44,7 +43,7 @@ func ResetGUIBaseline(ctx context.Context, options Options, pids []int) error {
 		if err != nil {
 			return err
 		}
-		if err := runner.persistence(ctx); err != nil {
+		if err := verifyPersistenceAttestation(ctx, options, true, collectPersistence); err != nil {
 			return err
 		}
 		baseline.PersistenceSHA256, err = PersistenceDigest(options.PersistencePath, options.JobUID)
