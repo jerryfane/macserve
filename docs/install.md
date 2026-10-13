@@ -315,7 +315,7 @@ Keep the owner's home at **0700**, or **0750 with an owner-private group that is
 
 `assets/install.sh` calls the verified prebuilt binary's `deploy-install` command to render the reviewed `assets/launchd/org.macserve.{controller,worker,maintenance}.plist.tmpl` files. Rendering is literal substitution of recognized markers only; unknown or unresolved `{{`/`}}` markers refuse. Apply runs `/usr/bin/plutil -lint` on all three rendered plists before installing them root-owned under `/Library/LaunchDaemons`. No PF template or policy file is rendered or installed.
 
-No deployment Go toolchain or separate JSON/template renderer is needed. Inspect the generated files: plist syntax acceptance does not qualify launchd behavior or grant permission to start services.
+No deployment Go toolchain or separate JSON/template renderer is needed. Rendering requires unique `Disabled=true` and `RunAtLoad=false` booleans in the plist's root dictionary; nested fields cannot supply or override those activation flags. Inspect the generated files: plist syntax acceptance does not qualify launchd behavior or grant permission to start services.
 
 All templates have `Disabled=true`, `RunAtLoad=false`, conservative restart throttling, fixed PATH, `GOMAXPROCS=2`, umask `077` and background/nice scheduling. Arguments are `/Library/macserve/bin/macserve <role> --config /Library/macserve/config/<role>.json`, where role is `controller`, `worker` or `maintenance`. Staging is not bootstrap, GUI login or authorization to start. Review launchd's existing per-label enabled overrides too; a disabled plist alone must not be mistaken for proof of a disabled loaded service. Do not bootstrap or enable any label until the gates below are met.
 
@@ -441,6 +441,8 @@ Run the actual approved build, unit and simulator UI recipes as the job user wit
 Run probes from the **actual job GUI effective UID**, not a root shell claiming to impersonate it. Keep admission disabled until the required non-network qualification is approved. The network report describes what trusted repository code can reach; it does not establish or test macserve-enforced isolation.
 
 Read-only coexistence snapshots protect unrelated configured services from unnoticed changes during installation and qualification. They neither inspect rule semantics nor authorize changing the host firewall. PF read failures remain explicitly unavailable; running service/PID and readable before/after digest changes still require owner investigation.
+
+Service observations parse the complete, newline-terminated `launchctl print system/LABEL` snapshot, bounded to 1 MiB and 16 container levels. Balanced nested dictionaries and arrays (including LWCR requirements with quoted keys, `=>` entries, and an indexed value whose closing `]` is on the same line) are metadata, not health authority. Only one unquoted service-root `state = running` and one canonical positive 32-bit `pid = N` qualify the exact requested service. Nested environment, LWCR, and coalition state/PID text cannot substitute for those fields. Duplicate or noncanonical root fields, controls, malformed or truncated nesting, and trailing output refuse observation rather than guessing service health. The regression fixture preserves the read-only Studio keyring launchd snapshot, including its empty indexed LWCR array; it contains no keyring contents or secret environment values.
 
 | Probe | Required evidence |
 | --- | --- |

@@ -221,6 +221,28 @@ func TestRenderRejectsStaleMarkersAndActivation(t *testing.T) {
 		t.Fatal("accepted enabled launchd template")
 	}
 }
+
+func TestDisabledPlistBindsActivationToRootDictionary(t *testing.T) {
+	flags := "<key>Disabled</key><true/><key>RunAtLoad</key><false/>"
+	for name, text := range map[string]string{
+		"nested-only": "<plist><dict><key>EnvironmentVariables</key><dict>" + flags + "</dict></dict></plist>",
+		"wrong-root":  "<dict>" + flags + "</dict>",
+		"extra-root":  "<plist><dict>" + flags + "</dict></plist><plist><dict/></plist>",
+		"true-text":   "<plist><dict><key>Disabled</key><true>not a boolean</true><key>RunAtLoad</key><false/></dict></plist>",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := disabledPlist([]byte(text)); err == nil {
+				t.Fatal("accepted activation authority outside the root dictionary or malformed boolean")
+			}
+		})
+	}
+	// Nested fields are data, not competing activation flags.
+	text := "<plist><dict>" + flags + "<key>EnvironmentVariables</key><dict><key>Disabled</key><string>false</string><key>RunAtLoad</key><string>true</string></dict></dict></plist>"
+	if err := disabledPlist([]byte(text)); err != nil {
+		t.Fatalf("nested data changed root activation authority: %v", err)
+	}
+}
+
 func TestMaterialHasValidCryptoConsumerConfigsAndPrivateIntent(t *testing.T) {
 	e, assets := fixture(t)
 	rendered, err := renderAssets(e, assets)

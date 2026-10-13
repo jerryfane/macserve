@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -284,6 +285,89 @@ func TestCoexistenceLaunchctlParser(t *testing.T) {
 				t.Fatalf("ambiguous service health accepted: %d, %v", pid, err)
 			}
 		})
+	}
+}
+
+// This read-only Studio capture contains paths and launchd metadata, not
+// keyring contents or environment secrets. Keep its tabs and array close intact.
+func keyringLaunchOutput(t *testing.T) string {
+	t.Helper()
+	text, err := os.ReadFile("testdata/keyring-launchctl.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(text)
+}
+
+func TestCoexistenceLaunchctlBalancedCapture(t *testing.T) {
+	capture := keyringLaunchOutput(t)
+	insert := func(body string) string {
+		return strings.Replace(capture, "\tdomain = system\n", body+"\tdomain = system\n", 1)
+	}
+	accepted := map[string]string{
+		"actual keyring":               capture,
+		"quoted equals dictionaries":   strings.ReplaceAll(capture, "\" => ", "\" = "),
+		"unquoted arrow containers":    strings.Replace(capture, "\tLWCR = {\n", "\tLWCR => {\n", 1),
+		"nested health spoof":          insert("\tmetadata => {\n\t\t\"state\" => stopped\n\t\t\"pid\" = 999\n\t\tvalues => [\n\t\t\t0 = {\n\t\t\t\tstate = waiting\n\t\t\t\tpid = 888\n\t\t\t}\n\t\t\t1 = \"state = running; pid = 777; ] }\"\n\t\t]\n\t}\n"),
+		"environment health spoof":     strings.Replace(capture, "\t\tOSLogRateLimit => 64\n", "\t\tstate => stopped\n\t\tpid => 999\n\t\tDESCRIPTION => \"state = running; pid = 777; ] }\"\n", 1),
+		"array scalar same-line close": strings.Replace(capture, "0 = \t\t\t\t]", "0 = \"quoted ] and }\" ]", 1),
+		"array bare elements":          strings.Replace(capture, "0 = \t\t\t\t]", "\"quoted ] and }\"\n\t\t\t\t]", 1),
+		"empty inline containers":      insert("\tmetadata = {\n\t\t\"array\" => []\n\t\t\"dictionary\" = { }\n\t}\n"),
+		"maximum nesting":              insert(strings.Repeat("\tmetadata = {\n", 15) + strings.Repeat("\t}\n", 15)),
+	}
+	for name, text := range accepted {
+		t.Run(name, func(t *testing.T) {
+			if pid, err := coexistenceServicePID("org.gitmoot.keyring", text); err != nil || pid != 2908 {
+				t.Fatalf("balanced service snapshot refused or nested PID used: pid=%d err=%v", pid, err)
+			}
+		})
+	}
+	refused := map[string]string{
+		"LWCR state cannot replace root":        strings.Replace(insert("\tmetadata => {\n\t\tstate = running\n\t\tpid = 999\n\t}\n"), "\tstate = running\n", "", 1),
+		"LWCR PID cannot replace root":          strings.Replace(insert("\tmetadata => {\n\t\tstate = running\n\t\tpid = 999\n\t}\n"), "\tpid = 2908\n", "", 1),
+		"environment state cannot replace root": strings.Replace(strings.Replace(capture, "\t\tOSLogRateLimit => 64\n", "\t\tstate => running\n", 1), "\tstate = running\n", "", 1),
+		"environment PID cannot replace root":   strings.Replace(strings.Replace(capture, "\t\tOSLogRateLimit => 64\n", "\t\tpid => 999\n", 1), "\tpid = 2908\n", "", 1),
+		"arrow root state":                      strings.Replace(capture, "\tstate = running\n", "\tstate => running\n", 1),
+		"arrow root PID":                        strings.Replace(capture, "\tpid = 2908\n", "\tpid => 2908\n", 1),
+		"duplicate quoted root state":           insert("\t\"state\" => running\n"),
+		"duplicate quoted root PID":             insert("\t\"pid\" => 999\n"),
+		"mismatched array close":                strings.Replace(capture, "0 = \t\t\t\t]", "0 = \t\t\t\t}", 1),
+		"missing array close":                   strings.Replace(capture, "0 = \t\t\t\t]", "0 = ", 1),
+		"extra array close":                     strings.Replace(capture, "0 = \t\t\t\t]", "0 = ] ]", 1),
+		"array close trailing scalar":           strings.Replace(capture, "0 = \t\t\t\t]", "0 = ] trailing", 1),
+		"array noncanonical index":              strings.Replace(capture, "0 = \t\t\t\t]", "00 = ]", 1),
+		"array nonindex property":               strings.Replace(capture, "0 = \t\t\t\t]", "pid = 999 ]", 1),
+		"array opening after scalar":            strings.Replace(capture, "\"$in\" => [", "\"$in\" => scalar [", 1),
+		"dictionary close after scalar":         insert("\tmetadata = {\n\t\tvalue = scalar }\n"),
+		"unclosed quoted key":                   strings.Replace(capture, "\"reqs\" => {", "\"reqs => {", 1),
+		"quoted key fragments":                  strings.Replace(capture, "\"reqs\" => {", "\"re\"\"qs\" => {", 1),
+		"excess nesting":                        insert(strings.Repeat("\tmetadata = {\n", 16) + strings.Repeat("\t}\n", 16)),
+		"output limit":                          insert("\tpadding = " + strings.Repeat("x", 1<<20) + "\n"),
+		"NUL":                                   insert("\tmetadata = nul\x00\n"),
+		"DEL":                                   insert("\tmetadata = del\x7f\n"),
+		"unicode control":                       insert("\tmetadata = control\u0085\n"),
+		"carriage return":                       strings.Replace(capture, "\n", "\r\n", 1),
+		"truncated newline":                     strings.TrimSuffix(capture, "\n"),
+		"truncated dictionary":                  strings.TrimSuffix(capture, "}\n"),
+		"trailing whitespace line":              capture + "\n",
+		"trailing second service":               capture + capture,
+	}
+	for name, text := range refused {
+		t.Run(name, func(t *testing.T) {
+			if pid, err := coexistenceServicePID("org.gitmoot.keyring", text); err == nil || pid != 0 {
+				t.Fatalf("malformed or spoofed service snapshot accepted: pid=%d err=%v", pid, err)
+			}
+		})
+	}
+}
+
+func TestCoexistenceObservationLWCRCapture(t *testing.T) {
+	c, fixture := coexistenceInputs()
+	c.CoexistingServices = []string{"org.gitmoot.keyring"}
+	fixture["print system/org.gitmoot.keyring"] = coexistenceReply{out: pfctl.Output{Stdout: keyringLaunchOutput(t)}}
+	state, err := observeCoexistenceWithCommands(context.Background(), c, fixture.command, fixture.command)
+	if err != nil || len(state.Services) != 1 || state.Services[0].Label != "org.gitmoot.keyring" || state.Services[0].PID != 2908 {
+		t.Fatalf("real LWCR service failed coexistence observation: %+v %v", state.Services, err)
 	}
 }
 
