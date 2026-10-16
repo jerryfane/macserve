@@ -18,44 +18,51 @@ import (
 // persistence and nonselected job-UID processes, then replaces the explicitly
 // audited baseline. Modern BTM registrations are never reset globally: residual
 // registrations must be resolved before this same command can succeed. The
-// saved baseline is returned so callers can report recorded launchd provenance.
-func ResetGUIBaseline(ctx context.Context, options Options, pids []int) (GUIBaseline, error) {
+// result reports the saved baseline with its launchd provenance and the
+// selected processes it dropped or replaced (see processScope.resetBaseline).
+func ResetGUIBaseline(ctx context.Context, options Options, pids []int) (ResetResult, error) {
 	if err := hostguard.BrokerIdentity(options.JobUID, options.JobGID, options.ControllerUID, options.OwnerUID); err != nil {
-		return GUIBaseline{}, err
+		return ResetResult{}, err
 	}
 	// Never permit an injected runner to bypass production inspection/identity.
 	options.Runner = nil
 	engine, err := New(options)
 	if err != nil {
-		return GUIBaseline{}, fmt.Errorf("stop the broker before administrator reset: %w", err)
+		return ResetResult{}, fmt.Errorf("stop the broker before administrator reset: %w", err)
 	}
 	defer engine.Close()
 	ctx, cancel := context.WithTimeout(ctx, PersistenceOperationTimeout)
 	defer cancel()
 	runner := engine.options.Runner.(*nativeRunner)
-	var saved GUIBaseline
+	var saved ResetResult
 	err = engine.reset(ctx, func(ctx context.Context) error {
-		baseline, err := runner.scope.resetBaseline(ctx, pids, bootIdentity, func(ctx context.Context) error {
+		result, err := runner.scope.resetBaseline(ctx, pids, bootIdentity, func(ctx context.Context) error {
 			account, err := user.LookupId(strconv.FormatUint(uint64(options.JobUID), 10))
 			if err != nil || !filepath.IsAbs(accountHome(account)) || accountHome(account) == "/" {
 				return errors.Join(err, errors.New("job account home unavailable"))
 			}
-			return resetPersistence(ctx, options, account.HomeDir, account.Username, inspectCommand)
+			if err := resetPersistence(ctx, options, account.HomeDir, account.Username, inspectCommand); err != nil {
+				return err
+			}
+			// Terminate job processes before the full attestation, as before,
+			// so none writes persistence while it runs. It takes minutes;
+			// resetBaseline settles again after it.
+			if err := runner.scope.quiesce(ctx); err != nil {
+				return err
+			}
+			return verifyPersistenceAttestation(ctx, options, true, collectPersistence)
 		})
 		if err != nil {
 			return err
 		}
-		if err := verifyPersistenceAttestation(ctx, options, true, collectPersistence); err != nil {
-			return err
-		}
-		baseline.PersistenceSHA256, err = PersistenceDigest(options.PersistencePath, options.JobUID)
+		result.PersistenceSHA256, err = PersistenceDigest(options.PersistencePath, options.JobUID)
 		if err != nil {
 			return err
 		}
-		if err := saveBaseline(options.BaselinePath, baseline); err != nil {
+		if err := saveBaseline(options.BaselinePath, result.GUIBaseline); err != nil {
 			return err
 		}
-		saved = baseline
+		saved = result
 		return nil
 	})
 	return saved, err
@@ -105,46 +112,86 @@ func (e *Engine) reset(ctx context.Context, prepare func(context.Context) error)
 	return nil
 }
 
-func (s *processScope) resetBaseline(ctx context.Context, pids []int, boot func() (string, error), cleanup func(context.Context) error) (GUIBaseline, error) {
+// resetBaseline replaces the baseline with the administrator's selection as
+// it survives reset. Reset takes minutes (the full persistence attestation in
+// cleanup alone measured about two); Apple helpers in the job GUI session exit
+// on their own in that time and launchd starts them again on demand, so:
+//
+//   - Launchd provenance is recorded from the selected instances themselves
+//     before cleanup (describeServices), while they still run.
+//   - A requested PID already absent at start is dropped. One held by another
+//     UID or a zombie refuses, and so does, at any later point, a selected PID
+//     number held by a process that is not its verified relaunch.
+//   - A selected process that exits is replaced by launchd's verified
+//     relaunch (the v0.1.9 rule), kept as an exited identity when it has
+//     provenance, or dropped. GUI anchors (selectAnchors) must survive.
+//   - Unselected system LaunchAgents follow the adoption rule. Every other
+//     job process is terminated as residual, including a relaunch that cannot
+//     be verified.
+//   - Survivors after termination still fail closed: contamination when every
+//     audited process is running or verifiably relaunched, otherwise
+//     inconclusive (ErrCleanup), as in quiesce.
+//
+// Dropping is safe because a reset defines the new baseline from what
+// survives it: an exited process cannot be part of one. A job can only end
+// its own UID's processes, which hides or retains nothing; nothing is added
+// to the baseline without verification against launchd's own record; and the
+// published baseline comes from a fresh audit after cleanup. cleanup runs
+// under this policy and resetBaseline terminates and settles again after it.
+func (s *processScope) resetBaseline(ctx context.Context, pids []int, boot func() (string, error), cleanup func(context.Context) error) (ResetResult, error) {
+	if s.agents == nil {
+		return ResetResult{}, errors.New("reset requires launchd process inspection")
+	}
 	bootID, err := boot()
 	if err != nil {
-		return GUIBaseline{}, err
+		return ResetResult{}, err
 	}
 	samples, err := s.sample(ctx)
 	if err != nil {
-		return GUIBaseline{}, err
+		return ResetResult{}, err
 	}
-	baseline, err := selectedBaseline(uint32(s.uid), pids, bootID, samples)
+	selected, dropped, err := selectedBaseline(uint32(s.uid), pids, bootID, samples)
 	if err != nil {
-		return baseline, err
+		return ResetResult{}, err
 	}
-	s.baseline = baseline
-	if err := cleanup(ctx); err != nil {
-		return baseline, err
-	}
-	if err := s.quiesce(ctx); err != nil {
-		return baseline, err
-	}
-	audited, err := auditedBaseline(ctx, uint32(s.uid), pids, boot, s.sample)
+	selected = describeServices(ctx, s.agents, s.uid, selected)
+	anchors, paths, err := selectAnchors(s.agents, selected)
 	if err != nil {
-		return baseline, err
+		return ResetResult{}, err
 	}
-	if audited.Boot != bootID {
-		return baseline, errors.New("boot identity changed during reset")
+	adopt := &adoption{initial: make(map[int]string, len(samples)), terminate: make(map[int]string), reference: domainReferences(ctx, s.agents, s.uid, selected)}
+	chosen := make(map[int]bool, len(selected.Processes))
+	for _, p := range selected.Processes {
+		chosen[p.PID] = true
 	}
-	selected := make(map[int]string, len(baseline.Processes))
-	for _, p := range baseline.Processes {
-		selected[p.PID] = p.Start
+	for _, p := range samples {
+		adopt.initial[p.pid] = p.start
 	}
-	for _, p := range audited.Processes {
-		if selected[p.PID] != p.Start {
-			return baseline, fmt.Errorf("%w: selected process changed during reset audit", ErrContamination)
+	for _, p := range samples {
+		if p.uid != s.uid || p.zombie || chosen[p.pid] {
+			continue
+		}
+		if id, ok := adopt.qualifies(ctx, s.agents, s.uid, p); ok {
+			adopt.terminate[p.pid] = p.start
+			adopt.adopted = append(adopt.adopted, id)
+			selected.Processes = append(selected.Processes, id)
 		}
 	}
-	if s.agents != nil {
-		baseline = describeServices(ctx, s.agents, s.uid, baseline)
+	s.baseline, s.adopt = selected, adopt
+	defer func() { s.adopt = nil }()
+	if err := cleanup(ctx); err != nil {
+		return ResetResult{}, err
 	}
-	return baseline, ctx.Err()
+	if err := s.quiesce(ctx); err != nil {
+		return ResetResult{}, err
+	}
+	result, err := s.auditReset(ctx, anchors, paths, boot, bootID)
+	if err != nil {
+		return result, err
+	}
+	result.Dropped = append(dropped, result.Dropped...)
+	s.baseline = result.GUIBaseline
+	return result, ctx.Err()
 }
 
 // All command arguments are fixed or trusted account configuration. launchctl

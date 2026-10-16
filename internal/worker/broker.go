@@ -40,7 +40,9 @@ type processScope struct {
 	sample   processSampler
 	// agents verifies launchd relaunches of absent audited processes. Nil
 	// accepts none: every unaudited job-UID process is then residual.
-	agents   agentInspector
+	agents agentInspector
+	// adopt is set only while worker-reset runs (see adoption).
+	adopt    *adoption
 	signal   func(context.Context, processSample, syscall.Signal) error
 	interval time.Duration
 	grace    time.Duration
@@ -102,10 +104,12 @@ var (
 
 // processCensus is one snapshot classified against the audited baseline.
 // Unresolved means some audited process is gone without a verified launchd
-// relaunch in this snapshot.
+// relaunch in this snapshot. relaunched maps such an absent audited PID to
+// its verified relaunch.
 type processCensus struct {
 	residual   []processSample
 	unresolved bool
+	relaunched map[int]processSample
 }
 
 // census classifies job-UID processes against the audited baseline. An audited
@@ -115,7 +119,9 @@ type processCensus struct {
 // new process stands in for an absent one only as launchd's verified relaunch
 // of a recorded system service (see respawned); that includes a relaunch that
 // lands on the exited audited PID number. Any other holder of an audited PID
-// number is refused as a changed baseline.
+// number is refused as a changed baseline. While worker-reset runs (s.adopt),
+// the recorded unselected instances are residual although audited, and a new
+// system LaunchAgent that launchd started may be adopted (see adoption).
 func (s *processScope) census(ctx context.Context, samples []processSample) (processCensus, error) {
 	absent := make(map[int]string, len(s.baseline.Processes))
 	for _, p := range s.baseline.Processes {
@@ -130,6 +136,9 @@ func (s *processScope) census(ctx context.Context, samples []processSample) (pro
 			}
 			if p.start == start {
 				delete(absent, p.pid)
+				if s.adopt != nil && s.adopt.terminate[p.pid] == start {
+					c.residual = append(c.residual, p)
+				}
 				continue
 			}
 			reused = append(reused, p.pid)
@@ -144,16 +153,23 @@ func (s *processScope) census(ctx context.Context, samples []processSample) (pro
 		}
 		c.residual = append(c.residual, p)
 	}
-	resolved := 0
 	if len(absent) != 0 && len(c.residual) != 0 && s.agents != nil {
-		c.residual, resolved = respawned(ctx, s.agents, s.uid, s.baseline, absent, c.residual)
+		c.residual, c.relaunched = respawned(ctx, s.agents, s.uid, s.baseline, absent, c.residual)
 	}
 	for _, pid := range reused {
 		if slices.ContainsFunc(c.residual, func(p processSample) bool { return p.pid == pid }) {
 			return processCensus{}, errBaselineChanged
 		}
 	}
-	c.unresolved = resolved < len(absent)
+	if s.adopt != nil && len(c.residual) != 0 && s.agents != nil {
+		var adopted []ProcessIdentity
+		c.residual, adopted = s.adopt.launchAgents(ctx, s.agents, s.uid, c.residual)
+		// Adopted agents join the audited set at once, so later snapshots
+		// verify their relaunches by recorded provenance, as for selections.
+		s.baseline.Processes = append(s.baseline.Processes, adopted...)
+		s.adopt.adopted = append(s.adopt.adopted, adopted...)
+	}
+	c.unresolved = len(c.relaunched) < len(absent)
 	return c, nil
 }
 

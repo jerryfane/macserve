@@ -155,22 +155,27 @@ func host(s *processScope, agents *fakeAgents, rows []processSample) *launchdHos
 	s.sample = func(context.Context) ([]processSample, error) { return slices.Clone(h.rows), nil }
 	s.signal = func(_ context.Context, p processSample, _ syscall.Signal) error {
 		h.signalled = append(h.signalled, p.pid)
-		h.rows = slices.DeleteFunc(h.rows, func(row processSample) bool { return row.pid == p.pid })
-		for target, svc := range agents.services {
-			if svc.PID != p.pid {
-				continue
-			}
-			h.next++
-			facts := agents.procs[p.pid]
-			facts.start = strconv.Itoa(h.next) + ":0"
-			agents.procs[h.next] = facts
-			svc.PID = h.next
-			agents.services[target] = svc
-			h.rows = append(h.rows, sample(h.next, facts.start))
-		}
+		h.exit(p.pid)
 		return nil
 	}
 	return h
+}
+
+// exit ends pid, signalled or on its own; launchd relaunches its service.
+func (h *launchdHost) exit(pid int) {
+	h.rows = slices.DeleteFunc(h.rows, func(row processSample) bool { return row.pid == pid })
+	for target, svc := range h.agents.services {
+		if svc.PID != pid {
+			continue
+		}
+		h.next++
+		facts := h.agents.procs[pid]
+		facts.start = strconv.Itoa(h.next) + ":0"
+		h.agents.procs[h.next] = facts
+		svc.PID = h.next
+		h.agents.services[target] = svc
+		h.rows = append(h.rows, sample(h.next, facts.start))
+	}
 }
 
 func quiesceOnce(s *processScope) error {
@@ -380,12 +385,18 @@ func TestResetRecordsOnlySystemLaunchdProvenance(t *testing.T) {
 	tips := LaunchdService{Domain: "gui", Label: "com.apple.tipsd", Path: "/System/Library/LaunchAgents/com.apple.tipsd.plist", Executable: "/usr/libexec/tipsd", LaunchSHA256: agentLaunch}
 	agents.run(106, "10:6", tips, tips.Label)
 	agents.publish("gui/"+uid+"/"+tips.Label, 106, tips.Path, "Submitted")
+	// Background-session LaunchAgents run in the user domain: the system plist
+	// is provenance, a job plist with the same label and binary is not.
+	agents.run(107, "10:7", teaService(), teaLabel)
+	agents.publish(teaTarget, 107, teaService().Path, "LaunchAgent")
+	agents.run(108, "10:8", teaService(), "job.background")
+	agents.publish("user/"+uid+"/job.background", 108, "/Users/job/Library/LaunchAgents/job.background.plist", "LaunchAgent")
 	baseline := GUIBaseline{JobUID: testJobUID, Boot: "boot"}
-	for _, pid := range []int{100, 101, 103, 104, 105, 106} {
+	for _, pid := range []int{100, 101, 103, 104, 105, 106, 107, 108} {
 		baseline.Processes = append(baseline.Processes, ProcessIdentity{PID: pid, Start: agents.procs[pid].start})
 	}
 	got := describeServices(context.Background(), agents, testJobUID, baseline)
-	want := []LaunchdService{speechAgentService(), speechXPCService(100), {}, {}, {}, {}}
+	want := []LaunchdService{speechAgentService(), speechXPCService(100), {}, {}, {}, {}, teaService(), {}}
 	for i, p := range got.Processes {
 		if p.Service != want[i] {
 			t.Errorf("pid %d provenance = %+v, want %+v", p.PID, p.Service, want[i])
@@ -398,15 +409,21 @@ func TestResetRecordsOnlySystemLaunchdProvenance(t *testing.T) {
 
 func procargs(t *testing.T, name string) (string, string) {
 	t.Helper()
-	raw, err := os.ReadFile("testdata/procargs2/" + name + ".bin")
+	launch := launchFixture(t, "testdata/procargs2/"+name+".bin")
+	return launch.label, launch.digest
+}
+
+func launchFixture(t *testing.T, path string) launchArguments {
+	t.Helper()
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	label, digest, err := launchIdentity(raw)
+	launch, err := launchIdentity(raw)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return label, digest
+	return launch
 }
 
 // Captured KERN_PROCARGS2 from macOS 26.6 (GitHub runner, job UID 501).

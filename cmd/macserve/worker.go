@@ -124,17 +124,29 @@ func runWorkerReset(args []string, stdout, stderr io.Writer) int {
 	}
 	ctx, cancel := workerPersistenceInspectionContext(context.Background())
 	defer cancel()
-	baseline, err := worker.ResetGUIBaseline(ctx, executionOptions(config), pids)
+	result, err := worker.ResetGUIBaseline(ctx, executionOptions(config), pids)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
 	services := 0
-	for _, p := range baseline.Processes {
+	for _, p := range result.Processes {
 		if p.Service.Domain != "" {
 			services++
 		}
 	}
-	fmt.Fprintf(stdout, "Audited GUI baseline reset; scoped cleanup verified, quarantine cleared, pending evidence retained. %d of %d audited processes are verified system launchd services that may be relaunched. Native delayed persistence remains a trust limit.\n", services, len(baseline.Processes))
+	fmt.Fprintf(stdout, "Audited GUI baseline reset; scoped cleanup verified, quarantine cleared, pending evidence retained. %d of %d audited processes are verified system launchd services that may be relaunched. Native delayed persistence remains a trust limit.\n", services, len(result.Processes))
+	for _, p := range result.Dropped {
+		fmt.Fprintf(stdout, "dropped pid=%d start=%q path=%q: %s\n", p.PID, p.Start, p.Path, p.Reason)
+	}
+	for _, p := range result.Exited {
+		fmt.Fprintf(stdout, "exited pid=%d start=%q service=%s/%s: kept with launchd provenance; its relaunch will be verified\n", p.PID, p.Start, p.Service.Domain, p.Service.Label)
+	}
+	for _, r := range result.Relaunched {
+		fmt.Fprintf(stdout, "relaunched pid=%d start=%q -> pid=%d start=%q service=%s/%s: verified launchd relaunch kept\n", r.Exited.PID, r.Exited.Start, r.Relaunch.PID, r.Relaunch.Start, r.Relaunch.Service.Domain, r.Relaunch.Service.Label)
+	}
+	for _, p := range result.Adopted {
+		fmt.Fprintf(stdout, "adopted pid=%d start=%q service=%s/%s executable=%q: unselected system LaunchAgent started by launchd during reset\n", p.PID, p.Start, p.Service.Domain, p.Service.Label, p.Service.Executable)
+	}
 	return 0
 }
