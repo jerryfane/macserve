@@ -23,6 +23,8 @@ type svc struct {
 	PID       int
 	Path      string
 	Type      string
+	Program   string
+	Arguments []string
 	EnvDict   map[string]string
 	Inherited map[string]string
 	Default   map[string]string
@@ -75,7 +77,16 @@ func procargs(pid int) (string, []string, []string, error) {
 func parsePrint(text string, s *svc) {
 	s.EnvDict, s.Inherited, s.Default = map[string]string{}, map[string]string{}, map[string]string{}
 	var cur map[string]string
+	args := false
 	for _, line := range strings.Split(text, "\n") {
+		if args {
+			if line == "\t}" {
+				args = false
+				continue
+			}
+			s.Arguments = append(s.Arguments, strings.TrimPrefix(line, "\t\t"))
+			continue
+		}
 		if cur != nil {
 			if line == "\t}" {
 				cur = nil
@@ -89,6 +100,10 @@ func parsePrint(text string, s *svc) {
 		switch {
 		case strings.HasPrefix(line, "\tpath = "):
 			s.Path = strings.TrimPrefix(line, "\tpath = ")
+		case strings.HasPrefix(line, "\tprogram = "):
+			s.Program = strings.TrimPrefix(line, "\tprogram = ")
+		case line == "\targuments = {":
+			args = true
 		case strings.HasPrefix(line, "\ttype = "):
 			s.Type = strings.TrimPrefix(line, "\ttype = ")
 		case strings.HasPrefix(line, "\tpid = "):
@@ -231,6 +246,82 @@ func main() {
 			pid, _ := strconv.Atoi(a)
 			exe, argv, env, err := procargs(pid)
 			fmt.Printf("PID %d exe=%s argv=%q env=%q err=%v\n", pid, exe, argv, env, err)
+		}
+	case "check":
+		var all []svc
+		if err := json.NewDecoder(os.Stdin).Decode(&all); err != nil {
+			panic(err)
+		}
+		check(all)
+	}
+}
+
+// check applies the candidate adoption rule to every running service.
+func check(all []svc) {
+	refs := map[string]map[string]int{}
+	stats := map[string]int{}
+	for _, s := range all {
+		dom := strings.SplitN(s.Target, "/", 2)[0]
+		system := s.Path == "/System/Library/LaunchAgents/"+s.Target[strings.LastIndex(s.Target, "/")+1:]+".plist" && s.Type == "LaunchAgent"
+		if !system || s.Err != "" {
+			stats["skipped "+s.Type]++
+			continue
+		}
+		stats["system agents"]++
+		if s.Program != s.Exec {
+			stats["program!=procargs exec"]++
+			fmt.Printf("PROGRAM-MISMATCH %s program=%q exec=%q\n", s.Target, s.Program, s.Exec)
+		}
+		if strings.Join(s.Arguments, "\x00") != strings.Join(s.Argv, "\x00") {
+			stats["arguments!=argv"]++
+			fmt.Printf("ARGV-MISMATCH %s arguments=%q argv=%q\n", s.Target, s.Arguments, s.Argv)
+		}
+		seen := map[string]int{}
+		flags := 0
+		var rest []string
+		bad := ""
+		for _, e := range s.Env {
+			k, v, _ := strings.Cut(e, "=")
+			if want, ok := s.EnvDict[k]; ok {
+				if v != want {
+					bad = "dict value differs " + k
+				}
+				seen[k]++
+				continue
+			}
+			if k == "XPC_FLAGS" {
+				flags++
+				continue
+			}
+			rest = append(rest, e)
+		}
+		for k := range s.EnvDict {
+			if seen[k] != 1 {
+				bad = "dict key count " + k
+			}
+		}
+		if flags != 1 {
+			bad = "XPC_FLAGS count"
+		}
+		if len(s.EnvDict) == 0 {
+			stats["empty env dict"]++
+		}
+		if bad != "" {
+			stats["env rule failed"]++
+			fmt.Printf("ENV-RULE %s %s\n", s.Target, bad)
+			continue
+		}
+		if refs[dom] == nil {
+			refs[dom] = map[string]int{}
+		}
+		refs[dom][strings.Join(rest, " ")]++
+	}
+	for k, v := range stats {
+		fmt.Printf("STAT %s = %d\n", k, v)
+	}
+	for dom, m := range refs {
+		for k, v := range m {
+			fmt.Printf("REF %s count=%d %s\n", dom, v, k)
 		}
 	}
 }
