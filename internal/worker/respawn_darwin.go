@@ -57,9 +57,11 @@ func (nativeAgents) process(pid int) (agentProcess, error) {
 	if err != nil {
 		return agentProcess{}, err
 	}
-	if facts.label, facts.launch, err = launchIdentity(raw); err != nil {
+	launch, err := launchIdentity(raw)
+	if err != nil {
 		return agentProcess{}, err
 	}
+	facts.label, facts.launch, facts.program, facts.argv, facts.env = launch.label, launch.digest, launch.program, launch.argv, launch.env
 	return facts, nil
 }
 

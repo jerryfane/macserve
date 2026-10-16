@@ -1,0 +1,113 @@
+gui/501/com.apple.Finder = {
+	active count = 5
+	path = /System/Library/LaunchAgents/com.apple.Finder.plist
+	type = LaunchAgent
+	state = running
+	bundle id = com.apple.finder
+
+	program = /System/Library/CoreServices/Finder.app/Contents/MacOS/Finder
+	inherited environment = {
+		SSH_AUTH_SOCK => /var/run/com.apple.launchd.iMU20vmCAo/Listeners
+	}
+
+	default environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+	}
+
+	environment = {
+		OSLogRateLimit => 64
+		XPC_SERVICE_NAME => com.apple.Finder
+	}
+
+	domain = gui/501 [100002]
+	asid = 100002
+	minimum runtime = 1
+	base minimum runtime = 1
+	exit timeout = 5
+	runs = 1
+	pid = 343
+	immediate reason = non-ipc demand
+	forks = 0
+	execs = 1
+	initialized = 1
+	trampolined = 1
+	started suspended = 0
+	proxy started suspended = 0
+	checked allocations = 0 (queried = 1)
+	checked allocations reason = no host
+	checked allocations flags = 0x0
+	last exit code = (never exited)
+
+	semaphores = {
+		successful exit => 0
+	}
+
+	dynamic endpoints = {
+		"com.apple.finder.ServiceProvider" = {
+			port = 0x48903
+			active = 1
+			managed = 0
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+	}
+
+	pid-local endpoints = {
+		"com.apple.coredrag" = {
+			port = 0x4af03
+			active = 1
+			managed = 0
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+		"com.apple.tsm.portname" = {
+			port = 0x4d80f
+			active = 1
+			managed = 0
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+		"com.apple.axserver" = {
+			port = 0x34303
+			active = 1
+			managed = 0
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+	}
+
+	resource coalition = {
+		ID = 389
+		type = resource
+		state = active
+		active count = 1
+		name = com.apple.Finder
+		bundle ID = com.apple.finder
+	}
+
+	jetsam coalition = {
+		ID = 390
+		type = jetsam
+		state = active
+		active count = 1
+		name = com.apple.Finder
+		bundle ID = com.apple.finder
+	}
+
+	spawn type = app (1)
+	spawn role = ui (2)
+	jetsam priority = 100
+	jetsam memory limit (active, soft) = 1600 MB
+	jetsam memory limit (inactive, soft) = 1600 MB
+	jetsamproperties category = app
+	jetsam thread limit = 512
+	cpumon = default
+	exponential throttling grace limit = 10
+	job state = running
+
+	properties = app | system service | exponential throttling | tle system
+}

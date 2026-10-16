@@ -20,18 +20,31 @@ var errInvalid = errors.New("invalid launchctl running service snapshot")
 // Snapshot contains only service-root authority. Callers must bind Target to
 // the exact service they requested; nested state and pid fields are never used.
 // Path and Type are the root service path and type when launchctl printed them.
+// Program and Arguments are the root `program` and `arguments` launchd execs
+// (Arguments is nil when not printed, as for an inferred program). Environment
+// is the service's own root `environment` dictionary (its plist
+// EnvironmentVariables plus launchd's per-service entries such as
+// XPC_SERVICE_NAME); it is nil when not printed or when an entry is not a
+// plain `KEY => value` line. It never includes the `inherited environment`
+// that `launchctl setenv` changes.
 type Snapshot struct {
-	Target string
-	State  string
-	PID    int
-	Path   string
-	Type   string
+	Target      string
+	State       string
+	PID         int
+	Path        string
+	Type        string
+	Program     string
+	Arguments   []string
+	Environment map[string]string
 }
 
 // Parse accepts a complete newline-terminated service dictionary with exactly
 // one unquoted state = running and one canonical positive 32-bit pid = N.
-// Root path and type are optional but unique; a filename that injects a second
-// root line therefore invalidates the snapshot instead of shadowing the first.
+// Root path, type, program, arguments and environment are optional but
+// unique; a value that injects a second root line (a filename, or a
+// `launchctl setenv` value printed in the inherited environment, which comes
+// before the root environment) therefore invalidates the snapshot instead of
+// shadowing the first. Collected entries never bypass the structural checks.
 // Other fields may contain dictionaries, arrays, quoted keys, and => entries.
 // Quotes are line-local; controls, malformed nesting and trailing output fail.
 func Parse(text string) (Snapshot, error) {
@@ -52,7 +65,11 @@ func Parse(text string) (Snapshot, error) {
 	var stack [maxDepth]byte
 	stack[0] = '{'
 	depth := 1
-	stateSeen, pidSeen, pathSeen, typeSeen := false, false, false, false
+	stateSeen, pidSeen, pathSeen, typeSeen, programSeen := false, false, false, false, false
+	// section names the root dictionary ("arguments" or "environment") whose
+	// depth-2 entries are collected; envUsable is cleared by any environment
+	// entry that is not a plain unique `KEY => value`.
+	section, envUsable := "", true
 	for text != "" {
 		line, rest, complete := strings.Cut(text, "\n")
 		if !complete {
@@ -68,9 +85,15 @@ func Parse(text string) (Snapshot, error) {
 				return Snapshot{}, errInvalid
 			}
 			depth--
+			if depth == 1 {
+				section = ""
+			}
 			if depth == 0 {
 				if text != "" || !stateSeen || !pidSeen {
 					return Snapshot{}, errInvalid
+				}
+				if !envUsable {
+					result.Environment = nil
 				}
 				return result, nil
 			}
@@ -85,6 +108,16 @@ func Parse(text string) (Snapshot, error) {
 		key, value, arrow, property, valid := entry(body)
 		if !valid || depth == 1 && !property {
 			return Snapshot{}, errInvalid
+		}
+		if depth == 2 && section == "arguments" {
+			result.Arguments = append(result.Arguments, body)
+		}
+		if depth == 2 && section == "environment" {
+			if _, seen := result.Environment[key]; seen || !arrow || !property || strings.HasPrefix(key, "\"") || strings.ContainsAny(value, "\"{}[]") {
+				envUsable = false
+			} else {
+				result.Environment[key] = value
+			}
 		}
 		if depth == 1 {
 			if strings.HasPrefix(key, "\"") {
@@ -115,6 +148,25 @@ func Parse(text string) (Snapshot, error) {
 					return Snapshot{}, errInvalid
 				}
 				result.Type, typeSeen = value, true
+			case "program":
+				if programSeen || arrow {
+					return Snapshot{}, errInvalid
+				}
+				result.Program, programSeen = value, true
+			case "arguments", "environment":
+				open := strings.Trim(value, " \t")
+				empty := open == "{}"
+				if key == "arguments" && result.Arguments != nil || key == "environment" && result.Environment != nil || arrow || open != "{" && !empty {
+					return Snapshot{}, errInvalid
+				}
+				if key == "arguments" {
+					result.Arguments = []string{}
+				} else {
+					result.Environment = map[string]string{}
+				}
+				if !empty {
+					section = key
+				}
 			}
 		}
 		if stack[depth-1] == '[' && property && (arrow || !decimal(key, true)) {

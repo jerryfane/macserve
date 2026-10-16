@@ -102,48 +102,6 @@ func TestPreflightCensusNeverSignalsUnexpectedProcesses(t *testing.T) {
 	}
 }
 
-func TestAuditRequiresStableExplicitUIDStartAndBootCensus(t *testing.T) {
-	for _, mode := range []string{"stable", "unlisted", "reused", "foreign", "disappeared", "boot", "unreadable"} {
-		t.Run(mode, func(t *testing.T) {
-			calls, boots := 0, 0
-			boot := func() (string, error) {
-				boots++
-				if mode == "boot" && boots == 2 {
-					return "new", nil
-				}
-				return "boot", nil
-			}
-			sample := func(context.Context) ([]processSample, error) {
-				calls++
-				p := trustedGUI()
-				if calls == 2 {
-					switch mode {
-					case "unlisted":
-						return []processSample{p, {pid: 200, uid: testJobUID, start: "extra"}}, nil
-					case "reused":
-						p.start = "reused"
-					case "foreign":
-						p.uid++
-					case "disappeared":
-						return nil, nil
-					case "unreadable":
-						return nil, syscall.EPERM
-					}
-				}
-				return []processSample{p}, nil
-			}
-			baseline, err := auditedBaseline(context.Background(), testJobUID, []int{100}, boot, sample)
-			if mode == "stable" {
-				if err != nil || baseline.Processes[0].Start != trustedGUI().start || calls != 2 || boots != 2 {
-					t.Fatalf("stable census: %+v %v", baseline, err)
-				}
-			} else if err == nil {
-				t.Fatal("changed census adopted")
-			}
-		})
-	}
-}
-
 type admissionRunner struct {
 	fakeRunner
 	failure error

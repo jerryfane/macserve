@@ -1,0 +1,367 @@
+gui/501/com.apple.corespeechd = {
+	active count = 13
+	path = /System/Library/LaunchAgents/com.apple.corespeechd.plist
+	type = LaunchAgent
+	state = running
+
+	program = /System/Library/PrivateFrameworks/CoreSpeech.framework/corespeechd
+	arguments = {
+		/System/Library/PrivateFrameworks/CoreSpeech.framework/corespeechd
+	}
+
+	inherited environment = {
+		SSH_AUTH_SOCK => /var/run/com.apple.launchd.iMU20vmCAo/Listeners
+	}
+
+	default environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+	}
+
+	environment = {
+		OSLogRateLimit => 64
+		MallocSpaceEfficient => 1
+		XPC_SERVICE_NAME => com.apple.corespeechd
+	}
+
+	domain = gui/501 [100002]
+	asid = 100002
+	minimum runtime = 10
+	base minimum runtime = 10
+	exit timeout = 5
+	runs = 1
+	pid = 403
+	immediate reason = speculative
+	forks = 0
+	execs = 1
+	initialized = 1
+	trampolined = 1
+	started suspended = 0
+	proxy started suspended = 0
+	checked allocations = 0 (queried = 1)
+	checked allocations reason = no host
+	checked allocations flags = 0x0
+	last exit code = (never exited)
+
+	event triggers = {
+		com.apple.cs.postinstall => {
+			keepalive = 0
+			service = com.apple.corespeechd
+			stream = com.apple.xpc.activity
+			monitor = com.apple.UserEventAgent-Aqua
+			descriptor = {
+				"_SequenceNumber" => 1
+				"PostInstall" => true
+			}
+		}
+		com.apple.corespeechd => {
+			keepalive = 0
+			service = com.apple.corespeechd
+			stream = com.apple.cascade.xpc.setChange
+			descriptor = {
+			}
+		}
+		com.apple.siri.bg_system_task.daily-speech-profile-maintenance => {
+			keepalive = 0
+			service = com.apple.corespeechd
+			stream = com.apple.bg.system.task
+			monitor = com.apple.dasd
+			descriptor = {
+				"RepeatingTask" => {
+					"Interval" => 86400
+				}
+				"RequiresNetworkConnectivity" => false
+				"RequiresExternalPower" => true
+				"Priority" => "Maintenance"
+			}
+		}
+		com.apple.siri.bg_system_task.daily-ttr-audio-logging-cleanup => {
+			keepalive = 0
+			service = com.apple.corespeechd
+			stream = com.apple.bg.system.task
+			monitor = com.apple.dasd
+			descriptor = {
+				"RepeatingTask" => {
+					"Interval" => 86400
+				}
+				"RequiresNetworkConnectivity" => false
+				"RequiresExternalPower" => false
+				"Priority" => "Maintenance"
+			}
+		}
+		com.apple.corespeechd => {
+			keepalive = 0
+			service = com.apple.corespeechd
+			stream = com.apple.cascade.xpc_event.setChange
+			monitor = com.apple.BiomeAgent
+			descriptor = {
+			}
+		}
+		com.apple.MobileAsset.AutoAssetNotification^com.apple.MobileAsset.MAAutoAsset^STARTUP_ACTIVATED => {
+			keepalive = 0
+			service = com.apple.corespeechd
+			stream = com.apple.notifyd.matching
+			monitor = com.apple.notifyd
+			descriptor = {
+				"Notification" => "com.apple.MobileAsset.AutoAssetNotification^com.apple.MobileAsset.MAAutoAsset^STARTUP_ACTIVATED"
+			}
+		}
+		com.apple.sysdiagnose.sysdiagnoseStarted => {
+			keepalive = 0
+			service = com.apple.corespeechd
+			stream = com.apple.notifyd.matching
+			monitor = com.apple.notifyd
+			descriptor = {
+				"Notification" => "com.apple.sysdiagnose.sysdiagnoseStarted"
+			}
+		}
+		kAFPreferencesDidChangeDarwinNotification => {
+			keepalive = 0
+			service = com.apple.corespeechd
+			stream = com.apple.notifyd.matching
+			monitor = com.apple.notifyd
+			descriptor = {
+				"Notification" => "kAFPreferencesDidChangeDarwinNotification"
+			}
+		}
+		com.apple.siri.uaf.com.apple.siri.understanding => {
+			keepalive = 0
+			service = com.apple.corespeechd
+			stream = com.apple.notifyd.matching
+			monitor = com.apple.notifyd
+			descriptor = {
+				"Notification" => "com.apple.siri.uaf.com.apple.siri.understanding"
+			}
+		}
+		com.apple.siri.uaf.com.apple.speech.automaticspeechrecognition => {
+			keepalive = 0
+			service = com.apple.corespeechd
+			stream = com.apple.notifyd.matching
+			monitor = com.apple.notifyd
+			descriptor = {
+				"Notification" => "com.apple.siri.uaf.com.apple.speech.automaticspeechrecognition"
+			}
+		}
+		com.apple.speech.systemsubscriptionschanged => {
+			keepalive = 0
+			service = com.apple.corespeechd
+			stream = com.apple.notifyd.matching
+			monitor = com.apple.notifyd
+			descriptor = {
+				"Notification" => "com.apple.speech.systemsubscriptionschanged"
+			}
+		}
+		AFLanguageCodeDidChangeDarwinNotification => {
+			keepalive = 0
+			service = com.apple.corespeechd
+			stream = com.apple.notifyd.matching
+			monitor = com.apple.notifyd
+			descriptor = {
+				"Notification" => "AFLanguageCodeDidChangeDarwinNotification"
+			}
+		}
+		com.apple.trial.NamespaceUpdate.SIRI_UNDERSTANDING_ASR_ASSISTANT => {
+			keepalive = 0
+			service = com.apple.corespeechd
+			stream = com.apple.notifyd.matching
+			monitor = com.apple.notifyd
+			descriptor = {
+				"Notification" => "com.apple.trial.NamespaceUpdate.SIRI_UNDERSTANDING_ASR_ASSISTANT"
+			}
+		}
+	}
+
+	endpoints = {
+		"com.apple.private.ssr.voiceprofileservice" = {
+			port = 0x48c03
+			active = 1
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+		"com.apple.siri.voiceprofilemanager.xpc" = {
+			port = 0x48d03
+			active = 0
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+		"com.apple.corespeech.corespeechd.activation.xpc" = {
+			port = 0x4a903
+			active = 1
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+		"com.apple.corespeech.corespeechd.rchandling.service" = {
+			port = 0x48e03
+			active = 1
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+		"com.apple.siri.attendingstates.xpc" = {
+			port = 0x4a803
+			active = 0
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+		"com.apple.corespeech.corespeechd.endpointer.service" = {
+			port = 0x4a703
+			active = 1
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+		"com.apple.siri.audiopowerupdate.xpc" = {
+			port = 0x48f03
+			active = 0
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+		"com.apple.corespeech.voicetriggerservice" = {
+			port = 0x4a603
+			active = 1
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+		"com.apple.siri.localspeechrecognitionbridge.xpc" = {
+			port = 0x49003
+			active = 1
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+		"com.apple.corespeech.corespeechservices" = {
+			port = 0x49103
+			active = 1
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+		"com.apple.corespeech.audioinjection.xpc" = {
+			port = 0x4a503
+			active = 0
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+		"com.apple.corespeech.corespeechd.xpc" = {
+			port = 0x49203
+			active = 1
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+		"com.apple.corespeech.corespeechd.attending.service" = {
+			port = 0x49303
+			active = 0
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+		"com.apple.siri.ssrvtuitrainingservice.xpc" = {
+			port = 0x49403
+			active = 0
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+		"com.apple.corespeech.corespeechd.speechprofileadmin.service" = {
+			port = 0x4a403
+			active = 0
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+	}
+
+	event channels = {
+		"com.apple.xpc.activity" = {
+			port = 0x61b83
+			active = 1
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+		"com.apple.cascade.xpc.setChange" = {
+			port = 0x4a303
+			active = 0
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+		"com.apple.bg.system.task" = {
+			port = 0x49503
+			active = 1
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+		"com.apple.cascade.xpc_event.setChange" = {
+			port = 0x49603
+			active = 1
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+		"com.apple.notifyd.matching" = {
+			port = 0x49703
+			active = 1
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+	}
+
+	resource coalition = {
+		ID = 495
+		type = resource
+		state = active
+		active count = 1
+		name = com.apple.corespeechd
+	}
+
+	jetsam coalition = {
+		ID = 496
+		type = jetsam
+		state = active
+		active count = 1
+		name = com.apple.corespeechd
+	}
+
+	spawn type = interactive (4)
+	jetsam priority = 40
+	jetsam memory limit (active, soft) = 79 MB
+	jetsam memory limit (inactive, soft) = 15 MB
+	jetsamproperties category = daemon
+	jetsam thread limit = 32
+	jetsam conclave memory limit = 200
+	cpumon = default
+	exponential throttling grace limit = 10
+	job state = running
+
+	properties = keepalive | runatload | supports transactions | inferred program | system service | exponential throttling | tle system
+}
