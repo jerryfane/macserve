@@ -253,6 +253,13 @@ func main() {
 			panic(err)
 		}
 		check(all)
+	case "raw":
+		pid, _ := strconv.Atoi(os.Args[2])
+		raw, err := unix.SysctlRaw("kern.procargs2", pid)
+		if err != nil {
+			panic(err)
+		}
+		os.Stdout.Write(raw)
 	}
 }
 
