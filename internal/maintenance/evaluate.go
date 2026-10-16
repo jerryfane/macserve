@@ -44,17 +44,20 @@ type Probe struct {
 // Observation is the pure evaluation seam. Production fills it only from bounded
 // live checks, never from JSON or a caller-provided health boolean.
 type Observation struct {
-	JobUID                 uint32                                `json:"job_uid"`
-	Boot                   string                                `json:"boot"`
-	BaselineSHA256         string                                `json:"baseline_sha256"`
-	BoundaryEvidenceSHA256 string                                `json:"boundary_evidence_sha256,omitempty"`
-	Profiles               map[string]string                     `json:"profiles"`
-	IdentityValid          bool                                  `json:"identity_valid"`
-	BaselineValid          bool                                  `json:"baseline_valid"`
-	AccountedBytes         int64                                 `json:"accounted_bytes"`
-	MemoryPressure         bool                                  `json:"memory_pressure"`
-	Coexistence            *CoexistenceState                     `json:"coexistence,omitempty"`
-	Persistence            worker.PersistenceAttestationMetadata `json:"persistence"`
+	JobUID                 uint32            `json:"job_uid"`
+	Boot                   string            `json:"boot"`
+	BaselineSHA256         string            `json:"baseline_sha256"`
+	BoundaryEvidenceSHA256 string            `json:"boundary_evidence_sha256,omitempty"`
+	Profiles               map[string]string `json:"profiles"`
+	IdentityValid          bool              `json:"identity_valid"`
+	BaselineValid          bool              `json:"baseline_valid"`
+	// BaselineExited lists audited PIDs that were absent (not reused) when
+	// observed. Qualification records them; live health refuses them.
+	BaselineExited []worker.ProcessIdentity              `json:"baseline_exited,omitempty"`
+	AccountedBytes int64                                 `json:"accounted_bytes"`
+	MemoryPressure bool                                  `json:"memory_pressure"`
+	Coexistence    *CoexistenceState                     `json:"coexistence,omitempty"`
+	Persistence    worker.PersistenceAttestationMetadata `json:"persistence"`
 }
 
 func digest(data []byte) string { s := sha256.Sum256(data); return hex.EncodeToString(s[:]) }
@@ -77,7 +80,7 @@ func Evaluate(now time.Time, q Qualification, e BoundaryEvidence, o Observation)
 	if !o.Persistence.Valid || o.Persistence.NeedsReview || !o.Persistence.RevokedAt.IsZero() || o.Persistence.LastVerified.IsZero() || o.Persistence.LastVerified.After(now) {
 		return fail()
 	}
-	if q.Schema != 3 || e.Schema != 3 || q.JobUID < 501 || q.JobUID != o.JobUID || e.JobUID != o.JobUID || q.ApprovedAt.IsZero() || q.ApprovedAt.After(now) || e.RecordedAt.IsZero() || e.RecordedAt.After(q.ApprovedAt) || e.Boot != q.Boot || !o.IdentityValid || !o.BaselineValid || o.AccountedBytes < 0 {
+	if q.Schema != 3 || e.Schema != 3 || q.JobUID < 501 || q.JobUID != o.JobUID || e.JobUID != o.JobUID || q.ApprovedAt.IsZero() || q.ApprovedAt.After(now) || e.RecordedAt.IsZero() || e.RecordedAt.After(q.ApprovedAt) || e.Boot != q.Boot || !o.IdentityValid || !o.BaselineValid || len(o.BaselineExited) != 0 || o.AccountedBytes < 0 {
 		return fail()
 	}
 	for _, pair := range [][2]string{{q.Boot, o.Boot}, {q.BaselineSHA256, o.BaselineSHA256}, {q.BoundaryEvidenceSHA256, o.BoundaryEvidenceSHA256}} {
