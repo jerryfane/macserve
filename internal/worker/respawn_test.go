@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"os"
 	"slices"
 	"strconv"
@@ -136,6 +137,135 @@ func TestQuiesceKeepsLaunchdRelaunchOfExitedAuditedAgent(t *testing.T) {
 	}
 	if !slices.Equal(signalled, []int{200}) {
 		t.Fatalf("cleanup targets: %v", signalled)
+	}
+}
+
+// launchdHost runs a scope against mutable kernel rows. Killing a process that
+// launchd reports for a service relaunches it (KeepAlive) under a new PID and
+// start, as launchd does for corespeechd; any other process just exits.
+type launchdHost struct {
+	rows      []processSample
+	agents    *fakeAgents
+	next      int
+	signalled []int
+}
+
+func host(s *processScope, agents *fakeAgents, rows []processSample) *launchdHost {
+	h := &launchdHost{rows: rows, agents: agents, next: 1000}
+	s.sample = func(context.Context) ([]processSample, error) { return slices.Clone(h.rows), nil }
+	s.signal = func(_ context.Context, p processSample, _ syscall.Signal) error {
+		h.signalled = append(h.signalled, p.pid)
+		h.rows = slices.DeleteFunc(h.rows, func(row processSample) bool { return row.pid == p.pid })
+		for target, svc := range agents.services {
+			if svc.PID != p.pid {
+				continue
+			}
+			h.next++
+			facts := agents.procs[p.pid]
+			facts.start = strconv.Itoa(h.next) + ":0"
+			agents.procs[h.next] = facts
+			svc.PID = h.next
+			agents.services[target] = svc
+			h.rows = append(h.rows, sample(h.next, facts.start))
+		}
+		return nil
+	}
+	return h
+}
+
+func quiesceOnce(s *processScope) error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	return s.quiesce(ctx)
+}
+
+// Review F1: an audited XPC service hosted by another pid-domain XPC service
+// must verify whatever the baseline order, or launchd relaunches it forever.
+func TestQuiesceResolvesNestedXPCOwnersInAnyBaselineOrder(t *testing.T) {
+	s, agents, rows := relaunchWorld()
+	nested := LaunchdService{Domain: "pid", Owner: 101, Label: "com.apple.speech.nested", Path: "/System/Library/PrivateFrameworks/Nested.framework/XPCServices/nested.xpc", Executable: "/System/Library/PrivateFrameworks/Nested.framework/XPCServices/nested.xpc/Contents/MacOS/nested", LaunchSHA256: xpcLaunch}
+	s.baseline.Processes = append([]ProcessIdentity{{PID: 103, Start: "10:3", Service: nested}}, s.baseline.Processes...)
+	agents.run(302, "20:2", nested, nested.Label)
+	agents.publish("pid/301/"+nested.Label, 302, nested.Path, "XPCService")
+	h := host(s, agents, append(rows, sample(302, "20:2")))
+	if err := quiesceOnce(s); err != nil {
+		t.Fatalf("nested XPC relaunch blocked cleanup: %v", err)
+	}
+	if !slices.Equal(h.signalled, []int{200}) {
+		t.Fatalf("cleanup targets: %v", h.signalled)
+	}
+}
+
+// Review F2: a survivor while an audited process is gone without a verified
+// relaunch is inconclusive (it may be launchd's relaunch this host could not
+// verify, e.g. under a v0.1.8 baseline without provenance). Cleanup and
+// admission refuse without contamination, so no durable quarantine is written.
+func TestUnverifiableRelaunchRefusesWithoutContamination(t *testing.T) {
+	s, agents, rows := relaunchWorld()
+	s.baseline.Processes[1].Service = LaunchdService{}
+	host(s, agents, rows)
+	err := quiesceOnce(s)
+	if !errors.Is(err, ErrCleanup) || errors.Is(err, ErrContamination) {
+		t.Fatalf("quiesce = %v, want cleanup failure without contamination", err)
+	}
+	err = s.observeQuiet(context.Background())
+	if err == nil || errors.Is(err, ErrContamination) {
+		t.Fatalf("admission = %v, want refusal without contamination", err)
+	}
+}
+
+// Review F2 boundary: when every audited process is present or verifiably
+// relaunched, a surviving job process (here a job's `launchctl submit`
+// KeepAlive service) is contamination evidence, quarantined as in v0.1.8.
+func TestSurvivingJobServiceIsContaminationWhenBaselineResolved(t *testing.T) {
+	s, agents, rows := relaunchWorld()
+	agents.publish("gui/"+strconv.Itoa(testJobUID)+"/job.sleep", 200, "(submitted by launchctl[7])", "Submitted")
+	h := host(s, agents, rows)
+	if err := quiesceOnce(s); !errors.Is(err, ErrContamination) {
+		t.Fatalf("quiesce = %v, want contamination", err)
+	}
+	if slices.Contains(h.signalled, 300) || slices.Contains(h.signalled, 301) {
+		t.Fatalf("verified relaunch signalled: %v", h.signalled)
+	}
+	if err := s.observeQuiet(context.Background()); !errors.Is(err, ErrContamination) {
+		t.Fatalf("admission = %v, want contamination", err)
+	}
+}
+
+// samePIDWorld relaunches corespeechd on its exited audited PID number 100.
+func samePIDWorld(path, kind string) (*processScope, *fakeAgents, []processSample) {
+	s, agents, _ := relaunchWorld()
+	delete(agents.procs, 300)
+	delete(agents.services, relaunchedXPC)
+	agents.run(100, "20:0", speechAgentService(), speechLabel)
+	agents.publish(speechAgentTarget, 100, path, kind)
+	agents.publish("pid/100/"+speechXPCLabel, 301, speechXPCBundle, "XPCService")
+	return s, agents, []processSample{sample(102, "10:2"), sample(100, "20:0"), sample(301, "20:1"), sample(200, "30:0")}
+}
+
+// Review F3: launchd's verified relaunch landing on the exited audited PID
+// number is a relaunch, not a changed baseline.
+func TestQuiesceAcceptsVerifiedRelaunchOnAuditedPIDNumber(t *testing.T) {
+	s, agents, rows := samePIDWorld(speechPlist, "LaunchAgent")
+	h := host(s, agents, rows)
+	if err := quiesceOnce(s); err != nil {
+		t.Fatalf("same-PID relaunch blocked cleanup: %v", err)
+	}
+	if !slices.Equal(h.signalled, []int{200}) {
+		t.Fatalf("cleanup targets: %v", h.signalled)
+	}
+}
+
+// Any other new holder of an audited PID number is still a changed baseline,
+// refused before anything is signalled.
+func TestUnverifiedHolderOfAuditedPIDNumberStillRefuses(t *testing.T) {
+	s, agents, rows := samePIDWorld("/Users/job/Library/LaunchAgents/com.apple.corespeechd.plist", "LaunchAgent")
+	h := host(s, agents, rows)
+	if err := quiesceOnce(s); err == nil || errors.Is(err, ErrContamination) || len(h.signalled) != 0 {
+		t.Fatalf("quiesce = %v, signalled %v", err, h.signalled)
+	}
+	if _, err := s.residual(context.Background(), rows); err == nil {
+		t.Fatal("unverified holder of an audited PID number accepted")
 	}
 }
 

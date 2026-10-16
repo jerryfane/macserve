@@ -150,10 +150,13 @@ func launchedBy(ctx context.Context, agents agentInspector, uid int, s LaunchdSe
 }
 
 // respawned removes from candidates every process that is launchd's verified
-// relaunch of an absent audited process. Agents are resolved before pid-domain
-// XPC children, so a child is accepted only inside the domain of a present
-// audited owner or of that owner's verified relaunch, never a job process.
-func respawned(ctx context.Context, agents agentInspector, uid int, b GUIBaseline, absent map[int]string, candidates []processSample) []processSample {
+// relaunch of an absent audited process and reports how many absent audited
+// processes were resolved. A pid-domain XPC service is looked up only in the
+// domain of a present audited owner or of that owner's verified relaunch,
+// never a job process. Owners may themselves be pid-domain services listed in
+// any order, so passes repeat until no owner resolves; each repeated pass
+// resolves at least one entry, bounding the work by len(pending)+1 passes.
+func respawned(ctx context.Context, agents agentInspector, uid int, b GUIBaseline, absent map[int]string, candidates []processSample) ([]processSample, int) {
 	current := make(map[int]int, len(b.Processes))
 	var pending []ProcessIdentity
 	for _, p := range b.Processes {
@@ -164,11 +167,8 @@ func respawned(ctx context.Context, agents agentInspector, uid int, b GUIBaselin
 		}
 	}
 	if len(pending) == 0 {
-		return candidates
+		return candidates, 0
 	}
-	slices.SortStableFunc(pending, func(a, b ProcessIdentity) int {
-		return boolInt(a.Service.Domain == "pid") - boolInt(b.Service.Domain == "pid")
-	})
 	type candidate struct {
 		sample processSample
 		facts  agentProcess
@@ -179,18 +179,29 @@ func respawned(ctx context.Context, agents agentInspector, uid int, b GUIBaselin
 		facts, err := agents.process(p.pid)
 		inspected[i] = candidate{sample: p, facts: facts, ok: err == nil && facts.start == p.start}
 	}
-	for _, audited := range pending {
-		owner := 0
-		if audited.Service.Domain == "pid" {
-			if owner = current[audited.Service.Owner]; owner == 0 {
+	attempted := make([]bool, len(pending))
+	resolved := 0
+	for progress := true; progress; {
+		progress = false
+		for i, audited := range pending {
+			if attempted[i] {
 				continue
 			}
-		}
-		for i, c := range inspected {
-			if c.ok && startedAfter(c.sample.start, audited.Start) && launchedBy(ctx, agents, uid, audited.Service, owner, c.sample.pid, c.facts) {
-				current[audited.PID] = c.sample.pid
-				inspected = slices.Delete(inspected, i, i+1)
-				break
+			owner := 0
+			if audited.Service.Domain == "pid" {
+				if owner = current[audited.Service.Owner]; owner == 0 {
+					continue
+				}
+			}
+			attempted[i] = true
+			for j, c := range inspected {
+				if c.ok && startedAfter(c.sample.start, audited.Start) && launchedBy(ctx, agents, uid, audited.Service, owner, c.sample.pid, c.facts) {
+					current[audited.PID] = c.sample.pid
+					inspected = slices.Delete(inspected, j, j+1)
+					resolved++
+					progress = true
+					break
+				}
 			}
 		}
 	}
@@ -198,7 +209,7 @@ func respawned(ctx context.Context, agents agentInspector, uid int, b GUIBaselin
 	for _, c := range inspected {
 		residual = append(residual, c.sample)
 	}
-	return residual
+	return residual, resolved
 }
 
 // startedAfter compares kernel start tokens ("sec:usec" on macOS).
@@ -218,13 +229,6 @@ func startedAfter(later, earlier string) bool {
 		}
 	}
 	return false
-}
-
-func boolInt(v bool) int {
-	if v {
-		return 1
-	}
-	return 0
 }
 
 // describeServices records launchd provenance for audited processes that are
