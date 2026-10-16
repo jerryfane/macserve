@@ -65,6 +65,6 @@ func TestProbeLive(t *testing.T) {
 			}
 		}
 		facts, ferr := agents.process(want)
-		fmt.Printf("CHECK %s pid=%d residual=%v facts=%+v err=%v\n", os.Getenv("PROBE_NAME"), want, found, facts, ferr)
+		fmt.Printf("CHECK %s pid=%d residual=%v facts=%+v err=%q\n", os.Getenv("PROBE_NAME"), want, found, facts, ferr)
 	}
 }

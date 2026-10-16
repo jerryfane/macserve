@@ -42,14 +42,15 @@ func (nativeAgents) process(pid int) (agentProcess, error) {
 		return agentProcess{}, errno
 	}
 	facts.platform = flags&csValid != 0 && flags&csPlatformBinary != 0
+	// The raw PROC_PIDPATHINFO call returns 0 on success; the path is the
+	// NUL-terminated prefix of the buffer.
 	path := make([]byte, 4096)
-	n, _, errno := unix.Syscall6(unix.SYS_PROC_INFO, procInfoPIDInfo, uintptr(pid), procPIDPathInfo, 0, uintptr(unsafe.Pointer(&path[0])), uintptr(len(path)))
-	if errno != 0 || n == 0 {
-		return agentProcess{}, errors.Join(errno, errors.New("process executable unavailable"))
+	if _, _, errno := unix.Syscall6(unix.SYS_PROC_INFO, procInfoPIDInfo, uintptr(pid), procPIDPathInfo, 0, uintptr(unsafe.Pointer(&path[0])), uintptr(len(path))); errno != 0 {
+		return agentProcess{}, errno
 	}
 	end := bytes.IndexByte(path, 0)
-	if end < 0 {
-		end = int(n)
+	if end <= 0 {
+		return agentProcess{}, errors.New("process executable unavailable")
 	}
 	facts.executable = string(path[:end])
 	raw, err := unix.SysctlRaw("kern.procargs2", pid)

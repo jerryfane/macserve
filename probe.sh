@@ -10,6 +10,7 @@ sudo PROBE_STAGE=describe PROBE_PIDS=$A,$F,$Q /tmp/w.test -test.run TestProbeLiv
 check() { sudo PROBE_STAGE=check PROBE_NAME="$1" PROBE_PID=$2 /tmp/w.test -test.run TestProbeLive 2>&1 | grep "CHECK\|RESIDUAL\|FAIL"; }
 waitnew() { for i in $(seq 1 40); do P=$(pidof $C); [ -n "$P" ] && [ "$P" != "$1" ] && echo $P && return; sleep 1; done; }
 check "audited still running (not candidate)" $A
+sudo PROBE_STAGE=check PROBE_NAME=facts-of-audited PROBE_PID=$A /tmp/w.test -test.run TestProbeLive -test.v 2>&1 | grep CHECK
 sudo kill -9 $A; B=$(waitnew $A); echo "relaunched B=$B"
 check "launchd relaunch after crash" $B
 launchctl setenv PROBE_ENV poisoned; launchctl kickstart -k $C; E=$(waitnew $B); echo "E=$E"
