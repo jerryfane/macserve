@@ -19,14 +19,19 @@ var errInvalid = errors.New("invalid launchctl running service snapshot")
 
 // Snapshot contains only service-root authority. Callers must bind Target to
 // the exact service they requested; nested state and pid fields are never used.
+// Path and Type are the root service path and type when launchctl printed them.
 type Snapshot struct {
 	Target string
 	State  string
 	PID    int
+	Path   string
+	Type   string
 }
 
 // Parse accepts a complete newline-terminated service dictionary with exactly
 // one unquoted state = running and one canonical positive 32-bit pid = N.
+// Root path and type are optional but unique; a filename that injects a second
+// root line therefore invalidates the snapshot instead of shadowing the first.
 // Other fields may contain dictionaries, arrays, quoted keys, and => entries.
 // Quotes are line-local; controls, malformed nesting and trailing output fail.
 func Parse(text string) (Snapshot, error) {
@@ -47,7 +52,7 @@ func Parse(text string) (Snapshot, error) {
 	var stack [maxDepth]byte
 	stack[0] = '{'
 	depth := 1
-	stateSeen, pidSeen := false, false
+	stateSeen, pidSeen, pathSeen, typeSeen := false, false, false, false
 	for text != "" {
 		line, rest, complete := strings.Cut(text, "\n")
 		if !complete {
@@ -100,12 +105,25 @@ func Parse(text string) (Snapshot, error) {
 					return Snapshot{}, errInvalid
 				}
 				result.PID, pidSeen = int(pid), true
+			case "path":
+				if pathSeen || arrow {
+					return Snapshot{}, errInvalid
+				}
+				result.Path, pathSeen = value, true
+			case "type":
+				if typeSeen || arrow {
+					return Snapshot{}, errInvalid
+				}
+				result.Type, typeSeen = value, true
 			}
 		}
 		if stack[depth-1] == '[' && property && (arrow || !decimal(key, true)) {
 			return Snapshot{}, errInvalid
 		}
 		value = strings.Trim(value, " \t")
+		if bracketedScalar(value) {
+			continue
+		}
 		bracket, valid := structural(value)
 		if !valid {
 			return Snapshot{}, errInvalid
@@ -236,4 +254,14 @@ func structural(value string) (int, bool) {
 		}
 	}
 	return bracket, !quoted && !escaped
+}
+
+// bracketedScalar accepts launchctl's same-line annotation suffix, as in
+// `domain = gui/501 [100002]` or `domain = pid/359 [Finder]`. The bracket pair
+// closes on the same line around plain text, so it cannot open, close or
+// reparent a container. Everything else keeps the structural checks.
+func bracketedScalar(value string) bool {
+	head, note, ok := strings.Cut(value, " [")
+	inner, closed := strings.CutSuffix(note, "]")
+	return ok && closed && head != "" && inner != "" && !strings.ContainsAny(head, "\"\\{}[]") && !strings.ContainsAny(inner, "\"\\{}[]")
 }

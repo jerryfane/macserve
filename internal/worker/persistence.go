@@ -72,7 +72,7 @@ func (s *processScope) observeQuiet(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		residual, err := s.residual(samples)
+		residual, err := s.residual(ctx, samples)
 		if err != nil {
 			return err
 		}

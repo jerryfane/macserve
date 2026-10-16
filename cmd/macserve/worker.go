@@ -124,10 +124,17 @@ func runWorkerReset(args []string, stdout, stderr io.Writer) int {
 	}
 	ctx, cancel := workerPersistenceInspectionContext(context.Background())
 	defer cancel()
-	if err := worker.ResetGUIBaseline(ctx, executionOptions(config), pids); err != nil {
+	baseline, err := worker.ResetGUIBaseline(ctx, executionOptions(config), pids)
+	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	fmt.Fprintln(stdout, "Audited GUI baseline reset; scoped cleanup verified, quarantine cleared, pending evidence retained. Native delayed persistence remains a trust limit.")
+	services := 0
+	for _, p := range baseline.Processes {
+		if p.Service.Domain != "" {
+			services++
+		}
+	}
+	fmt.Fprintf(stdout, "Audited GUI baseline reset; scoped cleanup verified, quarantine cleared, pending evidence retained. %d of %d audited processes are verified system launchd services that may be relaunched. Native delayed persistence remains a trust limit.\n", services, len(baseline.Processes))
 	return 0
 }

@@ -17,22 +17,24 @@ import (
 // ResetGUIBaseline is the sole administrator reset. It removes only job-user
 // persistence and nonselected job-UID processes, then replaces the explicitly
 // audited baseline. Modern BTM registrations are never reset globally: residual
-// registrations must be resolved before this same command can succeed.
-func ResetGUIBaseline(ctx context.Context, options Options, pids []int) error {
+// registrations must be resolved before this same command can succeed. The
+// saved baseline is returned so callers can report recorded launchd provenance.
+func ResetGUIBaseline(ctx context.Context, options Options, pids []int) (GUIBaseline, error) {
 	if err := hostguard.BrokerIdentity(options.JobUID, options.JobGID, options.ControllerUID, options.OwnerUID); err != nil {
-		return err
+		return GUIBaseline{}, err
 	}
 	// Never permit an injected runner to bypass production inspection/identity.
 	options.Runner = nil
 	engine, err := New(options)
 	if err != nil {
-		return fmt.Errorf("stop the broker before administrator reset: %w", err)
+		return GUIBaseline{}, fmt.Errorf("stop the broker before administrator reset: %w", err)
 	}
 	defer engine.Close()
 	ctx, cancel := context.WithTimeout(ctx, PersistenceOperationTimeout)
 	defer cancel()
 	runner := engine.options.Runner.(*nativeRunner)
-	return engine.reset(ctx, func(ctx context.Context) error {
+	var saved GUIBaseline
+	err = engine.reset(ctx, func(ctx context.Context) error {
 		baseline, err := runner.scope.resetBaseline(ctx, pids, bootIdentity, func(ctx context.Context) error {
 			account, err := user.LookupId(strconv.FormatUint(uint64(options.JobUID), 10))
 			if err != nil || !filepath.IsAbs(accountHome(account)) || accountHome(account) == "/" {
@@ -50,8 +52,13 @@ func ResetGUIBaseline(ctx context.Context, options Options, pids []int) error {
 		if err != nil {
 			return err
 		}
-		return saveBaseline(options.BaselinePath, baseline)
+		if err := saveBaseline(options.BaselinePath, baseline); err != nil {
+			return err
+		}
+		saved = baseline
+		return nil
 	})
+	return saved, err
 }
 
 // reset shares ordinary ownership-ledger cleanup, but alone may clear the marker.
@@ -133,6 +140,9 @@ func (s *processScope) resetBaseline(ctx context.Context, pids []int, boot func(
 		if selected[p.PID] != p.Start {
 			return baseline, fmt.Errorf("%w: selected process changed during reset audit", ErrContamination)
 		}
+	}
+	if s.agents != nil {
+		baseline = describeServices(ctx, s.agents, s.uid, baseline)
 	}
 	return baseline, ctx.Err()
 }

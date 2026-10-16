@@ -51,8 +51,8 @@ type Observation struct {
 	Profiles               map[string]string `json:"profiles"`
 	IdentityValid          bool              `json:"identity_valid"`
 	BaselineValid          bool              `json:"baseline_valid"`
-	// BaselineExited lists audited PIDs that were absent (not reused) when
-	// observed. Qualification records them; live health refuses them.
+	// BaselineExited records audited PIDs that were absent (not reused) when
+	// observed. Absence is evidence, not a refusal, in qualification and health.
 	BaselineExited []worker.ProcessIdentity              `json:"baseline_exited,omitempty"`
 	AccountedBytes int64                                 `json:"accounted_bytes"`
 	MemoryPressure bool                                  `json:"memory_pressure"`
@@ -80,7 +80,7 @@ func Evaluate(now time.Time, q Qualification, e BoundaryEvidence, o Observation)
 	if !o.Persistence.Valid || o.Persistence.NeedsReview || !o.Persistence.RevokedAt.IsZero() || o.Persistence.LastVerified.IsZero() || o.Persistence.LastVerified.After(now) {
 		return fail()
 	}
-	if q.Schema != 3 || e.Schema != 3 || q.JobUID < 501 || q.JobUID != o.JobUID || e.JobUID != o.JobUID || q.ApprovedAt.IsZero() || q.ApprovedAt.After(now) || e.RecordedAt.IsZero() || e.RecordedAt.After(q.ApprovedAt) || e.Boot != q.Boot || !o.IdentityValid || !o.BaselineValid || len(o.BaselineExited) != 0 || o.AccountedBytes < 0 {
+	if q.Schema != 3 || e.Schema != 3 || q.JobUID < 501 || q.JobUID != o.JobUID || e.JobUID != o.JobUID || q.ApprovedAt.IsZero() || q.ApprovedAt.After(now) || e.RecordedAt.IsZero() || e.RecordedAt.After(q.ApprovedAt) || e.Boot != q.Boot || !o.IdentityValid || !o.BaselineValid || o.AccountedBytes < 0 {
 		return fail()
 	}
 	for _, pair := range [][2]string{{q.Boot, o.Boot}, {q.BaselineSHA256, o.BaselineSHA256}, {q.BoundaryEvidenceSHA256, o.BoundaryEvidenceSHA256}} {
