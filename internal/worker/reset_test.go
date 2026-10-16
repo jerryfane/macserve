@@ -78,13 +78,18 @@ func hasPID(processes []ProcessIdentity, pid int) bool {
 
 func TestResetAuditsSelectedProcessesAndRemovesOnlyOtherJobUIDs(t *testing.T) {
 	s, _, h := resetWorld()
-	got, err := runReset(s, resetSelection, func(context.Context) error { return nil })
+	// The administrator selects a new GUI identity instead of implicitly
+	// trusting the stale protected baseline of an earlier boot.
+	s.baseline = GUIBaseline{JobUID: testJobUID, Boot: "old-boot", Processes: []ProcessIdentity{{PID: 100, Start: "boot:100"}}}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	b, err := s.resetBaseline(ctx, resetSelection, func() (string, error) { return "new-boot", nil }, func(context.Context) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []ProcessIdentity{{PID: 50, Start: "1:50"}, {PID: 51, Start: "1:51"}, {PID: 52, Start: "1:52", Service: finderService()}, {PID: 53, Start: "1:53"}, {PID: 54, Start: "1:54"}, {PID: 60, Start: "1:60", Service: teaService()}, {PID: 61, Start: "1:61"}}
-	if !slices.Equal(got, want) {
-		t.Fatalf("baseline = %+v, want %+v", got, want)
+	if b.JobUID != testJobUID || b.Boot != "new-boot" || !slices.Equal(b.Processes, want) {
+		t.Fatalf("reset adopted unselected process or stale baseline: %+v, want %+v", b, want)
 	}
 	if !slices.Equal(h.signalled, []int{200}) || !slices.ContainsFunc(h.rows, func(p processSample) bool { return p.uid == 999 }) {
 		t.Fatalf("reset targeted selected or foreign identity: signalled %v rows %+v", h.signalled, h.rows)

@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -151,4 +152,66 @@ func TestResetResultRecordsWhatChanged(t *testing.T) {
 			t.Fatalf("result = %+v, %v", result, err)
 		}
 	})
+}
+
+// The final reset audit (replacing v0.1.9's auditedBaseline census) takes two
+// snapshots on one boot. Between them, a new unadoptable job process, a
+// selected PID reused or moved to another UID, an unreadable snapshot or a
+// changed boot refuses; a selected non-anchor helper that exits is dropped.
+func TestResetAuditRequiresStableUIDStartAndBootCensus(t *testing.T) {
+	for _, mode := range []string{"stable", "unlisted", "reused", "foreign", "disappeared", "boot", "unreadable"} {
+		t.Run(mode, func(t *testing.T) {
+			s, _, h := resetWorld()
+			h.rows = slices.DeleteFunc(h.rows, func(p processSample) bool { return p.pid == 200 })
+			var selected []ProcessIdentity
+			for _, pid := range resetSelection {
+				selected = append(selected, ProcessIdentity{PID: pid, Start: "1:" + strconv.Itoa(pid)})
+			}
+			s.baseline = GUIBaseline{JobUID: testJobUID, Boot: "boot", Processes: selected}
+			anchors := map[int]string{50: "1:50", 51: "1:51", 52: "1:52", 53: "1:53", 54: "1:54"}
+			calls, boots := 0, 0
+			s.sample = func(context.Context) ([]processSample, error) {
+				calls++
+				rows := slices.Clone(h.rows)
+				if calls == 2 {
+					i := slices.IndexFunc(rows, func(p processSample) bool { return p.pid == 61 })
+					switch mode {
+					case "unlisted":
+						rows = append(rows, sample(201, "extra"))
+					case "reused":
+						rows[i].start = "reused"
+					case "foreign":
+						rows[i].uid = 999
+					case "disappeared":
+						rows = slices.Delete(rows, i, i+1)
+					case "unreadable":
+						return nil, syscall.EPERM
+					}
+				}
+				return rows, nil
+			}
+			boot := func() (string, error) {
+				boots++
+				if mode == "boot" {
+					return "new", nil
+				}
+				return "boot", nil
+			}
+			result, err := s.auditReset(context.Background(), anchors, map[int]string{61: helperPath}, boot, "boot")
+			switch mode {
+			case "stable":
+				if err != nil || !slices.Equal(result.Processes, selected) || calls != 2 || boots != 1 {
+					t.Fatalf("stable census: %+v %v calls=%d boots=%d", result, err, calls, boots)
+				}
+			case "disappeared":
+				if err != nil || hasPID(result.Processes, 61) || len(result.Dropped) != 1 || result.Dropped[0].PID != 61 {
+					t.Fatalf("exited helper: %+v %v", result, err)
+				}
+			default:
+				if err == nil {
+					t.Fatal("changed census adopted")
+				}
+			}
+		})
+	}
 }
