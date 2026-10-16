@@ -18,10 +18,12 @@ import (
 
 // ProcessIdentity is a kernel start identity, not a process name or an observed
 // PID alone. Baselines are explicitly qualified by an administrator, never
-// learned from processes found during worker startup.
+// learned from processes found during worker startup. Service is optional
+// launchd provenance verified at reset; see LaunchdService.
 type ProcessIdentity struct {
-	PID   int    `json:"pid"`
-	Start string `json:"start"`
+	PID     int            `json:"pid"`
+	Start   string         `json:"start"`
+	Service LaunchdService `json:"service,omitzero"`
 }
 
 type GUIBaseline struct {
@@ -35,6 +37,9 @@ type processScope struct {
 	uid      int
 	baseline GUIBaseline
 	sample   processSampler
+	// agents verifies launchd relaunches of absent audited processes. Nil
+	// accepts none: every unaudited job-UID process is then residual.
+	agents   agentInspector
 	signal   func(context.Context, processSample, syscall.Signal) error
 	interval time.Duration
 	grace    time.Duration
@@ -74,26 +79,37 @@ func validateBaseline(b GUIBaseline, uid uint32, boot string) error {
 	}
 	seen := make(map[int]bool, len(b.Processes))
 	for _, p := range b.Processes {
-		if p.PID <= 1 || p.Start == "" || seen[p.PID] {
+		if p.PID <= 1 || p.Start == "" || seen[p.PID] || p.Service != (LaunchdService{}) && !p.Service.valid(p.PID) {
 			return errors.New("invalid GUI baseline process identity")
 		}
 		seen[p.PID] = true
 	}
+	for _, p := range b.Processes {
+		if p.Service.Domain == "pid" && !seen[p.Service.Owner] {
+			return errors.New("GUI baseline XPC service owner is not audited")
+		}
+	}
 	return nil
 }
 
-func (s *processScope) residual(samples []processSample) ([]processSample, error) {
-	trusted := make(map[int]string, len(s.baseline.Processes))
+// residual returns job-UID processes outside the audited baseline. An audited
+// PID now held by another process, UID or zombie is refused. An audited PID that
+// is simply absent is not: launchd-managed Apple helpers exit on their own, and
+// a job can only end its own UID's processes, which hides or retains nothing.
+// A new process stands in for an absent one only as launchd's verified
+// relaunch of the same recorded system service (see respawned).
+func (s *processScope) residual(ctx context.Context, samples []processSample) ([]processSample, error) {
+	absent := make(map[int]string, len(s.baseline.Processes))
 	for _, p := range s.baseline.Processes {
-		trusted[p.PID] = p.Start
+		absent[p.PID] = p.Start
 	}
 	var residual []processSample
 	for _, p := range samples {
-		if start, ok := trusted[p.pid]; ok {
+		if start, ok := absent[p.pid]; ok {
 			if p.uid != s.uid || p.start != start || p.zombie {
 				return nil, errors.New("GUI baseline process changed; worker-reset required")
 			}
-			delete(trusted, p.pid)
+			delete(absent, p.pid)
 			continue
 		}
 		if p.uid != s.uid || p.zombie {
@@ -104,8 +120,8 @@ func (s *processScope) residual(samples []processSample) ([]processSample, error
 		}
 		residual = append(residual, p)
 	}
-	if len(trusted) != 0 {
-		return nil, errors.New("GUI baseline process disappeared; worker-reset required")
+	if len(absent) != 0 && len(residual) != 0 && s.agents != nil {
+		residual = respawned(ctx, s.agents, s.uid, s.baseline, absent, residual)
 	}
 	return residual, nil
 }
@@ -123,7 +139,7 @@ func (s *processScope) quiesce(ctx context.Context) error {
 		if err != nil {
 			return errors.Join(ErrCleanup, err)
 		}
-		residual, err := s.residual(samples)
+		residual, err := s.residual(ctx, samples)
 		if err != nil {
 			return errors.Join(ErrCleanup, err)
 		}
@@ -198,7 +214,7 @@ func NewNativeRunner(options Options) (Runner, error) {
 	runner.baselinePath = options.BaselinePath
 	runner.persistencePath = options.PersistencePath
 	runner.persistence = nativePersistenceInspector(options)
-	runner.scope = &processScope{uid: runner.uid, sample: identityProcesses, interval: 50 * time.Millisecond, grace: 500 * time.Millisecond}
+	runner.scope = &processScope{uid: runner.uid, sample: identityProcesses, agents: nativeAgents{}, interval: 50 * time.Millisecond, grace: 500 * time.Millisecond}
 	runner.scope.signal = func(ctx context.Context, p processSample, sig syscall.Signal) error {
 		// The kernel checks the job UID, not root, at the signal operation itself.
 		// A PID reused by the owner/controller/another UID can never be signalled.

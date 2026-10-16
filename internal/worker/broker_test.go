@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"reflect"
+	"slices"
 	"syscall"
 	"testing"
 	"time"
@@ -51,7 +52,7 @@ func TestScopeTerminatesEscapedAndOrphanProcessesOnly(t *testing.T) {
 }
 
 func TestScopeDistinguishesResidualProcessesFromInspectionFailure(t *testing.T) {
-	for _, mode := range []string{"sample-error", "signal-error", "residual", "baseline-reused", "baseline-missing", "baseline-foreign"} {
+	for _, mode := range []string{"sample-error", "signal-error", "residual", "baseline-reused", "baseline-zombie", "baseline-foreign"} {
 		t.Run(mode, func(t *testing.T) {
 			s := scopeFixture()
 			s.sample = func(context.Context) ([]processSample, error) {
@@ -59,8 +60,8 @@ func TestScopeDistinguishesResidualProcessesFromInspectionFailure(t *testing.T) 
 				switch mode {
 				case "sample-error":
 					return nil, errors.New("kernel snapshot unavailable")
-				case "baseline-missing":
-					return nil, nil
+				case "baseline-zombie":
+					baseline.zombie = true
 				case "baseline-reused":
 					baseline.start = "replacement"
 				case "baseline-foreign":
@@ -81,10 +82,35 @@ func TestScopeDistinguishesResidualProcessesFromInspectionFailure(t *testing.T) 
 			if err := s.quiesce(ctx); err == nil || errors.Is(err, ErrContamination) != (mode == "residual") {
 				t.Fatalf("incorrect cleanup classification: %v", err)
 			}
-			if (mode == "baseline-reused" || mode == "baseline-missing" || mode == "baseline-foreign" || mode == "sample-error") && calls != 0 {
+			if (mode == "baseline-reused" || mode == "baseline-zombie" || mode == "baseline-foreign" || mode == "sample-error") && calls != 0 {
 				t.Fatal("signalled before validating protected baseline")
 			}
 		})
+	}
+}
+
+// Issue #27: an audited Apple helper exiting on its own must not wedge job
+// cleanup or admission. Unaudited job processes are still terminated.
+func TestScopeToleratesSelfExitedAuditedProcess(t *testing.T) {
+	s := scopeFixture()
+	rows := []processSample{{pid: 200, group: 200, uid: testJobUID, start: "escaped"}}
+	s.sample = func(context.Context) ([]processSample, error) { return slices.Clone(rows), nil }
+	var signalled []int
+	s.signal = func(_ context.Context, p processSample, _ syscall.Signal) error {
+		signalled = append(signalled, p.pid)
+		rows = slices.DeleteFunc(rows, func(row processSample) bool { return row.pid == p.pid })
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := s.quiesce(ctx); err != nil {
+		t.Fatalf("exited audited process blocked cleanup: %v", err)
+	}
+	if !slices.Equal(signalled, []int{200}) {
+		t.Fatalf("cleanup targets: %v", signalled)
+	}
+	if err := s.observeQuiet(ctx); err != nil {
+		t.Fatalf("exited audited process blocked admission: %v", err)
 	}
 }
 
@@ -118,6 +144,11 @@ func TestBaselineNeverAdoptsCurrentProcesses(t *testing.T) {
 		"wrong-uid":     func(b *GUIBaseline) { b.JobUID++ },
 		"missing-start": func(b *GUIBaseline) { b.Processes[0].Start = "" },
 		"duplicate":     func(b *GUIBaseline) { b.Processes = append(b.Processes, b.Processes[0]) },
+		"job plist provenance": func(b *GUIBaseline) {
+			b.Processes[0].Service = speechAgentService()
+			b.Processes[0].Service.Path = "/Users/job/Library/LaunchAgents/com.apple.corespeechd.plist"
+		},
+		"unaudited XPC owner": func(b *GUIBaseline) { b.Processes[0].Service = speechXPCService(500) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			b := valid

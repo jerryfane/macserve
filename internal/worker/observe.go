@@ -7,11 +7,10 @@ import (
 
 // ObserveGUIBaseline checks every audited process without adopting or rejecting
 // additional active-job processes. It never signals processes or writes state.
-// Audited processes that are simply absent are returned rather than refused:
-// launchd-managed Apple helpers in the job GUI session may exit on their own,
-// and absence can neither hide nor retain job state. Callers decide whether an
-// exited baseline process is acceptable (qualification records it; health
-// refuses it). A reused PID, changed UID or zombie is always an error.
+// Audited processes that are simply absent are returned as evidence rather
+// than refused: launchd-managed Apple helpers in the job GUI session may exit
+// on their own, and absence can neither hide nor retain job state. A reused
+// PID, changed UID or zombie is always an error.
 func ObserveGUIBaseline(ctx context.Context, path, persistencePath string, uid uint32) (string, []ProcessIdentity, error) {
 	baseline, err := loadBaseline(path, uid)
 	if err != nil {

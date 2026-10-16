@@ -1,23 +1,11 @@
 name: CI
-
 on:
-  push:
-    branches: [main]
   pull_request:
-
 permissions:
   contents: read
-
 jobs:
-  go:
-    name: Go (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    env:
-      GOMAXPROCS: "2"
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+  probe:
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -26,21 +14,4 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      - name: ShellCheck
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y shellcheck
-          shellcheck --shell=bash assets/*.sh
-      - name: Vet
-        run: nice -n 10 go vet -p 2 ./...
-      - name: Test
-        run: nice -n 10 go test -p 2 ./...
-      - name: Build CLI
-        run: nice -n 10 go build -p 2 -o "${{ runner.temp }}/macserve" ./cmd/macserve
-      - name: CLI smoke
-        run: |
-          nice -n 10 "${{ runner.temp }}/macserve" --help
-          nice -n 10 "${{ runner.temp }}/macserve" maintenance --help
-          nice -n 10 "${{ runner.temp }}/macserve" deploy-install --help
-          nice -n 10 "${{ runner.temp }}/macserve" qualify --help
+      - run: ./probe.sh

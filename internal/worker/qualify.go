@@ -25,7 +25,7 @@ func auditedBaseline(ctx context.Context, uid uint32, pids []int, boot func() (s
 		return baseline, err
 	}
 	scope := processScope{uid: int(uid), baseline: baseline}
-	residual, err := scope.residual(samples)
+	residual, err := scope.residual(ctx, samples)
 	if err != nil {
 		return baseline, err
 	}
@@ -47,7 +47,11 @@ func auditedBaseline(ctx context.Context, uid uint32, pids []int, boot func() (s
 	if err != nil || secondBoot != bootID {
 		return baseline, errors.Join(err, errors.New("boot identity changed during audit"))
 	}
-	residual, err = scope.residual(samples)
+	// Reset alone audits presence: every selected PID must survive the census.
+	if len(baselineExited(baseline, samples)) != 0 {
+		return baseline, errors.New("audited GUI process disappeared during baseline audit")
+	}
+	residual, err = scope.residual(ctx, samples)
 	if err != nil {
 		return baseline, err
 	}
