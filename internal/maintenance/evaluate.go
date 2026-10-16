@@ -44,17 +44,20 @@ type Probe struct {
 // Observation is the pure evaluation seam. Production fills it only from bounded
 // live checks, never from JSON or a caller-provided health boolean.
 type Observation struct {
-	JobUID                 uint32                                `json:"job_uid"`
-	Boot                   string                                `json:"boot"`
-	BaselineSHA256         string                                `json:"baseline_sha256"`
-	BoundaryEvidenceSHA256 string                                `json:"boundary_evidence_sha256,omitempty"`
-	Profiles               map[string]string                     `json:"profiles"`
-	IdentityValid          bool                                  `json:"identity_valid"`
-	BaselineValid          bool                                  `json:"baseline_valid"`
-	AccountedBytes         int64                                 `json:"accounted_bytes"`
-	MemoryPressure         bool                                  `json:"memory_pressure"`
-	Coexistence            *CoexistenceState                     `json:"coexistence,omitempty"`
-	Persistence            worker.PersistenceAttestationMetadata `json:"persistence"`
+	JobUID                 uint32            `json:"job_uid"`
+	Boot                   string            `json:"boot"`
+	BaselineSHA256         string            `json:"baseline_sha256"`
+	BoundaryEvidenceSHA256 string            `json:"boundary_evidence_sha256,omitempty"`
+	Profiles               map[string]string `json:"profiles"`
+	IdentityValid          bool              `json:"identity_valid"`
+	BaselineValid          bool              `json:"baseline_valid"`
+	// BaselineExited records audited PIDs that were absent (not reused) when
+	// observed. Absence is evidence, not a refusal, in qualification and health.
+	BaselineExited []worker.ProcessIdentity              `json:"baseline_exited,omitempty"`
+	AccountedBytes int64                                 `json:"accounted_bytes"`
+	MemoryPressure bool                                  `json:"memory_pressure"`
+	Coexistence    *CoexistenceState                     `json:"coexistence,omitempty"`
+	Persistence    worker.PersistenceAttestationMetadata `json:"persistence"`
 }
 
 func digest(data []byte) string { s := sha256.Sum256(data); return hex.EncodeToString(s[:]) }

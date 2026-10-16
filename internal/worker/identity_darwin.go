@@ -31,7 +31,12 @@ func identityProcesses(ctx context.Context) ([]processSample, error) {
 	samples := make([]processSample, 0, len(rows))
 	for _, row := range rows {
 		p := row.Proc
-		samples = append(samples, processSample{pid: int(p.P_pid), group: int(row.Eproc.Pgid), uid: int(row.Eproc.Ucred.Uid), zombie: p.P_stat == 5, start: strconv.FormatInt(p.P_starttime.Sec, 10) + ":" + strconv.FormatInt(int64(p.P_starttime.Usec), 10)})
+		samples = append(samples, processSample{pid: int(p.P_pid), group: int(row.Eproc.Pgid), uid: int(row.Eproc.Ucred.Uid), zombie: p.P_stat == 5, start: startToken(&p)})
 	}
 	return samples, ctx.Err()
+}
+
+// startToken is the kernel start time: with the PID it names one process.
+func startToken(p *unix.ExternProc) string {
+	return strconv.FormatInt(p.P_starttime.Sec, 10) + ":" + strconv.FormatInt(int64(p.P_starttime.Usec), 10)
 }

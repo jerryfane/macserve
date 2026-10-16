@@ -14,6 +14,8 @@ func approvedFixture() (time.Time, Qualification, BoundaryEvidence, Observation)
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	d := digest([]byte("approved"))
 	o := Observation{JobUID: 550, Boot: d, BaselineSHA256: d, BoundaryEvidenceSHA256: d, Profiles: map[string]string{"build": d}, IdentityValid: true, BaselineValid: true, AccountedBytes: 1234}
+	// A self-exited audited helper is evidence, never a health refusal.
+	o.BaselineExited = []worker.ProcessIdentity{{PID: 101, Start: "boot:101"}}
 	o.Persistence = worker.PersistenceAttestationMetadata{Valid: true, LastVerified: now}
 	q := Qualification{Schema: 3, ApprovedAt: now, JobUID: o.JobUID, Boot: d, BaselineSHA256: d, BoundaryEvidenceSHA256: d, Profiles: map[string]string{"build": d}}
 	e := BoundaryEvidence{Schema: 3, RecordedAt: now.Add(-time.Minute), JobUID: o.JobUID, Boot: d}

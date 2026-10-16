@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"syscall"
 	"time"
@@ -18,10 +19,12 @@ import (
 
 // ProcessIdentity is a kernel start identity, not a process name or an observed
 // PID alone. Baselines are explicitly qualified by an administrator, never
-// learned from processes found during worker startup.
+// learned from processes found during worker startup. Service is optional
+// launchd provenance verified at reset; see LaunchdService.
 type ProcessIdentity struct {
-	PID   int    `json:"pid"`
-	Start string `json:"start"`
+	PID     int            `json:"pid"`
+	Start   string         `json:"start"`
+	Service LaunchdService `json:"service,omitzero"`
 }
 
 type GUIBaseline struct {
@@ -35,6 +38,9 @@ type processScope struct {
 	uid      int
 	baseline GUIBaseline
 	sample   processSampler
+	// agents verifies launchd relaunches of absent audited processes. Nil
+	// accepts none: every unaudited job-UID process is then residual.
+	agents   agentInspector
 	signal   func(context.Context, processSample, syscall.Signal) error
 	interval time.Duration
 	grace    time.Duration
@@ -74,42 +80,94 @@ func validateBaseline(b GUIBaseline, uid uint32, boot string) error {
 	}
 	seen := make(map[int]bool, len(b.Processes))
 	for _, p := range b.Processes {
-		if p.PID <= 1 || p.Start == "" || seen[p.PID] {
+		if p.PID <= 1 || p.Start == "" || seen[p.PID] || p.Service != (LaunchdService{}) && !p.Service.valid(p.PID) {
 			return errors.New("invalid GUI baseline process identity")
 		}
 		seen[p.PID] = true
 	}
+	for _, p := range b.Processes {
+		if p.Service.Domain == "pid" && !seen[p.Service.Owner] {
+			return errors.New("GUI baseline XPC service owner is not audited")
+		}
+	}
 	return nil
 }
 
-func (s *processScope) residual(samples []processSample) ([]processSample, error) {
-	trusted := make(map[int]string, len(s.baseline.Processes))
+var (
+	errBaselineChanged = errors.New("GUI baseline process changed; worker-reset required")
+	// errRelaunchUnverified is inconclusive, never contamination evidence: v0.1.8
+	// refused the same state ("disappeared") without durable quarantine.
+	errRelaunchUnverified = errors.New("audited GUI process exited and a surviving job process could not be verified as its launchd relaunch; worker-reset required")
+)
+
+// processCensus is one snapshot classified against the audited baseline.
+// Unresolved means some audited process is gone without a verified launchd
+// relaunch in this snapshot.
+type processCensus struct {
+	residual   []processSample
+	unresolved bool
+}
+
+// census classifies job-UID processes against the audited baseline. An audited
+// PID now held by another UID or a zombie is refused. An audited PID that is
+// simply absent is not: launchd-managed Apple helpers exit on their own, and a
+// job can only end its own UID's processes, which hides or retains nothing. A
+// new process stands in for an absent one only as launchd's verified relaunch
+// of a recorded system service (see respawned); that includes a relaunch that
+// lands on the exited audited PID number. Any other holder of an audited PID
+// number is refused as a changed baseline.
+func (s *processScope) census(ctx context.Context, samples []processSample) (processCensus, error) {
+	absent := make(map[int]string, len(s.baseline.Processes))
 	for _, p := range s.baseline.Processes {
-		trusted[p.PID] = p.Start
+		absent[p.PID] = p.Start
 	}
-	var residual []processSample
+	var c processCensus
+	var reused []int
 	for _, p := range samples {
-		if start, ok := trusted[p.pid]; ok {
-			if p.uid != s.uid || p.start != start || p.zombie {
-				return nil, errors.New("GUI baseline process changed; worker-reset required")
+		if start, ok := absent[p.pid]; ok {
+			if p.uid != s.uid || p.zombie || p.start == "" {
+				return processCensus{}, errBaselineChanged
 			}
-			delete(trusted, p.pid)
+			if p.start == start {
+				delete(absent, p.pid)
+				continue
+			}
+			reused = append(reused, p.pid)
+			c.residual = append(c.residual, p)
 			continue
 		}
 		if p.uid != s.uid || p.zombie {
 			continue
 		}
 		if p.pid <= 1 || p.start == "" {
-			return nil, errors.New("job process identity unavailable")
+			return processCensus{}, errors.New("job process identity unavailable")
 		}
-		residual = append(residual, p)
+		c.residual = append(c.residual, p)
 	}
-	if len(trusted) != 0 {
-		return nil, errors.New("GUI baseline process disappeared; worker-reset required")
+	resolved := 0
+	if len(absent) != 0 && len(c.residual) != 0 && s.agents != nil {
+		c.residual, resolved = respawned(ctx, s.agents, s.uid, s.baseline, absent, c.residual)
 	}
-	return residual, nil
+	for _, pid := range reused {
+		if slices.ContainsFunc(c.residual, func(p processSample) bool { return p.pid == pid }) {
+			return processCensus{}, errBaselineChanged
+		}
+	}
+	c.unresolved = resolved < len(absent)
+	return c, nil
 }
 
+// residual returns job-UID processes outside the audited baseline (see census).
+func (s *processScope) residual(ctx context.Context, samples []processSample) ([]processSample, error) {
+	c, err := s.census(ctx, samples)
+	return c.residual, err
+}
+
+// quiesce terminates residual job processes. Processes that survive the
+// deadline are contamination evidence only when every audited process is
+// present or verifiably relaunched. If one is gone without a verified relaunch,
+// a survivor may be launchd bringing it back (KeepAlive) in a way this host
+// could not verify, so cleanup fails without durable quarantine, as in v0.1.8.
 func (s *processScope) quiesce(ctx context.Context) error {
 	termUntil := time.Now().Add(s.grace)
 	// Require a second empty snapshot after a settling interval. Never waive a
@@ -123,17 +181,20 @@ func (s *processScope) quiesce(ctx context.Context) error {
 		if err != nil {
 			return errors.Join(ErrCleanup, err)
 		}
-		residual, err := s.residual(samples)
+		c, err := s.census(ctx, samples)
 		if err != nil {
 			return errors.Join(ErrCleanup, err)
 		}
-		if len(residual) == 0 {
+		if len(c.residual) == 0 {
 			if empty {
 				return nil
 			}
 			empty = true
 		} else {
 			if !time.Now().Before(termUntil.Add(s.grace)) {
+				if c.unresolved {
+					return errors.Join(ErrCleanup, errRelaunchUnverified)
+				}
 				return fmt.Errorf("%w: job processes remain after termination", ErrContamination)
 			}
 			empty = false
@@ -141,7 +202,7 @@ func (s *processScope) quiesce(ctx context.Context) error {
 			if !time.Now().Before(termUntil) {
 				sig = syscall.SIGKILL
 			}
-			for _, p := range residual {
+			for _, p := range c.residual {
 				if err := s.signal(ctx, p, sig); err != nil {
 					return errors.Join(ErrCleanup, err)
 				}
@@ -198,7 +259,7 @@ func NewNativeRunner(options Options) (Runner, error) {
 	runner.baselinePath = options.BaselinePath
 	runner.persistencePath = options.PersistencePath
 	runner.persistence = nativePersistenceInspector(options)
-	runner.scope = &processScope{uid: runner.uid, sample: identityProcesses, interval: 50 * time.Millisecond, grace: 500 * time.Millisecond}
+	runner.scope = &processScope{uid: runner.uid, sample: identityProcesses, agents: nativeAgents{}, interval: 50 * time.Millisecond, grace: 500 * time.Millisecond}
 	runner.scope.signal = func(ctx context.Context, p processSample, sig syscall.Signal) error {
 		// The kernel checks the job UID, not root, at the signal operation itself.
 		// A PID reused by the owner/controller/another UID can never be signalled.

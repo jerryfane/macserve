@@ -276,7 +276,7 @@ func Inspect(ctx context.Context, c Config) (Observation, error) {
 	if err != nil {
 		return invalid, err
 	}
-	o.Boot, err = worker.ObserveGUIBaseline(ctx, wc.BaselinePath, wc.PersistencePath, wc.JobUID)
+	o.Boot, o.BaselineExited, err = worker.ObserveGUIBaseline(ctx, wc.BaselinePath, wc.PersistencePath, wc.JobUID)
 	if err != nil {
 		return invalid, err
 	}

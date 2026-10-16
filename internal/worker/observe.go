@@ -7,45 +7,46 @@ import (
 
 // ObserveGUIBaseline checks every audited process without adopting or rejecting
 // additional active-job processes. It never signals processes or writes state.
-func ObserveGUIBaseline(ctx context.Context, path, persistencePath string, uid uint32) (string, error) {
+// Audited processes that are simply absent are returned as evidence rather
+// than refused: launchd-managed Apple helpers in the job GUI session may exit
+// on their own, and absence can neither hide nor retain job state. A changed
+// UID or zombie is always an error, and so is a reused audited PID unless the
+// new holder is a verified launchd relaunch (see processScope.census).
+func ObserveGUIBaseline(ctx context.Context, path, persistencePath string, uid uint32) (string, []ProcessIdentity, error) {
 	baseline, err := loadBaseline(path, uid)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	digest, err := PersistenceDigest(persistencePath, uid)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if baseline.PersistenceSHA256 != digest {
-		return "", errors.New("reviewed persistence changed; baseline reset and requalification required")
+		return "", nil, errors.New("reviewed persistence changed; baseline reset and requalification required")
 	}
 	samples, err := identityProcesses(ctx)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
-	if err := baselineAlive(baseline, samples); err != nil {
-		return "", err
+	scope := processScope{uid: int(uid), baseline: baseline, agents: nativeAgents{}}
+	if _, err := scope.census(ctx, samples); err != nil {
+		return "", nil, err
 	}
-	return baseline.Boot, ctx.Err()
+	return baseline.Boot, baselineExited(baseline, samples), ctx.Err()
 }
 
-func baselineAlive(b GUIBaseline, samples []processSample) error {
-	trusted := make(map[int]string, len(b.Processes))
-	for _, p := range b.Processes {
-		trusted[p.PID] = p.Start
-	}
+// baselineExited returns the audited identities no longer running: the PID is
+// absent or now held by a process with another start identity.
+func baselineExited(b GUIBaseline, samples []processSample) []ProcessIdentity {
+	live := make(map[int]string, len(samples))
 	for _, p := range samples {
-		start, ok := trusted[p.pid]
-		if !ok {
-			continue
-		}
-		if p.uid != int(b.JobUID) || p.start != start || p.zombie {
-			return errors.New("audited GUI baseline process changed")
-		}
-		delete(trusted, p.pid)
+		live[p.pid] = p.start
 	}
-	if len(trusted) != 0 {
-		return errors.New("audited GUI baseline process missing")
+	var exited []ProcessIdentity
+	for _, p := range b.Processes {
+		if start, ok := live[p.PID]; !ok || start != p.Start {
+			exited = append(exited, p)
+		}
 	}
-	return nil
+	return exited
 }

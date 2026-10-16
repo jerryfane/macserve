@@ -63,6 +63,9 @@ func (r *nativeRunner) Admission(ctx context.Context) error {
 	return r.scope.observeQuiet(ctx)
 }
 
+// observeQuiet refuses admission while any job process is outside the audited
+// baseline. As in quiesce, that is contamination evidence only if no audited
+// process is gone without a verified launchd relaunch.
 func (s *processScope) observeQuiet(ctx context.Context) error {
 	for i := 0; i < 2; i++ {
 		if err := ctx.Err(); err != nil {
@@ -72,11 +75,14 @@ func (s *processScope) observeQuiet(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		residual, err := s.residual(samples)
+		c, err := s.census(ctx, samples)
 		if err != nil {
 			return err
 		}
-		if len(residual) != 0 {
+		if len(c.residual) != 0 {
+			if c.unresolved {
+				return errRelaunchUnverified
+			}
 			return fmt.Errorf("%w: processes outside audited GUI baseline", ErrContamination)
 		}
 		if i == 0 {
