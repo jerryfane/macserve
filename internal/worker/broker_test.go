@@ -138,6 +138,7 @@ func TestScopeRechecksEmptySnapshot(t *testing.T) {
 
 func TestBaselineNeverAdoptsCurrentProcesses(t *testing.T) {
 	valid := scopeFixture().baseline
+	valid.Launchd = &LaunchdEnvironment{}
 	for name, mutate := range map[string]func(*GUIBaseline){
 		"empty":         func(b *GUIBaseline) { b.Processes = nil },
 		"boot-changed":  func(b *GUIBaseline) { b.Boot = "new boot" },
@@ -148,7 +149,12 @@ func TestBaselineNeverAdoptsCurrentProcesses(t *testing.T) {
 			b.Processes[0].Service = speechAgentService()
 			b.Processes[0].Service.Path = "/Users/job/Library/LaunchAgents/com.apple.corespeechd.plist"
 		},
-		"unaudited XPC owner": func(b *GUIBaseline) { b.Processes[0].Service = speechXPCService(500) },
+		"unaudited XPC owner":           func(b *GUIBaseline) { b.Processes[0].Service = speechXPCService(500) },
+		"no launchd domain environment": func(b *GUIBaseline) { b.Launchd = nil },
+		"provenance without inherited environment": func(b *GUIBaseline) {
+			b.Processes[0].Service = speechAgentService()
+			b.Processes[0].Service.InheritedSHA256 = ""
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			b := valid

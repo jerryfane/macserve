@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -26,38 +27,47 @@ import (
 // /System/Library/LaunchAgents/<label>.plist. Domain "user" is also a per-user
 // XPC service and "pid" an XPC service inside Owner's per-process domain; both
 // must be bundles under root-only system paths. Executable and LaunchSHA256 pin
-// the kernel executable path and the exact exec path, argv and environment.
+// the kernel executable path and the exact exec path and argv. InheritedSHA256
+// pins the `inherited environment` launchd prints for the service, where a
+// `launchctl setenv` in its domain appears.
+//
+// No identity is taken from a process environment. With SIP enabled the
+// kernel withholds the KERN_PROCARGS2 environment of every CS_RESTRICT process
+// from every caller, root included (xnu sysctl_procargsx); on macOS 27.0 that
+// is every process under /System, /usr, /bin and /sbin.
 type LaunchdService struct {
-	Domain       string `json:"domain"`
-	Owner        int    `json:"owner,omitempty"`
-	Label        string `json:"label"`
-	Path         string `json:"path"`
-	Executable   string `json:"executable"`
-	LaunchSHA256 string `json:"launch_sha256"`
+	Domain          string `json:"domain"`
+	Owner           int    `json:"owner,omitempty"`
+	Label           string `json:"label"`
+	Path            string `json:"path"`
+	Executable      string `json:"executable"`
+	LaunchSHA256    string `json:"launch_sha256"`
+	InheritedSHA256 string `json:"inherited_sha256"`
 }
 
-// agentProcess holds kernel facts about one live PID. label is only the
-// XPC_SERVICE_NAME hint from the launch environment; authority comes from
-// launchd's own service record.
+// agentProcess holds kernel facts about one live PID: kinfo_proc, csops,
+// PROC_PIDPATHINFO and, from process only, the KERN_PROCARGS2 exec path and
+// argv with their digest (launchArguments).
 type agentProcess struct {
 	start      string
 	uid        int
 	ppid       int
 	executable string
 	platform   bool
-	label      string
 	launch     string
-	// program, argv and env are the launch strings launch digests
-	// (launchArguments); adoption compares them with launchd's record.
-	program, argv, env string
+	// program and argv are the launch strings launch digests; adoption
+	// compares them with launchd's record.
+	program, argv string
 }
 
-// agentInspector is the read-only native seam: kernel facts, launchctl print
-// for one exact service target, and launchd's responsible-PID hint.
+// agentInspector is the read-only native seam: kernel facts alone (kernel),
+// kernel facts with the launch arguments (process), and launchctl print of one
+// exact service target (service) or domain (domain).
 type agentInspector interface {
+	kernel(pid int) (agentProcess, error)
 	process(pid int) (agentProcess, error)
 	service(ctx context.Context, target string) (launchctlprint.Snapshot, error)
-	responsible(ctx context.Context, pid int) (int, error)
+	domain(ctx context.Context, target string) (launchctlprint.Domain, error)
 }
 
 func validLaunchdLabel(label string) bool {
@@ -115,7 +125,7 @@ func (s LaunchdService) serviceType() string {
 }
 
 func (s LaunchdService) valid(self int) bool {
-	if !validLaunchdLabel(s.Label) || !systemPath(s.Executable) || !validLaunchDigest(s.LaunchSHA256) {
+	if !validLaunchdLabel(s.Label) || !systemPath(s.Executable) || !validLaunchDigest(s.LaunchSHA256) || !validLaunchDigest(s.InheritedSHA256) {
 		return false
 	}
 	switch s.Domain {
@@ -138,18 +148,36 @@ func validLaunchDigest(s string) bool {
 	return err == nil && len(b) == sha256.Size && hex.EncodeToString(b) == s
 }
 
+// inheritedEnvironment is the canonical form of a printed `inherited
+// environment`: its KEY=VALUE entries in key order, NUL-joined. Not printed
+// and empty are the same.
+func inheritedEnvironment(env map[string]string) string {
+	entries := make([]string, 0, len(env))
+	for _, key := range slices.Sorted(maps.Keys(env)) {
+		entries = append(entries, key+"="+env[key])
+	}
+	return strings.Join(entries, "\x00")
+}
+
+func inheritedDigest(env map[string]string) string {
+	digest := sha256.Sum256([]byte(inheritedEnvironment(env)))
+	return hex.EncodeToString(digest[:])
+}
+
 // launchedBy reports whether pid, with kernel facts already read, is launchd's
-// running instance of s and was launched from exactly the recorded executable,
-// argv and environment. The facts are read again after launchctl answers and
-// must be identical, binding that answer to this process instance rather than
-// to a reused PID.
+// running instance of s: a valid platform binary at the recorded executable,
+// child of launchd, exec'd with the recorded exec path and argv, that
+// launchctl print of the recorded target names as its running PID with the
+// recorded launchd path, type and inherited environment. The facts are read
+// again after launchctl answers and must be identical, binding that answer to
+// this process instance rather than to a reused PID.
 func launchedBy(ctx context.Context, agents agentInspector, uid int, s LaunchdService, owner, pid int, facts agentProcess) bool {
 	if facts.uid != uid || facts.ppid != 1 || !facts.platform || facts.executable != s.Executable || facts.launch != s.LaunchSHA256 {
 		return false
 	}
 	target := s.target(uid, owner)
 	snapshot, err := agents.service(ctx, target)
-	if err != nil || snapshot.Target != target || snapshot.PID != pid || snapshot.Path != s.Path || snapshot.Type != s.serviceType() {
+	if err != nil || snapshot.Target != target || snapshot.PID != pid || snapshot.Path != s.Path || snapshot.Type != s.serviceType() || inheritedDigest(snapshot.Inherited) != s.InheritedSHA256 {
 		return false
 	}
 	again, err := agents.process(pid)
@@ -242,64 +270,106 @@ func startedAfter(later, earlier string) bool {
 // verifiably system LaunchAgents or system XPC services. Anything else keeps
 // no record: it may still exit without refusal, but no replacement is accepted.
 func describeServices(ctx context.Context, agents agentInspector, uid int, b GUIBaseline) GUIBaseline {
-	audited := make(map[int]bool, len(b.Processes))
+	owners := make([]int, 0, len(b.Processes))
 	for _, p := range b.Processes {
-		audited[p.PID] = true
+		owners = append(owners, p.PID)
 	}
+	hints := newServiceHints(agents, uid, owners)
 	out := b
 	out.Processes = slices.Clone(b.Processes)
 	for i, p := range out.Processes {
 		if ctx.Err() != nil {
 			break
 		}
-		if s, ok := describeService(ctx, agents, uid, p, audited); ok {
+		if s, ok := describeService(ctx, agents, uid, p, hints); ok {
 			out.Processes[i].Service = s
 		}
 	}
 	return out
 }
 
-// describeService discovers which launchd domain reports p.PID for the label
-// hinted by its launch environment, then requires the full relaunch rule to
-// hold for the audited instance itself.
-func describeService(ctx context.Context, agents agentInspector, uid int, p ProcessIdentity, audited map[int]bool) (LaunchdService, bool) {
+// serviceHints names the launchd service a PID may be: the label next to it
+// in the `services` table of launchctl print of the job's gui or user domain,
+// or of an audited owner's pid domain (an XPC service). A table is only a
+// hint; describeService takes authority from launchctl print of that exact
+// service. Each domain is printed at most once.
+type serviceHints struct {
+	agents agentInspector
+	uid    int
+	owners []int
+	tables map[string]map[int]string
+}
+
+func newServiceHints(agents agentInspector, uid int, owners []int) *serviceHints {
+	return &serviceHints{agents: agents, uid: uid, owners: owners, tables: make(map[string]map[int]string)}
+}
+
+func (h *serviceHints) table(ctx context.Context, target string) map[int]string {
+	services, ok := h.tables[target]
+	if !ok {
+		if d, err := h.agents.domain(ctx, target); err == nil && d.Target == target {
+			services = d.Services
+		}
+		h.tables[target] = services
+	}
+	return services
+}
+
+// find returns the domain, pid-domain owner and label listed for pid: the gui
+// domain, else the user domain, else the one audited owner whose pid domain
+// lists it. A PID listed by several owners has no hint.
+func (h *serviceHints) find(ctx context.Context, pid int) (domain string, owner int, label string, ok bool) {
+	for _, domain := range []string{"gui", "user"} {
+		if label, ok := h.table(ctx, domain+"/"+strconv.Itoa(h.uid))[pid]; ok {
+			return domain, 0, label, true
+		}
+	}
+	for _, o := range h.owners {
+		if o == pid {
+			continue
+		}
+		if l, listed := h.table(ctx, "pid/"+strconv.Itoa(o))[pid]; listed {
+			if ok {
+				return "", 0, "", false
+			}
+			owner, label, ok = o, l, true
+		}
+	}
+	return "pid", owner, label, ok
+}
+
+// describeService finds the launchd service whose domain table lists p.PID,
+// then requires the full relaunch rule to hold for the audited instance
+// itself. The recorded inherited environment is the one launchctl prints for
+// that instance.
+func describeService(ctx context.Context, agents agentInspector, uid int, p ProcessIdentity, hints *serviceHints) (LaunchdService, bool) {
 	facts, err := agents.process(p.PID)
-	if err != nil || facts.start != p.Start || !validLaunchdLabel(facts.label) {
+	if err != nil || facts.start != p.Start {
 		return LaunchdService{}, false
 	}
-	s := LaunchdService{Label: facts.label, Executable: facts.executable, LaunchSHA256: facts.launch}
-	owner := 0
-	found := false
-	for _, domain := range []string{"gui", "user"} {
-		s.Domain = domain
-		if snapshot, err := agents.service(ctx, s.target(uid, 0)); err == nil && snapshot.PID == p.PID {
-			s.Path, found = snapshot.Path, true
-			break
-		}
+	domain, owner, label, ok := hints.find(ctx, p.PID)
+	if !ok || !validLaunchdLabel(label) {
+		return LaunchdService{}, false
 	}
-	if !found {
-		if owner, err = agents.responsible(ctx, p.PID); err != nil || !audited[owner] {
-			return LaunchdService{}, false
-		}
-		s.Domain, s.Owner = "pid", owner
-		snapshot, err := agents.service(ctx, s.target(uid, owner))
-		if err != nil || snapshot.PID != p.PID {
-			return LaunchdService{}, false
-		}
-		s.Path = snapshot.Path
+	s := LaunchdService{Domain: domain, Owner: owner, Label: label, Executable: facts.executable, LaunchSHA256: facts.launch}
+	snapshot, err := agents.service(ctx, s.target(uid, owner))
+	if err != nil || snapshot.PID != p.PID {
+		return LaunchdService{}, false
 	}
+	s.Path, s.InheritedSHA256 = snapshot.Path, inheritedDigest(snapshot.Inherited)
 	return s, s.valid(p.PID) && launchedBy(ctx, agents, uid, s, owner, p.PID, facts)
 }
 
-// launchAgentEnvironment returns the domain environment (domainEnvironment)
-// of p, whose provenance is a verified gui- or user-domain system LaunchAgent,
-// after binding p's whole launch to launchd's record of that service: the
-// exec path is its `program` and argv its `arguments` (or just the program
-// when launchd infers it), as measured for all 151 running system
-// LaunchAgents on macOS 26.6. Kernel facts are read again and must still
-// carry p's start and recorded launch digest, which binds them to the
-// described instance; launchd's record must still report p.
-func launchAgentEnvironment(ctx context.Context, agents agentInspector, uid int, p ProcessIdentity) (string, bool) {
+// launchAgentInherited returns the inherited environment launchctl prints for
+// p (inheritedEnvironment), whose provenance is a verified gui- or user-domain
+// system LaunchAgent, after binding p's launch to launchd's record of that
+// service: the exec path is its `program` and argv its `arguments` (or just
+// the program when launchd infers it), as measured for all 151 running system
+// LaunchAgents on macOS 26.6 and for Finder and Dock on macOS 27.0. Kernel
+// facts are read again and must still carry p's start and recorded launch
+// digest, which binds them to the described instance; launchd's record must
+// still report p with the recorded inherited environment.
+func launchAgentInherited(ctx context.Context, agents agentInspector, uid int, p ProcessIdentity) (string, bool) {
 	s := p.Service
 	if s.Domain != "gui" && s.Domain != "user" || s.serviceType() != "LaunchAgent" {
 		return "", false
@@ -310,7 +380,7 @@ func launchAgentEnvironment(ctx context.Context, agents agentInspector, uid int,
 	}
 	target := s.target(uid, 0)
 	snapshot, err := agents.service(ctx, target)
-	if err != nil || snapshot.Target != target || snapshot.PID != p.PID || snapshot.Path != s.Path || snapshot.Type != "LaunchAgent" {
+	if err != nil || snapshot.Target != target || snapshot.PID != p.PID || snapshot.Path != s.Path || snapshot.Type != "LaunchAgent" || inheritedDigest(snapshot.Inherited) != s.InheritedSHA256 {
 		return "", false
 	}
 	argv := snapshot.Arguments
@@ -320,21 +390,21 @@ func launchAgentEnvironment(ctx context.Context, agents agentInspector, uid int,
 	if snapshot.Program == "" || facts.program != snapshot.Program || facts.argv != strings.Join(argv, "\x00") {
 		return "", false
 	}
-	return domainEnvironment(facts.env, snapshot.Environment)
+	return inheritedEnvironment(snapshot.Inherited), true
 }
 
-// domainReferences returns, per launchd domain, the domain environment of the
-// selected system LaunchAgents there (Finder, a required anchor, is one in
-// gui). A domain whose selected agents disagree has no reference, so reset
-// adopts nothing in it. Without a selected user-domain agent, user falls back
-// to the gui reference minus the one SSH_AUTH_SOCK entry: launchd adds
-// SSH_AUTH_SOCK only for the Aqua (gui) domain and otherwise launches both
-// domains with the same per-user environment, in the same order (measured
-// on macOS 26.6 across 138 gui and 13 user system LaunchAgents).
+// domainReferences returns, per launchd domain, the inherited environment
+// launchctl prints for the selected system LaunchAgents there (Finder, a
+// required anchor, is one in gui). A domain whose selected agents disagree has
+// no reference, so reset adopts nothing in it. Without a selected user-domain
+// agent, user falls back to the gui reference minus its one SSH_AUTH_SOCK
+// entry: launchd prints SSH_AUTH_SOCK as the gui (Aqua) domain environment and
+// no inherited environment for user-domain agents (trustevaluationagent on
+// macOS 26.6 and 27.0).
 func domainReferences(ctx context.Context, agents agentInspector, uid int, b GUIBaseline) map[string]string {
 	envs := make(map[string][]string, 2)
 	for _, p := range b.Processes {
-		if env, ok := launchAgentEnvironment(ctx, agents, uid, p); ok {
+		if env, ok := launchAgentInherited(ctx, agents, uid, p); ok {
 			envs[p.Service.Domain] = append(envs[p.Service.Domain], env)
 		}
 	}
@@ -354,7 +424,7 @@ func domainReferences(ctx context.Context, agents agentInspector, uid int, b GUI
 			}
 			return socket
 		})
-		if sockets == 1 && len(entries) != 0 {
+		if sockets == 1 {
 			references["user"] = strings.Join(entries, "\x00")
 		}
 	}
@@ -371,12 +441,12 @@ func domainReferences(ctx context.Context, agents agentInspector, uid int, b GUI
 // launchd's own record of the SIP-protected /System/Library/LaunchAgents plist
 // in the job's gui or user domain (describeService: platform binary, recorded
 // executable, PPID 1, launchd path and type, re-read binding), was exec'd
-// with exactly the program and arguments of that record, and was launched
-// with exactly the domain environment of the selected LaunchAgents of its
-// domain (launchAgentEnvironment, domainReferences). That last check is what
-// a selected process's pinned launch digest does: a job's `launchctl setenv`
-// reaches every later launch and is refused. XPC services and anything in a
-// pid domain never qualify.
+// with exactly the program and arguments of that record, and launchctl prints
+// for it exactly the inherited environment of the selected LaunchAgents of
+// its domain (launchAgentInherited, domainReferences). That last check is
+// what a selected process's recorded inherited environment does: a job's
+// `launchctl setenv` appears there and is refused. XPC services and anything
+// in a pid domain never qualify.
 //
 // An unselected instance running at reset start that qualifies has its
 // provenance recorded before cleanup and is terminated like every other
@@ -393,15 +463,15 @@ type adoption struct {
 }
 
 // qualifies returns p with its provenance when p is an adoptable system
-// LaunchAgent (see adoption).
-func (a *adoption) qualifies(ctx context.Context, agents agentInspector, uid int, p processSample) (ProcessIdentity, bool) {
+// LaunchAgent (see adoption). hints holds no pid-domain owners.
+func (a *adoption) qualifies(ctx context.Context, agents agentInspector, uid int, p processSample, hints *serviceHints) (ProcessIdentity, bool) {
 	id := ProcessIdentity{PID: p.pid, Start: p.start}
-	s, ok := describeService(ctx, agents, uid, id, nil)
+	s, ok := describeService(ctx, agents, uid, id, hints)
 	if !ok {
 		return id, false
 	}
 	id.Service = s
-	env, ok := launchAgentEnvironment(ctx, agents, uid, id)
+	env, ok := launchAgentInherited(ctx, agents, uid, id)
 	reference, known := a.reference[s.Domain]
 	return id, ok && known && env == reference
 }
@@ -410,9 +480,10 @@ func (a *adoption) qualifies(ctx context.Context, agents agentInspector, uid int
 func (a *adoption) launchAgents(ctx context.Context, agents agentInspector, uid int, candidates []processSample) ([]processSample, []ProcessIdentity) {
 	var residual []processSample
 	var adopted []ProcessIdentity
+	hints := newServiceHints(agents, uid, nil)
 	for _, c := range candidates {
 		if start, present := a.initial[c.pid]; !present || start != c.start {
-			if p, ok := a.qualifies(ctx, agents, uid, c); ok {
+			if p, ok := a.qualifies(ctx, agents, uid, c, hints); ok {
 				adopted = append(adopted, p)
 				continue
 			}
@@ -422,17 +493,17 @@ func (a *adoption) launchAgents(ctx context.Context, agents agentInspector, uid 
 	return residual, adopted
 }
 
-// launchArguments is one process's KERN_PROCARGS2 launch: the XPC_SERVICE_NAME
-// label hint, the launch digest, and the exec path, argv and environment
-// strings (NUL-joined) it covers.
+// launchArguments is one process's KERN_PROCARGS2 launch: the launch digest
+// and the exec path and argv strings (NUL-joined) it covers.
 type launchArguments struct {
-	label, digest, program, argv, env string
+	digest, program, argv string
 }
 
-// launchIdentity digests KERN_PROCARGS2: argc, exec path, NUL padding, argc
-// argument strings, then environment strings up to the first empty string.
-// The apple[] strings after it (pointer munge, ports, boot hashes) vary per
-// launch and are excluded. launchctl setenv in the job's domain changes it.
+// launchIdentity digests KERN_PROCARGS2 up to the end of argv: argc, exec
+// path, NUL padding, then argc argument strings. Whatever follows is never
+// read: the environment, which the kernel omits for a CS_RESTRICT process
+// while SIP is enabled (the buffer then ends after argv), and the per-launch
+// apple[] strings.
 func launchIdentity(raw []byte) (launchArguments, error) {
 	bad := errors.New("unrecognized process launch arguments")
 	if len(raw) < 4 {
@@ -453,7 +524,6 @@ func launchIdentity(raw []byte) (launchArguments, error) {
 	field(executable)
 	field([]byte(strconv.Itoa(argc)))
 	rest = bytes.TrimLeft(rest, "\x00")
-	out := launchArguments{program: string(executable)}
 	argv := make([][]byte, 0, argc)
 	for range argc {
 		var arg []byte
@@ -463,77 +533,27 @@ func launchIdentity(raw []byte) (launchArguments, error) {
 		field(arg)
 		argv = append(argv, arg)
 	}
-	var environment [][]byte
-	for {
-		var entry []byte
-		if entry, rest, ok = bytes.Cut(rest, []byte{0}); !ok {
-			return launchArguments{}, bad
-		}
-		if len(entry) == 0 {
-			break
-		}
-		field(entry)
-		environment = append(environment, entry)
-		if value, found := bytes.CutPrefix(entry, []byte("XPC_SERVICE_NAME=")); found {
-			out.label = string(value)
-		}
-	}
-	out.digest = hex.EncodeToString(h.Sum(nil))
-	out.argv = string(bytes.Join(argv, []byte{0}))
-	out.env = string(bytes.Join(environment, []byte{0}))
-	return out, nil
+	return launchArguments{digest: hex.EncodeToString(h.Sum(nil)), program: string(executable), argv: string(bytes.Join(argv, []byte{0}))}, nil
 }
 
-// domainEnvironment removes from a LaunchAgent's launch environment what
-// launchd adds for that one service, its own `environment` dictionary (own)
-// and XPC_FLAGS, leaving what launchd takes from its domain: the per-user
-// defaults (PATH, LOGNAME, USER, HOME, SHELL, TMPDIR, SSH_AUTH_SOCK in gui)
-// plus anything `launchctl setenv` put there. Measured on macOS 26.6, that
-// remainder is identical, in order, for every running system LaunchAgent of a
-// domain (150 gui, 13 user); setenv of a dictionary key or of XPC_FLAGS does
-// not reach the process, while a new name or TMPDIR does. Every dictionary
-// entry must appear exactly once with its value, and XPC_FLAGS exactly once.
-func domainEnvironment(env string, own map[string]string) (string, bool) {
-	if own == nil || env == "" {
-		return "", false
-	}
-	matched := make(map[string]bool, len(own))
-	flags := false
-	var rest []string
-	for _, entry := range strings.Split(env, "\x00") {
-		key, value, ok := strings.Cut(entry, "=")
-		if !ok || key == "" {
-			return "", false
+// launchdEnvironment reads the root `environment` launchctl prints for the
+// job's gui and user domains: what `launchctl setenv` there changes for every
+// later launch.
+func launchdEnvironment(ctx context.Context, agents agentInspector, uid int) (*LaunchdEnvironment, error) {
+	var env LaunchdEnvironment
+	for _, d := range []struct {
+		domain string
+		into   *map[string]string
+	}{{"gui", &env.GUI}, {"user", &env.User}} {
+		target := d.domain + "/" + strconv.Itoa(uid)
+		printed, err := agents.domain(ctx, target)
+		if err != nil || printed.Target != target {
+			return nil, errors.Join(err, errors.New("job launchd domain environment unavailable"))
 		}
-		if want, owned := own[key]; owned {
-			if value != want || matched[key] {
-				return "", false
-			}
-			matched[key] = true
-			continue
-		}
-		if key == "XPC_FLAGS" && !flags && xpcFlags(value) {
-			flags = true
-			continue
-		}
-		rest = append(rest, entry)
-	}
-	if len(matched) != len(own) || !flags || len(rest) == 0 {
-		return "", false
-	}
-	return strings.Join(rest, "\x00"), true
-}
-
-// xpcFlags accepts launchd's per-service XPC_FLAGS value (observed: 1, 9, 19,
-// 8019): 1 to 16 lowercase hexadecimal digits.
-func xpcFlags(value string) bool {
-	if value == "" || len(value) > 16 {
-		return false
-	}
-	for _, c := range value {
-		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
-			return false
+		*d.into = printed.Environment
+		if *d.into == nil {
+			*d.into = map[string]string{}
 		}
 	}
-	return true
+	return &env, nil
 }

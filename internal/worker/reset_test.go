@@ -8,8 +8,6 @@ import (
 	"syscall"
 	"testing"
 	"time"
-
-	"github.com/jerryfane/macserve/internal/launchctlprint"
 )
 
 const (
@@ -31,11 +29,11 @@ var (
 // (LimitLoadToSessionType=Background, MachServices, no KeepAlive) that launchd
 // runs in the job's user domain and starts again on demand.
 func teaService() LaunchdService {
-	return LaunchdService{Domain: "user", Label: teaLabel, Path: "/System/Library/LaunchAgents/" + teaLabel + ".plist", Executable: teaPath, LaunchSHA256: agentLaunch}
+	return LaunchdService{Domain: "user", Label: teaLabel, Path: "/System/Library/LaunchAgents/" + teaLabel + ".plist", Executable: teaPath, LaunchSHA256: agentLaunch, InheritedSHA256: noInherited}
 }
 
 func finderService() LaunchdService {
-	return LaunchdService{Domain: "gui", Label: "com.apple.Finder", Path: "/System/Library/LaunchAgents/com.apple.Finder.plist", Executable: finderPath, LaunchSHA256: agentLaunch}
+	return LaunchdService{Domain: "gui", Label: "com.apple.Finder", Path: "/System/Library/LaunchAgents/com.apple.Finder.plist", Executable: finderPath, LaunchSHA256: agentLaunch, InheritedSHA256: noInherited}
 }
 
 // resetWorld is the job GUI session root sees at worker-reset: the anchors
@@ -45,13 +43,13 @@ func finderService() LaunchdService {
 // and an owner process (300). Killing a process launchd reports for a service
 // relaunches it under a new PID (see host).
 func resetWorld() (*processScope, *fakeAgents, *launchdHost) {
-	agents := &fakeAgents{procs: map[int]agentProcess{}, reread: map[int]agentProcess{}, reads: map[int]int{}, services: map[string]launchctlprint.Snapshot{}, owners: map[int]int{}}
+	agents := newFakeAgents()
 	for pid, path := range map[int]string{50: loginwindowPath, 51: dockPath, 53: terminalPath, 54: "/bin/zsh", 61: helperPath} {
 		agents.procs[pid] = agentProcess{start: "1:" + strconv.Itoa(pid), uid: testJobUID, ppid: 1, executable: path, platform: true}
 	}
-	agents.run(52, "1:52", finderService(), "com.apple.Finder")
+	agents.run(52, "1:52", finderService())
 	agents.publish(finderTarget, 52, finderService().Path, "LaunchAgent")
-	agents.run(60, "1:60", teaService(), teaLabel)
+	agents.run(60, "1:60", teaService())
 	agents.publish(teaTarget, 60, teaService().Path, "LaunchAgent")
 	agents.procs[200] = agentProcess{start: "30:0", uid: testJobUID, ppid: 1, executable: "/bin/sleep", platform: true, launch: poisonedLaunch}
 	scope := &processScope{uid: testJobUID, agents: agents, interval: time.Millisecond, grace: time.Millisecond}

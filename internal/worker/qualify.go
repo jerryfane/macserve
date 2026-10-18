@@ -58,8 +58,9 @@ type Relaunch struct {
 // unselected process that reset terminates. Nothing else qualifies: a smaller
 // set lets a logout or console loss pass as a helper exit, and a larger one
 // reinstates the v0.1.9 failure for helpers that exit on their own. Anchors
-// are matched by kernel executable path; the paths are SIP-protected and the
-// process must be a platform binary.
+// are matched by kernel facts alone (effective UID, start, csops platform
+// status and executable path; the paths are SIP-protected), never by the
+// launch arguments, whose environment a SIP-enabled kernel withholds.
 var (
 	requiredAnchors = []string{
 		"/System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow",
@@ -79,7 +80,7 @@ func selectAnchors(agents agentInspector, b GUIBaseline) (anchors, paths map[int
 	anchors, paths = make(map[int]string), make(map[int]string, len(b.Processes))
 	found := make(map[string]bool, len(requiredAnchors))
 	for _, p := range b.Processes {
-		facts, err := agents.process(p.PID)
+		facts, err := agents.kernel(p.PID)
 		if err != nil || facts.start != p.Start {
 			continue
 		}
@@ -187,7 +188,7 @@ func (s *processScope) published(c processCensus, live, paths map[int]string) Re
 			adopted[p.PID] = true
 		}
 	}
-	result := ResetResult{GUIBaseline: GUIBaseline{JobUID: s.baseline.JobUID, Boot: s.baseline.Boot}}
+	result := ResetResult{GUIBaseline: GUIBaseline{JobUID: s.baseline.JobUID, Boot: s.baseline.Boot, Launchd: s.baseline.Launchd}}
 	for _, p := range s.baseline.Processes {
 		k, ok := kept[p.PID]
 		if !ok {
@@ -221,8 +222,8 @@ func (s *processScope) published(c processCensus, live, paths map[int]string) Re
 // processes are left outside this baseline so reset can terminate them safely.
 // A requested PID that is no longer running cannot be part of any baseline and
 // is dropped; one now held by another UID or a zombie is refused.
-func selectedBaseline(uid uint32, pids []int, boot string, samples []processSample) (GUIBaseline, []DroppedProcess, error) {
-	baseline := GUIBaseline{JobUID: uid, Boot: boot}
+func selectedBaseline(uid uint32, pids []int, boot string, env *LaunchdEnvironment, samples []processSample) (GUIBaseline, []DroppedProcess, error) {
+	baseline := GUIBaseline{JobUID: uid, Boot: boot, Launchd: env}
 	if len(pids) == 0 || len(pids) > 4096 {
 		return baseline, nil, errors.New("explicit audited GUI process PIDs required")
 	}

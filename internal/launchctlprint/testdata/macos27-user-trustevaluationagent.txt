@@ -1,0 +1,68 @@
+user/501/com.apple.TrustEvaluationAgent = {
+	active count = 0
+	path = /System/Library/LaunchAgents/com.apple.TrustEvaluationAgent.plist
+	type = LaunchAgent
+	state = not running
+
+	program = /System/Library/PrivateFrameworks/TrustEvaluationAgent.framework/Resources/trustevaluationagent
+	arguments = {
+		trustevaluationagent
+	}
+
+	default environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+	}
+
+	environment = {
+		OSLogRateLimit => 64
+		MallocSpaceEfficient => 1
+		XPC_SERVICE_NAME => com.apple.TrustEvaluationAgent
+	}
+
+	domain = user/501
+	asid = 100060
+	minimum runtime = 10
+	base minimum runtime = 10
+	exit timeout = 5
+	runs = 188
+	last exit code = 0
+
+	endpoints = {
+		"com.apple.TrustEvaluationAgent" = {
+			port = 0x12d22b
+			active = 0
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 1
+		}
+	}
+
+	resource coalition = {
+		ID = 33067
+		type = resource
+		state = active
+		active count = 1
+		name = com.apple.TrustEvaluationAgent
+	}
+
+	jetsam coalition = {
+		ID = 33068
+		type = jetsam
+		state = active
+		active count = 1
+		name = com.apple.TrustEvaluationAgent
+	}
+
+	spawn type = daemon (3)
+	jetsam priority = 40
+	jetsam memory limit (active, soft) = 20 MB
+	jetsam memory limit (inactive, soft) = 20 MB
+	jetsamproperties category = daemon
+	jetsam thread limit = 32
+	cpumon = default
+	exponential throttling grace limit = 10
+	sanitizer flags = 0x0
+
+	properties = system service | exponential throttling | tle system
+}

@@ -1,0 +1,86 @@
+user/501 = {
+	type = user
+	handle = 501
+	active count = 92
+	service count = 82
+	active service count = 40
+	creator = mds[606]
+	creator euid = 0
+	session = Background
+	external activation count = 8
+	gui asid = 104086
+	security context = {
+		uid = 501
+		asid = 100060
+	}
+
+	bringup time = 58 ms
+	death port = 0x0
+	subdomains = {
+		gui/501
+	}
+
+	services = {
+		   15149      0 	com.apple.CoreSimulator.SimulatorTrampoline
+		    3554      - 	com.apple.accessibility.mediaaccessibilityd
+		       0      - 	com.apple.DistributionKit.DistributionHelper
+		       0      - 	com.apple.mdworker.sizing
+		    1084      - 	com.apple.trustd.agent
+		   53448      - 	com.apple.CoreDevice.CoreDeviceService
+		       0      - 	com.apple.MailServiceAgent
+		       0      0 	com.apple.iCloudHelper
+		    3660      - 	com.apple.tonelibraryd
+		       0      - 	com.apple.accounts.dom
+		       0      - 	com.apple.mdworker.mail
+		       0      - 	com.apple.cvmsCompAgent3600_x86_64_1
+		       0      0 	com.apple.TrustEvaluationAgent
+	}
+
+	unmanaged processes = {
+		com.apple.xpc.launchd.unmanaged.sshd-session.92318 = {
+			active count = 2
+			dynamic endpoints = {
+			}
+			pid-local endpoints = {
+				"com.apple.xpc.launchd.external-activation.sshd-session" = {
+					port = 0x1bb573
+					active = 1
+					managed = 0
+					reset = 0
+					hide = 0
+					watching = 0
+				}
+			}
+		}
+	}
+
+	endpoints = {
+		 0x63c13    M   A   com.apple.siri.location
+		 0xba80b    M   A   com.apple.assistant.flow_service
+		 0x73a07    M   A   com.apple.transparencyd.ckv
+		 0xa745b    M   A   com.apple.private.alloy.willow.stream-idswake
+		 0x90f13    M   A   com.apple.aa.identity.xpc
+		 0x97b0b    M   D   com.apple.aa.internal.tool.xpc
+		0x1d67e7    M   A   com.apple.coreservices.lsuseractivityadministration.xpc
+		0x100727    M   A   com.apple.jetpackassetd.xpc
+		 0x657c3    M   A   com.apple.bird.push
+		 0xb3a07    M   A   com.apple.homeenergyd.xpc
+		 0x75b23    M   A   com.apple.private.alloy.shortcuts-idswake
+		 0xcb1f3    M   A   com.apple.private.alloy.contextsync.local-idswake
+	}
+
+	task-special ports = {
+			 0x3db2b 4       bootstrap  com.apple.xpc.launchd.domain.user.501
+			0x1837ab 128     exception  com.apple.ReportCrash
+	}
+
+	disabled services = {
+		"com.apple.ManagedClientAgent.enrollagent" => disabled
+		"com.apple.Siri.agent" => disabled
+		"com.apple.FolderActionsDispatcher" => disabled
+		"com.apple.appleseed.seedusaged.postinstall" => disabled
+		"com.apple.ScriptMenuApp" => disabled
+	}
+
+	properties = 
+}

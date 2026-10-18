@@ -371,7 +371,7 @@ func TestNativeAdmissionUsesCheapDeadlineNotFullScanDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	baselinePath := filepath.Join(filepath.Dir(options.PersistencePath), "baseline.json")
-	if err := saveBaseline(baselinePath, GUIBaseline{JobUID: options.JobUID, Boot: boot, PersistenceSHA256: digest, Processes: []ProcessIdentity{{PID: 100, Start: "deadline-fixture"}}}); err != nil {
+	if err := saveBaseline(baselinePath, GUIBaseline{JobUID: options.JobUID, Boot: boot, PersistenceSHA256: digest, Processes: []ProcessIdentity{{PID: 100, Start: "deadline-fixture"}}, Launchd: &LaunchdEnvironment{}}); err != nil {
 		t.Fatal(err)
 	}
 	reached := errors.New("observed cheap inspection deadline")

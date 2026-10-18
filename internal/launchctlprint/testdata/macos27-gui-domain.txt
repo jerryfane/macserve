@@ -1,0 +1,90 @@
+gui/501 = {
+	type = login
+	handle = 104086
+	active count = 485
+	service count = 484
+	active service count = 265
+	creator = loginwindow[15160]
+	creator euid = 0
+	session = Aqua
+	endpoint destination = com.apple.xpc.launchd.domain.user.501
+	auxiliary bootstrapper = com.apple.xpc.otherbsd (complete)
+	security context = {
+		uid = 501
+		asid = 104086
+	}
+
+	bringup time = 53 ms
+	death port = 0x9c3c7
+
+	environment = {
+		SSH_AUTH_SOCK => /var/run/com.apple.launchd.GWnys7uPgY/Listeners
+	}
+
+	services = {
+		   16194      - 	com.apple.syncdefaultsd
+		   16278      - 	com.apple.assistantd
+		       0      0 	com.apple.DataDetectorsLocalSources
+		       0      - 	com.apple.unmountassistant.useragent
+		   28515      - 	com.apple.mlhostd
+		       0      - 	com.apple.mediacontinuityd
+		       0      - 	com.apple.SafariHistoryServiceAgent
+		       0      - 	com.apple.preference.displays.MirrorDisplays
+		       0      - 	com.apple.sidecar-display-agent
+		   16184      - 	com.apple.chronod
+		   64125      - 	com.apple.facetimemessagestored
+		       0      - 	com.apple.contacts.donation-agent
+		   16209      - 	com.apple.Finder
+		   16204      - 	com.apple.Dock.agent
+	}
+
+	unmanaged processes = {
+		com.apple.xpc.launchd.unmanaged.nsattributedstr.16538 = {
+			active count = 2
+			dynamic endpoints = {
+			}
+			pid-local endpoints = {
+				"com.apple.coredrag" = {
+					port = 0x7bf7f
+					active = 1
+					managed = 0
+					reset = 0
+					hide = 0
+					watching = 0
+				}
+			}
+		}
+	}
+
+	endpoints = {
+	}
+
+	externally-hosted endpoints = {
+		 0x63c13    M   A   com.apple.siri.location
+		 0xba80b    M   A   com.apple.assistant.flow_service
+		 0x73a07    M   A   com.apple.transparencyd.ckv
+		 0xa745b    M   A   com.apple.private.alloy.willow.stream-idswake
+		 0x90f13    M   A   com.apple.aa.identity.xpc
+		 0x97b0b    M   D   com.apple.aa.internal.tool.xpc
+		0x1d67e7    M   A   com.apple.coreservices.lsuseractivityadministration.xpc
+		0x100727    M   A   com.apple.jetpackassetd.xpc
+		 0x657c3    M   A   com.apple.bird.push
+		 0xb3a07    M   A   com.apple.homeenergyd.xpc
+		 0x75b23    M   A   com.apple.private.alloy.shortcuts-idswake
+		 0xcb1f3    M   A   com.apple.private.alloy.contextsync.local-idswake
+	}
+
+	task-special ports = {
+			0x145287 4       bootstrap  com.apple.xpc.launchd.user.domain.501.104086.Aqua
+	}
+
+	disabled services = {
+		"com.apple.ManagedClientAgent.enrollagent" => disabled
+		"com.apple.Siri.agent" => disabled
+		"com.apple.FolderActionsDispatcher" => disabled
+		"com.apple.appleseed.seedusaged.postinstall" => disabled
+		"com.apple.ScriptMenuApp" => disabled
+	}
+
+	properties = gui | gui login
+}

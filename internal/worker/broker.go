@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,10 +29,21 @@ type ProcessIdentity struct {
 }
 
 type GUIBaseline struct {
-	JobUID            uint32            `json:"job_uid"`
-	Boot              string            `json:"boot"`
-	Processes         []ProcessIdentity `json:"processes"`
-	PersistenceSHA256 string            `json:"persistence_sha256"`
+	JobUID            uint32              `json:"job_uid"`
+	Boot              string              `json:"boot"`
+	Processes         []ProcessIdentity   `json:"processes"`
+	PersistenceSHA256 string              `json:"persistence_sha256"`
+	Launchd           *LaunchdEnvironment `json:"launchd_environment"`
+}
+
+// LaunchdEnvironment is the root `environment` launchctl printed for the job's
+// gui and user domains at reset. `launchctl setenv` there changes it and
+// reaches every later launch in the domain; no process check can see that on
+// a SIP-enabled host, where the kernel withholds the environment of system
+// processes. The census refuses any later difference as contamination.
+type LaunchdEnvironment struct {
+	GUI  map[string]string `json:"gui"`
+	User map[string]string `json:"user"`
 }
 
 type processScope struct {
@@ -80,6 +92,9 @@ func validateBaseline(b GUIBaseline, uid uint32, boot string) error {
 	if b.JobUID != uid || b.Boot == "" || b.Boot != boot || len(b.Processes) == 0 || len(b.Processes) > 4096 {
 		return errors.New("GUI baseline missing or belongs to another UID or boot; administrator reconciliation required")
 	}
+	if b.Launchd == nil {
+		return errors.New("GUI baseline lacks the job launchd domain environment (written before v0.1.11); worker-reset required")
+	}
 	seen := make(map[int]bool, len(b.Processes))
 	for _, p := range b.Processes {
 		if p.PID <= 1 || p.Start == "" || seen[p.PID] || p.Service != (LaunchdService{}) && !p.Service.valid(p.PID) {
@@ -123,6 +138,9 @@ type processCensus struct {
 // the recorded unselected instances are residual although audited, and a new
 // system LaunchAgent that launchd started may be adopted (see adoption).
 func (s *processScope) census(ctx context.Context, samples []processSample) (processCensus, error) {
+	if err := s.launchdUnchanged(ctx); err != nil {
+		return processCensus{}, err
+	}
 	absent := make(map[int]string, len(s.baseline.Processes))
 	for _, p := range s.baseline.Processes {
 		absent[p.PID] = p.Start
@@ -171,6 +189,31 @@ func (s *processScope) census(ctx context.Context, samples []processSample) (pro
 	}
 	c.unresolved = len(c.relaunched) < len(absent)
 	return c, nil
+}
+
+// launchdUnchanged refuses when the environment launchctl prints for the job's
+// gui or user domain differs from the one recorded at reset (see
+// LaunchdEnvironment); a difference is contamination evidence. A job that
+// sets a variable, has launchd launch a service and unsets it again before
+// this check runs is not seen here; LaunchdService.InheritedSHA256 then
+// refuses that relaunch if launchctl prints the variable for it.
+func (s *processScope) launchdUnchanged(ctx context.Context) error {
+	// Every loaded or published baseline carries the record (validateBaseline);
+	// only a scope no baseline was ever loaded into has none.
+	if s.baseline.Launchd == nil {
+		return nil
+	}
+	if s.agents == nil {
+		return errors.New("job launchd domain environment unavailable")
+	}
+	now, err := launchdEnvironment(ctx, s.agents, s.uid)
+	if err != nil {
+		return err
+	}
+	if !maps.Equal(now.GUI, s.baseline.Launchd.GUI) || !maps.Equal(now.User, s.baseline.Launchd.User) {
+		return fmt.Errorf("%w: job launchd domain environment changed since worker-reset (launchctl setenv)", ErrContamination)
+	}
+	return nil
 }
 
 // residual returns job-UID processes outside the audited baseline (see census).

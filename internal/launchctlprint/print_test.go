@@ -113,3 +113,59 @@ func TestParseRootProgramArgumentsAndEnvironment(t *testing.T) {
 		})
 	}
 }
+
+// Root-run prints from the SIP-enabled Mac Studio, macOS 27.0 (26A428), UID
+// 501. Service roots keep their 26.6 shape; the inherited environment is the
+// gui domain's SSH_AUTH_SOCK. Domain prints were trimmed to Apple entries.
+func TestParseMacOS27Captures(t *testing.T) {
+	socket := map[string]string{"SSH_AUTH_SOCK": "/var/run/com.apple.launchd.GWnys7uPgY/Listeners"}
+	for name, want := range map[string]Snapshot{
+		"macos27-gui-finder.txt": {Target: "gui/501/com.apple.Finder", State: "running", PID: 16209, Path: "/System/Library/LaunchAgents/com.apple.Finder.plist", Type: "LaunchAgent", Program: "/System/Library/CoreServices/Finder.app/Contents/MacOS/Finder", Inherited: socket},
+		"macos27-gui-dock.txt":   {Target: "gui/501/com.apple.Dock.agent", State: "running", PID: 16204, Path: "/System/Library/LaunchAgents/com.apple.Dock.plist", Type: "LaunchAgent", Program: "/System/Library/CoreServices/Dock.app/Contents/MacOS/Dock", Inherited: socket},
+	} {
+		got, err := Parse(capture(t, name))
+		if err != nil || got.Target != want.Target || got.State != want.State || got.PID != want.PID || got.Path != want.Path || got.Type != want.Type || got.Program != want.Program || got.Arguments != nil || !maps.Equal(got.Inherited, want.Inherited) {
+			t.Errorf("%s: Parse = %+v, %v", name, got, err)
+		}
+	}
+	// A job's `launchctl submit` (path "(submitted by launchctl[N])", type
+	// Submitted) and a service that is not running never parse.
+	for _, name := range []string{"macos27-gui-submitted.txt", "macos27-user-trustevaluationagent.txt"} {
+		if got, err := Parse(capture(t, name)); err == nil {
+			t.Errorf("%s accepted: %+v", name, got)
+		}
+	}
+	gui, err := ParseDomain(capture(t, "macos27-gui-domain.txt"))
+	if err != nil || gui.Target != "gui/501" || !maps.Equal(gui.Environment, socket) || gui.Services[16209] != "com.apple.Finder" || gui.Services[16204] != "com.apple.Dock.agent" || slices.Contains(slices.Collect(maps.Keys(gui.Services)), 0) {
+		t.Fatalf("ParseDomain = %+v, %v", gui, err)
+	}
+	user, err := ParseDomain(capture(t, "macos27-user-domain.txt"))
+	if err != nil || user.Target != "user/501" || user.Environment != nil || user.Services[1084] != "com.apple.trustd.agent" {
+		t.Fatalf("ParseDomain = %+v, %v", user, err)
+	}
+	text := capture(t, "macos27-gui-finder.txt")
+	domain := capture(t, "macos27-gui-domain.txt")
+	for name, edited := range map[string]string{
+		"second inherited environment":  strings.Replace(text, "\tdomain = ", "\tinherited environment = {\n\t\tX => y\n\t}\n\tdomain = ", 1),
+		"quoted inherited entry":        strings.Replace(text, "\t\tSSH_AUTH_SOCK => ", "\t\t\"SSH_AUTH_SOCK\" => ", 1),
+		"inherited entry without arrow": strings.Replace(text, "\t\tSSH_AUTH_SOCK => ", "\t\tSSH_AUTH_SOCK = ", 1),
+	} {
+		if got, err := Parse(edited); err == nil {
+			t.Errorf("%s accepted: %+v", name, got)
+		}
+	}
+	for name, edited := range map[string]string{
+		"second domain environment": strings.Replace(domain, "\tservices = {", "\tenvironment = {\n\t\tX => y\n\t}\n\tservices = {", 1),
+		"quoted domain entry":       strings.Replace(domain, "\t\tSSH_AUTH_SOCK => ", "\t\t\"SSH_AUTH_SOCK\" => ", 1),
+		"second services table":     strings.Replace(domain, "\tunmanaged processes = {", "\tservices = {\n\t}\n\tunmanaged processes = {", 1),
+		"trailing output":           domain + "x\n",
+	} {
+		if got, err := ParseDomain(edited); err == nil {
+			t.Errorf("%s accepted: %+v", name, got)
+		}
+	}
+	twice := strings.Replace(domain, "\t\t   16204      - \tcom.apple.Dock.agent\n", "\t\t   16204      - \tcom.apple.Dock.agent\n\t\t   16204      - \tjob.copy\n", 1)
+	if d, err := ParseDomain(twice); err != nil || d.Services[16204] != "" {
+		t.Fatalf("PID listed twice kept a label: %+v, %v", d.Services, err)
+	}
+}
