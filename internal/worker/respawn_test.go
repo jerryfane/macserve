@@ -3,9 +3,11 @@ package worker
 import (
 	"context"
 	"errors"
+	"maps"
 	"os"
 	"slices"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -24,22 +26,41 @@ const (
 	poisonedLaunch   = "3333333333333333333333333333333333333333333333333333333333333333"
 )
 
+// noInherited is the recorded inherited environment of a service launchctl
+// prints none for.
+var noInherited = inheritedDigest(nil)
+
 func speechAgentService() LaunchdService {
-	return LaunchdService{Domain: "gui", Label: speechLabel, Path: speechPlist, Executable: speechExecutable, LaunchSHA256: agentLaunch}
+	return LaunchdService{Domain: "gui", Label: speechLabel, Path: speechPlist, Executable: speechExecutable, LaunchSHA256: agentLaunch, InheritedSHA256: noInherited}
 }
 
 func speechXPCService(owner int) LaunchdService {
-	return LaunchdService{Domain: "pid", Owner: owner, Label: speechXPCLabel, Path: speechXPCBundle, Executable: speechXPCBundle + "/Contents/MacOS/localspeechrecognition", LaunchSHA256: xpcLaunch}
+	return LaunchdService{Domain: "pid", Owner: owner, Label: speechXPCLabel, Path: speechXPCBundle, Executable: speechXPCBundle + "/Contents/MacOS/localspeechrecognition", LaunchSHA256: xpcLaunch, InheritedSHA256: noInherited}
 }
 
 // fakeAgents is the kernel and launchd as seen by root. reread, when set,
 // replaces a PID's facts from the second read on (the binding re-read).
+// Domain prints list the running services published under the domain, with
+// the domain environment env holds for it.
 type fakeAgents struct {
 	procs    map[int]agentProcess
 	reread   map[int]agentProcess
 	reads    map[int]int
 	services map[string]launchctlprint.Snapshot
-	owners   map[int]int
+	env      map[string]map[string]string
+}
+
+func newFakeAgents() *fakeAgents {
+	return &fakeAgents{procs: map[int]agentProcess{}, reread: map[int]agentProcess{}, reads: map[int]int{}, services: map[string]launchctlprint.Snapshot{}, env: map[string]map[string]string{}}
+}
+
+// kernel never carries launch arguments.
+func (f *fakeAgents) kernel(pid int) (agentProcess, error) {
+	p, ok := f.procs[pid]
+	if !ok {
+		return agentProcess{}, syscall.ESRCH
+	}
+	return agentProcess{start: p.start, uid: p.uid, ppid: p.ppid, executable: p.executable, platform: p.platform}, nil
 }
 
 func (f *fakeAgents) process(pid int) (agentProcess, error) {
@@ -62,15 +83,25 @@ func (f *fakeAgents) service(_ context.Context, target string) (launchctlprint.S
 	return s, nil
 }
 
-func (f *fakeAgents) responsible(_ context.Context, pid int) (int, error) {
-	if owner, ok := f.owners[pid]; ok {
-		return owner, nil
+func (f *fakeAgents) domain(_ context.Context, target string) (launchctlprint.Domain, error) {
+	d := launchctlprint.Domain{Target: target, Environment: maps.Clone(f.env[target]), Services: map[int]string{}}
+	listed := map[int]int{}
+	for t, s := range f.services {
+		if label, ok := strings.CutPrefix(t, target+"/"); ok && s.PID > 0 {
+			d.Services[s.PID] = label
+			listed[s.PID]++
+		}
 	}
-	return 0, syscall.ESRCH
+	for pid, n := range listed {
+		if n != 1 {
+			delete(d.Services, pid)
+		}
+	}
+	return d, nil
 }
 
-func (f *fakeAgents) run(pid int, start string, s LaunchdService, label string) {
-	f.procs[pid] = agentProcess{start: start, uid: testJobUID, ppid: 1, executable: s.Executable, platform: true, label: label, launch: s.LaunchSHA256}
+func (f *fakeAgents) run(pid int, start string, s LaunchdService) {
+	f.procs[pid] = agentProcess{start: start, uid: testJobUID, ppid: 1, executable: s.Executable, platform: true, launch: s.LaunchSHA256}
 }
 
 func (f *fakeAgents) publish(target string, pid int, path, kind string) {
@@ -90,9 +121,9 @@ var (
 // child (101, killed with it) came back as 301 in the new owner's domain. 102
 // is another audited process that stayed up; 200 is an escaped job process.
 func relaunchWorld() (*processScope, *fakeAgents, []processSample) {
-	agents := &fakeAgents{procs: map[int]agentProcess{}, reread: map[int]agentProcess{}, reads: map[int]int{}, services: map[string]launchctlprint.Snapshot{}, owners: map[int]int{}}
-	agents.run(300, "20:0", speechAgentService(), speechLabel)
-	agents.run(301, "20:1", speechXPCService(100), speechXPCLabel)
+	agents := newFakeAgents()
+	agents.run(300, "20:0", speechAgentService())
+	agents.run(301, "20:1", speechXPCService(100))
 	agents.procs[200] = agentProcess{start: "30:0", uid: testJobUID, ppid: 1, executable: "/bin/sleep", platform: true, launch: poisonedLaunch}
 	agents.publish(speechAgentTarget, 300, speechPlist, "LaunchAgent")
 	agents.publish(relaunchedXPC, 301, speechXPCBundle, "XPCService")
@@ -188,9 +219,9 @@ func quiesceOnce(s *processScope) error {
 // must verify whatever the baseline order, or launchd relaunches it forever.
 func TestQuiesceResolvesNestedXPCOwnersInAnyBaselineOrder(t *testing.T) {
 	s, agents, rows := relaunchWorld()
-	nested := LaunchdService{Domain: "pid", Owner: 101, Label: "com.apple.speech.nested", Path: "/System/Library/PrivateFrameworks/Nested.framework/XPCServices/nested.xpc", Executable: "/System/Library/PrivateFrameworks/Nested.framework/XPCServices/nested.xpc/Contents/MacOS/nested", LaunchSHA256: xpcLaunch}
+	nested := LaunchdService{Domain: "pid", Owner: 101, Label: "com.apple.speech.nested", Path: "/System/Library/PrivateFrameworks/Nested.framework/XPCServices/nested.xpc", Executable: "/System/Library/PrivateFrameworks/Nested.framework/XPCServices/nested.xpc/Contents/MacOS/nested", LaunchSHA256: xpcLaunch, InheritedSHA256: noInherited}
 	s.baseline.Processes = append([]ProcessIdentity{{PID: 103, Start: "10:3", Service: nested}}, s.baseline.Processes...)
-	agents.run(302, "20:2", nested, nested.Label)
+	agents.run(302, "20:2", nested)
 	agents.publish("pid/301/"+nested.Label, 302, nested.Path, "XPCService")
 	h := host(s, agents, append(rows, sample(302, "20:2")))
 	if err := quiesceOnce(s); err != nil {
@@ -242,7 +273,7 @@ func samePIDWorld(path, kind string) (*processScope, *fakeAgents, []processSampl
 	s, agents, _ := relaunchWorld()
 	delete(agents.procs, 300)
 	delete(agents.services, relaunchedXPC)
-	agents.run(100, "20:0", speechAgentService(), speechLabel)
+	agents.run(100, "20:0", speechAgentService())
 	agents.publish(speechAgentTarget, 100, path, kind)
 	agents.publish("pid/100/"+speechXPCLabel, 301, speechXPCBundle, "XPCService")
 	return s, agents, []processSample{sample(102, "10:2"), sample(100, "20:0"), sample(301, "20:1"), sample(200, "30:0")}
@@ -370,28 +401,26 @@ func TestRelaunchRuleRefusesJobLaunchdServices(t *testing.T) {
 func TestResetRecordsOnlySystemLaunchdProvenance(t *testing.T) {
 	_, agents, _ := relaunchWorld()
 	uid := strconv.Itoa(testJobUID)
-	agents.run(100, "10:0", speechAgentService(), speechLabel)
+	agents.run(100, "10:0", speechAgentService())
 	agents.publish(speechAgentTarget, 100, speechPlist, "LaunchAgent")
-	agents.run(101, "10:1", speechXPCService(100), speechXPCLabel)
-	agents.owners[101] = 100
+	agents.run(101, "10:1", speechXPCService(100))
 	agents.publish("pid/100/"+speechXPCLabel, 101, speechXPCBundle, "XPCService")
-	agents.run(103, "10:3", speechAgentService(), "job.copy")
+	agents.run(103, "10:3", speechAgentService())
 	agents.publish("gui/"+uid+"/job.copy", 103, "/Users/job/Library/LaunchAgents/job.copy.plist", "LaunchAgent")
-	agents.run(104, "10:4", speechAgentService(), "job.submit")
+	agents.run(104, "10:4", speechAgentService())
 	agents.publish("gui/"+uid+"/job.submit", 104, "(submitted by launchctl[7])", "Submitted")
-	agents.run(105, "10:5", speechXPCService(500), speechXPCLabel)
-	agents.owners[105] = 500
+	agents.run(105, "10:5", speechXPCService(500))
 	agents.publish("pid/500/"+speechXPCLabel, 105, speechXPCBundle, "XPCService")
-	tips := LaunchdService{Domain: "gui", Label: "com.apple.tipsd", Path: "/System/Library/LaunchAgents/com.apple.tipsd.plist", Executable: "/usr/libexec/tipsd", LaunchSHA256: agentLaunch}
-	agents.run(106, "10:6", tips, tips.Label)
+	tips := LaunchdService{Domain: "gui", Label: "com.apple.tipsd", Path: "/System/Library/LaunchAgents/com.apple.tipsd.plist", Executable: "/usr/libexec/tipsd", LaunchSHA256: agentLaunch, InheritedSHA256: noInherited}
+	agents.run(106, "10:6", tips)
 	agents.publish("gui/"+uid+"/"+tips.Label, 106, tips.Path, "Submitted")
 	// Background-session LaunchAgents run in the user domain: the system plist
 	// is provenance, a job plist with the same label and binary is not.
-	agents.run(107, "10:7", teaService(), teaLabel)
+	agents.run(107, "10:7", teaService())
 	agents.publish(teaTarget, 107, teaService().Path, "LaunchAgent")
-	agents.run(108, "10:8", teaService(), "job.background")
+	agents.run(108, "10:8", teaService())
 	agents.publish("user/"+uid+"/job.background", 108, "/Users/job/Library/LaunchAgents/job.background.plist", "LaunchAgent")
-	baseline := GUIBaseline{JobUID: testJobUID, Boot: "boot"}
+	baseline := GUIBaseline{JobUID: testJobUID, Boot: "boot", Launchd: &LaunchdEnvironment{}}
 	for _, pid := range []int{100, 101, 103, 104, 105, 106, 107, 108} {
 		baseline.Processes = append(baseline.Processes, ProcessIdentity{PID: pid, Start: agents.procs[pid].start})
 	}
@@ -407,12 +436,6 @@ func TestResetRecordsOnlySystemLaunchdProvenance(t *testing.T) {
 	}
 }
 
-func procargs(t *testing.T, name string) (string, string) {
-	t.Helper()
-	launch := launchFixture(t, "testdata/procargs2/"+name+".bin")
-	return launch.label, launch.digest
-}
-
 func launchFixture(t *testing.T, path string) launchArguments {
 	t.Helper()
 	raw, err := os.ReadFile(path)
@@ -426,25 +449,45 @@ func launchFixture(t *testing.T, path string) launchArguments {
 	return launch
 }
 
-// Captured KERN_PROCARGS2 from macOS 26.6 (GitHub runner, job UID 501).
-func TestLaunchIdentityFromRealProcessArguments(t *testing.T) {
-	label, audited := procargs(t, "corespeechd-audited")
-	if label != speechLabel {
-		t.Fatalf("label = %q", label)
+// KERN_PROCARGS2 captured as UID 501: macOS 26.6 on a GitHub runner, where
+// the environment follows argv, and macOS 27.0 on the SIP-enabled Mac Studio,
+// where the kernel ends the buffer after argv for these CS_RESTRICT processes.
+// The launch identity is the exec path and argv only, so both layouts give
+// the same identity, and the environment (including a job's `launchctl
+// setenv`) never enters it: launchd's record decides provenance.
+func TestLaunchIdentityNeverReadsEnvironment(t *testing.T) {
+	for name, want := range map[string][]string{
+		"macos27-dock.bin":                 {dockPath, dockPath},
+		"macos27-finder.bin":               {finderPath, finderPath},
+		"macos27-loginwindow.bin":          {loginwindowPath, loginwindowPath, "console"},
+		"macos27-trustevaluationagent.bin": {"/System/Library/PrivateFrameworks/TrustEvaluationAgent.framework/Resources/trustevaluationagent", "trustevaluationagent"},
+	} {
+		launch := launchFixture(t, "testdata/procargs2/"+name)
+		if launch.program != want[0] || launch.argv != strings.Join(want[1:], "\x00") || !validLaunchDigest(launch.digest) {
+			t.Errorf("%s: %+v", name, launch)
+		}
 	}
-	if _, relaunched := procargs(t, "corespeechd-relaunched"); relaunched != audited {
-		t.Fatal("launchd relaunch after SIGKILL changed the launch identity")
+	if launchFixture(t, "testdata/procargs2/finder.bin") != launchFixture(t, "testdata/procargs2/macos27-finder.bin") {
+		t.Error("Finder with and without its environment block has different launch identities")
 	}
-	if _, submitted := procargs(t, "corespeechd-submitted"); submitted == audited {
-		t.Fatal("launchctl submit launch identity matched the system agent")
+	audited := launchFixture(t, "testdata/procargs2/corespeechd-audited.bin")
+	for _, name := range []string{"corespeechd-relaunched", "corespeechd-session", "corespeechd-session-setenv", "corespeechd-job-plist", "corespeechd-submitted"} {
+		if launchFixture(t, "testdata/procargs2/"+name+".bin") != audited {
+			t.Errorf("%s: launch identity depends on more than exec path and argv", name)
+		}
 	}
-	// The job plist copy is indistinguishable here; its plist path is not.
-	if _, copied := procargs(t, "corespeechd-job-plist"); copied != audited {
-		t.Fatal("expected identical launch identity for an unmodified plist copy")
+	raw, err := os.ReadFile("testdata/procargs2/macos27-loginwindow.bin")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, kicked := procargs(t, "syncdefaultsd-kickstarted"); kicked == "" {
-		t.Fatal("empty digest")
-	} else if _, poisoned := procargs(t, "syncdefaultsd-setenv"); poisoned == kicked {
-		t.Fatal("launchctl setenv did not change the launch identity")
+	for name, bad := range map[string][]byte{
+		"argv truncated": raw[:len(raw)-1],
+		"argc too large": append([]byte{3, 0, 0, 0}, raw[4:]...),
+		"argc zero":      append([]byte{0, 0, 0, 0}, raw[4:]...),
+		"no exec path":   raw[:4],
+	} {
+		if _, err := launchIdentity(bad); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
 	}
 }

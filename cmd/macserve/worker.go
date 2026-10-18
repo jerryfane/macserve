@@ -6,8 +6,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -136,6 +138,12 @@ func runWorkerReset(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	fmt.Fprintf(stdout, "Audited GUI baseline reset; scoped cleanup verified, quarantine cleared, pending evidence retained. %d of %d audited processes are verified system launchd services that may be relaunched. Native delayed persistence remains a trust limit.\n", services, len(result.Processes))
+	for _, d := range []struct {
+		name string
+		env  map[string]string
+	}{{"gui", result.Launchd.GUI}, {"user", result.Launchd.User}} {
+		fmt.Fprintf(stdout, "launchd %s domain environment recorded: %q; a later change refuses as contamination\n", d.name, slices.Sorted(maps.Keys(d.env)))
+	}
 	for _, p := range result.Dropped {
 		fmt.Fprintf(stdout, "dropped pid=%d start=%q path=%q: %s\n", p.PID, p.Start, p.Path, p.Reason)
 	}

@@ -14,12 +14,12 @@ import (
 	"github.com/jerryfane/macserve/internal/launchctlprint"
 )
 
-// realAgent runs pid as captured on macOS 26.6 (one session, UID 501): its
-// root `launchctl print` and KERN_PROCARGS2, rebound to testJobUID and pid.
+// realAgent runs pid as captured (UID 501): its root `launchctl print` and
+// KERN_PROCARGS2, rebound to testJobUID and pid.
 func realAgent(t *testing.T, agents *fakeAgents, pid int, start, executable, print, procargs string) LaunchdService {
 	t.Helper()
 	launch := launchFixture(t, "testdata/procargs2/"+procargs)
-	agents.procs[pid] = agentProcess{start: start, uid: testJobUID, ppid: 1, executable: executable, platform: true, label: launch.label, launch: launch.digest, program: launch.program, argv: launch.argv, env: launch.env}
+	agents.procs[pid] = agentProcess{start: start, uid: testJobUID, ppid: 1, executable: executable, platform: true, launch: launch.digest, program: launch.program, argv: launch.argv}
 	text, err := os.ReadFile("../launchctlprint/testdata/" + print)
 	if err != nil {
 		t.Fatal(err)
@@ -31,7 +31,7 @@ func realAgent(t *testing.T, agents *fakeAgents, pid int, start, executable, pri
 	parts := strings.SplitN(snapshot.Target, "/", 3)
 	snapshot.Target, snapshot.PID = parts[0]+"/"+strconv.Itoa(testJobUID)+"/"+parts[2], pid
 	agents.services[snapshot.Target] = snapshot
-	return LaunchdService{Domain: parts[0], Label: parts[2], Path: snapshot.Path, Executable: executable, LaunchSHA256: launch.digest}
+	return LaunchdService{Domain: parts[0], Label: parts[2], Path: snapshot.Path, Executable: executable, LaunchSHA256: launch.digest, InheritedSHA256: inheritedDigest(snapshot.Inherited)}
 }
 
 // realResetWorld is resetWorld with Finder (52) and trustevaluationagent (60)
@@ -74,28 +74,30 @@ func TestResetAdoptsLaunchdRespawnOfExcludedSystemAgent(t *testing.T) {
 
 // An unselected system LaunchAgent that launchd starts on demand during reset
 // is adopted only with launchd's record of the system plist, its program and
-// the domain environment of the selected agents. Anything else is terminated;
-// launchd starting it again then fails reset closed.
+// the inherited environment launchctl prints for the selected agents of its
+// domain. Anything else is terminated; launchd starting it again then fails
+// reset closed. A `launchctl setenv` appears in launchd's record, never only in
+// the process: its environment is not read.
 func TestResetAdoptsOnlyCleanSystemLaunchAgentsStartedDuringReset(t *testing.T) {
 	for name, tc := range map[string]struct {
-		procargs string
-		mutate   func(*launchctlprint.Snapshot)
-		adopted  bool
+		print   string
+		mutate  func(*launchctlprint.Snapshot)
+		adopted bool
 	}{
-		"clean on-demand launch": {"corespeechd-session.bin", nil, true},
-		"after launchctl setenv": {"corespeechd-session-setenv.bin", nil, false},
-		"job LaunchAgents plist copy": {"corespeechd-session.bin", func(s *launchctlprint.Snapshot) {
+		"clean on-demand launch": {"gui-corespeechd-session.txt", nil, true},
+		"after launchctl setenv": {"gui-corespeechd-setenv.txt", nil, false},
+		"job LaunchAgents plist copy": {"gui-corespeechd-session.txt", func(s *launchctlprint.Snapshot) {
 			s.Path = "/Users/job/Library/LaunchAgents/com.apple.corespeechd.plist"
 		}, false},
-		"launchctl submit":             {"corespeechd-session.bin", func(s *launchctlprint.Snapshot) { s.Path, s.Type = "(submitted by launchctl[7])", "Submitted" }, false},
-		"program differs from record":  {"corespeechd-session.bin", func(s *launchctlprint.Snapshot) { s.Program = "/bin/sh" }, false},
-		"arguments differ from record": {"corespeechd-session.bin", func(s *launchctlprint.Snapshot) { s.Arguments = append(s.Arguments, "--debug") }, false},
-		"environment record missing":   {"corespeechd-session.bin", func(s *launchctlprint.Snapshot) { s.Environment = nil }, false},
+		"launchctl submit":              {"gui-corespeechd-session.txt", func(s *launchctlprint.Snapshot) { s.Path, s.Type = "(submitted by launchctl[7])", "Submitted" }, false},
+		"program differs from record":   {"gui-corespeechd-session.txt", func(s *launchctlprint.Snapshot) { s.Program = "/bin/sh" }, false},
+		"arguments differ from record":  {"gui-corespeechd-session.txt", func(s *launchctlprint.Snapshot) { s.Arguments = append(s.Arguments, "--debug") }, false},
+		"inherited environment missing": {"gui-corespeechd-session.txt", func(s *launchctlprint.Snapshot) { s.Inherited = nil }, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			s, agents, h, _ := realResetWorld(t)
 			result, err := resetResult(s, resetSelection, func(context.Context) error {
-				realAgent(t, agents, 400, "50:0", speechExecutable, "gui-corespeechd-session.txt", tc.procargs)
+				realAgent(t, agents, 400, "50:0", speechExecutable, tc.print, "corespeechd-session.bin")
 				if tc.mutate != nil {
 					snapshot := agents.services[speechAgentTarget]
 					tc.mutate(&snapshot)
@@ -167,7 +169,7 @@ func TestResetAuditRequiresStableUIDStartAndBootCensus(t *testing.T) {
 			for _, pid := range resetSelection {
 				selected = append(selected, ProcessIdentity{PID: pid, Start: "1:" + strconv.Itoa(pid)})
 			}
-			s.baseline = GUIBaseline{JobUID: testJobUID, Boot: "boot", Processes: selected}
+			s.baseline = GUIBaseline{JobUID: testJobUID, Boot: "boot", Processes: selected, Launchd: &LaunchdEnvironment{GUI: map[string]string{}, User: map[string]string{}}}
 			anchors := map[int]string{50: "1:50", 51: "1:51", 52: "1:52", 53: "1:53", 54: "1:54"}
 			calls, boots := 0, 0
 			s.sample = func(context.Context) ([]processSample, error) {

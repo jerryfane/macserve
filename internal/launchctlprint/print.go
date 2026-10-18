@@ -25,8 +25,11 @@ var errInvalid = errors.New("invalid launchctl running service snapshot")
 // is the service's own root `environment` dictionary (its plist
 // EnvironmentVariables plus launchd's per-service entries such as
 // XPC_SERVICE_NAME); it is nil when not printed or when an entry is not a
-// plain `KEY => value` line. It never includes the `inherited environment`
-// that `launchctl setenv` changes.
+// plain `KEY => value` line. Inherited is the root `inherited environment`
+// dictionary, the domain environment launchd lists for the service, where a
+// `launchctl setenv` value appears; it is nil when not printed, and an entry
+// that is not a plain `KEY => value` line invalidates the snapshot, because
+// callers compare it as authority.
 type Snapshot struct {
 	Target      string
 	State       string
@@ -36,44 +39,225 @@ type Snapshot struct {
 	Program     string
 	Arguments   []string
 	Environment map[string]string
+	Inherited   map[string]string
+}
+
+// Domain is the root authority of `launchctl print <domain>` (gui/UID,
+// user/UID or pid/PID). Environment is the domain's own root `environment`
+// dictionary, what `launchctl setenv` changes for every later launch there;
+// it is nil when not printed, and an entry that is not a plain `KEY => value`
+// line invalidates the print. Services maps each running PID in the root
+// `services` table to its label. It is only a hint for finding the exact
+// service record: rows that are not `PID STATUS LABEL`, PID 0 (not running)
+// and PIDs listed more than once are left out.
+type Domain struct {
+	Target      string
+	Environment map[string]string
+	Services    map[int]string
 }
 
 // Parse accepts a complete newline-terminated service dictionary with exactly
 // one unquoted state = running and one canonical positive 32-bit pid = N.
-// Root path, type, program, arguments and environment are optional but
-// unique; a value that injects a second root line (a filename, or a
-// `launchctl setenv` value printed in the inherited environment, which comes
-// before the root environment) therefore invalidates the snapshot instead of
-// shadowing the first. Collected entries never bypass the structural checks.
-// Other fields may contain dictionaries, arrays, quoted keys, and => entries.
-// Quotes are line-local; controls, malformed nesting and trailing output fail.
+// Root path, type, program, arguments, environment and inherited environment
+// are optional but unique; a value that injects a second root line (a
+// filename, or a `launchctl setenv` value printed in the inherited
+// environment, which comes before the root environment) therefore invalidates
+// the snapshot instead of shadowing the first. Collected entries never bypass
+// the structural checks. Other fields may contain dictionaries, arrays, quoted
+// keys, and => entries. Quotes are line-local; controls, malformed nesting and
+// trailing output fail.
 func Parse(text string) (Snapshot, error) {
-	if len(text) == 0 || len(text) > maxOutput || !utf8.ValidString(text) {
+	var result Snapshot
+	stateSeen, pidSeen, pathSeen, typeSeen, programSeen := false, false, false, false, false
+	// envUsable is cleared by any root environment entry that is not a plain
+	// unique `KEY => value`.
+	envUsable := true
+	root := func(key, value string, arrow bool) (string, error) {
+		switch key {
+		case "state":
+			if stateSeen || arrow || value != "running" {
+				return "", errInvalid
+			}
+			result.State, stateSeen = value, true
+		case "pid":
+			if pidSeen || arrow || !decimal(value, false) {
+				return "", errInvalid
+			}
+			pid, err := strconv.ParseInt(value, 10, 32)
+			if err != nil {
+				return "", errInvalid
+			}
+			result.PID, pidSeen = int(pid), true
+		case "path":
+			if pathSeen || arrow {
+				return "", errInvalid
+			}
+			result.Path, pathSeen = value, true
+		case "type":
+			if typeSeen || arrow {
+				return "", errInvalid
+			}
+			result.Type, typeSeen = value, true
+		case "program":
+			if programSeen || arrow {
+				return "", errInvalid
+			}
+			result.Program, programSeen = value, true
+		case "arguments":
+			if result.Arguments != nil {
+				return "", errInvalid
+			}
+			result.Arguments = []string{}
+			return opened(key, value, arrow)
+		case "environment":
+			if result.Environment != nil {
+				return "", errInvalid
+			}
+			result.Environment = map[string]string{}
+			return opened(key, value, arrow)
+		case "inherited environment":
+			if result.Inherited != nil {
+				return "", errInvalid
+			}
+			result.Inherited = map[string]string{}
+			return opened(key, value, arrow)
+		}
+		return "", nil
+	}
+	item := func(section, body, key, value string, arrow, property bool) error {
+		switch section {
+		case "arguments":
+			result.Arguments = append(result.Arguments, body)
+		case "environment":
+			if !plainEntry(result.Environment, key, value, arrow, property) {
+				envUsable = false
+			} else {
+				result.Environment[key] = value
+			}
+		case "inherited environment":
+			if !plainEntry(result.Inherited, key, value, arrow, property) {
+				return errInvalid
+			}
+			result.Inherited[key] = value
+		}
+		return nil
+	}
+	target, err := walk(text, root, item)
+	if err != nil || !stateSeen || !pidSeen {
 		return Snapshot{}, errInvalid
+	}
+	result.Target = target
+	if !envUsable {
+		result.Environment = nil
+	}
+	return result, nil
+}
+
+// ParseDomain accepts a complete newline-terminated `launchctl print` of a
+// domain with the structure Parse requires of a service. Root environment and
+// services are optional but unique.
+func ParseDomain(text string) (Domain, error) {
+	var result Domain
+	servicesSeen := false
+	listed := make(map[int]int)
+	root := func(key, value string, arrow bool) (string, error) {
+		switch key {
+		case "environment":
+			if result.Environment != nil {
+				return "", errInvalid
+			}
+			result.Environment = map[string]string{}
+			return opened(key, value, arrow)
+		case "services":
+			if servicesSeen {
+				return "", errInvalid
+			}
+			servicesSeen = true
+			return opened(key, value, arrow)
+		}
+		return "", nil
+	}
+	item := func(section, body, key, value string, arrow, property bool) error {
+		switch section {
+		case "environment":
+			if !plainEntry(result.Environment, key, value, arrow, property) {
+				return errInvalid
+			}
+			result.Environment[key] = value
+		case "services":
+			fields := strings.Fields(body)
+			if property || len(fields) != 3 || !decimal(fields[0], true) {
+				return nil
+			}
+			if pid, err := strconv.ParseInt(fields[0], 10, 32); err == nil && pid > 0 {
+				listed[int(pid)]++
+				if result.Services == nil {
+					result.Services = make(map[int]string)
+				}
+				result.Services[int(pid)] = fields[2]
+			}
+		}
+		return nil
+	}
+	target, err := walk(text, root, item)
+	if err != nil {
+		return Domain{}, errInvalid
+	}
+	result.Target = target
+	for pid, n := range listed {
+		if n != 1 {
+			delete(result.Services, pid)
+		}
+	}
+	return result, nil
+}
+
+// opened returns the root dictionary key opens for collection: the value
+// must open a dictionary, and an empty inline one collects nothing.
+func opened(key, value string, arrow bool) (string, error) {
+	open := strings.Trim(value, " \t")
+	if arrow || open != "{" && open != "{}" {
+		return "", errInvalid
+	}
+	if open == "{}" {
+		return "", nil
+	}
+	return key, nil
+}
+
+// plainEntry reports whether a collected dictionary line is a plain unique
+// unquoted `KEY => value` with a scalar value.
+func plainEntry(m map[string]string, key, value string, arrow, property bool) bool {
+	_, seen := m[key]
+	return !seen && arrow && property && !strings.HasPrefix(key, "\"") && !strings.ContainsAny(value, "\"{}[]")
+}
+
+// walk validates one complete newline-terminated launchctl print and returns
+// its root target. It calls root for every root-level property, in order;
+// root may name the root dictionary it opens as a section, and item is then
+// called for each line directly inside that section.
+func walk(text string, root func(key, value string, arrow bool) (string, error), item func(section, body, key, value string, arrow, property bool) error) (string, error) {
+	if len(text) == 0 || len(text) > maxOutput || !utf8.ValidString(text) {
+		return "", errInvalid
 	}
 	for _, c := range text {
 		if unicode.IsControl(c) && c != '\n' && c != '\t' {
-			return Snapshot{}, errInvalid
+			return "", errInvalid
 		}
 	}
 	first, text, complete := strings.Cut(text, "\n")
 	target, ok := strings.CutSuffix(first, " = {")
 	if !complete || !ok || target == "" || strings.ContainsAny(target, " \t\"{}[]\\=") {
-		return Snapshot{}, errInvalid
+		return "", errInvalid
 	}
-	result := Snapshot{Target: target}
 	var stack [maxDepth]byte
 	stack[0] = '{'
 	depth := 1
-	stateSeen, pidSeen, pathSeen, typeSeen, programSeen := false, false, false, false, false
-	// section names the root dictionary ("arguments" or "environment") whose
-	// depth-2 entries are collected; envUsable is cleared by any environment
-	// entry that is not a plain unique `KEY => value`.
-	section, envUsable := "", true
+	section := ""
 	for text != "" {
 		line, rest, complete := strings.Cut(text, "\n")
 		if !complete {
-			return Snapshot{}, errInvalid
+			return "", errInvalid
 		}
 		text = rest
 		trimmed := strings.Trim(line, " \t")
@@ -82,95 +266,47 @@ func Parse(text string) (Snapshot, error) {
 		}
 		if trimmed == "}" || trimmed == "]" {
 			if !matches(stack[depth-1], trimmed[0]) {
-				return Snapshot{}, errInvalid
+				return "", errInvalid
 			}
 			depth--
 			if depth == 1 {
 				section = ""
 			}
 			if depth == 0 {
-				if text != "" || !stateSeen || !pidSeen {
-					return Snapshot{}, errInvalid
+				if text != "" {
+					return "", errInvalid
 				}
-				if !envUsable {
-					result.Environment = nil
-				}
-				return result, nil
+				return target, nil
 			}
 			continue
 		}
 		if line[0] != ' ' && line[0] != '\t' {
-			return Snapshot{}, errInvalid
+			return "", errInvalid
 		}
 		// Retain trailing whitespace here: it must not canonicalize a PID or
 		// state into an authoritative value that launchctl did not emit.
 		body := strings.TrimLeft(line, " \t")
 		key, value, arrow, property, valid := entry(body)
 		if !valid || depth == 1 && !property {
-			return Snapshot{}, errInvalid
+			return "", errInvalid
 		}
-		if depth == 2 && section == "arguments" {
-			result.Arguments = append(result.Arguments, body)
-		}
-		if depth == 2 && section == "environment" {
-			if _, seen := result.Environment[key]; seen || !arrow || !property || strings.HasPrefix(key, "\"") || strings.ContainsAny(value, "\"{}[]") {
-				envUsable = false
-			} else {
-				result.Environment[key] = value
+		if depth == 2 && section != "" {
+			if err := item(section, body, key, value, arrow, property); err != nil {
+				return "", err
 			}
 		}
 		if depth == 1 {
 			if strings.HasPrefix(key, "\"") {
-				return Snapshot{}, errInvalid
+				return "", errInvalid
 			}
-			switch key {
-			case "state":
-				if stateSeen || arrow || value != "running" {
-					return Snapshot{}, errInvalid
-				}
-				result.State, stateSeen = value, true
-			case "pid":
-				if pidSeen || arrow || !decimal(value, false) {
-					return Snapshot{}, errInvalid
-				}
-				pid, err := strconv.ParseInt(value, 10, 32)
-				if err != nil {
-					return Snapshot{}, errInvalid
-				}
-				result.PID, pidSeen = int(pid), true
-			case "path":
-				if pathSeen || arrow {
-					return Snapshot{}, errInvalid
-				}
-				result.Path, pathSeen = value, true
-			case "type":
-				if typeSeen || arrow {
-					return Snapshot{}, errInvalid
-				}
-				result.Type, typeSeen = value, true
-			case "program":
-				if programSeen || arrow {
-					return Snapshot{}, errInvalid
-				}
-				result.Program, programSeen = value, true
-			case "arguments", "environment":
-				open := strings.Trim(value, " \t")
-				empty := open == "{}"
-				if key == "arguments" && result.Arguments != nil || key == "environment" && result.Environment != nil || arrow || open != "{" && !empty {
-					return Snapshot{}, errInvalid
-				}
-				if key == "arguments" {
-					result.Arguments = []string{}
-				} else {
-					result.Environment = map[string]string{}
-				}
-				if !empty {
-					section = key
-				}
+			opens, err := root(key, value, arrow)
+			if err != nil {
+				return "", err
 			}
+			section = opens
 		}
 		if stack[depth-1] == '[' && property && (arrow || !decimal(key, true)) {
-			return Snapshot{}, errInvalid
+			return "", errInvalid
 		}
 		value = strings.Trim(value, " \t")
 		if bracketedScalar(value) {
@@ -178,7 +314,7 @@ func Parse(text string) (Snapshot, error) {
 		}
 		bracket, valid := structural(value)
 		if !valid {
-			return Snapshot{}, errInvalid
+			return "", errInvalid
 		}
 		if bracket < 0 {
 			continue
@@ -189,12 +325,12 @@ func Parse(text string) (Snapshot, error) {
 			// Containers occupy the value, never a suffix of an unquoted
 			// scalar. Empty inline containers are also emitted by launchctl.
 			if bracket != 0 || !property && stack[depth-1] != '[' || depth == maxDepth {
-				return Snapshot{}, errInvalid
+				return "", errInvalid
 			}
 			remainder := strings.Trim(value[1:], " \t")
 			if remainder != "" {
 				if len(remainder) != 1 || !matches(c, remainder[0]) {
-					return Snapshot{}, errInvalid
+					return "", errInvalid
 				}
 				continue
 			}
@@ -204,17 +340,17 @@ func Parse(text string) (Snapshot, error) {
 			// The close belongs to its array, not the enclosing service.
 			prefix := strings.Trim(value[:bracket], " \t")
 			if prefix != "" {
-				return Snapshot{}, errInvalid
+				return "", errInvalid
 			}
 			if stack[depth-1] != '[' || strings.Trim(value[bracket+1:], " \t") != "" {
-				return Snapshot{}, errInvalid
+				return "", errInvalid
 			}
 			depth--
 		default:
-			return Snapshot{}, errInvalid
+			return "", errInvalid
 		}
 	}
-	return Snapshot{}, errInvalid
+	return "", errInvalid
 }
 
 func matches(open, close byte) bool {
@@ -308,12 +444,33 @@ func structural(value string) (int, bool) {
 	return bracket, !quoted && !escaped
 }
 
-// bracketedScalar accepts launchctl's same-line annotation suffix, as in
-// `domain = gui/501 [100002]` or `domain = pid/359 [Finder]`. The bracket pair
-// closes on the same line around plain text, so it cannot open, close or
+// bracketedScalar accepts launchctl's same-line bracket annotations, as in
+// `domain = gui/501 [100002]`, `domain = pid/359 [Finder]` or a domain's
+// `creator = loginwindow[15160]`. Each bracket pair closes on the same line
+// around plain text and the value has no braces, so it cannot open, close or
 // reparent a container. Everything else keeps the structural checks.
 func bracketedScalar(value string) bool {
-	head, note, ok := strings.Cut(value, " [")
-	inner, closed := strings.CutSuffix(note, "]")
-	return ok && closed && head != "" && inner != "" && !strings.ContainsAny(head, "\"\\{}[]") && !strings.ContainsAny(inner, "\"\\{}[]")
+	if value == "" || value[0] == '[' || strings.ContainsAny(value, "\"\\{}") {
+		return false
+	}
+	open, closed, inner := false, false, 0
+	for i := range len(value) {
+		switch value[i] {
+		case '[':
+			if open {
+				return false
+			}
+			open, inner = true, 0
+		case ']':
+			if !open || inner == 0 {
+				return false
+			}
+			open, closed = false, true
+		default:
+			if open {
+				inner++
+			}
+		}
+	}
+	return closed && !open
 }

@@ -14,10 +14,14 @@ type nativeAgents struct{}
 
 var errNoLaunchd = errors.New("launchd service inspection requires macOS")
 
+func (nativeAgents) kernel(int) (agentProcess, error) { return agentProcess{}, errNoLaunchd }
+
 func (nativeAgents) process(int) (agentProcess, error) { return agentProcess{}, errNoLaunchd }
 
 func (nativeAgents) service(context.Context, string) (launchctlprint.Snapshot, error) {
 	return launchctlprint.Snapshot{}, errNoLaunchd
 }
 
-func (nativeAgents) responsible(context.Context, int) (int, error) { return 0, errNoLaunchd }
+func (nativeAgents) domain(context.Context, string) (launchctlprint.Domain, error) {
+	return launchctlprint.Domain{}, errNoLaunchd
+}

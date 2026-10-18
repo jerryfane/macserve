@@ -117,6 +117,9 @@ func (e *Engine) reset(ctx context.Context, prepare func(context.Context) error)
 // cleanup alone measured about two); Apple helpers in the job GUI session exit
 // on their own in that time and launchd starts them again on demand, so:
 //
+//   - The environment launchctl prints for the job's gui and user domains is
+//     recorded first; every later census refuses a difference (see
+//     LaunchdEnvironment).
 //   - Launchd provenance is recorded from the selected instances themselves
 //     before cleanup (describeServices), while they still run.
 //   - A requested PID already absent at start is dropped. One held by another
@@ -146,11 +149,15 @@ func (s *processScope) resetBaseline(ctx context.Context, pids []int, boot func(
 	if err != nil {
 		return ResetResult{}, err
 	}
+	env, err := launchdEnvironment(ctx, s.agents, s.uid)
+	if err != nil {
+		return ResetResult{}, err
+	}
 	samples, err := s.sample(ctx)
 	if err != nil {
 		return ResetResult{}, err
 	}
-	selected, dropped, err := selectedBaseline(uint32(s.uid), pids, bootID, samples)
+	selected, dropped, err := selectedBaseline(uint32(s.uid), pids, bootID, env, samples)
 	if err != nil {
 		return ResetResult{}, err
 	}
@@ -167,11 +174,12 @@ func (s *processScope) resetBaseline(ctx context.Context, pids []int, boot func(
 	for _, p := range samples {
 		adopt.initial[p.pid] = p.start
 	}
+	hints := newServiceHints(s.agents, s.uid, nil)
 	for _, p := range samples {
 		if p.uid != s.uid || p.zombie || chosen[p.pid] {
 			continue
 		}
-		if id, ok := adopt.qualifies(ctx, s.agents, s.uid, p); ok {
+		if id, ok := adopt.qualifies(ctx, s.agents, s.uid, p, hints); ok {
 			adopt.terminate[p.pid] = p.start
 			adopt.adopted = append(adopt.adopted, id)
 			selected.Processes = append(selected.Processes, id)

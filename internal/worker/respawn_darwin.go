@@ -6,8 +6,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"strconv"
-	"strings"
 	"unsafe"
 
 	"github.com/jerryfane/macserve/internal/launchctlprint"
@@ -25,7 +23,11 @@ const (
 // It never signals, starts or modifies a service.
 type nativeAgents struct{}
 
-func (nativeAgents) process(pid int) (agentProcess, error) {
+// kernel reads kinfo_proc (start, effective UID, parent), the csops status and
+// the PROC_PIDPATHINFO executable path. It does not read KERN_PROCARGS2, whose
+// environment the kernel withholds from every caller, root included, for a
+// CS_RESTRICT process while SIP is enabled.
+func (nativeAgents) kernel(pid int) (agentProcess, error) {
 	k, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
 	if err != nil || int(k.Proc.P_pid) != pid {
 		return agentProcess{}, errors.Join(err, errors.New("process unavailable"))
@@ -53,6 +55,14 @@ func (nativeAgents) process(pid int) (agentProcess, error) {
 		return agentProcess{}, errors.New("process executable unavailable")
 	}
 	facts.executable = string(path[:end])
+	return facts, nil
+}
+
+func (a nativeAgents) process(pid int) (agentProcess, error) {
+	facts, err := a.kernel(pid)
+	if err != nil {
+		return agentProcess{}, err
+	}
 	raw, err := unix.SysctlRaw("kern.procargs2", pid)
 	if err != nil {
 		return agentProcess{}, err
@@ -61,7 +71,7 @@ func (nativeAgents) process(pid int) (agentProcess, error) {
 	if err != nil {
 		return agentProcess{}, err
 	}
-	facts.label, facts.launch, facts.program, facts.argv, facts.env = launch.label, launch.digest, launch.program, launch.argv, launch.env
+	facts.launch, facts.program, facts.argv = launch.digest, launch.program, launch.argv
 	return facts, nil
 }
 
@@ -73,31 +83,10 @@ func (nativeAgents) service(ctx context.Context, target string) (launchctlprint.
 	return launchctlprint.Parse(out)
 }
 
-// responsible is only a hint naming which audited pid domain to query;
-// authority comes from launchctl print of that domain's exact service.
-func (nativeAgents) responsible(ctx context.Context, pid int) (int, error) {
-	out, _, err := inspectCommand(ctx, nil, "/bin/launchctl", "procinfo", strconv.Itoa(pid))
+func (nativeAgents) domain(ctx context.Context, target string) (launchctlprint.Domain, error) {
+	out, _, err := inspectCommand(ctx, nil, "/bin/launchctl", "print", target)
 	if err != nil {
-		return 0, err
+		return launchctlprint.Domain{}, err
 	}
-	return responsiblePID(out)
-}
-
-func responsiblePID(out string) (int, error) {
-	found := 0
-	for line := range strings.Lines(out) {
-		value, ok := strings.CutPrefix(strings.TrimSuffix(line, "\n"), "responsible pid = ")
-		if !ok {
-			continue
-		}
-		pid, err := strconv.Atoi(value)
-		if err != nil || pid <= 1 || found != 0 {
-			return 0, errors.New("ambiguous responsible process")
-		}
-		found = pid
-	}
-	if found == 0 {
-		return 0, errors.New("responsible process unavailable")
-	}
-	return found, nil
+	return launchctlprint.ParseDomain(out)
 }
