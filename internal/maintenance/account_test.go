@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -310,5 +311,44 @@ func TestMutableAccountingHardlinksAndAncestorSymlinks(t *testing.T) {
 	n, err = accountBytes(context.Background(), []string{filepath.Join(base, "linked-parent", "root")})
 	if err == nil || n != -1 {
 		t.Fatalf("followed ancestor symlink: bytes=%d err=%v", n, err)
+	}
+}
+
+func TestMutableAccountingErrorsNameRelativePath(t *testing.T) {
+	for _, tc := range []struct {
+		failure, name, want string
+		cause               error
+	}{
+		{"tcc denial", "Mail", `"Library/Mail": operation not permitted`, unix.EPERM},
+		{"mount", "DeviceFS", `"Library/Developer/CoreDevice/DeviceFS": mutable mount crossing`, nil},
+	} {
+		t.Run(tc.failure, func(t *testing.T) {
+			root := filepath.Join(censusFixtureDir(t), "home")
+			for _, dir := range []string{"Library/Mail", "Library/Developer/CoreDevice/DeviceFS"} {
+				if err := os.MkdirAll(filepath.Join(root, dir), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			statat := func(fd int, name string, st *unix.Stat_t, flags int) error {
+				if name != tc.name {
+					return unix.Fstatat(fd, name, st, flags)
+				}
+				if tc.cause != nil {
+					return tc.cause
+				}
+				if err := unix.Fstatat(fd, name, st, flags); err != nil {
+					return err
+				}
+				st.Dev++
+				return nil
+			}
+			n, err := accountBytesWithStat(context.Background(), []string{root}, statat)
+			if n != -1 || err == nil || !strings.Contains(err.Error(), root+": "+tc.want) {
+				t.Fatalf("census error does not name the failing path: bytes=%d err=%v", n, err)
+			}
+			if tc.cause != nil && !errors.Is(err, tc.cause) {
+				t.Fatalf("lost underlying error: %v", err)
+			}
+		})
 	}
 }

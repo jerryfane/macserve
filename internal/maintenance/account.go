@@ -3,10 +3,12 @@ package maintenance
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -18,6 +20,8 @@ import (
 // census, not a snapshot: concurrent changes can be missed or observed at different
 // times. Mount crossings, special nodes (except local sockets), and traversal
 // limits invalidate the census. Local sockets have metadata but no file payload.
+// Errors name the census root and the quoted root-relative path that failed, so
+// a TCC denial (EPERM without Full Disk Access) or a refusal is diagnosable.
 func accountBytes(ctx context.Context, roots []string) (int64, error) {
 	return accountBytesWithStat(ctx, roots, unix.Fstatat)
 }
@@ -31,24 +35,27 @@ func accountBytesWithStat(ctx context.Context, roots []string, statat func(int, 
 	seen := map[inode]bool{}
 	var total int64
 	entries := 0
-	var walk func(int, string, uint64, int) error
-	walk = func(parent int, name string, device uint64, depth int) error {
+	var walk func(int, string, string, uint64, int) error
+	walk = func(parent int, name, rel string, device uint64, depth int) error {
+		fail := func(err error) error {
+			return fmt.Errorf("%s: %w", strconv.Quote(rel), err)
+		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		entries++
 		if entries > 1000000 || depth > 128 {
-			return errors.New("mutable census bound exceeded")
+			return fail(errors.New("mutable census bound exceeded"))
 		}
 		var st unix.Stat_t
 		if err := statat(parent, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 			if errors.Is(err, unix.ENOENT) {
 				return nil
 			}
-			return err
+			return fail(err)
 		}
 		if uint64(st.Dev) != device {
-			return errors.New("mutable mount crossing")
+			return fail(errors.New("mutable mount crossing"))
 		}
 		key := inode{uint64(st.Dev), uint64(st.Ino)}
 		if seen[key] {
@@ -64,16 +71,16 @@ func accountBytesWithStat(ctx context.Context, roots []string, statat func(int, 
 				if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ENOTDIR) || errors.Is(err, unix.ELOOP) {
 					return nil
 				}
-				return err
+				return fail(err)
 			}
 			f = os.NewFile(uintptr(fd), name)
 			defer f.Close()
 			// Account the directory actually opened, not its possibly stale lstat.
 			if err = unix.Fstat(fd, &st); err != nil {
-				return err
+				return fail(err)
 			}
 			if uint64(st.Dev) != device {
-				return errors.New("mutable mount crossing")
+				return fail(errors.New("mutable mount crossing"))
 			}
 			key = inode{uint64(st.Dev), uint64(st.Ino)}
 			if seen[key] {
@@ -83,20 +90,20 @@ func accountBytesWithStat(ctx context.Context, roots []string, statat func(int, 
 		seen[key] = true
 		size := st.Size
 		if st.Blocks < 0 || st.Blocks > math.MaxInt64/512 || size < 0 {
-			return errors.New("invalid mutable size")
+			return fail(errors.New("invalid mutable size"))
 		}
 		if allocated := st.Blocks * 512; allocated > size {
 			size = allocated
 		}
 		if total > math.MaxInt64-size {
-			return errors.New("mutable size overflow")
+			return fail(errors.New("mutable size overflow"))
 		}
 		total += size
 		if kind == unix.S_IFREG || kind == unix.S_IFLNK || kind == unix.S_IFSOCK {
 			return nil
 		}
 		if kind != unix.S_IFDIR {
-			return errors.New("unsupported mutable special file")
+			return fail(errors.New("unsupported mutable special file"))
 		}
 		for {
 			names, err := f.Readdirnames(128)
@@ -104,10 +111,10 @@ func accountBytesWithStat(ctx context.Context, roots []string, statat func(int, 
 				if errors.Is(err, unix.ENOENT) {
 					return nil
 				}
-				return err
+				return fail(err)
 			}
 			for _, child := range names {
-				if err := walk(fd, child, device, depth+1); err != nil {
+				if err := walk(fd, child, filepath.Join(rel, child), device, depth+1); err != nil {
 					return err
 				}
 			}
@@ -131,7 +138,7 @@ func accountBytesWithStat(ctx context.Context, roots []string, statat func(int, 
 			next, e := unix.Openat(fd, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 			unix.Close(fd)
 			if e != nil {
-				return -1, e
+				return -1, fmt.Errorf("mutable census %s: ancestor %s: %w", root, strconv.Quote(part), e)
 			}
 			fd = next
 		}
@@ -141,11 +148,11 @@ func accountBytesWithStat(ctx context.Context, roots []string, statat func(int, 
 			err = errors.New("mutable root is not directory")
 		}
 		if err == nil {
-			err = walk(fd, parts[len(parts)-1], uint64(st.Dev), 0)
+			err = walk(fd, parts[len(parts)-1], ".", uint64(st.Dev), 0)
 		}
 		unix.Close(fd)
 		if err != nil {
-			return -1, err
+			return -1, fmt.Errorf("mutable census %s: %w", root, err)
 		}
 	}
 	return total, ctx.Err()
