@@ -19,7 +19,9 @@ import (
 // Hardlinks and nested roots are counted once. This is an approximate live budget
 // census, not a snapshot: concurrent changes can be missed or observed at different
 // times. Mount crossings, special nodes (except local sockets), and traversal
-// limits invalidate the census. Local sockets have metadata but no file payload.
+// limits invalidate the census, with one exception: the CoreDevice devicefs that
+// Xcode/CoreDeviceService mounts for the job user inside the job home (see
+// coreDeviceMount) is not descended. Local sockets have metadata but no file payload.
 // Errors name the census root and the quoted root-relative path that failed, so
 // a TCC denial (EPERM without Full Disk Access) or a refusal is diagnosable.
 func accountBytes(ctx context.Context, roots []string, jobHome string, jobUID uint32) (int64, error) {
@@ -49,6 +51,46 @@ type mountEntry struct {
 	from   string
 }
 
+const (
+	// Root-relative mount point and backing directory of the CoreDevice devicefs.
+	coreDeviceMountPoint = "Library/Developer/CoreDevice/DeviceFS"
+	coreDeviceData       = "Library/Containers/com.apple.CoreDevice.CoreDeviceService/Data"
+	// <sys/mount.h> MNT_NODEV and MNT_NOSUID; a darwin test pins them to x/sys.
+	mountNoDev  = 0x10
+	mountNoSUID = 0x8
+)
+
+// coreDeviceMount returns the single mount-table record for dev if, and only if,
+// it is the job user's own CoreDevice devicefs at its fixed job-home path, backed
+// by CoreDeviceService's container directory in that same home. The backing bytes
+// are therefore already counted on the home device, and the FSKit server runs as
+// the job user, so it cannot store anything the job could not write directly.
+// Every other nested mount (disk images, other FSKit or network filesystems,
+// devicefs elsewhere or owned by another user) stays a mount crossing.
+func (c census) coreDeviceMount(dev uint64) (mountEntry, error) {
+	if c.mounts == nil || c.jobHome == "" {
+		return mountEntry{}, errors.New("mutable mount crossing")
+	}
+	table, err := c.mounts()
+	if err != nil {
+		return mountEntry{}, fmt.Errorf("mutable mount crossing: %w", err)
+	}
+	var match []mountEntry
+	for _, m := range table {
+		if m.fsid == dev {
+			match = append(match, m)
+		}
+	}
+	if len(match) != 1 {
+		return mountEntry{}, errors.New("mutable mount crossing: no unique mount record")
+	}
+	m := match[0]
+	if m.fstype != "devicefs" || m.on != c.jobHome+"/"+coreDeviceMountPoint || m.from != "devices -- file://"+c.jobHome+"/"+coreDeviceData+"/" || m.owner != c.jobUID || m.flags&(mountNoDev|mountNoSUID) != mountNoDev|mountNoSUID {
+		return mountEntry{}, fmt.Errorf("mutable mount crossing: %s mount is not the job CoreDevice devicefs", strconv.Quote(m.fstype))
+	}
+	return m, nil
+}
+
 func (c census) account(ctx context.Context, roots []string) (int64, error) {
 	statat := c.statat
 	type inode struct {
@@ -58,6 +100,9 @@ func (c census) account(ctx context.Context, roots []string) (int64, error) {
 	seen := map[inode]bool{}
 	var total int64
 	entries := 0
+	// The one accepted CoreDevice mount; it must be unchanged when the census ends.
+	var skipped *mountEntry
+	jobHome := false
 	var walk func(int, string, string, uint64, int) error
 	walk = func(parent int, name, rel string, device uint64, depth int) error {
 		fail := func(err error) error {
@@ -78,7 +123,21 @@ func (c census) account(ctx context.Context, roots []string) (int64, error) {
 			return fail(err)
 		}
 		if uint64(st.Dev) != device {
-			return fail(errors.New("mutable mount crossing"))
+			if !jobHome || rel != coreDeviceMountPoint || skipped != nil || st.Mode&unix.S_IFMT != unix.S_IFDIR {
+				return fail(errors.New("mutable mount crossing"))
+			}
+			m, err := c.coreDeviceMount(uint64(st.Dev))
+			if err != nil {
+				return fail(err)
+			}
+			// Never open or descend the mount. The name must still resolve to the
+			// same mounted root after the decision.
+			var again unix.Stat_t
+			if err := statat(parent, name, &again, unix.AT_SYMLINK_NOFOLLOW); err != nil || again.Dev != st.Dev || again.Ino != st.Ino || again.Mode&unix.S_IFMT != unix.S_IFDIR {
+				return fail(errors.New("mutable mount changed during census"))
+			}
+			skipped = &m
+			return nil
 		}
 		key := inode{uint64(st.Dev), uint64(st.Ino)}
 		if seen[key] {
@@ -171,11 +230,31 @@ func (c census) account(ctx context.Context, roots []string) (int64, error) {
 			err = errors.New("mutable root is not directory")
 		}
 		if err == nil {
+			jobHome = c.jobHome != "" && root == c.jobHome
 			err = walk(fd, parts[len(parts)-1], ".", uint64(st.Dev), 0)
 		}
 		unix.Close(fd)
 		if err != nil {
 			return -1, fmt.Errorf("mutable census %s: %w", root, err)
+		}
+	}
+	if skipped != nil {
+		// The skip is valid only if the same record still describes that mount.
+		table, err := c.mounts()
+		if err != nil {
+			return -1, fmt.Errorf("mutable census %s: %s: %w", c.jobHome, strconv.Quote(coreDeviceMountPoint), err)
+		}
+		same := 0
+		for _, m := range table {
+			if m.fsid == skipped.fsid {
+				same++
+				if m != *skipped {
+					same++
+				}
+			}
+		}
+		if same != 1 {
+			return -1, fmt.Errorf("mutable census %s: %s: mutable mount table changed during census", c.jobHome, strconv.Quote(coreDeviceMountPoint))
 		}
 	}
 	return total, ctx.Err()
