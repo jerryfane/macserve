@@ -22,12 +22,35 @@ import (
 // limits invalidate the census. Local sockets have metadata but no file payload.
 // Errors name the census root and the quoted root-relative path that failed, so
 // a TCC denial (EPERM without Full Disk Access) or a refusal is diagnosable.
-func accountBytes(ctx context.Context, roots []string) (int64, error) {
-	return accountBytesWithStat(ctx, roots, unix.Fstatat)
+func accountBytes(ctx context.Context, roots []string, jobHome string, jobUID uint32) (int64, error) {
+	return census{base: "/", statat: unix.Fstatat, mounts: mountTable, jobHome: jobHome, jobUID: jobUID}.account(ctx, roots)
 }
 
-// The stat boundary permits deterministic coverage of changes before directory open.
-func accountBytesWithStat(ctx context.Context, roots []string, statat func(int, string, *unix.Stat_t, int) error) (int64, error) {
+// census is the filesystem boundary of accountBytes. Roots are absolute paths
+// resolved beneath base ("/" in production). The stat boundary permits
+// deterministic coverage of changes before directory open; mounts reports the
+// kernel mount table. jobHome and jobUID name the job-home root and its owner.
+type census struct {
+	base    string
+	statat  func(int, string, *unix.Stat_t, int) error
+	mounts  func() ([]mountEntry, error)
+	jobHome string
+	jobUID  uint32
+}
+
+// mountEntry is the portable subset of one getfsstat record. fsid is
+// f_fsid.val[0], which equals st_dev of every node on that mount.
+type mountEntry struct {
+	fsid   uint64
+	owner  uint32
+	flags  uint64
+	fstype string
+	on     string
+	from   string
+}
+
+func (c census) account(ctx context.Context, roots []string) (int64, error) {
+	statat := c.statat
 	type inode struct {
 		dev uint64
 		ino uint64
@@ -129,7 +152,7 @@ func accountBytesWithStat(ctx context.Context, roots []string, statat func(int, 
 			return -1, errors.New("invalid mutable root")
 		}
 		// Open every ancestor without following a link, not just the final component.
-		fd, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+		fd, err := unix.Open(c.base, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 		if err != nil {
 			return -1, err
 		}
