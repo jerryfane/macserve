@@ -233,27 +233,86 @@ func resetLaunchAgents(ctx context.Context, home string) error {
 	return resetLaunchAgentsWithStat(ctx, home, unix.Fstatat)
 }
 
-// resetLaunchAgentsWithStat takes the stat boundary used to inspect entries.
-func resetLaunchAgentsWithStat(ctx context.Context, home string, _ func(int, string, *unix.Stat_t, int) error) error {
+// resetLaunchAgentsWithStat removes every LaunchAgents entry with
+// descriptor-relative, no-follow operations that never cross a mount. Like
+// walkWorkspace, any nested filesystem (one the job attached under
+// LaunchAgents, or a mount on Library or LaunchAgents itself) is contamination:
+// a dry pass refuses before anything is removed, and the removal pass re-checks
+// every directory it opens, so a mount that appears later is refused too.
+func resetLaunchAgentsWithStat(ctx context.Context, home string, statat func(int, string, *unix.Stat_t, int) error) error {
 	if err := inspectLaunchAgents(home); !errors.Is(err, ErrContamination) {
 		return err
 	}
-	root, err := os.OpenRoot(home)
+	homeFD, err := unix.Open(home, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return err
 	}
-	defer root.Close()
-	dir, err := root.OpenRoot("Library/LaunchAgents")
+	defer unix.Close(homeFD)
+	var st unix.Stat_t
+	if err := unix.Fstat(homeFD, &st); err != nil {
+		return err
+	}
+	device := uint64(st.Dev)
+	fd := homeFD
+	for _, name := range []string{"Library", "LaunchAgents"} {
+		next, err := openSameDevice(fd, name, device, statat)
+		if fd != homeFD {
+			unix.Close(fd)
+		}
+		if err != nil {
+			return err
+		}
+		fd = next
+	}
+	defer unix.Close(fd)
+	for _, remove := range []bool{false, true} {
+		if err := clearSameDevice(ctx, fd, device, remove, statat, 0); err != nil {
+			return err
+		}
+	}
+	return unix.Fsync(fd)
+}
+
+// openSameDevice opens a child directory without following links and refuses
+// it, before and after opening, unless it is on device.
+func openSameDevice(parent int, name string, device uint64, statat func(int, string, *unix.Stat_t, int) error) (int, error) {
+	var st unix.Stat_t
+	if err := statat(parent, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return -1, err
+	}
+	if uint64(st.Dev) != device {
+		return -1, fmt.Errorf("%w: nested mount at LaunchAgents path %q", ErrContamination, name)
+	}
+	fd, err := unix.Openat(parent, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, err
+	}
+	if err := unix.Fstat(fd, &st); err != nil || uint64(st.Dev) != device {
+		unix.Close(fd)
+		if err == nil {
+			err = fmt.Errorf("%w: nested mount at LaunchAgents path %q", ErrContamination, name)
+		}
+		return -1, err
+	}
+	return fd, nil
+}
+
+// clearSameDevice checks (remove=false) or removes (remove=true) the contents
+// of the directory fd, which is on device. Unlinks happen only in directories
+// whose open descriptor was verified to be on device, so no removal can reach
+// into another filesystem.
+func clearSameDevice(ctx context.Context, fd int, device uint64, remove bool, statat func(int, string, *unix.Stat_t, int) error, depth int) error {
+	if depth > 64 {
+		return fmt.Errorf("%w: LaunchAgents tree too deep", ErrContamination)
+	}
+	// A fresh open file description reads from the start on every pass.
+	listFD, err := unix.Openat(fd, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return err
 	}
+	dir := os.NewFile(uintptr(listFD), "LaunchAgents")
 	defer dir.Close()
-	entries, err := dir.Open(".")
-	if err != nil {
-		return err
-	}
-	defer entries.Close()
-	names, err := entries.Readdirnames(-1)
+	names, err := dir.Readdirnames(-1)
 	if err != nil {
 		return err
 	}
@@ -261,9 +320,38 @@ func resetLaunchAgentsWithStat(ctx context.Context, home string, _ func(int, str
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := dir.RemoveAll(name); err != nil {
+		var st unix.Stat_t
+		if err := statat(fd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			if errors.Is(err, unix.ENOENT) {
+				continue
+			}
 			return err
 		}
+		if uint64(st.Dev) != device {
+			return fmt.Errorf("%w: nested mount at LaunchAgents entry %q", ErrContamination, name)
+		}
+		if st.Mode&unix.S_IFMT == unix.S_IFDIR {
+			child, err := openSameDevice(fd, name, device, statat)
+			if err != nil {
+				return err
+			}
+			err = clearSameDevice(ctx, child, device, remove, statat, depth+1)
+			unix.Close(child)
+			if err != nil {
+				return err
+			}
+			if remove {
+				if err := unix.Unlinkat(fd, name, unix.AT_REMOVEDIR); err != nil && !errors.Is(err, unix.ENOENT) {
+					return err
+				}
+			}
+			continue
+		}
+		if remove {
+			if err := unix.Unlinkat(fd, name, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+				return err
+			}
+		}
 	}
-	return entries.Sync()
+	return nil
 }
