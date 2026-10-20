@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/jerryfane/macserve/internal/hostguard"
+	"golang.org/x/sys/unix"
 )
 
 // ResetGUIBaseline is the sole administrator reset. It removes only job-user
@@ -229,6 +230,11 @@ func resetPersistence(ctx context.Context, options Options, home, username strin
 }
 
 func resetLaunchAgents(ctx context.Context, home string) error {
+	return resetLaunchAgentsWithStat(ctx, home, unix.Fstatat)
+}
+
+// resetLaunchAgentsWithStat takes the stat boundary used to inspect entries.
+func resetLaunchAgentsWithStat(ctx context.Context, home string, _ func(int, string, *unix.Stat_t, int) error) error {
 	if err := inspectLaunchAgents(home); !errors.Is(err, ErrContamination) {
 		return err
 	}
