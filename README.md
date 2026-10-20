@@ -370,6 +370,8 @@ rows and 14 GiB for artifacts, with seven-day expiry/oldest-terminal eviction. M
 expired downloads, log pages and newly opened log streams return `410`.
 These are monitored application budgets, not filesystem quotas. Controller test parsing uses sealed JSON
 exported by the pinned worker tool; it does not execute repository-provided parsers.
+The census refuses nested mounts except the job user's own CoreDevice `devicefs` (Xcode), and on SIP hosts
+needs Full Disk Access for `/Library/macserve/bin/macserve`; see the installation guide.
 
 Offered/running workers retain the ordinary 30-second heartbeat-loss fence. Cancellation, deadline or finalizing
 starts a fixed cleanup/delivery grace (two minutes each, plus heartbeat tolerance); repeated heartbeats cannot

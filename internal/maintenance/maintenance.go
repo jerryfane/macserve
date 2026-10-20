@@ -309,7 +309,7 @@ func Inspect(ctx context.Context, c Config) (Observation, error) {
 	if err != nil {
 		return invalid, err
 	}
-	o.AccountedBytes, err = accountBytes(ctx, []string{"/Library/macserve/var", account.HomeDir})
+	o.AccountedBytes, err = accountBytes(ctx, []string{"/Library/macserve/var", account.HomeDir}, account.HomeDir, wc.JobUID)
 	if err != nil {
 		return invalid, err
 	}

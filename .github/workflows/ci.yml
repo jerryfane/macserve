@@ -36,6 +36,9 @@ jobs:
         run: nice -n 10 go vet -p 2 ./...
       - name: Test
         run: nice -n 10 go test -p 2 ./...
+      - name: Real-mount tests (macOS)
+        if: runner.os == 'macOS'
+        run: nice -n 10 go test -count=1 -v -run 'RealImage|NeverEnters|RealMount|StudioStatfs' ./internal/maintenance ./internal/worker
       - name: Build CLI
         run: nice -n 10 go build -p 2 -o "${{ runner.temp }}/macserve" ./cmd/macserve
       - name: CLI smoke

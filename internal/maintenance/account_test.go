@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -101,7 +102,7 @@ func TestMutableAccountingEntryChurn(t *testing.T) {
 				}
 				return nil
 			}
-			n, err := accountBytesWithStat(context.Background(), []string{root}, statat)
+			n, err := census{base: "/", statat: statat}.account(context.Background(), []string{root})
 			if !changed || err != nil || n != want || n <= 32*1024 {
 				t.Fatalf("churn lost budget observation: changed=%v bytes=%d want=%d err=%v", changed, n, want, err)
 			}
@@ -132,7 +133,7 @@ func TestMutableAccountingDirectoryMetadataChurn(t *testing.T) {
 		}
 		return err
 	}
-	n, err := accountBytesWithStat(context.Background(), []string{root}, statat)
+	n, err := census{base: "/", statat: statat}.account(context.Background(), []string{root})
 	if err != nil || n != want {
 		t.Fatalf("metadata churn invalidated observation: bytes=%d want=%d err=%v", n, want, err)
 	}
@@ -154,7 +155,7 @@ func TestMutableAccountingOpenedDirectoryUnlinked(t *testing.T) {
 		}
 		return unix.Fstatat(fd, name, st, flags)
 	}
-	n, err := accountBytesWithStat(context.Background(), []string{root}, statat)
+	n, err := census{base: "/", statat: statat}.account(context.Background(), []string{root})
 	if err != nil || n != want {
 		t.Fatalf("unlinked open directory invalidated observation: bytes=%d want=%d err=%v", n, want, err)
 	}
@@ -185,7 +186,7 @@ func TestMutableAccountingUsesOpenedParentAfterRename(t *testing.T) {
 		}
 		return err
 	}
-	n, err := accountBytesWithStat(context.Background(), []string{root}, statat)
+	n, err := census{base: "/", statat: statat}.account(context.Background(), []string{root})
 	if err != nil || n != want {
 		t.Fatalf("renamed parent escaped descriptor confinement: bytes=%d want=%d err=%v", n, want, err)
 	}
@@ -218,7 +219,7 @@ func TestMutableAccountingReplacementAlreadyCounted(t *testing.T) {
 		}
 		return err
 	}
-	n, err := accountBytesWithStat(context.Background(), []string{first, second}, statat)
+	n, err := census{base: "/", statat: statat}.account(context.Background(), []string{first, second})
 	if err != nil || n != want {
 		t.Fatalf("opened replacement counted twice: bytes=%d want=%d err=%v", n, want, err)
 	}
@@ -238,12 +239,12 @@ func TestMutableAccountingFileGrowthUsesLiveObservations(t *testing.T) {
 		}
 		return err
 	}
-	n, err := accountBytesWithStat(context.Background(), []string{root}, statat)
+	n, err := census{base: "/", statat: statat}.account(context.Background(), []string{root})
 	if err != nil || n != before {
 		t.Fatalf("live file write invalidated observation: bytes=%d want=%d err=%v", n, before, err)
 	}
 	after := censusFixtureBytes(t, root) + censusFixtureBytes(t, payload)
-	n, err = accountBytes(context.Background(), []string{root})
+	n, err = accountBytes(context.Background(), []string{root}, "", 0)
 	if err != nil || n != after || n <= 32*1024 {
 		t.Fatalf("next observation lost budget excess: bytes=%d want=%d err=%v", n, after, err)
 	}
@@ -277,7 +278,7 @@ func TestMutableAccountingRetainsFailures(t *testing.T) {
 				}
 				return nil
 			}
-			n, err := accountBytesWithStat(context.Background(), []string{root}, statat)
+			n, err := census{base: "/", statat: statat}.account(context.Background(), []string{root})
 			if err == nil || n != -1 {
 				t.Fatalf("real failure published budget: bytes=%d err=%v", n, err)
 			}
@@ -300,15 +301,54 @@ func TestMutableAccountingHardlinksAndAncestorSymlinks(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := censusFixtureBytes(t, root) + censusFixtureBytes(t, payload)
-	n, err := accountBytes(context.Background(), []string{root})
+	n, err := accountBytes(context.Background(), []string{root}, "", 0)
 	if err != nil || n != want {
 		t.Fatalf("hardlink counted twice: bytes=%d want=%d err=%v", n, want, err)
 	}
 	if err := os.Symlink(base, filepath.Join(base, "linked-parent")); err != nil {
 		t.Fatal(err)
 	}
-	n, err = accountBytes(context.Background(), []string{filepath.Join(base, "linked-parent", "root")})
+	n, err = accountBytes(context.Background(), []string{filepath.Join(base, "linked-parent", "root")}, "", 0)
 	if err == nil || n != -1 {
 		t.Fatalf("followed ancestor symlink: bytes=%d err=%v", n, err)
+	}
+}
+
+func TestMutableAccountingErrorsNameRelativePath(t *testing.T) {
+	for _, tc := range []struct {
+		failure, name, want string
+		cause               error
+	}{
+		{"tcc denial", "Mail", `"Library/Mail": operation not permitted`, unix.EPERM},
+		{"mount", "DeviceFS", `"Library/Developer/CoreDevice/DeviceFS": mutable mount crossing`, nil},
+	} {
+		t.Run(tc.failure, func(t *testing.T) {
+			root := filepath.Join(censusFixtureDir(t), "home")
+			for _, dir := range []string{"Library/Mail", "Library/Developer/CoreDevice/DeviceFS"} {
+				if err := os.MkdirAll(filepath.Join(root, dir), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			statat := func(fd int, name string, st *unix.Stat_t, flags int) error {
+				if name != tc.name {
+					return unix.Fstatat(fd, name, st, flags)
+				}
+				if tc.cause != nil {
+					return tc.cause
+				}
+				if err := unix.Fstatat(fd, name, st, flags); err != nil {
+					return err
+				}
+				st.Dev++
+				return nil
+			}
+			n, err := census{base: "/", statat: statat}.account(context.Background(), []string{root})
+			if n != -1 || err == nil || !strings.Contains(err.Error(), root+": "+tc.want) {
+				t.Fatalf("census error does not name the failing path: bytes=%d err=%v", n, err)
+			}
+			if tc.cause != nil && !errors.Is(err, tc.cause) {
+				t.Fatalf("lost underlying error: %v", err)
+			}
+		})
 	}
 }

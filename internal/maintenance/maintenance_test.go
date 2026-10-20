@@ -131,20 +131,20 @@ func TestMutableAccountingDoesNotFollowLinksOrDoubleCountRoots(t *testing.T) {
 	if err = os.Symlink("/nonexistent-outside-accounted-tree", filepath.Join(nested, "outside")); err != nil {
 		t.Fatal(err)
 	}
-	before, err := accountBytes(context.Background(), []string{root})
+	before, err := accountBytes(context.Background(), []string{root}, "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	after, err := accountBytes(context.Background(), []string{root, nested})
+	after, err := accountBytes(context.Background(), []string{root, nested}, "", 0)
 	if err != nil || after != before || after < 8192 {
 		t.Fatalf("overlap count %d %d: %v", before, after, err)
 	}
-	if _, err = accountBytes(context.Background(), []string{filepath.Join(nested, "outside")}); err == nil {
+	if _, err = accountBytes(context.Background(), []string{filepath.Join(nested, "outside")}, "", 0); err == nil {
 		t.Fatal("symlink mutable root accepted")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if n, err := accountBytes(ctx, []string{root}); err == nil || n != -1 {
+	if n, err := accountBytes(ctx, []string{root}, "", 0); err == nil || n != -1 {
 		t.Fatalf("canceled census trusted: %d %v", n, err)
 	}
 }
