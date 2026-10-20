@@ -121,6 +121,7 @@ func devicefsHome(t *testing.T) (base string, shadow string) {
 	}
 	censusFixtureFile(t, filepath.Join(home, coreDataDir, "device.db"), 96*1024)
 	censusFixtureFile(t, filepath.Join(home, "Documents", "build.log"), 8*1024)
+	censusFixtureFile(t, filepath.Join(home, "Library/Caches", "cache.db"), 8*1024)
 	censusFixtureFile(t, filepath.Join(base, "Library/macserve/var", "queue"), 4*1024)
 	// Bytes beneath the mount point on the home device are shadowed by the mount.
 	shadow = filepath.Join(home, deviceFS, "shadowed")
@@ -185,11 +186,15 @@ func TestMutableAccountingSkipsJobCoreDeviceMount(t *testing.T) {
 			}
 			presented := 0
 			statat := func(fd int, name string, st *unix.Stat_t, flags int) error {
-				if err := unix.Fstatat(fd, name, st, flags); err != nil {
+				var dir unix.Stat_t
+				if err := unix.Fstat(fd, &dir); err != nil {
 					return err
 				}
-				if name == "shadowed" {
-					t.Error("census descended into the mount point")
+				if dir.Dev == mounted.Dev && dir.Ino == mounted.Ino {
+					t.Errorf("census descended into the mount point: stat %q", name)
+				}
+				if err := unix.Fstatat(fd, name, st, flags); err != nil {
+					return err
 				}
 				if st.Dev != mounted.Dev || st.Ino != mounted.Ino {
 					return nil
