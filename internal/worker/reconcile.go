@@ -25,6 +25,11 @@ func ResetGUIBaseline(ctx context.Context, options Options, pids []int) (ResetRe
 	if err := hostguard.BrokerIdentity(options.JobUID, options.JobGID, options.ControllerUID, options.OwnerUID); err != nil {
 		return ResetResult{}, err
 	}
+	// A baseline captured with the job session in the foreground would audit an
+	// unqualified state; refuse before any cleanup.
+	if err := hostguard.CheckConsole(options.OwnerUID); err != nil {
+		return ResetResult{}, fmt.Errorf("worker-reset refused: %w", err)
+	}
 	// Never permit an injected runner to bypass production inspection/identity.
 	options.Runner = nil
 	engine, err := New(options)

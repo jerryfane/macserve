@@ -58,7 +58,7 @@ func runWorkerPersistence(args []string, stdout, stderr io.Writer) int {
 	ctx, cancel := workerPersistenceInspectionContext(context.Background())
 	defer cancel()
 	if args[0] == "inspect" {
-		digest, err := worker.ReviewPersistence(ctx, executionOptions(cfg), *candidate)
+		digest, err := worker.ReviewPersistence(ctx, cfg.EngineOptions(), *candidate)
 		if digest != "" {
 			fmt.Fprintln(stdout, "Candidate SHA256:", digest, "(private review only; not accepted)")
 		}
@@ -68,7 +68,7 @@ func runWorkerPersistence(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
-	if err := worker.AcceptPersistence(ctx, executionOptions(cfg), *candidate, *reviewed); err != nil {
+	if err := worker.AcceptPersistence(ctx, cfg.EngineOptions(), *candidate, *reviewed); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}

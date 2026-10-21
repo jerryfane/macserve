@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/jerryfane/macserve/internal/hostguard"
+	"github.com/jerryfane/macserve/internal/worker"
 )
 
 type Config struct {
@@ -28,6 +29,13 @@ type Config struct {
 	PollSeconds           int    `json:"poll_seconds"`
 	HeartbeatSeconds      int    `json:"heartbeat_seconds"`
 	RequestTimeoutSeconds int    `json:"request_timeout_seconds"`
+}
+
+// EngineOptions maps the protected broker configuration to native worker
+// options; the broker, worker-reset, persistence review and qualification tool
+// evidence all use this one mapping.
+func (c Config) EngineOptions() worker.Options {
+	return worker.Options{Root: c.Root, ExportRoot: c.ExportRoot, WorkspaceRoot: c.WorkspaceRoot, JobUID: c.JobUID, JobGID: c.JobGID, OwnerUID: c.OwnerUID, ControllerUID: c.ControllerUID, HelperPath: c.HelperPath, BaselinePath: c.BaselinePath, PersistencePath: c.PersistencePath}
 }
 
 func LoadConfig(path string) (Config, error) {

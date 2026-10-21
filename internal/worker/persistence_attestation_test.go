@@ -379,6 +379,7 @@ func TestNativeAdmissionUsesCheapDeadlineNotFullScanDeadline(t *testing.T) {
 	runner := &nativeRunner{
 		uid: int(options.JobUID), scope: &processScope{},
 		baselinePath: baselinePath, persistencePath: options.PersistencePath,
+		console: func() error { return nil },
 		persistence: func(ctx context.Context) error {
 			deadline, ok := ctx.Deadline()
 			if !ok || deadline.Before(start.Add(30*time.Second)) || deadline.After(time.Now().Add(30*time.Second)) {

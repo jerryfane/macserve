@@ -27,7 +27,7 @@ plan --env PATH
 begin --session /Library/macserve/var/qualification/NAME
   --env /Library/macserve/config/deploy.env --owner-canary /Users/OWNER/private/canary
   [--allow IP:PORT[,IP:PORT...]] [--udp-canary IP:PORT[,IP:PORT...]]
-  [--private-path PATH[,PATH...]] [--previous PROTECTED_PREVIOUS_SESSION]
+  [--private-path PATH[,PATH...]] [--previous PROTECTED_PREVIOUS_SESSION | --requalify]
   Root creates an immutable two-hour challenge and initial live observations.
   Protected ports on loopback, host and tailnet addresses are observed, not gated.
   Records available main/peer rule digests and configured running service PIDs.
@@ -39,28 +39,35 @@ canary --session DIR --transport udp|tcp|owner-home --out NEW_FILE
   and leave running until BOTH finish to provide mandatory owner-home controls.
   Optional TCP accepts/closes only; UDP records/echoes challenge nonces.
   Multiple network listeners write NEW_FILE.1.json, NEW_FILE.2.json, etc.
-probe --session DIR --role job|owner --out NEW_FILE
-  Run directly in that actual account's existing GUI login with full memberships.
-  Preserves non-root target/attempt/refusal evidence; no sudo/su impersonation.
-  Real or effective UID 0 refuses before session access or any --out write.
-collect --session DIR --job JOB_REPORT --owner OWNER_REPORT
+  --requalify chains to the session the owner last approved (activation anchor)
+  and requires the live configuration to equal it.
+probe --session DIR --role owner --out NEW_FILE
+  Owner account with full memberships; no sudo/su impersonation. Real or
+  effective UID 0 refuses before session access or any --out write. The job
+  probe is not run here: root runs it with
+  /bin/launchctl asuser JOB_UID macserve _qualify-job-probe SESSION_ID
+  in the job's background GUI session with the production credential, and
+  captures its report into the protected session.
+collect --session DIR --owner OWNER_REPORT
   --receipts OWNER_HOME_RECEIPT[,UDP_RECEIPT...]
-  Root snapshots bounded reports, owner-home controls, optional receiver evidence
-  and current observations into schema3 candidate and qualification artifacts.
-  Network results never gate; non-network failures cannot be manually attested.
-  Incomplete attempts retain separate snapshots and can retry before expiry.
+  Root reads the launcher-captured job report and tool evidence from the session,
+  snapshots the owner report, owner-home controls, optional receiver evidence and
+  current observations into schema 4 candidate and qualification artifacts.
+  Every category is machine-checked: reboot needs a predecessor sitting on an
+  earlier boot; tool_profiles needs root-run recipes on pinned sources.
   Once candidate.json exists, begin a new session rather than recollecting.
-attest --session DIR --category tool_profiles|fast_switch|reboot
-  --artifact EXISTING_FILE --reason 'Owner-reviewed provenance and conclusions'
-  Explicit root review of real owner/root artifacts only. Enabled profiles need
-  genuine recipe/UI evidence for EVERY profile; tool inspection alone is not it.
-  Lifecycle categories need full fresh predecessor sittings (--previous). Switch
-  requires same boot. Reboot requires an observed boot transition to current boot.
 approve --session DIR
-  One explicit root command checks all mandatory categories, artifacts, freshness,
-  exact current maintenance bindings and maintenance.Evaluate before installing
-  protected approval records. Does not clear owner.pause or activate services.
-  Rechecks coexistence rules and same running service PIDs after qualification.
+  The owner's root approval: checks all mandatory categories, artifacts,
+  freshness, exact maintenance bindings and maintenance.Evaluate, installs the
+  protected approval records and writes the activation anchor. Does not clear
+  owner.pause or activate services.
+reapprove --session DIR
+  Agent requalification commit for a --requalify sitting: as approve, and the
+  live configuration must equal the activation anchor, with no earlier approval
+  on this boot. Never writes the anchor.
+activation-check
+  Read-only: the anchor matches the live configuration and installed approval
+  evaluates to valid health now.
 `
 
 func runQualify(args []string, stdout, stderr io.Writer) int {
@@ -72,7 +79,8 @@ func runQualify(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("qualify "+command, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	session := fs.String("session", "", "protected sitting directory")
-	var env, allow, udp, ownerCanary, private, previous, role, out, listen, transport, job, owner, receipts, category, artifact, reason *string
+	var env, allow, udp, ownerCanary, private, previous, role, out, listen, transport, owner, receipts *string
+	var requalify *bool
 	var duration *time.Duration
 	switch command {
 	case "plan":
@@ -84,6 +92,7 @@ func runQualify(args []string, stdout, stderr io.Writer) int {
 		ownerCanary = fs.String("owner-canary", "", "existing private owner file")
 		private = fs.String("private-path", "", "additional private paths")
 		previous = fs.String("previous", "", "protected previous sitting")
+		requalify = fs.Bool("requalify", false, "chain to the anchored approved session")
 	case "probe":
 		role = fs.String("role", "", "job or owner")
 		out = fs.String("out", "", "new report file")
@@ -93,14 +102,9 @@ func runQualify(args []string, stdout, stderr io.Writer) int {
 		out = fs.String("out", "", "new receipt file")
 		duration = fs.Duration("duration", 120*time.Second, "bounded receiver lifetime")
 	case "collect":
-		job = fs.String("job", "", "job report")
 		owner = fs.String("owner", "", "owner report")
 		receipts = fs.String("receipts", "", "owner-home control and optional UDP receiver reports")
-	case "attest":
-		category = fs.String("category", "", "manual category")
-		artifact = fs.String("artifact", "", "existing genuine artifact")
-		reason = fs.String("reason", "", "review provenance and conclusions")
-	case "approve":
+	case "approve", "reapprove", "activation-check":
 	default:
 		fmt.Fprint(stderr, qualifyUsage)
 		return 2
@@ -116,7 +120,7 @@ func runQualify(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "unexpected positional arguments")
 		return 2
 	}
-	if command != "plan" && *session == "" {
+	if command != "plan" && command != "activation-check" && *session == "" {
 		fmt.Fprintln(stderr, "--session is required")
 		return 2
 	}
@@ -135,17 +139,19 @@ func runQualify(args []string, stdout, stderr io.Writer) int {
 			err = enc.Encode(v)
 		}
 	case "begin":
-		err = qualification.Begin(ctx, qualification.BeginOptions{Environment: *env, Session: *session, Allow: *allow, UDP: *udp, OwnerCanary: *ownerCanary, PrivatePaths: *private, Previous: *previous})
+		err = qualification.Begin(ctx, qualification.BeginOptions{Environment: *env, Session: *session, Allow: *allow, UDP: *udp, OwnerCanary: *ownerCanary, PrivatePaths: *private, Previous: *previous, Requalify: *requalify})
 	case "probe":
 		err = qualification.Probe(ctx, *session, *role, *out)
 	case "canary":
 		err = qualification.Canary(ctx, *session, *listen, *transport, *out, *duration)
 	case "collect":
-		err = qualification.Collect(ctx, *session, *job, *owner, *receipts)
-	case "attest":
-		err = qualification.Attest(ctx, *session, *category, *artifact, *reason)
+		err = qualification.Collect(ctx, *session, *owner, *receipts)
 	case "approve":
 		err = qualification.Approve(ctx, *session)
+	case "reapprove":
+		err = qualification.Reapprove(ctx, *session)
+	case "activation-check":
+		err = qualification.ActivationCheck(ctx)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "macserve qualify %s: %v\n", command, err)
@@ -161,9 +167,43 @@ func runQualify(args []string, stdout, stderr io.Writer) int {
 // commands retain their own existing probe/canary bounds and caller deadline.
 func qualificationCommandContext(parent context.Context, command string) (context.Context, context.CancelFunc) {
 	switch command {
-	case "begin", "collect", "attest", "approve":
+	case "begin", "collect", "approve", "reapprove", "activation-check":
 		return context.WithTimeout(parent, worker.PersistenceOperationTimeout)
 	default:
 		return context.WithCancel(parent)
 	}
+}
+
+// runQualifyPrivate dispatches the hidden root launcher commands. Each takes
+// exactly one session ID (or --self-test, which writes nothing); the
+// executable, arguments and paths are fixed.
+func runQualifyPrivate(command string, args []string, stdout, stderr io.Writer) int {
+	if len(args) != 1 {
+		fmt.Fprintf(stderr, "macserve %s: exactly one session ID required\n", command)
+		return 2
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	var err error
+	switch command {
+	case "_qualify-job-probe":
+		if args[0] == "--self-test" {
+			err = qualification.JobProbeSelfTest(ctx, stdout)
+		} else {
+			err = qualification.LaunchJobProbe(ctx, args[0])
+		}
+	case "_qualify-job-probe-child":
+		if args[0] == "--self-test" {
+			err = qualification.JobProbeChildSelfTest(stdout)
+		} else {
+			err = qualification.RunJobProbeChild(ctx, args[0], stdout)
+		}
+	case "_qualify-tool-evidence":
+		err = qualification.RunToolEvidence(ctx, args[0])
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "macserve %s: %v\n", command, err)
+		return 1
+	}
+	return 0
 }

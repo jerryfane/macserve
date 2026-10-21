@@ -132,8 +132,8 @@ func receiptFixture() (Challenge, Report, Report, []Receipts) {
 }
 func TestReportBindingAndExpiration(t *testing.T) {
 	now := time.Now().UTC().Add(-time.Minute)
-	c := Challenge{Schema: 3, ID: strings.Repeat("a", 64), Created: now, Expires: now.Add(lifetime), Environment: deploy.Environment{JobUID: 502, OwnerUID: 501}}
-	r := Report{Schema: 3, ChallengeSHA256: "current", Role: "job", UID: 502, Groups: []int{502}, Started: now.Add(time.Second), Finished: now.Add(2 * time.Second)}
+	c := Challenge{Schema: schema, ID: strings.Repeat("a", 64), Created: now, Expires: now.Add(lifetime), Environment: deploy.Environment{JobUID: 502, JobGID: 20, OwnerUID: 501}}
+	r := Report{Schema: schema, ChallengeSHA256: "current", Role: "job", Mode: jobProbeMode, UID: 502, AuditUID: 502, AuditSession: 100010, Groups: []int{20}, Started: now.Add(time.Second), Finished: now.Add(2 * time.Second)}
 	if e := checkReport(r, c, "current", "job"); e != nil {
 		t.Fatal(e)
 	}
@@ -153,13 +153,13 @@ func TestReportBindingAndExpiration(t *testing.T) {
 }
 func TestMissingAutomaticAndLifecycleCategoriesNeverPass(t *testing.T) {
 	c := Challenge{Environment: deploy.Environment{OwnerUser: "example-owner", DeveloperDir: "/Applications/Xcode.app/Contents/Developer"}, OwnerCanary: "/Users/example-owner/private/canary", TCP: []string{"127.0.0.1:8080"}, UDP: []string{"127.0.0.1:9000"}, Allow: []string{"192.0.2.1:443"}, Socket: "/private/worker.sock", PrivatePaths: []string{"/private/store"}}
-	categories := aggregate(c, Report{}, Report{}, nil)
+	categories := aggregate(c, Report{}, Report{}, nil, sittingFacts{})
 	for name, cat := range categories {
 		if cat.Status == "pass" {
 			t.Errorf("missing %s passed", name)
 		}
 	}
-	for _, name := range []string{"fast_switch", "reboot"} {
+	for _, name := range []string{"reboot"} {
 		if categories[name].Status != "pending" {
 			t.Errorf("%s is not pending", name)
 		}
@@ -259,22 +259,23 @@ func TestSittingBindingsRejectDeploymentOrProfileChanges(t *testing.T) {
 }
 
 func TestObservationBindingsPreserveNonNetworkBoundaries(t *testing.T) {
-	before := maintenance.Observation{JobUID: 502, Boot: "boot", BaselineSHA256: "baseline", Profiles: map[string]string{"profile": "pin"}, IdentityValid: true, BaselineValid: true}
+	before := maintenance.Observation{JobUID: 502, Boot: "boot", BaselineSHA256: "baseline", Profiles: map[string]string{"profile": "pin"}, IdentityValid: true, BaselineValid: true, ConsoleAdmissible: true}
 	before.Persistence.Valid = true
 	before.Persistence.LastVerified = time.Now().UTC()
 	if !sameObservation(before, before) {
 		t.Fatal("unchanged non-network observation refused")
 	}
 	for name, mutate := range map[string]func(*maintenance.Observation){
-		"uid":                 func(o *maintenance.Observation) { o.JobUID++ },
-		"boot":                func(o *maintenance.Observation) { o.Boot = "rebooted" },
-		"baseline":            func(o *maintenance.Observation) { o.BaselineSHA256 = "changed" },
-		"profile":             func(o *maintenance.Observation) { o.Profiles = map[string]string{"profile": "changed"} },
-		"identity validity":   func(o *maintenance.Observation) { o.IdentityValid = false },
-		"baseline validity":   func(o *maintenance.Observation) { o.BaselineValid = false },
-		"persistence revoked": func(o *maintenance.Observation) { o.Persistence.Valid = false },
-		"persistence review":  func(o *maintenance.Observation) { o.Persistence.NeedsReview = true },
-		"persistence missing": func(o *maintenance.Observation) { o.Persistence.LastVerified = time.Time{} },
+		"uid":                    func(o *maintenance.Observation) { o.JobUID++ },
+		"boot":                   func(o *maintenance.Observation) { o.Boot = "rebooted" },
+		"baseline":               func(o *maintenance.Observation) { o.BaselineSHA256 = "changed" },
+		"profile":                func(o *maintenance.Observation) { o.Profiles = map[string]string{"profile": "changed"} },
+		"identity validity":      func(o *maintenance.Observation) { o.IdentityValid = false },
+		"baseline validity":      func(o *maintenance.Observation) { o.BaselineValid = false },
+		"persistence revoked":    func(o *maintenance.Observation) { o.Persistence.Valid = false },
+		"persistence review":     func(o *maintenance.Observation) { o.Persistence.NeedsReview = true },
+		"persistence missing":    func(o *maintenance.Observation) { o.Persistence.LastVerified = time.Time{} },
+		"foreground job console": func(o *maintenance.Observation) { o.ConsoleAdmissible = false },
 	} {
 		t.Run(name, func(t *testing.T) {
 			after := before
@@ -480,12 +481,9 @@ func TestNetworkObservationsNeverBlockApproval(t *testing.T) {
 			if e := validateReceiptPackets(j, o, receipts); e != nil {
 				t.Fatal(e)
 			}
-			v := Candidate{Categories: aggregate(c, j, o, receipts)}
+			v := Candidate{Categories: aggregate(c, j, o, receipts, sittingFacts{rebootOK: true, toolOK: true})}
 			if e := readyAutomatic(v); e != nil {
 				t.Fatal(e)
-			}
-			for _, name := range []string{"fast_switch", "reboot"} {
-				v.Categories[name] = Category{Status: "pass"}
 			}
 			if e := readyApproval(v); e != nil {
 				t.Fatal(e)
@@ -502,7 +500,7 @@ func TestNetworkObservationsNeverBlockApproval(t *testing.T) {
 }
 
 func TestNonNetworkFailuresStillBlockApproval(t *testing.T) {
-	for _, category := range []string{"unix_socket_boundary", "owner_home_denial", "tool_profiles", "owner_unaffected", "fast_switch", "reboot"} {
+	for _, category := range []string{"unix_socket_boundary", "owner_home_denial", "tool_profiles", "owner_unaffected", "reboot"} {
 		t.Run(category, func(t *testing.T) {
 			c, j, o, receipts := phaseOneFixture()
 			if category == "owner_unaffected" {
@@ -514,11 +512,9 @@ func TestNonNetworkFailuresStillBlockApproval(t *testing.T) {
 					}
 				}
 			}
-			v := Candidate{Categories: aggregate(c, j, o, receipts)}
-			for _, name := range []string{"fast_switch", "reboot"} {
-				if name != category {
-					v.Categories[name] = Category{Status: "pass"}
-				}
+			v := Candidate{Categories: aggregate(c, j, o, receipts, sittingFacts{rebootOK: true, toolOK: true})}
+			if category == "reboot" {
+				v = Candidate{Categories: aggregate(c, j, o, receipts, sittingFacts{toolOK: true})}
 			}
 			if e := readyApproval(v); e == nil {
 				t.Fatalf("%s failure admitted", category)
@@ -529,15 +525,15 @@ func TestNonNetworkFailuresStillBlockApproval(t *testing.T) {
 
 func TestOldChallengeAndReportSchemasRejected(t *testing.T) {
 	now := time.Now().UTC().Add(-time.Minute)
-	c := Challenge{Schema: 3, ID: strings.Repeat("a", 64), Created: now, Expires: now.Add(lifetime), Environment: deploy.Environment{JobUID: 502}}
-	r := Report{Schema: 3, ChallengeSHA256: "current", Role: "job", UID: 502, Groups: []int{502}, Started: now, Finished: now.Add(time.Second)}
+	c := Challenge{Schema: schema, ID: strings.Repeat("a", 64), Created: now, Expires: now.Add(lifetime), Environment: deploy.Environment{JobUID: 502, JobGID: 20, OwnerUID: 501}}
+	r := Report{Schema: schema, ChallengeSHA256: "current", Role: "job", Mode: jobProbeMode, UID: 502, AuditUID: 502, AuditSession: 100010, Groups: []int{20}, Started: now, Finished: now.Add(time.Second)}
 	if e := fresh(c, now.Add(time.Second)); e != nil {
 		t.Fatal(e)
 	}
 	if e := checkReport(r, c, "current", "job"); e != nil {
 		t.Fatal(e)
 	}
-	for _, schema := range []int{1, 2} {
+	for _, schema := range []int{1, 2, 3} {
 		old := c
 		old.Schema = schema
 		if e := fresh(old, now.Add(time.Second)); e == nil {

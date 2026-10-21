@@ -44,6 +44,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		return 0
+	case "_qualify-job-probe", "_qualify-job-probe-child", "_qualify-tool-evidence":
+		return runQualifyPrivate(args[0], args[1:], stdout, stderr)
 	case "worker-reset":
 		return runWorkerReset(args[1:], stdout, stderr)
 	case "worker-persistence":

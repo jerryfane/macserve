@@ -35,7 +35,11 @@ const maintenancePath = "/Library/macserve/config/maintenance.json"
 
 const networkStatus = "not enforced in phase 1"
 
-var categories = []string{"network_reachability", "unix_socket_boundary", "owner_unaffected", "owner_home_denial", "fast_switch", "reboot", "tool_profiles"}
+// schema is the version of every qualification document (challenge, report,
+// receipts, candidate) and of the maintenance records they produce.
+const schema = maintenance.RecordSchema
+
+var categories = maintenance.Categories
 
 type Challenge struct {
 	Schema            int                     `json:"schema"`
@@ -54,6 +58,14 @@ type Challenge struct {
 	Profiles          []model.Profile         `json:"profiles"`
 	Previous          string                  `json:"previous,omitempty"`
 	PreviousSHA256    string                  `json:"previous_sha256,omitempty"`
+	// BootSession is kern.bootsessionuuid. A reboot transition needs both it
+	// and Observation.Boot (a kern.boottime digest) to change.
+	BootSession string `json:"boot_session"`
+	// SourcesSHA256 binds the root-protected pinned tool-evidence sources.
+	SourcesSHA256 string `json:"sources_sha256,omitempty"`
+	// Requalify marks an agent-run sitting whose predecessor is the session the
+	// owner last approved (the activation anchor).
+	Requalify bool `json:"requalify,omitempty"`
 }
 type Result struct {
 	Category string `json:"category"`
@@ -73,6 +85,12 @@ type Report struct {
 	Finished        time.Time `json:"finished"`
 	Results         []Result  `json:"results"`
 	Refusal         string    `json:"refusal,omitempty"`
+	// Context of the probing process. A job report counts only with mode
+	// jobProbeMode, written by the root launcher (see JobProbeLaunch).
+	Mode         string `json:"mode"`
+	ConsoleUID   uint32 `json:"console_uid"`
+	AuditUID     uint32 `json:"audit_uid"`
+	AuditSession int32  `json:"audit_session"`
 }
 type Packet struct {
 	Challenge string `json:"challenge"`
@@ -122,17 +140,6 @@ type Candidate struct {
 	Categories      map[string]Category              `json:"categories"`
 	Coexistence     *maintenance.CoexistenceEvidence `json:"coexistence"`
 }
-type Attestation struct {
-	Schema          int               `json:"schema"`
-	ChallengeSHA256 string            `json:"challenge_sha256"`
-	Category        string            `json:"category"`
-	Recorded        time.Time         `json:"recorded"`
-	ReviewerUID     uint32            `json:"reviewer_uid"`
-	Reason          string            `json:"reason"`
-	Artifact        string            `json:"artifact"`
-	ArtifactSHA256  string            `json:"artifact_sha256"`
-	Profiles        map[string]string `json:"profiles"`
-}
 
 func digest(b []byte) string       { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
 func encode(v any) ([]byte, error) { return json.MarshalIndent(v, "", "  ") }
@@ -154,13 +161,13 @@ func decode(b []byte, v any) error {
 	return nil
 }
 func fresh(c Challenge, now time.Time) error {
-	if c.Schema != 3 || len(c.ID) != 64 || c.Created.IsZero() || now.Before(c.Created) || !now.Before(c.Expires) || c.Expires.Sub(c.Created) != lifetime {
+	if c.Schema != schema || len(c.ID) != 64 || c.Created.IsZero() || now.Before(c.Created) || !now.Before(c.Expires) || c.Expires.Sub(c.Created) != lifetime {
 		return errors.New("invalid or expired challenge; begin a fresh sitting")
 	}
 	return nil
 }
 func sameObservation(a, b maintenance.Observation) bool {
-	return a.JobUID == b.JobUID && a.Boot == b.Boot && a.BaselineSHA256 == b.BaselineSHA256 && maps.Equal(a.Profiles, b.Profiles) && b.IdentityValid && b.BaselineValid &&
+	return a.JobUID == b.JobUID && a.Boot == b.Boot && a.BaselineSHA256 == b.BaselineSHA256 && maps.Equal(a.Profiles, b.Profiles) && b.IdentityValid && b.BaselineValid && a.ConsoleAdmissible && b.ConsoleAdmissible &&
 		a.Persistence.Valid && !a.Persistence.NeedsReview && a.Persistence.RevokedAt.IsZero() && !a.Persistence.LastVerified.IsZero() &&
 		b.Persistence.Valid && !b.Persistence.NeedsReview && b.Persistence.RevokedAt.IsZero() && !b.Persistence.LastVerified.IsZero()
 }

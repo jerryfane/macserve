@@ -12,6 +12,16 @@ import (
 	"github.com/jerryfane/macserve/internal/worker"
 )
 
+// RecordSchema is the schema of Qualification and BoundaryEvidence. Schema 4
+// (v0.1.13) removed the owner-attested fast_switch category: the job probe now
+// runs in the production background context, so there is no foreground switch
+// left to attest. Schema 3 records are never accepted or relabelled; they fail
+// closed until a fresh schema 4 qualification is approved.
+const RecordSchema = 4
+
+// Categories are the mandatory evidence categories of a schema 4 record.
+var Categories = []string{"network_reachability", "unix_socket_boundary", "owner_unaffected", "owner_home_denial", "reboot", "tool_profiles"}
+
 type Qualification struct {
 	Schema                 int               `json:"schema"`
 	ApprovedAt             time.Time         `json:"approved_at"`
@@ -51,6 +61,9 @@ type Observation struct {
 	Profiles               map[string]string `json:"profiles"`
 	IdentityValid          bool              `json:"identity_valid"`
 	BaselineValid          bool              `json:"baseline_valid"`
+	// ConsoleAdmissible is true only while the owner or the login window owns
+	// /dev/console. A foreground job session is not the qualified state.
+	ConsoleAdmissible bool `json:"console_admissible"`
 	// BaselineExited records audited PIDs that were absent (not reused) when
 	// observed. Absence is evidence, not a refusal, in qualification and health.
 	BaselineExited []worker.ProcessIdentity              `json:"baseline_exited,omitempty"`
@@ -80,7 +93,7 @@ func Evaluate(now time.Time, q Qualification, e BoundaryEvidence, o Observation)
 	if !o.Persistence.Valid || o.Persistence.NeedsReview || !o.Persistence.RevokedAt.IsZero() || o.Persistence.LastVerified.IsZero() || o.Persistence.LastVerified.After(now) {
 		return fail()
 	}
-	if q.Schema != 3 || e.Schema != 3 || q.JobUID < 501 || q.JobUID != o.JobUID || e.JobUID != o.JobUID || q.ApprovedAt.IsZero() || q.ApprovedAt.After(now) || e.RecordedAt.IsZero() || e.RecordedAt.After(q.ApprovedAt) || e.Boot != q.Boot || !o.IdentityValid || !o.BaselineValid || o.AccountedBytes < 0 {
+	if q.Schema != RecordSchema || e.Schema != RecordSchema || q.JobUID < 501 || q.JobUID != o.JobUID || e.JobUID != o.JobUID || q.ApprovedAt.IsZero() || q.ApprovedAt.After(now) || e.RecordedAt.IsZero() || e.RecordedAt.After(q.ApprovedAt) || e.Boot != q.Boot || !o.IdentityValid || !o.BaselineValid || !o.ConsoleAdmissible || o.AccountedBytes < 0 {
 		return fail()
 	}
 	for _, pair := range [][2]string{{q.Boot, o.Boot}, {q.BaselineSHA256, o.BaselineSHA256}, {q.BoundaryEvidenceSHA256, o.BoundaryEvidenceSHA256}} {
@@ -102,7 +115,10 @@ func Evaluate(now time.Time, q Qualification, e BoundaryEvidence, o Observation)
 			return fail()
 		}
 	}
-	required := map[string]bool{"network_reachability": false, "unix_socket_boundary": false, "owner_unaffected": false, "owner_home_denial": false, "fast_switch": false, "reboot": false, "tool_profiles": false}
+	required := make(map[string]bool, len(Categories))
+	for _, name := range Categories {
+		required[name] = false
+	}
 	for _, p := range e.Probes {
 		seen, known := required[p.Category]
 		if !known || seen || !validDigest(p.ArtifactSHA256) || p.Attempts < 0 || p.AuthorizedControlSuccesses < 0 || p.CanaryReceipts < 0 {

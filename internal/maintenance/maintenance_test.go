@@ -13,12 +13,12 @@ import (
 func approvedFixture() (time.Time, Qualification, BoundaryEvidence, Observation) {
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	d := digest([]byte("approved"))
-	o := Observation{JobUID: 550, Boot: d, BaselineSHA256: d, BoundaryEvidenceSHA256: d, Profiles: map[string]string{"build": d}, IdentityValid: true, BaselineValid: true, AccountedBytes: 1234}
+	o := Observation{JobUID: 550, Boot: d, BaselineSHA256: d, BoundaryEvidenceSHA256: d, Profiles: map[string]string{"build": d}, IdentityValid: true, BaselineValid: true, ConsoleAdmissible: true, AccountedBytes: 1234}
 	// A self-exited audited helper is evidence, never a health refusal.
 	o.BaselineExited = []worker.ProcessIdentity{{PID: 101, Start: "boot:101"}}
 	o.Persistence = worker.PersistenceAttestationMetadata{Valid: true, LastVerified: now}
-	q := Qualification{Schema: 3, ApprovedAt: now, JobUID: o.JobUID, Boot: d, BaselineSHA256: d, BoundaryEvidenceSHA256: d, Profiles: map[string]string{"build": d}}
-	e := BoundaryEvidence{Schema: 3, RecordedAt: now.Add(-time.Minute), JobUID: o.JobUID, Boot: d}
+	q := Qualification{Schema: RecordSchema, ApprovedAt: now, JobUID: o.JobUID, Boot: d, BaselineSHA256: d, BoundaryEvidenceSHA256: d, Profiles: map[string]string{"build": d}}
+	e := BoundaryEvidence{Schema: RecordSchema, RecordedAt: now.Add(-time.Minute), JobUID: o.JobUID, Boot: d}
 	before := CoexistenceState{RecordedAt: now.Add(-2 * time.Minute), MainRulesStatus: "available", MainRulesSHA256: d}
 	after := before
 	after.RecordedAt = e.RecordedAt
@@ -27,7 +27,7 @@ func approvedFixture() (time.Time, Qualification, BoundaryEvidence, Observation)
 	o.Coexistence = &current
 	e.Coexistence = &CoexistenceEvidence{Before: before, After: after}
 	e.Probes = append(e.Probes, Probe{Category: "network_reachability", ArtifactSHA256: d, Status: "not enforced in phase 1"})
-	for _, category := range []string{"unix_socket_boundary", "owner_unaffected", "fast_switch", "reboot", "tool_profiles", "owner_home_denial"} {
+	for _, category := range []string{"unix_socket_boundary", "owner_unaffected", "reboot", "tool_profiles", "owner_home_denial"} {
 		e.Probes = append(e.Probes, Probe{Category: category, ArtifactSHA256: d, Status: "passed", Attempts: 3, AuthorizedControlSuccesses: 3})
 	}
 	return now, q, e, o
@@ -183,5 +183,21 @@ func TestOldQualificationSchemasRejected(t *testing.T) {
 				t.Fatalf("old schema %d (qualification=%t) admitted: %+v %v", schema, qualification, h, err)
 			}
 		}
+	}
+}
+
+func TestForegroundJobConsoleInvalidatesHealth(t *testing.T) {
+	now, q, e, o := approvedFixture()
+	if _, err := Evaluate(now, q, e, o); err != nil {
+		t.Fatal(err)
+	}
+	o.ConsoleAdmissible = false
+	if h, err := Evaluate(now, q, e, o); err == nil || h.BoundaryValidated {
+		t.Fatal("health valid while a non-owner account owns the console")
+	}
+	q.Schema, e.Schema = 3, 3
+	o.ConsoleAdmissible = true
+	if _, err := Evaluate(now, q, e, o); err == nil {
+		t.Fatal("schema 3 approval accepted")
 	}
 }

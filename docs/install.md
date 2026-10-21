@@ -166,27 +166,33 @@ The root-owned challenge is readable by both accounts; private evidence remains 
 
    Both actual owner file reads must succeed and bracket both account reports; missing file controls still block owner-home qualification. No network receiver is required for that proof.
 
-2. At the **actual job GUI console**, run the job probe. Set `SESSION` in that terminal to the same protected path; do not use root, `sudo -u`, `su`, or a helper that drops supplementary groups:
+2. As administrator, run the **background job probe**. The job account's GUI must be logged in, and the console must be held by the owner or by the login window (after the owner logged into the job account, use Switch User to return to the login window or the owner). Nobody types in the job session:
 
    ```sh
-   /Library/macserve/bin/qualify.sh probe --session "$SESSION" \
-     --role job --out "$HOME/job-probe.json"
+   sudo /bin/launchctl asuser "$JOB_UID" /Library/macserve/bin/macserve \
+     _qualify-job-probe "$SESSION_ID"
    ```
 
-   A probe with real or effective UID 0 refuses before reading the session or touching `--out`; it creates no root-owned refusal report. Non-root identity refusals may still produce a report.
+   `SESSION_ID` is the session directory's name (`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`); it is the only input. The root launcher refuses unless it is the installed binary, has no `SUDO_*` environment, runs in the job's GUI audit session and the console is the owner's or the login window's. `launchctl asuser` adopts the user's "security audit session" (launchctl(1)); in XNU, joining a session replaces the process's whole audit info, audit user included (`audit_session_join_internal`, `bsd/security/audit/audit_session.c`). The launcher accepts **either** audit user = job UID **or** audit session = the job GUI login session as measured by root from the job's own loginwindow (`auditon(A_GETPINFO_ADDR)`) and/or launchd's `security context` for `gui/JOB` (the two must agree when both are available). A plain `sudo` or a root SSH session matches neither and refuses. The job child's audit identity must equal the verified launcher's. It then runs the probe through the production job path: `_job-exec` drops to the job UID and primary group with **no supplementary groups** and execs under `taskpolicy -b`, exactly like CI jobs. Root captures the report into the session (`job-probe.json`, `job-launch.json`, root-owned). A launch refused before the probe runs (wrong context, console, sudo, stale session) can be retried in the same session once fixed; an attempt that actually ran the probe, whatever its outcome, consumes the session, so begin a new session to retry it. To validate this on a host before any round, run the read-only self-test: `sudo /bin/launchctl asuser "$JOB_UID" /Library/macserve/bin/macserve _qualify-job-probe --self-test`. It runs every launcher check and the production credential drop, prints one JSON report (audit user and session, measured GUI session, child groups, console, `would_accept`) and writes nothing. A probe run in the job account itself is never evidence: `qualify probe --role job` refuses, and `collect` reads only the root capture.
 
-3. At the actual owner GUI console, run controls, then stop the receivers gracefully in their original terminals:
+3. As the owner (over SSH is fine), run controls, then stop the receivers gracefully in their original terminals:
 
    ```sh
    /Library/macserve/bin/qualify.sh probe --session "$SESSION" \
      --role owner --out "$HOME/owner-probe.json"
    ```
 
-4. As administrator, collect the exact job/owner reports and the required file-only owner-home receipt. `RECEIPTS` is that real file, optionally followed by comma-separated UDP receipt files; it is not sample JSON. Optional network receipts cannot substitute for the independent owner-home controls:
+4. With enabled profiles, as administrator and with the broker stopped, run the pinned recipes (see **Tool evidence** below):
+
+   ```sh
+   sudo /Library/macserve/bin/macserve _qualify-tool-evidence "$SESSION_ID"
+   ```
+
+5. As administrator, collect the owner report and the required file-only owner-home receipt. `RECEIPTS` is that real file, optionally followed by comma-separated UDP receipt files; it is not sample JSON. Optional network receipts cannot substitute for the independent owner-home controls:
 
    ```sh
    sudo /Library/macserve/bin/qualify.sh collect --session "$SESSION" \
-     --job "$JOB_REPORT" --owner "$OWNER_REPORT" --receipts "$RECEIPTS"
+     --owner "$OWNER_REPORT" --receipts "$RECEIPTS"
    sudo /bin/cat "$SESSION/candidate.json"
    ```
 
@@ -200,16 +206,9 @@ Each boundary `artifact_sha256` identifies a preserved `category-<name>.json` ma
 
 Read/list probes use nonblocking, no-follow opens. Missing paths and unsupported object types are not permission-denial proof, and a FIFO cannot stall the probe waiting for a peer.
 
-`fast_switch` and `reboot` start **pending**. Finish the pre-switch round, then perform the actual foreground/lock/UI sitting. Begin a new `after-switch` session with the same reviewed endpoint arguments and `--previous /Library/macserve/var/qualification/before-switch`; repeat the entire probe round with fresh filenames. Preserve the real foreground/UI observations, including background job behavior while the owner is foreground, then explicitly attest that artifact:
+**Console state (v0.1.13).** Jobs run only in the job account's *background* GUI domain. Admission, `worker-reset` and probes refuse, and maintenance health is invalid, while any account other than the owner holds `/dev/console` (the login window, owned by root, is accepted). A foreground job session is never a qualified state, so there is no foreground switch left to qualify and the `fast_switch` category was removed in schema 4. A job already running when someone switches to the job account is not cancelled; no new job is admitted until the console returns to the owner or the login window.
 
-```sh
-sudo /Library/macserve/bin/qualify.sh attest \
-  --session /Library/macserve/var/qualification/after-switch \
-  --category fast_switch --artifact "$SWITCH_ARTIFACT" \
-  --reason "$REVIEWED_SWITCH_CONCLUSIONS"
-```
-
-The same-boot predecessor must already be collected and remain unchanged. Attestation accepts real owner/root artifacts and records provenance; it is not a test generator. Required UI semantics still need genuine reviewed evidence. Delegated networking is informational, not a network-isolation attestation gate.
+**Tool evidence.** Enabled profiles need real recipe runs. `_qualify-tool-evidence SESSION_ID` (root, broker stopped) runs each enabled profile's prepare/run recipe through the production worker engine (admission, workspace, `launchctl asuser` + `_job-exec`, `taskpolicy`, cleanup and quarantine) on source archives pinned by `/Library/macserve/config/qualification-sources.json` (root-protected; per profile `profile`, `commit`, `tree`, `sha256`, `size_bytes`) and stored root-owned as `/Library/macserve/qualification-sources/<sha256>.tar`. The engine verifies the archive's size, sha256 and git tree before any recipe runs. The pin file's digest is bound into the challenge at `begin`. Each run is capped at the profile's default timeout and the time left in the challenge minus 15 minutes; the measured v0.1.11 compile of both profiles took about five minutes. `tool_profiles` passes only when every profile succeeded with clean cleanup, the exact profile digest and the pinned Xcode. Nothing is attested by hand.
 
 ### Sitting 3: repository/App enrollment and real recipe evidence
 
@@ -217,38 +216,34 @@ Review the installed numeric repository/public-key pins, actual GitHub App enrol
 
 Apple helpers in the job GUI session may exit on their own during a round or between jobs (issue #27: a KeepAlive `corespeechd` crashed itself and launchd relaunched it under a new PID). Since v0.1.9 an audited PID that is simply absent is recorded, not refused: `begin`/`collect` snapshots and live health observations list it in `observation.baseline_exited` (PID and start token), and broker cleanup and admission continue. An audited PID now held by another UID or a zombie still refuses everywhere, and so does an audited PID number now held by a different process (changed start token) unless that process is launchd's verified relaunch under the rule in section 3. Launchd relaunches are handled by the rule in section 3. The baseline file and its digest are never rewritten for exits or relaunches, so these never require requalification.
 
-Run approved recipes only as the job user and retain their actual artifacts. Tool inspection may create long-lived job processes: audit them and use the existing reset explicitly, never auto-adopt them. Collect a fresh round after configuration/profile/baseline changes. For the current collected session, record genuine recipe/UI evidence with:
-
-```sh
-sudo /Library/macserve/bin/qualify.sh attest --session "$SESSION" \
-  --category tool_profiles --artifact "$RECIPE_ARTIFACT" \
-  --reason "$REVIEWED_RECIPE_CONCLUSIONS"
-```
-
-This command is needed when enabled profiles require semantic recipe/UI evidence; it cannot repair failed automated tool inspection. Keep profiles empty until real recipes and their trusted writers are approved. `reboot` is still pending before sitting 4, so no production approval is available yet.
+Tool inspection and recipe runs may leave long-lived job processes: audit them and use the existing reset explicitly, never auto-adopt them. Collect a fresh round after configuration/profile/baseline changes. `reboot` stays pending until a sitting on a later boot, so no production approval is available yet.
 
 ### Sitting 4: planned cold reboot, repeat, explicit approval
 
-Arrange physical-console FileVault unlock, an actual fresh job GUI login, approved prompts and a newly audited PID list. Keep admission disabled and use the **same** `worker-reset` command above. Begin a fresh `after-reboot` session with the reviewed endpoint arguments and `--previous` pointing to the preserved preboot collected session. Repeat the full probe round; prior boot-bound reports cannot substitute for it.
+Reboot (`fdesetup authrestart` or FileVault unlock at the console), log into the job account, then Switch User back to the login window or the owner. Keep admission disabled and use the **same** `worker-reset` command above. Begin a fresh `after-reboot` session with the reviewed endpoint arguments and `--previous` pointing to the preserved preboot collected session, and repeat the full round.
+
+`reboot` is machine-checked at `collect`: it passes when the predecessor sitting was collected on a different boot, with both the `kern.boottime` digest and `kern.bootsessionuuid` changed (a clock step alone cannot pass), or when the predecessor passed `reboot` on this same boot. A challenge expires after two hours; predecessors are bounded to seven days.
+
+Inspect the final candidate and preserved evidence, then the owner's **one explicit root command** installs the approval records and the activation anchor:
 
 ```sh
-sudo /Library/macserve/bin/qualify.sh attest \
-  --session /Library/macserve/var/qualification/after-reboot \
-  --category reboot --artifact "$REBOOT_ARTIFACT" \
-  --reason "$REVIEWED_REBOOT_CONCLUSIONS"
-```
-
-To prove fast switching on this boot too, finish that session, perform the real switch sitting, then begin `final-switch` with `--previous /Library/macserve/var/qualification/after-reboot`. Repeat the full round and record current real delegated/tool/switch/reboot artifacts using `attest`. The protected predecessor chain supplies the observed reboot transition and same-boot before/after comparison; artifacts and current observations must still match. A challenge and its probes expire after two hours; predecessors are bounded to seven days. Start a fresh round rather than changing timestamps or carrying forward stale success.
-
-Inspect the final candidate and preserved evidence, then **one explicit owner-approved root command** installs the approval records:
-
-```sh
-sudo /bin/cat /Library/macserve/var/qualification/final-switch/candidate.json
+sudo /bin/cat /Library/macserve/var/qualification/after-reboot/candidate.json
 sudo /Library/macserve/bin/qualify.sh approve \
-  --session /Library/macserve/var/qualification/final-switch
+  --session /Library/macserve/var/qualification/after-reboot
 ```
 
-Approval refuses pending/failed non-network categories, changed artifacts or current host/profile binding drift and checks the maintenance evaluator. It remeasures read-only coexistence, requiring unchanged running service PIDs and unchanged rule digests wherever both measurements are available, then saves exact final bytes as `approved-boundary-evidence.json`. PF unavailability alone never blocks approval. The candidate/predecessor chain remains unchanged. Approval does not manufacture health, clear `owner.pause`, adopt GUI processes or activate services. Only after remaining enrollment/health gates and separate explicit service-start approval may section 6 be followed. Preserve every session for review and recovery.
+Approval refuses pending/failed categories, changed artifacts or current host/profile binding drift and checks the maintenance evaluator. It remeasures read-only coexistence, requiring unchanged running service PIDs and unchanged rule digests wherever both measurements are available, then saves exact final bytes as `approved-boundary-evidence.json`. PF unavailability alone never blocks approval. Approval does not manufacture health, clear `owner.pause`, adopt GUI processes or activate services.
+
+**Activation anchor and requalification after reboot.** `approve` also writes `/Library/macserve/config/activation-anchor.json` (root, 0600). It binds the sha256 of every protected file in `/Library/macserve/config` (except `owner.pause`, the approval records and the anchor) and `/Library/macserve/bin`, the three LaunchDaemon plists and the reviewed persistence manifest, plus the profile digests, job/owner/controller UIDs and challenge parameters (TCP, UDP, allowed endpoints, private paths, socket). It does **not** bind boot-bound facts (boot, baseline digest, evidence, coexistence PIDs, persistence attestation) or the GUI baseline's process set: real audited baselines differ on every boot because Apple helpers start on demand. Instead every audited baseline process must run a SIP-restricted (`SF_RESTRICTED`), root-owned, non-writable executable that is not a shell, interpreter or Terminal; `begin`, `collect` and approval refuse otherwise.
+
+Approval stays boot-bound. After a reboot, with the anchor in place, an administrator can requalify with no owner password: `worker-reset`, `begin --requalify` (chains to the anchored session), the probe round, tool evidence, `collect`, then:
+
+```sh
+sudo /Library/macserve/bin/qualify.sh reapprove --session "$SESSION"
+sudo /Library/macserve/bin/qualify.sh activation-check
+```
+
+`reapprove` performs every `approve` check and additionally requires the live configuration and challenge parameters to equal the anchor, and no earlier approval on this boot (so no job can have run since boot). It never writes the anchor. Any configuration change (release, manifest, profiles, plists, deploy environment, narrowed endpoints or private paths) refuses until the owner approves again. `activation-check` is read-only. Remove the anchor to revoke carry-forward.
 
 ## Trust boundary and stop conditions
 
@@ -297,7 +292,7 @@ All ancestors of protected policy, executable and control-state paths must be ro
 | `var` | root:wheel `0711` |
 | `bin/macserve` | reviewed prebuilt Darwin binary, root-owned executable, normally `0755` |
 | `config/controller.json`, `worker.json`, `maintenance.json`, `profiles.json` | root-owned `0644` policy (no embedded secrets); controller configuration and profiles readable by controller |
-| `config/qualification.json`, `boundary-evidence.json` | root-approved schema-3 evidence, mode `0600`; no job/controller write |
+| `config/qualification.json`, `boundary-evidence.json` | root-approved schema-4 evidence, mode `0600`; no job/controller write |
 | `var/broker/gui-baseline.json` | root-private audited GUI baseline, written by the existing reset command |
 | `var/qualification/<session>` | root-owned session `0755`; public challenge `0644`, preserved evidence/approval artifacts `0600` |
 | `var/controller` and its `secrets` | controller-owned `0700`; secret files `0600` |
@@ -372,7 +367,7 @@ Services are read with `launchctl print system/<label>` and must be verifiably r
 
 | Field | Meaning |
 | --- | --- |
-| `schema` | integer `3`; schema-1/2 approvals require fresh qualification, never migration |
+| `schema` | integer `4`; schema-1/2/3 approvals require fresh qualification, never migration |
 | `approved_at` | actual approval timestamp, RFC3339 |
 | `job_uid` | approved numeric job effective UID |
 | `boot` | current kernel boot identity, matching the protected worker baseline |
@@ -380,7 +375,7 @@ Services are read with `launchctl print system/<label>` and must be verifiably r
 | `boundary_evidence_sha256` | SHA-256 of exact approved `boundary-evidence.json` bytes |
 | `profiles` | object mapping each qualified profile ID to its normalized registry digest |
 
-`boundary-evidence.json` contains `schema` (integer `3`), `recorded_at`, `job_uid`, `boot`, `coexistence` and `probes`. Each probe has `category`, `artifact_sha256`, `status`, `attempts`, `authorized_control_successes` and `canary_receipts`. Required categories are `network_reachability`, `unix_socket_boundary`, `owner_unaffected`, `owner_home_denial`, `fast_switch`, `reboot` and `tool_profiles`. Network status is exactly `not enforced in phase 1`; its actual reachability/unsupported results are informational. Other categories require `passed`, actual attempts and valid artifact digests. Owner-home denial additionally requires successful owner file controls and zero successful job canary reads. There are no PF-hit counters or network-denial pass criteria.
+`boundary-evidence.json` contains `schema` (integer `4`; schema 3 records fail closed), `recorded_at`, `job_uid`, `boot`, `coexistence` and `probes`. Each probe has `category`, `artifact_sha256`, `status`, `attempts`, `authorized_control_successes` and `canary_receipts`. Required categories are `network_reachability`, `unix_socket_boundary`, `owner_unaffected`, `owner_home_denial`, `reboot` and `tool_profiles`. Network status is exactly `not enforced in phase 1`; its actual reachability/unsupported results are informational. Other categories require `passed`, actual attempts and valid artifact digests. Owner-home denial additionally requires successful owner file controls and zero successful job canary reads. There are no PF-hit counters or network-denial pass criteria.
 
 Supply exactly one probe per required category, no duplicate/unknown categories, and nonnegative integer counts. Digests are 64 lowercase hexadecimal characters. Evidence `recorded_at` must be no later than `approved_at`, and approval must not be in the future. The qualification's profile map must exactly match the observed configured profiles, not an approved subset of an otherwise unqualified registry.
 
@@ -395,7 +390,7 @@ After the approved baseline reset, the future root-only read-only observation co
 
 This command collects protected live facts without qualification/evidence files and without writing health: `job_uid`, `boot`, `baseline_sha256`, `profiles`, `identity_valid`, `baseline_valid`, `accounted_bytes`, `memory_pressure`, `coexistence` and protected `persistence` attestation metadata. It does not run the full persistence collector or renew an attestation; its observation deadline remains eight seconds. It is **not** boundary evidence or approval. `maintenance-observe --coexistence-only --config /Library/macserve/config/maintenance.json` emits only the read-only coexistence state and needs no GUI baseline/profile qualification. Do not install observation JSON as qualification or copy observation booleans into an approval record.
 
-**Schema-3 cutover:** interface inventory is no longer collected or bound by maintenance, qualification or controller admission. VM bridge starts/stops, address/prefix changes and interface name/flag churn do not invalidate boundary qualification, health or active work. This removes an obsolete network gate, not a non-network protection: boot, exact GUI baseline, account separation, profiles and protected evidence remain binding. Health, qualification, boundary evidence and all challenge/report/receipt/candidate/attestation artifacts use schema 3. Schema-1/2 artifacts are refused and require new qualification; never rewrite a schema number to reuse old evidence. Informational target matrices still come from the reviewed deployment environment; this is not network isolation.
+**Schema-3 cutover:** interface inventory is no longer collected or bound by maintenance, qualification or controller admission. VM bridge starts/stops, address/prefix changes and interface name/flag churn do not invalidate boundary qualification, health or active work. This removes an obsolete network gate, not a non-network protection: boot, exact GUI baseline, account separation, profiles and protected evidence remain binding. Qualification, boundary evidence and all challenge/report/receipt/candidate artifacts use schema 4 since v0.1.13 (published health remains schema 3). Schema-1/2/3 artifacts are refused and require new qualification; never rewrite a schema number to reuse old evidence. Informational target matrices still come from the reviewed deployment environment; this is not network isolation.
 
 Maintenance is a root/Darwin-only observer except for its health and protected persistence-attestation publication. It checks boot/baseline process identity, account separation, configured peer services, profile digests, memory pressure and bounded mutable-byte accounting. It never writes PF, adopts processes, runs root Apple build tools or signals a job. Unsupported non-network security observations invalidate health rather than refreshing stale success. Missing/stale/mismatched health blocks admission and cancels active work; unavailable PF alone does not.
 
@@ -417,7 +412,7 @@ The protected attestation binds the accepted manifest to boot and relevant ident
 
 Recovery: preserve the failure evidence, inspect and explicitly approve/accept the current registrations, then run the approved GUI-baseline reset and requalification flow. Acceptance establishes a new `reset_required` revision, even when the reviewed manifest bytes are unchanged; only successful explicit reset completes that recovery. A transient hot-path refusal needs no re-review unless a later observation finds positive contamination. Reset does not implicitly erase an unrelated quarantine. Do not edit/delete attestation or lock files to resume admission. There is no FSEvents watcher or TTL-cache admission substitute.
 
-Qualification `begin`, `collect`, `attest`, and `approve` perform explicit full verification before their eight-second observation. Their command deadline is 540 seconds, so it does not truncate the 480-second scan; `qualify.sh` execs the binary without a shorter wrapper timeout. External per-operation wrappers allow 600 seconds. If an external procedure runs reset followed by qualification, budget for **two** full scans plus overhead (at least 1260 seconds), not one 600-second wrapper around both. Maintenance's launchd `ExitTimeOut` (the documented case-sensitive key) is 600 seconds so a cancelled background scan can finish protected revocation publication. Inspection, acceptance and reset retain full verification. The protected attestation lives at `persistence-attestation.json` beside the accepted manifest, with a separate `.lock` file; it is not a controller/job-writable cache.
+Qualification `begin`, `collect`, `approve` and `reapprove` perform explicit full verification before their eight-second observation. Their command deadline is 540 seconds, so it does not truncate the 480-second scan; `qualify.sh` execs the binary without a shorter wrapper timeout. External per-operation wrappers allow 600 seconds. If an external procedure runs reset followed by qualification, budget for **two** full scans plus overhead (at least 1260 seconds), not one 600-second wrapper around both. Maintenance's launchd `ExitTimeOut` (the documented case-sensitive key) is 600 seconds so a cancelled background scan can finish protected revocation publication. Inspection, acceptance and reset retain full verification. The protected attestation lives at `persistence-attestation.json` beside the accepted manifest, with a separate `.lock` file; it is not a controller/job-writable cache.
 The periodic maintenance operation uses the same 540-second outer deadline, leaving protected publication/revocation headroom outside its worker-enforced 480-second collector deadline.
 
 Budget evidence: a cold native full `collectPersistence` replay took 157.806467208 seconds for all 16 accepted registrations (apps and nested plug-ins/extensions), with zero problems including final rechecks. Three times that observation rounded up gives the fixed 480-second budget. The cheap registration portion took 0.160902417 seconds. The replay ran as the owner with the accepted v016 census substituted as raw input and the installed helper supplying executable context. These timings cover registration checks only, **not** complete login-items/admission: root-only legacy-item and job-home checks were excluded, and no fresh root BTM census was collected. This is not a claim that every native admission prerequisite was exercised.
