@@ -302,7 +302,7 @@ func checkReportBinding(r Report, c Challenge, hash, role string) error {
 	if r.Refusal != "" {
 		return nil
 	}
-	if len(r.Groups) == 0 || r.AuditUID != uid || hostguard.ConsoleAdmissible(r.ConsoleUID, c.Environment.OwnerUID) != nil || (role == "job" && !slices.Equal(r.Groups, []int{int(c.Environment.JobGID)})) {
+	if len(r.Groups) == 0 || (role == "owner" && r.AuditUID != uid) || (role == "job" && r.AuditSession <= 0) || hostguard.ConsoleAdmissible(r.ConsoleUID, c.Environment.OwnerUID) != nil || (role == "job" && !slices.Equal(r.Groups, []int{int(c.Environment.JobGID)})) {
 		return errors.New("report probe context is not the reviewed one")
 	}
 	return nil

@@ -169,8 +169,10 @@ func actualIdentity(ctx context.Context, c Challenge, role string) (probeIdentit
 	if id.auditUID, id.auditSession, e = processAudit(); e != nil {
 		return id, fmt.Errorf("audit session unavailable: %w", e)
 	}
-	if role == "job" && id.auditUID != uid {
-		return id, fmt.Errorf("job probe audit user %d is not the job account %d: launchctl asuser did not join the job's GUI audit session", id.auditUID, uid)
+	// The job child's audit identity is bound to the verified root launcher's
+	// in loadJobProbe; the owner probe runs in the owner's own login session.
+	if role == "owner" && id.auditUID != uid {
+		return id, fmt.Errorf("owner probe audit user %d is not the owner account %d", id.auditUID, uid)
 	}
 	_, diag, e := command(ctx, "", "/bin/launchctl", "print", "gui/"+strconv.Itoa(int(uid)))
 	if e != nil {

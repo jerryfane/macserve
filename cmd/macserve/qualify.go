@@ -175,7 +175,8 @@ func qualificationCommandContext(parent context.Context, command string) (contex
 }
 
 // runQualifyPrivate dispatches the hidden root launcher commands. Each takes
-// exactly one session ID; the executable, arguments and paths are fixed.
+// exactly one session ID (or --self-test, which writes nothing); the
+// executable, arguments and paths are fixed.
 func runQualifyPrivate(command string, args []string, stdout, stderr io.Writer) int {
 	if len(args) != 1 {
 		fmt.Fprintf(stderr, "macserve %s: exactly one session ID required\n", command)
@@ -186,9 +187,17 @@ func runQualifyPrivate(command string, args []string, stdout, stderr io.Writer) 
 	var err error
 	switch command {
 	case "_qualify-job-probe":
-		err = qualification.LaunchJobProbe(ctx, args[0])
+		if args[0] == "--self-test" {
+			err = qualification.JobProbeSelfTest(ctx, stdout)
+		} else {
+			err = qualification.LaunchJobProbe(ctx, args[0])
+		}
 	case "_qualify-job-probe-child":
-		err = qualification.RunJobProbeChild(ctx, args[0], stdout)
+		if args[0] == "--self-test" {
+			err = qualification.JobProbeChildSelfTest(stdout)
+		} else {
+			err = qualification.RunJobProbeChild(ctx, args[0], stdout)
+		}
 	case "_qualify-tool-evidence":
 		err = qualification.RunToolEvidence(ctx, args[0])
 	}

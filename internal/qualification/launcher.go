@@ -59,19 +59,24 @@ func SessionDirectory(id string) (string, error) {
 
 // JobProbeLaunch is the root launcher's record of one job probe.
 type JobProbeLaunch struct {
-	Schema               int       `json:"schema"`
-	Session              string    `json:"session"`
-	ChallengeSHA256      string    `json:"challenge_sha256"`
-	LauncherSHA256       string    `json:"launcher_sha256"`
-	LauncherAuditUID     uint32    `json:"launcher_audit_uid"`
-	LauncherAuditSession int32     `json:"launcher_audit_session"`
-	ConsoleUID           uint32    `json:"console_uid"`
-	Started              time.Time `json:"started"`
-	Finished             time.Time `json:"finished"`
-	ExitStatus           int       `json:"exit_status"`
-	ReportSHA256         string    `json:"report_sha256,omitempty"`
-	Diagnostics          string    `json:"diagnostics,omitempty"`
-	Error                string    `json:"error,omitempty"`
+	Schema               int    `json:"schema"`
+	Session              string `json:"session"`
+	ChallengeSHA256      string `json:"challenge_sha256"`
+	LauncherSHA256       string `json:"launcher_sha256"`
+	LauncherAuditUID     uint32 `json:"launcher_audit_uid"`
+	LauncherAuditSession int32  `json:"launcher_audit_session"`
+	// Provenance is how the launcher proved it runs in the job GUI session
+	// (provenanceAuditUser or provenanceGUISession); GUISession is root's
+	// measurement of that session.
+	Provenance   string     `json:"provenance"`
+	GUISession   guiSession `json:"gui_session"`
+	ConsoleUID   uint32     `json:"console_uid"`
+	Started      time.Time  `json:"started"`
+	Finished     time.Time  `json:"finished"`
+	ExitStatus   int        `json:"exit_status"`
+	ReportSHA256 string     `json:"report_sha256,omitempty"`
+	Diagnostics  string     `json:"diagnostics,omitempty"`
+	Error        string     `json:"error,omitempty"`
 }
 
 func fileDigest(path string) (string, error) {
@@ -111,7 +116,7 @@ func installedDeployment() (deploy.Environment, []byte, error) {
 // launcherContext verifies that this root process runs inside the job's GUI
 // audit session (launchctl asuser JOB_UID), from the installed executable,
 // with an admissible console. Every failure is a refusal with no host change.
-func launcherContext(env deploy.Environment) (launch JobProbeLaunch, err error) {
+func launcherContext(ctx context.Context, env deploy.Environment) (launch JobProbeLaunch, err error) {
 	if err = rootOnly(); err != nil {
 		return launch, err
 	}
@@ -131,8 +136,11 @@ func launcherContext(env deploy.Environment) (launch JobProbeLaunch, err error) 
 	if launch.LauncherAuditUID, launch.LauncherAuditSession, err = processAudit(); err != nil {
 		return launch, fmt.Errorf("audit session unavailable: %w", err)
 	}
-	if launch.LauncherAuditUID != env.JobUID {
-		return launch, fmt.Errorf("launcher audit user %d is not the job account %d: run as /bin/launchctl asuser %d %s _qualify-job-probe SESSION_ID with the job GUI logged in", launch.LauncherAuditUID, env.JobUID, env.JobUID, installedHelper)
+	// The GUI session is measured even when the audit user already matches,
+	// so the launch record always shows both facts.
+	launch.GUISession, _ = measureGUISession(ctx, env.JobUID)
+	if launch.Provenance, err = launcherProvenance(launch.LauncherAuditUID, launch.LauncherAuditSession, env.JobUID, launch.GUISession.ASID); err != nil {
+		return launch, err
 	}
 	if launch.ConsoleUID, err = hostguard.ConsoleUID(); err != nil {
 		return launch, err
@@ -175,7 +183,7 @@ func LaunchJobProbe(ctx context.Context, id string) error {
 	if _, err := os.Lstat(filepath.Join(dir, "candidate.json")); !errors.Is(err, os.ErrNotExist) {
 		return errors.New("session already collected; begin a new session")
 	}
-	launch, err := launcherContext(env)
+	launch, err := launcherContext(ctx, env)
 	launch.Schema, launch.Session, launch.ChallengeSHA256, launch.Started = schema, id, digest(raw), time.Now().UTC()
 	if err != nil {
 		return err
@@ -279,11 +287,172 @@ func loadJobProbe(dir string, c Challenge, raw []byte) ([]byte, []byte, Report, 
 	if err != nil {
 		return nil, nil, r, err
 	}
-	if launch.Schema != schema || launch.Session != filepath.Base(dir) || launch.ChallengeSHA256 != digest(raw) || launch.ReportSHA256 != digest(jb) || launch.LauncherSHA256 != launcher || launch.LauncherAuditUID != c.Environment.JobUID || hostguard.ConsoleAdmissible(launch.ConsoleUID, c.Environment.OwnerUID) != nil || launch.Started.Before(c.Created) || launch.Finished.Before(launch.Started) || launch.Finished.After(c.Expires) {
+	if launch.Schema != schema || launch.Session != filepath.Base(dir) || launch.ChallengeSHA256 != digest(raw) || launch.ReportSHA256 != digest(jb) || launch.LauncherSHA256 != launcher || !launchProvenanceValid(launch, c.Environment.JobUID) || hostguard.ConsoleAdmissible(launch.ConsoleUID, c.Environment.OwnerUID) != nil || launch.Started.Before(c.Created) || launch.Finished.Before(launch.Started) || launch.Finished.After(c.Expires) {
 		return nil, nil, r, errors.New("job probe launch record does not bind this session, report and installed launcher")
 	}
 	if err = decode(jb, &r); err != nil {
 		return nil, nil, r, err
 	}
+	// The child inherits the launcher's audit identity through _job-exec;
+	// a report from any other session is not this launch's child.
+	if r.AuditUID != launch.LauncherAuditUID || r.AuditSession != launch.LauncherAuditSession {
+		return nil, nil, r, errors.New("job report audit identity differs from the verified launcher")
+	}
 	return jb, lb, r, nil
+}
+
+// launchProvenanceValid re-derives the recorded provenance decision.
+func launchProvenanceValid(l JobProbeLaunch, jobUID uint32) bool {
+	p, err := launcherProvenance(l.LauncherAuditUID, l.LauncherAuditSession, jobUID, l.GUISession.ASID)
+	return err == nil && p == l.Provenance
+}
+
+// SelfTestReport is the read-only host check of the launcher context.
+type SelfTestReport struct {
+	Root                 bool       `json:"root"`
+	Sudo                 bool       `json:"sudo_environment"`
+	Executable           string     `json:"executable"`
+	InstalledExecutable  bool       `json:"installed_executable"`
+	LauncherAuditUID     uint32     `json:"launcher_audit_uid"`
+	LauncherAuditSession int32      `json:"launcher_audit_session"`
+	GUISession           guiSession `json:"gui_session"`
+	ConsoleUID           uint32     `json:"console_uid"`
+	Provenance           string     `json:"provenance,omitempty"`
+	Child                *SelfTest  `json:"child,omitempty"`
+	ChildError           string     `json:"child_error,omitempty"`
+	WouldAccept          bool       `json:"would_accept"`
+	Refusals             []string   `json:"refusals,omitempty"`
+}
+
+// SelfTest is what the job child observes after the production drop.
+type SelfTest struct {
+	UID          int    `json:"uid"`
+	GID          int    `json:"gid"`
+	Groups       []int  `json:"groups"`
+	AuditUID     uint32 `json:"audit_uid"`
+	AuditSession int32  `json:"audit_session"`
+	ConsoleUID   uint32 `json:"console_uid"`
+	Error        string `json:"error,omitempty"`
+}
+
+// JobProbeSelfTest runs every launcher check and the production credential
+// drop without a session. It reads installed configuration only, writes no
+// file and prints one JSON report. It fails when the real launcher would
+// refuse.
+func JobProbeSelfTest(ctx context.Context, stdout io.Writer) error {
+	var t SelfTestReport
+	refuse := func(format string, args ...any) { t.Refusals = append(t.Refusals, fmt.Sprintf(format, args...)) }
+	t.Root = os.Getuid() == 0 && os.Geteuid() == 0
+	if !t.Root {
+		refuse("not root")
+	}
+	t.Sudo = sudoInvocation()
+	if t.Sudo {
+		refuse("SUDO_* environment present")
+	}
+	if self, err := os.Executable(); err == nil {
+		if self, err = filepath.EvalSymlinks(self); err == nil {
+			t.Executable = self
+		}
+	}
+	t.InstalledExecutable = t.Executable == installedHelper
+	if !t.InstalledExecutable {
+		refuse("not the installed %s", installedHelper)
+	}
+	env, _, err := installedDeployment()
+	if err != nil {
+		refuse("deployment environment: %v", err)
+	} else {
+		var auditErr error
+		if t.LauncherAuditUID, t.LauncherAuditSession, auditErr = processAudit(); auditErr != nil {
+			refuse("audit session: %v", auditErr)
+		}
+		var sessionErr error
+		if t.GUISession, sessionErr = measureGUISession(ctx, env.JobUID); sessionErr != nil {
+			refuse("job GUI session: %v", sessionErr)
+		}
+		if auditErr == nil {
+			if t.Provenance, err = launcherProvenance(t.LauncherAuditUID, t.LauncherAuditSession, env.JobUID, t.GUISession.ASID); err != nil {
+				refuse("%v", err)
+			}
+		}
+		if t.ConsoleUID, err = hostguard.ConsoleUID(); err != nil {
+			refuse("console: %v", err)
+		} else if err = hostguard.ConsoleAdmissible(t.ConsoleUID, env.OwnerUID); err != nil {
+			refuse("%v", err)
+		}
+		if t.Root && t.InstalledExecutable {
+			t.Child, err = runSelfTestChild(ctx, env)
+			if err != nil {
+				t.ChildError = err.Error()
+				refuse("job child: %v", err)
+			} else if t.Child.UID != int(env.JobUID) || t.Child.GID != int(env.JobGID) || !slices.Equal(t.Child.Groups, []int{int(env.JobGID)}) || t.Child.AuditUID != t.LauncherAuditUID || t.Child.AuditSession != t.LauncherAuditSession {
+				refuse("job child credential or audit identity is not the production one")
+			}
+		}
+	}
+	t.WouldAccept = len(t.Refusals) == 0
+	b, err := json.MarshalIndent(t, "", "  ")
+	if err != nil {
+		return err
+	}
+	if _, err = stdout.Write(append(b, '\n')); err != nil {
+		return err
+	}
+	if !t.WouldAccept {
+		return errors.New("self-test: the job probe launcher would refuse; see refusals")
+	}
+	return nil
+}
+
+func runSelfTestChild(ctx context.Context, env deploy.Environment) (*SelfTest, error) {
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	jobUID, jobGID := strconv.FormatUint(uint64(env.JobUID), 10), strconv.FormatUint(uint64(env.JobGID), 10)
+	cmd := exec.CommandContext(ctx, installedHelper, "_job-exec", jobUID, jobGID, "/", installedHelper, "_qualify-job-probe-child", "--self-test")
+	cmd.Dir = "/"
+	cmd.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LANG=C", "LC_ALL=C"}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = 5 * time.Second
+	out := &boundedOutput{limit: 64 << 10}
+	diag := &boundedOutput{limit: 16 << 10}
+	cmd.Stdout, cmd.Stderr = out, diag
+	runErr := cmd.Run()
+	var child SelfTest
+	if err := decode(out.Bytes(), &child); err != nil {
+		return nil, errors.Join(runErr, fmt.Errorf("no child report: %w %s", err, diag.String()))
+	}
+	if child.Error != "" {
+		return &child, errors.New(child.Error)
+	}
+	return &child, runErr
+}
+
+// JobProbeChildSelfTest reports the job child's own credential and audit
+// identity. It reads nothing protected and writes only stdout.
+func JobProbeChildSelfTest(stdout io.Writer) error {
+	t := SelfTest{UID: os.Getuid(), GID: os.Getgid()}
+	var errs []error
+	var err error
+	if t.Groups, err = processGroups(); err != nil {
+		errs = append(errs, err)
+	}
+	if t.AuditUID, t.AuditSession, err = processAudit(); err != nil {
+		errs = append(errs, err)
+	}
+	if t.ConsoleUID, err = hostguard.ConsoleUID(); err != nil {
+		errs = append(errs, err)
+	}
+	if os.Geteuid() == 0 {
+		errs = append(errs, errRootProbe)
+	}
+	if err = errors.Join(errs...); err != nil {
+		t.Error = err.Error()
+	}
+	b, merr := json.Marshal(t)
+	if merr != nil {
+		return merr
+	}
+	_, werr := stdout.Write(b)
+	return errors.Join(err, werr)
 }

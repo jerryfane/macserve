@@ -133,7 +133,7 @@ func receiptFixture() (Challenge, Report, Report, []Receipts) {
 func TestReportBindingAndExpiration(t *testing.T) {
 	now := time.Now().UTC().Add(-time.Minute)
 	c := Challenge{Schema: schema, ID: strings.Repeat("a", 64), Created: now, Expires: now.Add(lifetime), Environment: deploy.Environment{JobUID: 502, JobGID: 20, OwnerUID: 501}}
-	r := Report{Schema: schema, ChallengeSHA256: "current", Role: "job", Mode: jobProbeMode, UID: 502, AuditUID: 502, Groups: []int{20}, Started: now.Add(time.Second), Finished: now.Add(2 * time.Second)}
+	r := Report{Schema: schema, ChallengeSHA256: "current", Role: "job", Mode: jobProbeMode, UID: 502, AuditUID: 502, AuditSession: 100010, Groups: []int{20}, Started: now.Add(time.Second), Finished: now.Add(2 * time.Second)}
 	if e := checkReport(r, c, "current", "job"); e != nil {
 		t.Fatal(e)
 	}
@@ -526,7 +526,7 @@ func TestNonNetworkFailuresStillBlockApproval(t *testing.T) {
 func TestOldChallengeAndReportSchemasRejected(t *testing.T) {
 	now := time.Now().UTC().Add(-time.Minute)
 	c := Challenge{Schema: schema, ID: strings.Repeat("a", 64), Created: now, Expires: now.Add(lifetime), Environment: deploy.Environment{JobUID: 502, JobGID: 20, OwnerUID: 501}}
-	r := Report{Schema: schema, ChallengeSHA256: "current", Role: "job", Mode: jobProbeMode, UID: 502, AuditUID: 502, Groups: []int{20}, Started: now, Finished: now.Add(time.Second)}
+	r := Report{Schema: schema, ChallengeSHA256: "current", Role: "job", Mode: jobProbeMode, UID: 502, AuditUID: 502, AuditSession: 100010, Groups: []int{20}, Started: now, Finished: now.Add(time.Second)}
 	if e := fresh(c, now.Add(time.Second)); e != nil {
 		t.Fatal(e)
 	}

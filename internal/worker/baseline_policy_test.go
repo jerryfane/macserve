@@ -45,3 +45,20 @@ func TestBaselinePolicyRefusesCodeRunnersAndUnrestricted(t *testing.T) {
 		t.Fatal("exited entry relaunching a non-SIP executable accepted")
 	}
 }
+
+func TestJobLoginwindowsByKernelFacts(t *testing.T) {
+	samples := []processSample{{pid: 10, uid: 600, start: "s"}, {pid: 11, uid: 600, start: "s"}, {pid: 12, uid: 501, start: "s"}, {pid: 13, uid: 600, start: "s", zombie: true}}
+	agents := policyAgents{facts: map[int]agentProcess{
+		10: {start: "s", uid: 600, platform: true, executable: loginwindowExecutable},
+		11: {start: "s", uid: 600, platform: false, executable: loginwindowExecutable},
+		12: {start: "s", uid: 501, platform: true, executable: loginwindowExecutable},
+		13: {start: "s", uid: 600, platform: true, executable: loginwindowExecutable},
+	}}
+	pids, err := jobLoginwindows(samples, agents, 600)
+	if err != nil || len(pids) != 1 || pids[0] != 10 {
+		t.Fatal(pids, err)
+	}
+	if _, err := jobLoginwindows(samples[2:3], agents, 600); err == nil {
+		t.Fatal("missing job loginwindow accepted")
+	}
+}
