@@ -147,22 +147,28 @@ func anchoredConfiguration() (ActivationAnchor, error) {
 	if err != nil {
 		return a, err
 	}
-	var changed []string
-	for path := range maps.Keys(a.Bindings) {
-		if now[path] != a.Bindings[path] {
-			changed = append(changed, path)
-		}
-	}
-	for path := range maps.Keys(now) {
-		if _, ok := a.Bindings[path]; !ok {
-			changed = append(changed, path)
-		}
-	}
-	if len(changed) != 0 {
-		slices.Sort(changed)
+	if changed := bindingChanges(a.Bindings, now); len(changed) != 0 {
 		return a, fmt.Errorf("configuration changed since the owner's approval (%v); the owner must approve again", changed)
 	}
 	return a, nil
+}
+
+// bindingChanges lists, sorted, every path whose digest differs between the
+// anchored and live bindings, including paths present on only one side.
+func bindingChanges(anchored, now map[string]string) []string {
+	var changed []string
+	for path, want := range anchored {
+		if got, ok := now[path]; !ok || got != want {
+			changed = append(changed, path)
+		}
+	}
+	for path := range now {
+		if _, ok := anchored[path]; !ok {
+			changed = append(changed, path)
+		}
+	}
+	slices.Sort(changed)
+	return changed
 }
 
 // approvedOnBoot reports whether the installed qualification was approved on

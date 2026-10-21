@@ -152,7 +152,11 @@ func launcherContext(ctx context.Context, env deploy.Environment) (launch JobPro
 }
 
 // LaunchJobProbe is the root launcher. Its only input is the session ID.
-// One attempt per session; a failed or refused attempt needs a new session.
+// Launch-context refusals (not root, sudo, wrong binary, wrong audit
+// session, console, stale or collected session) happen before anything runs
+// and may be retried in the same session. Once the context is verified the
+// attempt file is created exclusively: an attempt that actually ran the child,
+// whatever its outcome, consumes the session.
 func LaunchJobProbe(ctx context.Context, id string) error {
 	if err := rootOnly(); err != nil {
 		return err
@@ -267,21 +271,31 @@ func RunJobProbeChild(ctx context.Context, id string, stdout io.Writer) error {
 	return errors.Join(probeErr, err)
 }
 
+// readJobProbeArtifacts reads the launcher's capture only through the
+// protected read: a root-owned regular file, no symlink anywhere on the path,
+// and root-protected, non-writable ancestors. A file any other account wrote
+// or could replace is never a job report.
+func readJobProbeArtifacts(dir string) (launch, report []byte, err error) {
+	if launch, err = protectedRead(filepath.Join(dir, jobLaunchFile)); err != nil {
+		return nil, nil, fmt.Errorf("root-captured job probe launch record required (run the job probe launcher first): %w", err)
+	}
+	if report, err = protectedRead(filepath.Join(dir, jobProbeFile)); err != nil {
+		return nil, nil, fmt.Errorf("root-captured job probe report required: %w", err)
+	}
+	return launch, report, nil
+}
+
 // loadJobProbe returns the launcher-captured job report and its launch record
 // after binding them to the challenge and the installed launcher.
 func loadJobProbe(dir string, c Challenge, raw []byte) ([]byte, []byte, Report, error) {
 	var r Report
-	lb, err := protectedRead(filepath.Join(dir, jobLaunchFile))
+	lb, jb, err := readJobProbeArtifacts(dir)
 	if err != nil {
-		return nil, nil, r, fmt.Errorf("root-captured job probe launch record required (run the job probe launcher first): %w", err)
+		return nil, nil, r, err
 	}
 	var launch JobProbeLaunch
 	if err = decode(lb, &launch); err != nil {
 		return nil, nil, r, err
-	}
-	jb, err := protectedRead(filepath.Join(dir, jobProbeFile))
-	if err != nil {
-		return nil, nil, r, fmt.Errorf("root-captured job probe report required: %w", err)
 	}
 	launcher, err := fileDigest(installedHelper)
 	if err != nil {
