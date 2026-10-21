@@ -54,6 +54,14 @@ func (r *nativeRunner) Admission(ctx context.Context) error {
 	if r.scope == nil || r.persistence == nil {
 		return errors.New("native persistence inspection unavailable")
 	}
+	// A foreground job session is not the qualified state. This refuses, without
+	// quarantine, before any job starts; a job already running is not cancelled.
+	if r.console == nil {
+		return errors.New("console admission inspection unavailable")
+	}
+	if err := r.console(); err != nil {
+		return fmt.Errorf("job admission refused: %w", err)
+	}
 	if err := r.loadBaseline(); err != nil {
 		return err
 	}

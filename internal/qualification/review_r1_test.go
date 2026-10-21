@@ -82,7 +82,7 @@ func TestReviewRootProbeRefusesBeforeSessionAndOutputAccess(t *testing.T) {
 			}
 			newOutput := filepath.Join(dir, "new-output")
 			for _, out := range []string{newOutput, existing, link, filepath.Join(existing, "not-a-directory"), ""} {
-				err := probe(context.Background(), session, "job", out, ids.uid, ids.euid)
+				err := probe(context.Background(), session, "owner", out, ids.uid, ids.euid)
 				if !errors.Is(err, errRootProbe) {
 					t.Fatalf("root refusal must precede missing session or output errors: %v", err)
 				}

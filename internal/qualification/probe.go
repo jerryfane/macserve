@@ -35,8 +35,14 @@ func (b *boundedOutput) Write(p []byte) (int, error) {
 	}
 	return b.Buffer.Write(p)
 }
+
+// commandTimeout bounds each probe tool command. The job probe runs under
+// taskpolicy -b (background CPU and I/O), so it allows more than an
+// interactive shell would need.
+const commandTimeout = 30 * time.Second
+
 func command(ctx context.Context, developer, exe string, args ...string) (string, string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, exe, args...)
 	cmd.Dir = "/"
@@ -66,75 +72,111 @@ func command(ctx context.Context, developer, exe string, args ...string) (string
 	e := cmd.Run()
 	return out.String(), diag.String(), e
 }
-func actualIdentity(ctx context.Context, c Challenge, role string) ([]int, error) {
-	uid := c.Environment.JobUID
-	if role == "owner" {
-		uid = c.Environment.OwnerUID
-	} else if role != "job" {
-		return nil, errors.New("role must be job or owner")
-	}
-	if runtime.GOOS != "darwin" || os.Getuid() != int(uid) || os.Geteuid() != int(uid) || os.Getgid() != os.Getegid() {
-		return nil, errors.New("run directly as the approved actual GUI account, not root impersonation")
-	}
-	// sudo/su wrappers are not a substitute for a real logged-in GUI session.
-	for _, key := range []string{"SUDO_UID", "SUDO_USER", "SUDO_COMMAND"} {
-		if os.Getenv(key) != "" {
-			return nil, errors.New("sudo impersonation is not qualification")
-		}
-	}
-	account, e := user.LookupId(strconv.Itoa(int(uid)))
-	if e != nil {
-		return nil, e
-	}
-	wanted, e := account.GroupIds()
-	if e != nil {
-		return nil, e
-	}
+
+// Probe context modes recorded in reports.
+const (
+	// jobProbeMode: the job probe, reached only as root launchctl asuser JOB
+	// into the job's existing GUI bootstrap and audit session, then the
+	// production _job-exec credential drop (no supplementary groups,
+	// taskpolicy -b). The report counts only when the root launcher captured it.
+	jobProbeMode = "asuser-background"
+	// ownerProbeMode: the owner's own account, typically over SSH.
+	ownerProbeMode = "owner"
+)
+
+type probeIdentity struct {
+	groups       []int
+	console      uint32
+	auditUID     uint32
+	auditSession int32
+}
+
+func processGroups() ([]int, error) {
 	groups, e := os.Getgroups()
 	if e != nil {
 		return nil, e
 	}
 	groups = append(groups, os.Getgid())
 	slices.Sort(groups)
-	groups = slices.Compact(groups)
+	return slices.Compact(groups), nil
+}
+
+func actualIdentity(ctx context.Context, c Challenge, role string) (probeIdentity, error) {
+	var id probeIdentity
+	uid := c.Environment.JobUID
 	name := c.Environment.JobUser
 	if role == "owner" {
+		uid = c.Environment.OwnerUID
 		name = c.Environment.OwnerUser
+	} else if role != "job" {
+		return id, errors.New("role must be job or owner")
+	}
+	if runtime.GOOS != "darwin" || os.Getuid() != int(uid) || os.Geteuid() != int(uid) || os.Getgid() != os.Getegid() {
+		return id, errors.New("run as the approved actual account, not root impersonation")
+	}
+	// sudo/su wrappers are not a substitute for the reviewed contexts.
+	for _, key := range []string{"SUDO_UID", "SUDO_USER", "SUDO_COMMAND"} {
+		if os.Getenv(key) != "" {
+			return id, errors.New("sudo impersonation is not qualification")
+		}
+	}
+	account, e := user.LookupId(strconv.Itoa(int(uid)))
+	if e != nil {
+		return id, e
 	}
 	if account.Username != name || account.Gid != strconv.Itoa(os.Getgid()) {
-		return nil, errors.New("actual account name/primary group differs from reviewed identity")
+		return id, errors.New("actual account name/primary group differs from reviewed identity")
+	}
+	if id.groups, e = processGroups(); e != nil {
+		return id, e
 	}
 	if role == "job" {
 		if e := hostguard.JobLoginListable(ctx, name); e != nil {
-			return nil, e
+			return id, e
 		}
-	}
-	expected := []int{}
-	for _, s := range append(wanted, account.Gid) {
-		n, e := strconv.Atoi(s)
+		// The production credential: primary group only, exactly what
+		// _job-exec leaves after setgroups([]), setgid, setuid. Full
+		// memberships could hide a group deny ACE that production would meet.
+		if os.Getgid() != int(c.Environment.JobGID) || !slices.Equal(id.groups, []int{int(c.Environment.JobGID)}) {
+			return id, fmt.Errorf("job probe groups %v are not the production credential [%d]; it runs only through the root background launcher", id.groups, c.Environment.JobGID)
+		}
+	} else {
+		wanted, e := account.GroupIds()
 		if e != nil {
-			return nil, e
+			return id, e
 		}
-		expected = append(expected, n)
+		expected := []int{}
+		for _, s := range append(wanted, account.Gid) {
+			n, e := strconv.Atoi(s)
+			if e != nil {
+				return id, e
+			}
+			expected = append(expected, n)
+		}
+		slices.Sort(expected)
+		if !slices.Equal(slices.Compact(expected), id.groups) {
+			return id, errors.New("process does not have the account's full current memberships")
+		}
 	}
-	slices.Sort(expected)
-	expected = slices.Compact(expected)
-	if !slices.Equal(expected, groups) {
-		return nil, errors.New("process does not have the account's full current memberships")
+	if id.console, e = hostguard.ConsoleUID(); e != nil {
+		return id, e
 	}
-	console, err := os.Stat("/dev/console")
-	if err != nil {
-		return nil, err
+	// The qualified arrangement: the owner in the foreground, or the login
+	// window after the owner chose Switch User. Never a foreground job session.
+	if e = hostguard.ConsoleAdmissible(id.console, c.Environment.OwnerUID); e != nil {
+		return id, e
 	}
-	st, ok := console.Sys().(*syscall.Stat_t)
-	if !ok || st.Uid != uid {
-		return nil, errors.New("run probes from the account currently owning the GUI console")
+	if id.auditUID, id.auditSession, e = processAudit(); e != nil {
+		return id, fmt.Errorf("audit session unavailable: %w", e)
+	}
+	if role == "job" && id.auditUID != uid {
+		return id, fmt.Errorf("job probe audit user %d is not the job account %d: launchctl asuser did not join the job's GUI audit session", id.auditUID, uid)
 	}
 	_, diag, e := command(ctx, "", "/bin/launchctl", "print", "gui/"+strconv.Itoa(int(uid)))
 	if e != nil {
-		return nil, fmt.Errorf("existing GUI domain required: %v %s", e, diag)
+		return id, fmt.Errorf("existing GUI domain required: %v %s", e, diag)
 	}
-	return groups, nil
+	return id, nil
 }
 func tcpProbe(ctx context.Context, target string) (bool, string) {
 	d := net.Dialer{Timeout: 2 * time.Second}
@@ -261,6 +303,8 @@ func networkMatrix(ctx context.Context, c Challenge, challengeDigest, role strin
 
 var errRootProbe = errors.New("qualification probes must not run with real or effective UID 0")
 
+var errJobProbeLauncher = errors.New("job probes run only through the root background launcher (launchctl asuser JOB_UID macserve _qualify-job-probe SESSION_ID); a probe run in the job account is not qualification evidence")
+
 func Probe(ctx context.Context, dir, role, out string) error {
 	return probe(ctx, dir, role, out, os.Getuid(), os.Geteuid())
 }
@@ -271,20 +315,41 @@ func probe(ctx context.Context, dir, role, out string, uid, euid int) error {
 	if uid == 0 || euid == 0 {
 		return errRootProbe
 	}
+	if role == "job" {
+		return errJobProbeLauncher
+	}
 	c, raw, e := loadChallenge(dir)
 	if e != nil {
 		return e
 	}
+	r, e := probeReport(ctx, c, raw, role)
+	if saveErr := saveJSON(out, r, 0600); saveErr != nil {
+		return errors.Join(e, saveErr)
+	}
+	if e != nil {
+		return e
+	}
+	return fresh(c, r.Finished)
+}
+
+// probeReport always returns a complete report, including refusal evidence;
+// the error reports a refusal or a failed non-network row.
+func probeReport(ctx context.Context, c Challenge, raw []byte, role string) (Report, error) {
 	ctx, cancel := context.WithDeadline(ctx, c.Expires)
 	defer cancel()
-	r := Report{Schema: 3, ChallengeSHA256: digest(raw), Role: role, UID: os.Getuid(), Started: time.Now().UTC()}
-	groups, e := actualIdentity(ctx, c, role)
+	mode := ownerProbeMode
+	if role == "job" {
+		mode = jobProbeMode
+	}
+	r := Report{Schema: schema, ChallengeSHA256: digest(raw), Role: role, UID: os.Getuid(), Started: time.Now().UTC(), Mode: mode}
+	id, e := actualIdentity(ctx, c, role)
+	r.ConsoleUID, r.AuditUID, r.AuditSession = id.console, id.auditUID, id.auditSession
 	if e != nil {
 		r.Refusal = e.Error()
 		r.Finished = time.Now().UTC()
-		return errors.Join(e, saveJSON(out, r, 0600))
+		return r, e
 	}
-	r.Groups = groups
+	r.Groups = id.groups
 	remaining := 1 << 20
 	add := func(category, target string, attempt int, ok bool, detail, nonce string) {
 		if len(detail) > remaining {
@@ -296,7 +361,7 @@ func probe(ctx context.Context, dir, role, out string, uid, euid int) error {
 	}
 	network, err := networkMatrix(ctx, c, digest(raw), role, tcpProbe, udpProbe)
 	if err != nil {
-		return err
+		return r, err
 	}
 	for _, row := range network {
 		add(row.Category, row.Target, row.Attempt, row.Success, row.Detail, row.Nonce)
@@ -360,15 +425,12 @@ func probe(ctx context.Context, dir, role, out string, uid, euid int) error {
 		}
 	}
 	r.Finished = time.Now().UTC()
-	if e = saveJSON(out, r, 0600); e != nil {
-		return e
-	}
 	for _, row := range r.Results {
 		if !row.Success && row.Category != "network_reachability" {
-			return errors.New("one or more probes failed; complete report preserved")
+			return r, errors.New("one or more probes failed; complete report preserved")
 		}
 	}
-	return fresh(c, r.Finished)
+	return r, nil
 }
 
 // Canary is an explicitly approved, bounded nonce echo receiver. TCP mode only
@@ -388,7 +450,7 @@ func Canary(ctx context.Context, dir, listen, transport, out string, duration ti
 		if listen != "" {
 			return errors.New("owner-home controls do not accept a network listener")
 		}
-		r := Receipts{Schema: 3, ChallengeSHA256: digest(raw), UID: os.Getuid(), Started: time.Now().UTC()}
+		r := Receipts{Schema: schema, ChallengeSHA256: digest(raw), UID: os.Getuid(), Started: time.Now().UTC()}
 		r.OwnerBefore = ownerCanaryRead(c.OwnerCanary)
 		end := minTime(time.Now().Add(duration), c.Expires)
 		controlCtx, cancel := context.WithDeadline(ctx, end)
@@ -432,7 +494,7 @@ func Canary(ctx context.Context, dir, listen, transport, out string, duration ti
 		wg.Wait()
 	}()
 	for index, target := range targets {
-		r := Receipts{Schema: 3, ChallengeSHA256: digest(raw), UID: os.Getuid(), Listen: target, Started: time.Now().UTC()}
+		r := Receipts{Schema: schema, ChallengeSHA256: digest(raw), UID: os.Getuid(), Listen: target, Started: time.Now().UTC()}
 		var udp *net.UDPConn
 		var tcp net.Listener
 		if transport == "udp" {

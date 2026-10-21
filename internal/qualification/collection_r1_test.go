@@ -16,13 +16,13 @@ import (
 func TestCollectionRejectsPreviousReceiptSchemas(t *testing.T) {
 	now := time.Now().UTC()
 	c := Challenge{Created: now.Add(-time.Minute), Expires: now.Add(time.Hour), Environment: deploy.Environment{OwnerUID: uint32(os.Getuid())}}
-	for _, schema := range []int{1, 2, 3} {
+	for _, version := range []int{1, 2, 3, 4} {
 		dir, err := filepath.EvalSymlinks(t.TempDir())
 		if err != nil {
 			t.Fatal(err)
 		}
-		v := Candidate{Schema: 3, ChallengeSHA256: strings.Repeat("a", 64), Collected: now, Artifacts: map[string]string{}}
-		r := Receipts{Schema: schema, ChallengeSHA256: v.ChallengeSHA256, UID: os.Getuid(), Started: c.Created, Finished: now}
+		v := Candidate{Schema: schema, ChallengeSHA256: strings.Repeat("a", 64), Collected: now, Artifacts: map[string]string{}}
+		r := Receipts{Schema: version, ChallengeSHA256: v.ChallengeSHA256, UID: os.Getuid(), Started: c.Created, Finished: now}
 		raw, err := encode(r)
 		if err != nil {
 			t.Fatal(err)
@@ -32,11 +32,11 @@ func TestCollectionRejectsPreviousReceiptSchemas(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, err = collectArtifacts(dir, "attempt-", c, v, []byte("{}"), []byte("{}"), Snapshot{At: now}, path)
-		if schema == 3 && err != nil {
+		if version == schema && err != nil {
 			t.Fatalf("current receipt refused: %v", err)
 		}
-		if schema != 3 && (err == nil || !strings.Contains(err.Error(), "invalid canary receipt document")) {
-			t.Fatalf("schema %d receipt did not fail schema validation: %v", schema, err)
+		if version != schema && (err == nil || !strings.Contains(err.Error(), "invalid canary receipt document")) {
+			t.Fatalf("schema %d receipt did not fail schema validation: %v", version, err)
 		}
 	}
 }
@@ -53,10 +53,10 @@ func TestCollectionAcceptsFullUDPMatrixAndOwnerControl(t *testing.T) {
 			for i := range 128 {
 				c.UDP = append(c.UDP, fmt.Sprintf("127.0.0.1:%d", 10000+i))
 			}
-			candidate := Candidate{Schema: 3, ChallengeSHA256: strings.Repeat("a", 64), Collected: now, Artifacts: map[string]string{}}
+			candidate := Candidate{Schema: schema, ChallengeSHA256: strings.Repeat("a", 64), Collected: now, Artifacts: map[string]string{}}
 			paths := make([]string, 0, count)
 			for i := range count {
-				receipt := Receipts{Schema: 3, ChallengeSHA256: candidate.ChallengeSHA256, UID: os.Getuid(), Started: c.Created, Finished: now}
+				receipt := Receipts{Schema: schema, ChallengeSHA256: candidate.ChallengeSHA256, UID: os.Getuid(), Started: c.Created, Finished: now}
 				if i < len(c.UDP) {
 					receipt.Listen = c.UDP[i]
 				}
@@ -118,7 +118,7 @@ func TestCollectionRetryPreservesFailedAttempt(t *testing.T) {
 	if !bytes.Equal(originals[first+"receipts-000.json"], bad) {
 		t.Fatal("failed receipt evidence not retained")
 	}
-	valid := Receipts{Schema: 3, ChallengeSHA256: failed.ChallengeSHA256, UID: os.Getuid(), Listen: c.UDP[0], Started: c.Created, Finished: now}
+	valid := Receipts{Schema: schema, ChallengeSHA256: failed.ChallengeSHA256, UID: os.Getuid(), Listen: c.UDP[0], Started: c.Created, Finished: now}
 	b, err := encode(valid)
 	if err != nil {
 		t.Fatal(err)

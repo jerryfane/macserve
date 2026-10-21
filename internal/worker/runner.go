@@ -52,6 +52,9 @@ type nativeRunner struct {
 	baselinePath    string
 	persistencePath string
 	persistence     func(context.Context) error
+	// console refuses admission unless the owner or the login window holds
+	// /dev/console (hostguard.ConsoleAdmissible). Nil refuses.
+	console func() error
 }
 
 // newProcessRunner is the process/pipes implementation. Production construction

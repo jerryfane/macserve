@@ -269,7 +269,7 @@ successful verification timestamp. Periodic success cannot silently heal revocat
 review and accept the current registrations, reset the GUI baseline, then requalify. Acceptance writes
 `reset_required`; only a successful explicit reset completes that recovery. Reset does not implicitly erase
 an unrelated admission quarantine. Explicit inspection, acceptance, reset, and qualification retain
-full verification; qualification `begin`, `collect`, `attest`, and `approve` run it before the cheap
+full verification; qualification `begin`, `collect`, `approve` and `reapprove` run it before the cheap
 observation, under a 540-second outer command deadline. Maintenance launchd shutdown allows 600 seconds
 for cancellation and protected revocation publication.
 The periodic operation also has a 540-second outer deadline, leaving publication/revocation headroom
@@ -501,8 +501,8 @@ recipes, account boundaries and GUI qualification still require the approved dep
 `-trimpath` Darwin arm64 binary and `SHA256SUMS` using only `GITHUB_TOKEN`; the deployed host needs no Go.
 Explicit root apply stages disabled controller/worker/maintenance assets, empty profiles, generated keys
 and a one-time API token. The installed `qualify.sh` collects actual account-specific probes and protected
-candidate evidence; approval is a separate root command. Fast-switch/reboot and unperformed recipe/UI
-evidence remain pending. Nothing activates services or changes owner ACLs; macserve never writes PF.
+candidate evidence; approval is a separate root command. Reboot stays pending until a sitting on a later
+boot, and tool_profiles until root-run pinned recipes succeed. Nothing activates services or changes owner ACLs; macserve never writes PF.
 
 Keep the owner's home at **0700**, or **0750 with an owner-private group—not staff—that excludes the job
 account**. Audit ACL grants separately. Qualification requires an `owner_home_denial` probe from the actual

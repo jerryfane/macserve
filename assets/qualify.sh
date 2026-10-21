@@ -1,6 +1,6 @@
 #!/bin/bash
 # Thin wrapper for the installed, root-reviewed executable. Never source deploy.env.
-# begin/collect/attest/approve run a 480s full persistence scan; macserve owns the 540s outer
+# begin/collect/approve/reapprove run a 480s full persistence scan; macserve owns the 540s outer
 # deadline. Keep this wrapper as exec so signals reach that cancellation path.
 set -euo pipefail
 export PATH=/usr/bin:/bin:/usr/sbin:/sbin
@@ -16,7 +16,7 @@ if [[ "${1:-}" == "--binary" ]]; then
   shift 2
 fi
 case "${1:-}" in
-  plan|begin|probe|canary|collect|attest|approve) ;;
+  plan|begin|probe|canary|collect|approve|reapprove|activation-check) ;;
   *)
     printf '%s\n' 'qualify.sh: expected a recognized qualification subcommand; raw commands are refused' >&2
     exit 2

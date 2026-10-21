@@ -318,6 +318,7 @@ func NewNativeRunner(options Options) (Runner, error) {
 	runner.baselinePath = options.BaselinePath
 	runner.persistencePath = options.PersistencePath
 	runner.persistence = nativePersistenceInspector(options)
+	runner.console = func() error { return hostguard.CheckConsole(options.OwnerUID) }
 	runner.scope = &processScope{uid: runner.uid, sample: identityProcesses, agents: nativeAgents{}, interval: 50 * time.Millisecond, grace: 500 * time.Millisecond}
 	runner.scope.signal = func(ctx context.Context, p processSample, sig syscall.Signal) error {
 		// The kernel checks the job UID, not root, at the signal operation itself.

@@ -61,7 +61,7 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "macserve worker: %v\n", err)
 		return 1
 	}
-	engine, err := worker.New(executionOptions(config))
+	engine, err := worker.New(config.EngineOptions())
 	if err != nil {
 		fmt.Fprintf(stderr, "macserve worker: %v\n", err)
 		return 1
@@ -80,10 +80,6 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
-}
-
-func executionOptions(config workerclient.Config) worker.Options {
-	return worker.Options{Root: config.Root, ExportRoot: config.ExportRoot, WorkspaceRoot: config.WorkspaceRoot, JobUID: config.JobUID, JobGID: config.JobGID, OwnerUID: config.OwnerUID, ControllerUID: config.ControllerUID, HelperPath: config.HelperPath, BaselinePath: config.BaselinePath, PersistencePath: config.PersistencePath}
 }
 
 func runWorkerReset(args []string, stdout, stderr io.Writer) int {
@@ -126,7 +122,7 @@ func runWorkerReset(args []string, stdout, stderr io.Writer) int {
 	}
 	ctx, cancel := workerPersistenceInspectionContext(context.Background())
 	defer cancel()
-	result, err := worker.ResetGUIBaseline(ctx, executionOptions(config), pids)
+	result, err := worker.ResetGUIBaseline(ctx, config.EngineOptions(), pids)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1

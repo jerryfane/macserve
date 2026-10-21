@@ -179,6 +179,15 @@ func publish(path string, h controller.Health) error {
 	}
 	return os.Rename(f.Name(), path)
 }
+
+// Check evaluates the installed approval against live state once, without
+// publishing health. It requires macOS root and a protected loaded config.
+func Check(ctx context.Context, c Config) (controller.Health, error) {
+	if c.path == "" {
+		return controller.Health{}, errors.New("check requires protected configuration")
+	}
+	return observe(ctx, c)
+}
 func observe(ctx context.Context, c Config) (controller.Health, error) {
 	invalid, _ := Evaluate(time.Now(), Qualification{}, BoundaryEvidence{}, Observation{})
 	opts, err := persistenceOptions(c)
@@ -267,6 +276,9 @@ func Inspect(ctx context.Context, c Config) (Observation, error) {
 		return invalid, errors.New("unsupported job home")
 	}
 	o := Observation{JobUID: wc.JobUID, IdentityValid: true, Profiles: map[string]string{}}
+	// Recorded, not refused: health stays publishable and is invalid while a
+	// foreground job session (or any non-owner account) owns the console.
+	o.ConsoleAdmissible = hostguard.CheckConsole(wc.OwnerUID) == nil
 	baseline, err := protectedRead(wc.BaselinePath)
 	if err != nil {
 		return invalid, err

@@ -19,10 +19,14 @@ import (
 	"github.com/jerryfane/macserve/internal/hostguard"
 	"github.com/jerryfane/macserve/internal/maintenance"
 	"github.com/jerryfane/macserve/internal/profiles"
+	"github.com/jerryfane/macserve/internal/worker"
+	"github.com/jerryfane/macserve/internal/workerclient"
 )
 
 type BeginOptions struct {
 	Environment, Session, Allow, UDP, OwnerCanary, PrivatePaths, Previous string
+	// Requalify chains to the activation anchor's session instead of Previous.
+	Requalify bool
 }
 
 func Plan(path string) (any, error) {
@@ -53,6 +57,14 @@ func snapshot(ctx context.Context) (Snapshot, error) {
 	s.Observation, e = maintenance.Inspect(ctx, config)
 	if e == nil && (!s.Observation.Persistence.Valid || s.Observation.Persistence.NeedsReview || !s.Observation.Persistence.RevokedAt.IsZero()) {
 		e = errors.New("persistence attestation changed during qualification")
+	}
+	if e == nil {
+		// Agent-selected baselines are trusted only by kernel facts: every
+		// audited executable must be SIP-restricted and not a code runner.
+		var wc workerclient.Config
+		if wc, e = workerclient.LoadConfig(config.WorkerConfig); e == nil {
+			e = worker.CheckBaselinePolicy(ctx, wc.BaselinePath, wc.JobUID)
+		}
 	}
 	return s, e
 }
@@ -204,16 +216,37 @@ func Begin(ctx context.Context, o BeginOptions) error {
 		return e
 	}
 	now := time.Now().UTC()
-	c := Challenge{Schema: 3, ID: id, Created: now, Expires: now.Add(lifetime), Environment: env, EnvironmentSHA256: digest(envRaw), TCP: targets, Allow: allow, UDP: udp, OwnerCanary: o.OwnerCanary, PrivatePaths: private, Socket: cc.Socket, Profiles: registry.List()}
-	if o.Previous != "" {
-		previous, b, err := loadCollected(o.Previous)
+	c := Challenge{Schema: schema, ID: id, Created: now, Expires: now.Add(lifetime), Environment: env, EnvironmentSHA256: digest(envRaw), TCP: targets, Allow: allow, UDP: udp, OwnerCanary: o.OwnerCanary, PrivatePaths: private, Socket: cc.Socket, Profiles: registry.List(), Requalify: o.Requalify}
+	if c.BootSession, e = bootSession(); e != nil {
+		return e
+	}
+	if len(c.Profiles) > 0 {
+		if _, err := os.Lstat(sourcesPinsPath); err == nil {
+			if _, c.SourcesSHA256, e = loadSourcePins(c.Profiles); e != nil {
+				return e
+			}
+		}
+	}
+	previousDir := o.Previous
+	if o.Requalify {
+		if o.Previous != "" {
+			return errors.New("requalify chains to the anchored session; do not pass --previous")
+		}
+		a, err := anchoredConfiguration()
 		if err != nil {
 			return err
 		}
-		if previous.Collected.After(now) || now.Sub(previous.Collected) > 7*24*time.Hour {
+		previousDir = a.Session
+	}
+	if previousDir != "" {
+		previous, b, err := loadCollected(previousDir)
+		if err != nil {
+			return err
+		}
+		if previous.Collected.After(now) || (!o.Requalify && now.Sub(previous.Collected) > 7*24*time.Hour) {
 			return errors.New("previous sitting must be within seven days")
 		}
-		c.Previous = o.Previous
+		c.Previous = previousDir
 		c.PreviousSHA256 = digest(b)
 	}
 	if e = os.Mkdir(o.Session, 0755); e != nil {
@@ -250,21 +283,36 @@ func loadCollected(dir string) (Candidate, []byte, error) {
 	if e = decode(b, &c); e != nil {
 		return c, nil, e
 	}
-	if c.Schema != 3 {
+	if c.Schema != schema {
 		return c, nil, errors.New("unsupported candidate")
 	}
 	return c, b, nil
 }
-func checkReport(r Report, c Challenge, hash, role string) error {
-	uid := c.Environment.JobUID
+
+// checkReportBinding binds a report to the challenge, role and reviewed probe
+// context. Refusal reports bind but carry no completed context.
+func checkReportBinding(r Report, c Challenge, hash, role string) error {
+	uid, mode := c.Environment.JobUID, jobProbeMode
 	if role == "owner" {
-		uid = c.Environment.OwnerUID
+		uid, mode = c.Environment.OwnerUID, ownerProbeMode
 	}
-	if r.Schema != 3 || r.ChallengeSHA256 != hash || r.Role != role || r.UID != int(uid) || len(r.Groups) == 0 || r.Started.Before(c.Created) || r.Finished.Before(r.Started) || r.Finished.After(c.Expires) || r.Finished.After(time.Now().UTC()) || len(r.Results) > 4096 {
+	if r.Schema != schema || r.ChallengeSHA256 != hash || r.Role != role || r.Mode != mode || r.UID != int(uid) || r.Started.Before(c.Created) || r.Finished.Before(r.Started) || r.Finished.After(c.Expires) || r.Finished.After(time.Now().UTC()) || len(r.Results) > 4096 {
 		return errors.New("report identity, challenge or time mismatch")
 	}
 	if r.Refusal != "" {
-		return errors.New("probe identity refused; review preserved report and use the actual GUI account")
+		return nil
+	}
+	if len(r.Groups) == 0 || r.AuditUID != uid || hostguard.ConsoleAdmissible(r.ConsoleUID, c.Environment.OwnerUID) != nil || (role == "job" && !slices.Equal(r.Groups, []int{int(c.Environment.JobGID)})) {
+		return errors.New("report probe context is not the reviewed one")
+	}
+	return nil
+}
+func checkReport(r Report, c Challenge, hash, role string) error {
+	if e := checkReportBinding(r, c, hash, role); e != nil {
+		return e
+	}
+	if r.Refusal != "" {
+		return errors.New("probe identity refused; review the preserved report")
 	}
 	nonces := map[string]bool{}
 	for _, row := range r.Results {
@@ -287,7 +335,10 @@ func preserve(dir, name string, b []byte, artifacts map[string]string) error {
 	artifacts[name] = digest(b)
 	return nil
 }
-func Collect(ctx context.Context, dir, jobPath, ownerPath, receiptPaths string) error {
+
+// Collect reads the job report only from the root launcher's capture in the
+// session; the owner report and receipts are owner-account files.
+func Collect(ctx context.Context, dir, ownerPath, receiptPaths string) error {
 	if e := rootOnly(); e != nil {
 		return e
 	}
@@ -304,12 +355,9 @@ func Collect(ctx context.Context, dir, jobPath, ownerPath, receiptPaths string) 
 	if e != nil {
 		return e
 	}
-	var job, owner Report
-	jb, e := readArtifact(jobPath, int(c.Environment.JobUID))
+	var owner Report
+	jb, lb, job, e := loadJobProbe(dir, c, raw)
 	if e != nil {
-		return e
-	}
-	if e = decode(jb, &job); e != nil {
 		return e
 	}
 	ob, e := readArtifact(ownerPath, int(c.Environment.OwnerUID))
@@ -341,7 +389,23 @@ func Collect(ctx context.Context, dir, jobPath, ownerPath, receiptPaths string) 
 		}{after, e.Error()}, 0600)
 		return errors.Join(e, saveErr)
 	}
-	candidate := Candidate{Schema: 3, ChallengeSHA256: digest(raw), Collected: time.Now().UTC(), Observation: after.Observation, Artifacts: map[string]string{"challenge.json": digest(raw), "before.json": digest(beforeBytes)}, Categories: map[string]Category{}}
+	candidate := Candidate{Schema: schema, ChallengeSHA256: digest(raw), Collected: time.Now().UTC(), Observation: after.Observation, Artifacts: map[string]string{"challenge.json": digest(raw), "before.json": digest(beforeBytes)}, Categories: map[string]Category{}}
+	if e = preserve(dir, attempt+jobLaunchFile, lb, candidate.Artifacts); e != nil {
+		return e
+	}
+	facts := sittingFacts{toolReason: "zero profiles makes no recipe success claim", toolOK: true}
+	if facts.rebootOK, facts.rebootReason, e = rebootTransition(c); e != nil {
+		return e
+	}
+	if len(c.Profiles) > 0 {
+		var tb []byte
+		tb, facts.toolOK, facts.toolReason = toolEvidencePasses(dir, c, raw)
+		if tb != nil {
+			if e = preserve(dir, attempt+toolEvidenceFile, tb, candidate.Artifacts); e != nil {
+				return e
+			}
+		}
+	}
 	receipts, e := collectArtifacts(dir, attempt, c, candidate, jb, ob, after, receiptPaths)
 	if e != nil {
 		return e
@@ -354,7 +418,7 @@ func Collect(ctx context.Context, dir, jobPath, ownerPath, receiptPaths string) 
 		return e
 	}
 	candidate.Coexistence = &coexistence
-	candidate.Categories = aggregate(c, job, owner, receipts)
+	candidate.Categories = aggregate(c, job, owner, receipts, facts)
 	evidence := make([]string, 0, len(candidate.Artifacts))
 	for name := range candidate.Artifacts {
 		evidence = append(evidence, name)
@@ -415,7 +479,7 @@ func collectArtifacts(dir, attempt string, c Challenge, candidate Candidate, job
 		if err = decode(b, &r); err != nil {
 			return nil, err
 		}
-		if r.Schema != 3 || r.ChallengeSHA256 != candidate.ChallengeSHA256 || r.UID != int(c.Environment.OwnerUID) || r.Started.Before(c.Created) || r.Finished.Before(r.Started) || r.Finished.After(c.Expires) || r.Finished.After(candidate.Collected) || (r.Listen != "" && !slices.Contains(c.UDP, r.Listen)) {
+		if r.Schema != schema || r.ChallengeSHA256 != candidate.ChallengeSHA256 || r.UID != int(c.Environment.OwnerUID) || r.Started.Before(c.Created) || r.Finished.Before(r.Started) || r.Finished.After(c.Expires) || r.Finished.After(candidate.Collected) || (r.Listen != "" && !slices.Contains(c.UDP, r.Listen)) {
 			return nil, errors.New("invalid canary receipt document")
 		}
 		receipts = append(receipts, r)
@@ -450,7 +514,16 @@ func rows(r Report, category string, targets []string, attempts int) (bool, int)
 	}
 	return valid && len(expected) > 0, count
 }
-func aggregate(c Challenge, j, o Report, receipts []Receipts) map[string]Category {
+
+// sittingFacts are machine-checked outside the probe reports.
+type sittingFacts struct {
+	rebootOK     bool
+	rebootReason string
+	toolOK       bool
+	toolReason   string
+}
+
+func aggregate(c Challenge, j, o Report, receipts []Receipts, facts sittingFacts) map[string]Category {
 	out := map[string]Category{}
 	for _, name := range categories {
 		out[name] = Category{Status: "pending", Reason: "genuine reviewed evidence required", Evidence: []string{"job-report.json", "owner-report.json", "before.json", "after.json"}, Probe: maintenance.Probe{Category: name}}
@@ -508,13 +581,21 @@ func aggregate(c Challenge, j, o Report, receipts []Receipts) map[string]Categor
 	dirs = slices.Compact(dirs)
 	tools, tc := rows(j, "tool_profiles", dirs, 1)
 	set("owner_unaffected", homeOwner && canaryControls, hoc+canaryCount, hoc+canaryCount, "owner home and before/after canary controls required; network observations are informational; no owner Apple tools or simulator operations")
-	set("tool_profiles", tools, tc, 0, "actual job pinned tool inspection; zero profiles makes no recipe/UI success claim")
-	if tools && len(c.Profiles) > 0 {
+	set("tool_profiles", tools && facts.toolOK, tc, 0, "job pinned tool inspection; "+facts.toolReason)
+	if tools && !facts.toolOK {
 		v := out["tool_profiles"]
 		v.Status = "pending"
-		v.Reason = "tool pins inspected; owner must review genuine recipe/UI artifacts for EVERY enabled profile"
-		v.Probe.Status = "failed"
 		out["tool_profiles"] = v
+	}
+	attempts := 0
+	if c.Previous != "" {
+		attempts = 1
+	}
+	set("reboot", facts.rebootOK, attempts, 0, facts.rebootReason)
+	if !facts.rebootOK {
+		v := out["reboot"]
+		v.Status = "pending"
+		out["reboot"] = v
 	}
 	return out
 }
@@ -536,7 +617,7 @@ func ownerCanaryControls(c Challenge, j, o Report, receipts []Receipts) (bool, i
 	return count >= 2, count
 }
 func writeCandidate(dir string, c Challenge, v Candidate) error {
-	boundary := maintenance.BoundaryEvidence{Schema: 3, RecordedAt: v.Collected, JobUID: c.Environment.JobUID, Boot: v.Observation.Boot, Coexistence: v.Coexistence}
+	boundary := maintenance.BoundaryEvidence{Schema: schema, RecordedAt: v.Collected, JobUID: c.Environment.JobUID, Boot: v.Observation.Boot, Coexistence: v.Coexistence}
 	for _, name := range categories {
 		cat := v.Categories[name]
 		framing := map[string]string{}
@@ -582,7 +663,7 @@ func writeCandidate(dir string, c Challenge, v Candidate) error {
 	return replaceJSON(filepath.Join(dir, "candidate.json"), v)
 }
 func qualification(o maintenance.Observation) maintenance.Qualification {
-	return maintenance.Qualification{Schema: 3, JobUID: o.JobUID, Boot: o.Boot, BaselineSHA256: o.BaselineSHA256, Profiles: maps.Clone(o.Profiles)}
+	return maintenance.Qualification{Schema: schema, JobUID: o.JobUID, Boot: o.Boot, BaselineSHA256: o.BaselineSHA256, Profiles: maps.Clone(o.Profiles)}
 }
 func homeTargets(c Challenge) []string {
 	out := []string{c.OwnerCanary, filepath.Dir(c.OwnerCanary), "/Users/" + c.Environment.OwnerUser}
