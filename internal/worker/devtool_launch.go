@@ -115,6 +115,15 @@ func pidDomainEnvironment(ctx context.Context, hints *serviceHints, env LaunchdE
 	return reference, nil
 }
 
+// osCryptex is the sealed, SIP-protected OS cryptex: its files are
+// SF_RESTRICTED and its directories SF_NOUNLINK (macOS 27.0), so only Apple
+// installs what it contains. The App cryptex (Safari) is not trusted here.
+const osCryptex = "/System/Volumes/Preboot/Cryptexes/OS/"
+
+func osCryptexPath(path string) bool {
+	return filepath.IsAbs(path) && filepath.Clean(path) == path && strings.HasPrefix(path, osCryptex)
+}
+
 func developerToolPath(path string) bool {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return false
@@ -171,10 +180,15 @@ func developerToolLaunch(ctx context.Context, agents agentInspector, uid int, en
 	if facts.start != p.start || facts.uid != uid || facts.ppid != 1 || !facts.platform {
 		return "", errors.New("not a platform binary launched by launchd as the job user")
 	}
-	if !developerToolPath(facts.executable) || codeRunner(facts.executable) {
+	cryptex := osCryptexPath(facts.executable)
+	if !cryptex && !developerToolPath(facts.executable) || codeRunner(facts.executable) {
 		return "", fmt.Errorf("executable %q is outside the developer-tool roots", facts.executable)
 	}
-	if err := agents.toolchain(facts.executable, false, uid); err != nil {
+	if cryptex {
+		if err := agents.restricted(facts.executable); err != nil {
+			return "", fmt.Errorf("executable %q: %w", facts.executable, err)
+		}
+	} else if err := agents.toolchain(facts.executable, false, uid); err != nil {
 		return "", fmt.Errorf("executable %q: %w", facts.executable, err)
 	}
 	domain, owner, label, ok := hints.listing(ctx, p.pid, owners)
@@ -196,18 +210,34 @@ func developerToolLaunch(ctx context.Context, agents agentInspector, uid int, en
 	if !developerToolPath(bundle) || !strings.HasSuffix(bundle, ".xpc") && !strings.HasSuffix(bundle, ".appex") {
 		return target, fmt.Errorf("launchd path %q is not a bundle under the developer-tool roots", bundle)
 	}
-	if filepath.Dir(facts.executable) != bundle+"/Contents/MacOS" {
+	// An OS-cryptex service is named by launchd through /System's SIP
+	// symlinks into the cryptex (SafariFoundation.framework on macOS 27.0);
+	// its bundle is where they resolve.
+	resolvedBundle := bundle
+	if cryptex {
+		if resolvedBundle, err = agents.resolve(bundle); err != nil || !osCryptexPath(resolvedBundle) {
+			return target, errors.Join(err, fmt.Errorf("launchd path %q does not resolve into the OS cryptex", bundle))
+		}
+	}
+	if filepath.Dir(facts.executable) != resolvedBundle+"/Contents/MacOS" {
 		return target, errors.New("executable is not the bundle's")
 	}
-	if err := agents.toolchain(bundle, true, uid); err != nil {
+	if cryptex {
+		if err := agents.restricted(resolvedBundle + "/Contents/Info.plist"); err != nil {
+			return target, fmt.Errorf("bundle %q: %w", resolvedBundle, err)
+		}
+	} else if err := agents.toolchain(bundle, true, uid); err != nil {
 		return target, fmt.Errorf("bundle %q: %w", bundle, err)
 	}
 	argv := snapshot.Arguments
 	if argv == nil {
 		argv = []string{snapshot.Program}
 	}
-	if snapshot.Program != facts.executable || facts.program != snapshot.Program || facts.argv != strings.Join(argv, "\x00") {
+	if facts.program != snapshot.Program || facts.argv != strings.Join(argv, "\x00") {
 		return target, errors.New("exec path or argv differs from launchd's program and arguments")
+	}
+	if program, err := agents.resolve(snapshot.Program); err != nil || program != facts.executable || !cryptex && snapshot.Program != facts.executable {
+		return target, errors.Join(err, fmt.Errorf("launchd program %q is not the executable", snapshot.Program))
 	}
 	defined := label
 	if snapshot.Original != "" {
