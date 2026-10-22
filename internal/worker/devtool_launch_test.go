@@ -304,3 +304,63 @@ func TestDeveloperToolLaunchesStayResidualDuringReset(t *testing.T) {
 		t.Fatalf("census residual %v tolerated %v: %v", c.residual, c.tolerated, err)
 	}
 }
+
+// Both rules read the kernel facts again after launchd answered and refuse
+// when they changed: the PID was reused, or the instance exec'd something
+// else, between the verification and that re-read. Each case is checked on
+// one fresh verification, so a later census cannot be what refuses it.
+func TestToleratedLaunchRefusesInstanceChangedDuringVerification(t *testing.T) {
+	type rule func(*testing.T) (*fakeAgents, func() error, int)
+	apple := func(t *testing.T) (*fakeAgents, func() error, int) {
+		s, agents, _ := appleWorld()
+		hints := newServiceHints(agents, testJobUID, nil)
+		return agents, func() error {
+			_, err := appleLaunch(context.Background(), agents, testJobUID, *s.baseline.Launchd, hints, sample(400, "40:400"))
+			return err
+		}, 400
+	}
+	devtool := func(pid int, start string) rule {
+		return func(t *testing.T) (*fakeAgents, func() error, int) {
+			s, agents, _ := devtoolWorld(t)
+			hints := newServiceHints(agents, testJobUID, nil)
+			return agents, func() error {
+				_, err := developerToolLaunch(context.Background(), agents, testJobUID, *s.baseline.Launchd, hints, []int{fskitPID, simPID}, sample(pid, start))
+				return err
+			}, pid
+		}
+	}
+	for name, verify := range map[string]rule{
+		"Apple-defined launch":             apple,
+		"developer-tool XPC service":       devtool(simPID, "50:500"),
+		"developer-tool extension in pid/": devtool(deviceFSPID, "50:67438"),
+	} {
+		for change, mutate := range map[string]func(*agentProcess){
+			"PID reused":      func(p *agentProcess) { p.start = "99:0" },
+			"instance exec'd": func(p *agentProcess) { p.argv += "\x00--other" },
+		} {
+			t.Run(name+"/"+change, func(t *testing.T) {
+				agents, check, pid := verify(t)
+				if err := check(); err != nil {
+					t.Fatalf("unchanged instance refused: %v", err)
+				}
+				agents.reads[pid] = 0
+				changed := agents.procs[pid]
+				mutate(&changed)
+				agents.reread[pid] = changed
+				err := check()
+				if err == nil || err.Error() != "process changed during verification" || agents.reads[pid] != 2 {
+					t.Fatalf("changed instance after %d reads: %v", agents.reads[pid], err)
+				}
+			})
+		}
+	}
+	// The census refuses on that same verification.
+	s, agents, rows := appleWorld()
+	p := agents.procs[400]
+	p.start = "99:0"
+	agents.reread[400] = p
+	c, err := s.census(context.Background(), rows)
+	if err != nil || len(c.tolerated) != 1 || !slices.ContainsFunc(c.residual, func(p processSample) bool { return p.pid == 400 }) {
+		t.Fatalf("census residual %v tolerated %v: %v", c.residual, c.tolerated, err)
+	}
+}

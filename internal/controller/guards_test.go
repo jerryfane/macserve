@@ -85,6 +85,21 @@ func TestPersistenceAttestationPausesAdmission(t *testing.T) {
 		})
 	}
 }
+
+// A worker that keeps refusing admission because a child of a tolerated launch
+// persists is reported in admin state, without cancelling work.
+func TestAdmissionInconclusiveHealthBlocksWithReason(t *testing.T) {
+	g, h, _ := readyGuard(t)
+	h.AdmissionInconclusive = "a child process of a tolerated launchd service outlived the admission wait; retry admission"
+	state, err := g.Check(context.Background())
+	if err != nil || state.Ready || state.CancelActive || len(state.Blockers) != 1 || state.Blockers[0] != "worker_admission_inconclusive" {
+		t.Fatalf("inconclusive admission not reported: %+v %v", state, err)
+	}
+	h.AdmissionInconclusive = ""
+	if state, err := g.Check(context.Background()); err != nil || !state.Ready {
+		t.Fatalf("cleared record still blocks: %+v %v", state, err)
+	}
+}
 func TestDiskReservationAndEmergencyHaveDifferentCancellationSemantics(t *testing.T) {
 	g, h, free := readyGuard(t)
 	for _, tc := range []struct {

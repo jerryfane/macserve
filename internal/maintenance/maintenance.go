@@ -303,6 +303,12 @@ func Inspect(ctx context.Context, c Config) (Observation, error) {
 		// successful timestamp, when available, without claiming a fresh scan.
 		o.Persistence.Valid = false
 	}
+	// Recorded, not refused: health stays valid and the controller's gate
+	// reports a worker that keeps refusing admission inconclusively.
+	o.AdmissionInconclusive, err = worker.ReadAdmissionInconclusive(wc.Root)
+	if err != nil {
+		return invalid, err
+	}
 	if err = hostguard.RootConfig(cc.ProfilesFile); err != nil {
 		return invalid, err
 	}

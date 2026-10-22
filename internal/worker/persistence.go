@@ -125,7 +125,13 @@ func (s *processScope) observeQuiet(ctx context.Context) error {
 	}
 }
 
+// quarantine durably records contamination (quarantineRecord) and an admission
+// refused for a persisting child of a tolerated launch
+// (admissionInconclusiveRecord, never quarantine).
 func (e *Engine) quarantine(err error) error {
+	if errors.Is(err, errToleratedChildPersists) {
+		err = errors.Join(err, e.recordInconclusive())
+	}
 	if !errors.Is(err, ErrContamination) {
 		return err
 	}
@@ -144,7 +150,7 @@ func (e *Engine) admission(ctx context.Context) error {
 			return e.quarantine(err)
 		}
 	}
-	return nil
+	return e.clearInconclusive()
 }
 
 func (e *Engine) checkQuarantine() error {

@@ -148,6 +148,11 @@ func TestAppleLaunchRefusesUnprovenLaunches(t *testing.T) {
 		"job-submitted plist running an Apple binary": edit(func(s *launchctlprint.Snapshot) {
 			s.Path, s.Type = "(submitted by launchctl[900])", "Submitted"
 		}),
+		// launchd's type alone: the SIP plist path is kept, so only the type
+		// check refuses (launchctlprint parses such a record, see
+		// TestParseDoesNotPairTypeWithPath).
+		"Submitted type at the SIP plist path":  edit(func(s *launchctlprint.Snapshot) { s.Type = "Submitted" }),
+		"XPCService type at the SIP plist path": edit(func(s *launchctlprint.Snapshot) { s.Type = "XPCService" }),
 		"home plist under an Apple label": edit(func(s *launchctlprint.Snapshot) {
 			s.Path = "/Users/macservejob/Library/LaunchAgents/" + heardLabel + ".plist"
 		}),

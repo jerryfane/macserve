@@ -214,6 +214,18 @@ func TestParseOriginalLabel(t *testing.T) {
 	}
 }
 
+// The parser reports launchd's root type and path as printed, without pairing
+// them: a record whose type is Submitted but whose path names a SIP
+// LaunchAgents plist parses, so callers must check the type themselves.
+func TestParseDoesNotPairTypeWithPath(t *testing.T) {
+	dock := capture(t, "macos27-gui-dock.txt")
+	forged := strings.Replace(dock, "\ttype = LaunchAgent\n", "\ttype = Submitted\n", 1)
+	s, err := Parse(forged)
+	if forged == dock || err != nil || s.Type != "Submitted" || s.Path != "/System/Library/LaunchAgents/com.apple.Dock.plist" {
+		t.Fatalf("type %q path %q: %v", s.Type, s.Path, err)
+	}
+}
+
 // macOS 27.0 developer-tool services launchd starts in the job's user domain
 // and in pid domains while a build runs. DeviceFS (an Extension) carries a
 // JSON argument that opens and closes on its own line.

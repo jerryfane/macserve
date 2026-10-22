@@ -97,6 +97,9 @@ func (e *Engine) reset(ctx context.Context, prepare func(context.Context) error)
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := e.clearInconclusive(); err != nil {
+		return err
+	}
 	marker, err := e.root.ReadFile(quarantineRecord)
 	if os.IsNotExist(err) {
 		return nil

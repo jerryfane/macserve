@@ -74,6 +74,17 @@ func TestQualificationRefusesPostApprovalServiceRestart(t *testing.T) {
 		t.Fatalf("restarted peer retained qualified health: %+v %v", health, err)
 	}
 }
+
+// The broker's inconclusive-admission record is published in otherwise valid
+// health, so the controller can report it; it never invalidates the boundary.
+func TestHealthPublishesInconclusiveAdmission(t *testing.T) {
+	now, q, evidence, observation := approvedFixture()
+	observation.AdmissionInconclusive = &worker.AdmissionInconclusive{Reason: "child persists", Since: now, CheckedAt: now}
+	health, err := Evaluate(now, q, evidence, observation)
+	if err != nil || !health.BoundaryValidated || health.AdmissionInconclusive != "child persists" {
+		t.Fatalf("health %+v: %v", health, err)
+	}
+}
 func TestEvidenceRequiresActualProbeAttestationFields(t *testing.T) {
 	for name, mutate := range map[string]func(*BoundaryEvidence){
 		"missing category":          func(e *BoundaryEvidence) { e.Probes = e.Probes[1:] },
