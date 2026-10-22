@@ -9,7 +9,8 @@ import (
 
 // admissionInconclusiveRecord is the broker's durable record of admissions
 // refused because a child of a tolerated launch outlived the wait
-// (errToleratedChildPersists). Admission only observes and never terminates
+// (errToleratedChildPersists) or because refused processes kept vanishing
+// before verification (errAdmissionUnsettled, v0.1.15). Admission only observes and never terminates
 // such a child; only a job's quiesce or worker-reset does, and no job starts
 // while admission refuses. Without this record the worker would refuse work
 // for as long as the child runs while quarantine-based alerting saw nothing.
@@ -33,9 +34,9 @@ type AdmissionInconclusive struct {
 	CheckedAt time.Time `json:"checked_at"`
 }
 
-func (e *Engine) recordInconclusive() error {
+func (e *Engine) recordInconclusive(reason error) error {
 	now := e.options.Now().UTC()
-	record := AdmissionInconclusive{Reason: errToleratedChildPersists.Error(), Since: now, CheckedAt: now}
+	record := AdmissionInconclusive{Reason: reason.Error(), Since: now, CheckedAt: now}
 	var previous AdmissionInconclusive
 	if readJSON(e.root, admissionInconclusiveRecord, &previous) == nil && !previous.Since.IsZero() && !previous.Since.After(now) {
 		record.Since = previous.Since

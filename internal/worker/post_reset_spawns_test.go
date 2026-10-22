@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"maps"
+	"slices"
 	"strconv"
 	"testing"
 
@@ -151,5 +152,69 @@ func TestAdmissionAcceptsTransientPidDomainServices(t *testing.T) {
 	c, err := s.census(context.Background(), rows)
 	if err != nil || len(c.residual) != 0 {
 		t.Fatalf("transient pid-domain services residual %v: %v", pids(c.residual), err)
+	}
+}
+
+const (
+	safariCacheBundle  = "/System/Volumes/Preboot/Cryptexes/App/System/Applications/Safari.app/Contents/PlugIns/CacheDeleteExtension.appex"
+	safariCacheID      = "com.apple.Safari.CacheDeleteExtension"
+	safariCacheProgram = safariCacheBundle + "/Contents/MacOS/CacheDeleteExtension"
+)
+
+// addSafariCacheDelete adds Safari's CacheDeleteExtension as launchd printed
+// it in deleted's pid domain on the host (path in the App cryptex, type
+// Extension), here under RemoteManagementAgent, a verified gui owner.
+func addSafariCacheDelete(agents *fakeAgents) processSample {
+	owner := "pid/" + strconv.Itoa(rmOwnerPID) + "/"
+	inherited := maps.Clone(jobXPCEnvironment())
+	inherited["SSH_AUTH_SOCK"] = jobSocket
+	agents.procs[620] = agentProcess{start: "50:620", uid: testJobUID, ppid: 1, executable: safariCacheProgram, platform: true, program: safariCacheProgram, argv: safariCacheProgram}
+	agents.services[owner+safariCacheID] = launchctlprint.Snapshot{Target: owner + safariCacheID, State: "running", PID: 620, Path: safariCacheBundle, Type: "Extension", BundleID: safariCacheID, Program: safariCacheProgram, Inherited: inherited}
+	agents.bundles[safariCacheBundle] = [2]string{safariCacheID, "CacheDeleteExtension"}
+	agents.sip[safariCacheProgram], agents.sip[safariCacheBundle+"/Contents/Info.plist"] = true, true
+	return sample(620, "50:620")
+}
+
+func TestAdmissionAcceptsAppCryptexExtensionInVerifiedPidDomain(t *testing.T) {
+	s, agents, rows := postResetWorld(t)
+	rows = append(rows, addSafariCacheDelete(agents))
+	if c, err := s.census(context.Background(), rows); err != nil || len(c.residual) != 0 {
+		t.Fatalf("Safari CacheDeleteExtension residual %v: %v", pids(c.residual), err)
+	}
+	delete(agents.sip, safariCacheProgram)
+	if c, err := s.census(context.Background(), rows); err != nil || len(c.residual) != 1 {
+		t.Fatalf("non-SIP App-cryptex binary admitted: %v %v", pids(c.residual), err)
+	}
+}
+
+// The App cryptex is never trusted for a gui-domain service.
+func TestAppCryptexAgentInGuiDomainStaysResidual(t *testing.T) {
+	s, agents, rows := postResetWorld(t)
+	rows = append(rows, addSafariCacheDelete(agents))
+	owner := "pid/" + strconv.Itoa(rmOwnerPID) + "/"
+	gui := "gui/" + strconv.Itoa(testJobUID)
+	snapshot := agents.services[owner+safariCacheID]
+	delete(agents.services, owner+safariCacheID)
+	snapshot.Target, snapshot.Type, snapshot.Inherited = gui+"/"+safariCacheID, "XPCService", map[string]string{"SSH_AUTH_SOCK": jobSocket}
+	agents.services[snapshot.Target] = snapshot
+	c, err := s.census(context.Background(), rows)
+	if err != nil || len(c.residual) != 1 || c.residual[0].pid != 620 {
+		t.Fatalf("App-cryptex gui service: residual %v: %v", pids(c.residual), err)
+	}
+}
+
+// F2: a pid domain's owner environment never replaces the job account's.
+func TestPidDomainEnvironmentRefusesReplacedAccountVariable(t *testing.T) {
+	s, agents, rows := postResetWorld(t)
+	gui := "gui/" + strconv.Itoa(testJobUID)
+	s.baseline.Launchd.GUI = map[string]string{"SSH_AUTH_SOCK": jobSocket, "HOME": "/Users/macservejob"}
+	agents.env[gui] = s.baseline.Launchd.GUI
+	owner := "pid/" + strconv.Itoa(rmOwnerPID) + "/"
+	snapshot := agents.services[owner+subscriberID]
+	snapshot.Inherited = maps.Clone(snapshot.Inherited)
+	agents.services[owner+subscriberID] = snapshot
+	c, err := s.census(context.Background(), rows)
+	if err != nil || !slices.Contains(pids(c.residual), subscriberPID) {
+		t.Fatalf("replaced HOME accepted: residual %v: %v", pids(c.residual), err)
 	}
 }

@@ -161,8 +161,10 @@ const quarantineReasonBytes = 8 << 10
 // persisting child of a tolerated launch (admissionInconclusiveRecord, never
 // quarantine).
 func (e *Engine) quarantine(err error) error {
-	if errors.Is(err, errToleratedChildPersists) {
-		err = errors.Join(err, e.recordInconclusive())
+	for _, inconclusive := range []error{errToleratedChildPersists, errAdmissionUnsettled} {
+		if errors.Is(err, inconclusive) {
+			err = errors.Join(err, e.recordInconclusive(inconclusive))
+		}
 	}
 	if !errors.Is(err, ErrContamination) {
 		return err

@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // Agents that keep vanishing before verification never quarantine:
@@ -93,5 +96,42 @@ func TestLaunchdProgram(t *testing.T) {
 	}
 	if clean, _ := launchdProgram(cloudphotodProgram); !systemPath(clean) {
 		t.Fatal("cleaned cloudphotod program is not a system path")
+	}
+}
+
+// F2: quiesce never settles on a snapshot whose refused processes vanished.
+func TestQuiesceDoesNotSettleWhileRefusedProcessesVanish(t *testing.T) {
+	s, _, rows := appleWorld()
+	s.signal = func(context.Context, processSample, syscall.Signal) error { return nil }
+	s.sample = vanishingSampler(rows, func(call int) bool { return call%2 == 1 })
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	if err := s.quiesce(ctx); err == nil {
+		t.Fatal("quiesce settled while refused processes kept vanishing")
+	}
+}
+
+// F1: an unsettled admission is recorded durably like an inconclusive one,
+// never quarantined, and cleared by the next admission that passes.
+func TestUnsettledAdmissionIsRecordedAndCleared(t *testing.T) {
+	s, _, rows := appleWorld()
+	s.sample = vanishingSampler(rows, func(call int) bool { return call%2 == 1 })
+	engine := engineFixture(t, &scopeRunner{scope: s})
+	if err := engine.Recover(context.Background()); !errors.Is(err, errAdmissionUnsettled) || errors.Is(err, ErrRecovery) {
+		t.Fatalf("unsettled recover: %v", err)
+	}
+	record, err := ReadAdmissionInconclusive(engine.options.Root)
+	if err != nil || record == nil || record.Reason != errAdmissionUnsettled.Error() {
+		t.Fatalf("unsettled admission not recorded: %+v %v", record, err)
+	}
+	if _, err := engine.root.Lstat(quarantineRecord); err == nil {
+		t.Fatal("unsettled admission quarantined")
+	}
+	s.sample = func(context.Context) ([]processSample, error) { return slices.Clone(rows), nil }
+	if err := engine.Recover(context.Background()); err != nil {
+		t.Fatalf("recover: %v", err)
+	}
+	if record, err := ReadAdmissionInconclusive(engine.options.Root); err != nil || record != nil {
+		t.Fatalf("record not cleared: %+v %v", record, err)
 	}
 }

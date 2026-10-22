@@ -120,6 +120,17 @@ func pidDomainEnvironment(ctx context.Context, hints *serviceHints, env LaunchdE
 // installs what it contains. The App cryptex (Safari) is not trusted here.
 const osCryptex = "/System/Volumes/Preboot/Cryptexes/OS/"
 
+// appCryptex is the sealed, SIP-protected App cryptex (Safari and its
+// plug-ins). Trusted only for XPC services and extensions in a verified
+// owner's pid domain: deleted starts Safari's CacheDeleteExtension there in
+// bursts (about 18 starts per boot on macOS 27.0). Never for a gui or user
+// service.
+const appCryptex = "/System/Volumes/Preboot/Cryptexes/App/"
+
+func appCryptexPath(path string) bool {
+	return filepath.IsAbs(path) && filepath.Clean(path) == path && strings.HasPrefix(path, appCryptex)
+}
+
 func osCryptexPath(path string) bool {
 	return filepath.IsAbs(path) && filepath.Clean(path) == path && strings.HasPrefix(path, osCryptex)
 }
@@ -180,7 +191,8 @@ func developerToolLaunch(ctx context.Context, agents agentInspector, uid int, en
 	if facts.start != p.start || facts.uid != uid || facts.ppid != 1 || !facts.platform {
 		return "", errors.New("not a platform binary launched by launchd as the job user")
 	}
-	cryptex := osCryptexPath(facts.executable)
+	appCryptex := appCryptexPath(facts.executable)
+	cryptex := osCryptexPath(facts.executable) || appCryptex
 	if !cryptex && !developerToolPath(facts.executable) || codeRunner(facts.executable) {
 		return "", fmt.Errorf("executable %q is outside the developer-tool roots", facts.executable)
 	}
@@ -195,6 +207,9 @@ func developerToolLaunch(ctx context.Context, agents agentInspector, uid int, en
 	if !ok || !validLaunchdLabel(label) {
 		return "", errors.New("not listed by the job's launchd domains or a verified owner's pid domain")
 	}
+	if appCryptex && domain != "pid" {
+		return "", errors.New("an App-cryptex executable is tolerated only in a verified owner's pid domain")
+	}
 	target := domain + "/" + strconv.Itoa(uid) + "/" + label
 	if domain == "pid" {
 		target = "pid/" + strconv.Itoa(owner) + "/" + label
@@ -207,7 +222,7 @@ func developerToolLaunch(ctx context.Context, agents agentInspector, uid int, en
 		return target, fmt.Errorf("launchd type %q is not an XPC service or extension", snapshot.Type)
 	}
 	bundle := snapshot.Path
-	if !developerToolPath(bundle) || !strings.HasSuffix(bundle, ".xpc") && !strings.HasSuffix(bundle, ".appex") {
+	if !developerToolPath(bundle) && !(appCryptex && appCryptexPath(bundle)) || !strings.HasSuffix(bundle, ".xpc") && !strings.HasSuffix(bundle, ".appex") {
 		return target, fmt.Errorf("launchd path %q is not a bundle under the developer-tool roots", bundle)
 	}
 	// An OS-cryptex service is named by launchd through /System's SIP
@@ -215,8 +230,8 @@ func developerToolLaunch(ctx context.Context, agents agentInspector, uid int, en
 	// its bundle is where they resolve.
 	resolvedBundle := bundle
 	if cryptex {
-		if resolvedBundle, err = agents.resolve(bundle); err != nil || !osCryptexPath(resolvedBundle) {
-			return target, errors.Join(err, fmt.Errorf("launchd path %q does not resolve into the OS cryptex", bundle))
+		if resolvedBundle, err = agents.resolve(bundle); err != nil || !osCryptexPath(resolvedBundle) && !(appCryptex && appCryptexPath(resolvedBundle)) {
+			return target, errors.Join(err, fmt.Errorf("launchd path %q does not resolve into the sealed cryptex", bundle))
 		}
 	}
 	if filepath.Dir(facts.executable) != resolvedBundle+"/Contents/MacOS" {

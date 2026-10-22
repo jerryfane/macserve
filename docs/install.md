@@ -461,7 +461,7 @@ Anything else stays residual and is contamination as before. That includes a `la
 
 **Diagnosable refusals (v0.1.15).**
 
-- **Vanished candidates.** Admission recounts its census against a fresh snapshot of the process table. A process that was refused only because it exited (or its PID was reused) before launchd could be asked about it is not contamination. Apple agents can live for 40 ms; heard respawns every second. Such a snapshot is not clean either: admission samples again, at most 10 times, then refuses without quarantine ("admission inconclusive").
+- **Vanished candidates.** Admission recounts its census against a fresh snapshot of the process table. A process that was refused only because it exited (or its PID was reused) before launchd could be asked about it is not contamination. Apple agents can live for 40 ms; heard respawns every second. Such a snapshot is not clean either: admission samples again, at most 10 times, then refuses without quarantine ("admission inconclusive"). The refusal is recorded in `admission-inconclusive.json` and published as health `admission_inconclusive`, like a persisting tolerated child. The record is cleared by the next admission that passes or by `worker-reset`.
 - **Listed refusals.** A contamination refusal now lists the refused processes, sorted by PID, at most 8 of them, each field bounded:
   - PID and start;
   - kernel parent and executable;
@@ -486,7 +486,7 @@ Anything else stays residual and is contamination as before. That includes a `la
   - FedStatsPluginStatic;
   - PhotosReliveWidget.
   All lie under `/System`, are SIP `restricted`, and their `Info.plist` `CFBundleIdentifier` is the launchd label (or `original`) with `CFBundleExecutable` as the bundle executable. So the developer-tool rule classifies a live instance if launchd's record matches. Their inherited environment is the one part not observed live.
-- **Safari CacheDeleteExtension stays residual.** It lies in the App cryptex (about 18 starts since boot, in bursts every ~30 min). An admission that samples it alive refuses as contamination, with the extension listed. One that sees it exit before the re-check is a vanished candidate.
+- **App cryptex, pid domains only.** Safari's CacheDeleteExtension lies in the App cryptex. `deleted` starts it in bursts, about 18 times per boot. It is tolerated only as an `XPCService` or `Extension` in a verified owner's `pid` domain, under the same checks as the OS cryptex: sealed path, SIP `SF_RESTRICTED` executable and `Info.plist`, bundle id, and environment. An App-cryptex binary as a `gui` or `user` service stays residual.
 
 Threat model: a job can always make launchd start any Apple on-demand agent in its own domains by looking up a MachService, and have the agent do XPC work for it while the job runs. Quarantine afterwards never prevented that. The rule proves the process is Apple's SIP binary, exec'd by launchd from Apple's SIP plist with Apple's argv and no setenv or enable override: the code that lookup would run in any login session. That is the same exposure as the audited relaunches the census has tolerated since v0.1.9, with stronger cleanup. As with those relaunches, three things are not covered:
 
