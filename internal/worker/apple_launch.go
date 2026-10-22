@@ -183,7 +183,7 @@ func agentPlist(data []byte, label string) (string, []string, bool, error) {
 	if name := fields["Label"]; !plistString(name) || name.Text != label {
 		return "", nil, false, errors.New("plist names another label")
 	}
-	if disabled, ok := fields["Disabled"]; ok && disabled.XMLName.Local != "false" {
+	if disabled, ok := fields["Disabled"]; ok && disabled.XMLName.Local != "false" && !featureFlagCondition(disabled) {
 		return "", nil, false, errors.New("plist is disabled")
 	}
 	if _, ok := fields["BundleProgram"]; ok {
@@ -223,6 +223,42 @@ func agentPlist(data []byte, label string) (string, []string, bool, error) {
 	return program, argv, ok && multiple.XMLName.Local == "true", nil
 }
 
+// featureFlagCondition reports whether v is a feature-flag conditional value
+// launchd evaluates when it loads the plist: a dict with exactly one
+// #IfFeatureFlagEnabled or #IfFeatureFlagDisabled string, a #Then and an
+// optional #Else, each <true/>, <false/> or another such dict (macOS 27.0:
+// keychain-circle-notification, hybridsearchd, visualintelligenced, ...).
+// Feature flags are system state the job cannot set, and launchd only runs a
+// service it loaded as enabled; the running PID launchd reports for this
+// SIP plist, with the disabled-services overrides checked separately, is that
+// evidence. A literal <true/> stays refused.
+func featureFlagCondition(v servicePlistValue) bool {
+	if v.XMLName.Local != "dict" || len(v.Children)%2 != 0 {
+		return false
+	}
+	seen := map[string]bool{}
+	for i := 0; i < len(v.Children); i += 2 {
+		key, value := v.Children[i], v.Children[i+1]
+		if key.XMLName.Local != "key" || len(key.Children) != 0 || seen[key.Text] {
+			return false
+		}
+		seen[key.Text] = true
+		switch key.Text {
+		case "#IfFeatureFlagEnabled", "#IfFeatureFlagDisabled":
+			if !plistString(value) || value.Text == "" {
+				return false
+			}
+		case "#Then", "#Else":
+			if value.XMLName.Local != "true" && value.XMLName.Local != "false" && !featureFlagCondition(value) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return seen["#Then"] && seen["#IfFeatureFlagEnabled"] != seen["#IfFeatureFlagDisabled"]
+}
+
 func plistString(v servicePlistValue) bool {
 	return v.XMLName.Local == "string" && len(v.Children) == 0
 }
@@ -256,15 +292,17 @@ func plistDict(data []byte) (map[string]servicePlistValue, error) {
 }
 
 // bundleIdentity returns CFBundleIdentifier and CFBundleExecutable of the XML
-// Info.plist data.
+// Info.plist data; the executable is "" when the plist names none (the
+// caller applies CFBundle's default, the bundle name).
 func bundleIdentity(data []byte) (string, string, error) {
 	fields, err := plistDict(data)
 	if err != nil {
 		return "", "", err
 	}
-	id, exe := fields["CFBundleIdentifier"], fields["CFBundleExecutable"]
-	if !plistString(id) || !plistString(exe) || id.Text == "" || exe.Text == "" || strings.Contains(exe.Text, "/") {
-		return "", "", errors.New("Info.plist lacks a bundle identifier or executable")
+	id := fields["CFBundleIdentifier"]
+	exe, named := fields["CFBundleExecutable"]
+	if !plistString(id) || id.Text == "" || named && (!plistString(exe) || exe.Text == "" || strings.Contains(exe.Text, "/")) {
+		return "", "", errors.New("Info.plist lacks a bundle identifier or has an invalid executable")
 	}
 	return id.Text, exe.Text, nil
 }

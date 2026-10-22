@@ -84,6 +84,37 @@ const toleratedChildWait = 30 * time.Second
 
 var errToleratedChildPersists = errors.New("a child process of a tolerated launchd service outlived the admission wait; retry admission")
 
+// pidDomainEnvironment is the inherited environment launchd gives an XPC
+// service in owner's pid domain: HOME, PATH and TMPDIR of the job account
+// (xpcEnvironment), plus the domain environment recorded at reset of the gui
+// or user domain launchd lists owner in. A gui-domain owner's services
+// inherit its SSH_AUTH_SOCK (macOS 27.0: RemoteManagementAgent's
+// subscribers, assistantd's media-indexer); CoreSimulatorService in user has
+// none. Every value is the job account's or recorded at reset and censused
+// since, so a job's setenv still differs; a domain entry that would replace
+// one of the account's refuses.
+func pidDomainEnvironment(ctx context.Context, hints *serviceHints, env LaunchdEnvironment, owner int) (map[string]string, error) {
+	base, err := hints.xpcEnvironment(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("job XPC environment: %w", err)
+	}
+	reference := maps.Clone(base)
+	var domainEnv map[string]string
+	switch domain, _, _, ok := hints.listing(ctx, owner, nil); {
+	case ok && domain == "gui":
+		domainEnv = env.GUI
+	case ok && domain == "user":
+		domainEnv = env.User
+	}
+	for key, value := range domainEnv {
+		if _, exists := reference[key]; exists {
+			return nil, fmt.Errorf("domain environment replaces %s of the job XPC environment", key)
+		}
+		reference[key] = value
+	}
+	return reference, nil
+}
+
 func developerToolPath(path string) bool {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return false
@@ -190,6 +221,11 @@ func developerToolLaunch(ctx context.Context, agents agentInspector, uid int, en
 		return target, fmt.Errorf("launchd bundle id %q is not the service label %q", snapshot.BundleID, defined)
 	}
 	id, executable, err := agents.bundleInfo(ctx, bundle)
+	if executable == "" {
+		// CFBundle's default when Info.plist names none: the bundle name
+		// (RemoteManagement's ASConfigurationSubscriber.xpc on macOS 27.0).
+		executable = strings.TrimSuffix(filepath.Base(bundle), filepath.Ext(bundle))
+	}
 	if err != nil || id != defined || executable != filepath.Base(facts.executable) {
 		return target, errors.Join(err, errors.New("bundle Info.plist differs from launchd's record"))
 	}
@@ -200,8 +236,8 @@ func developerToolLaunch(ctx context.Context, agents agentInspector, uid int, en
 	case "user":
 		reference = env.User
 	case "pid":
-		if reference, err = hints.xpcEnvironment(ctx); err != nil {
-			return target, fmt.Errorf("job XPC environment: %w", err)
+		if reference, err = pidDomainEnvironment(ctx, hints, env, owner); err != nil {
+			return target, err
 		}
 	}
 	if !maps.Equal(snapshot.Inherited, reference) {
