@@ -1,0 +1,68 @@
+pid/67431/com.apple.CoreSimulator.SimAudioProcessorServices.SimAudioProcessorService = {
+	active count = 2
+	path = /Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/Resources/SimAudioProcessorServices.simdeviceio/Contents/XPCServices/SimAudioProcessorService.xpc
+	type = XPCService
+	state = running
+	bundle id = com.apple.CoreSimulator.SimAudioProcessorServices.SimAudioProcessorService
+	bundle version = 1171.7
+
+	program = /Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/Resources/SimAudioProcessorServices.simdeviceio/Contents/XPCServices/SimAudioProcessorService.xpc/Contents/MacOS/SimAudioProcessorService
+	inherited environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+		HOME => /Users/macservejob
+		TMPDIR => /var/folders/zz/zyxvpxvq6csfxvn_n0000000000000/T/
+	}
+
+	default environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+	}
+
+	environment = {
+		OSLogRateLimit => 64
+		XPC_SERVICE_NAME => com.apple.CoreSimulator.SimAudioProcessorServices.SimAudioProcessorService
+	}
+
+	domain = pid/67431 [com.apple.CoreS]
+	asid = 100064
+	minimum runtime = 10
+	base minimum runtime = 10
+	exit timeout = 5
+	runs = 1
+	pid = 67994
+	immediate reason = ipc (mach)
+	forks = 0
+	execs = 1
+	initialized = 1
+	trampolined = 1
+	started suspended = 0
+	proxy started suspended = 0
+	checked allocations = 0 (queried = 1)
+	checked allocations reason = inherited
+	checked allocations flags = 0x0
+	last exit code = (never exited)
+
+	endpoints = {
+		"com.apple.CoreSimulator.SimAudioProcessorServices.SimAudioProcessorService" = {
+			port = 0x1cae57
+			active = 1
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+	}
+
+	spawn type = app (1)
+	spawn role = ui (2)
+	jetsam priority = 40
+	jetsam memory limit (active) = (unlimited)
+	jetsam memory limit (inactive) = (unlimited)
+	jetsamproperties category = xpcservice
+	jetsam thread limit = 32
+	cpumon = default
+	exponential throttling grace limit = 10
+	job state = running
+	sanitizer flags = 0x0
+
+	properties = xpc bundle | supports transactions | supports pressured exit | parameterized sandbox | exponential throttling
+}

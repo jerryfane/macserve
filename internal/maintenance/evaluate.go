@@ -71,6 +71,9 @@ type Observation struct {
 	MemoryPressure bool                                  `json:"memory_pressure"`
 	Coexistence    *CoexistenceState                     `json:"coexistence,omitempty"`
 	Persistence    worker.PersistenceAttestationMetadata `json:"persistence"`
+	// AdmissionInconclusive is the broker's record of admissions refused for
+	// a persisting child of a tolerated launch (never quarantine).
+	AdmissionInconclusive *worker.AdmissionInconclusive `json:"admission_inconclusive,omitempty"`
 }
 
 func digest(data []byte) string { s := sha256.Sum256(data); return hex.EncodeToString(s[:]) }
@@ -87,6 +90,9 @@ func Evaluate(now time.Time, q Qualification, e BoundaryEvidence, o Observation)
 	h.PersistenceValid = o.Persistence.Valid
 	h.PersistenceNeedsReview = o.Persistence.NeedsReview
 	h.PersistenceReason = o.Persistence.Reason
+	if o.AdmissionInconclusive != nil {
+		h.AdmissionInconclusive = o.AdmissionInconclusive.Reason
+	}
 	fail := func() (controller.Health, error) {
 		return h, errors.New("maintenance qualification or live observation mismatch")
 	}

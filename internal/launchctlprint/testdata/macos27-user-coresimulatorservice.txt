@@ -1,0 +1,99 @@
+user/501/com.apple.CoreSimulator.CoreSimulatorService = {
+	active count = 4
+	path = /Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/XPCServices/com.apple.CoreSimulator.CoreSimulatorService.xpc
+	type = XPCService
+	state = running
+	bundle id = com.apple.CoreSimulator.CoreSimulatorService
+	bundle version = 1171.7
+
+	program = /Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/XPCServices/com.apple.CoreSimulator.CoreSimulatorService.xpc/Contents/MacOS/com.apple.CoreSimulator.CoreSimulatorService
+	default environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+	}
+
+	environment = {
+		OSLogRateLimit => 64
+		XPC_SERVICE_NAME => com.apple.CoreSimulator.CoreSimulatorService
+	}
+
+	domain = user/501
+	asid = 100064
+	minimum runtime = 10
+	base minimum runtime = 10
+	exit timeout = 5
+	runs = 4
+	pid = 67431
+	immediate reason = ipc (mach)
+	forks = 0
+	execs = 1
+	initialized = 1
+	trampolined = 1
+	started suspended = 0
+	proxy started suspended = 0
+	checked allocations = 0 (queried = 1)
+	checked allocations reason = no host
+	checked allocations flags = 0x0
+	last terminating signal = Killed: 9
+
+	endpoints = {
+		"com.apple.CoreSimulator.CoreSimulatorService" = {
+			port = 0x19e3cb
+			active = 1
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+	}
+
+	pid-local endpoints = {
+		"com.apple.tsm.portname" = {
+			port = 0x1b4db7
+			active = 1
+			managed = 0
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+		"com.apple.axserver" = {
+			port = 0x1c978b
+			active = 1
+			managed = 0
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+	}
+
+	resource coalition = {
+		ID = 3349
+		type = resource
+		state = active
+		active count = 1
+		name = com.apple.CoreSimulator.CoreSimulatorService
+		bundle ID = com.apple.CoreSimulator.CoreSimulatorService
+	}
+
+	jetsam coalition = {
+		ID = 3350
+		type = jetsam
+		state = active
+		active count = 1
+		name = com.apple.CoreSimulator.CoreSimulatorService
+		bundle ID = com.apple.CoreSimulator.CoreSimulatorService
+	}
+
+	spawn type = app (1)
+	spawn role = ui (2)
+	jetsam priority = 40
+	jetsam memory limit (active) = (unlimited)
+	jetsam memory limit (inactive) = (unlimited)
+	jetsamproperties category = xpcservice
+	jetsam thread limit = 32
+	cpumon = default
+	exponential throttling grace limit = 10
+	job state = running
+	sanitizer flags = 0x0
+
+	properties = xpc bundle | supports transactions | supports pressured exit | parameterized sandbox | exponential throttling
+}

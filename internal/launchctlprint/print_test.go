@@ -169,3 +169,123 @@ func TestParseMacOS27Captures(t *testing.T) {
 		t.Fatalf("PID listed twice kept a label: %+v, %v", d.Services, err)
 	}
 }
+
+// v0.1.14: the `disabled services` table is the per-user override record an
+// Apple-defined launch must not appear in (worker appleLaunch).
+func TestParseDomainDisabledServices(t *testing.T) {
+	domain := capture(t, "macos27-gui-domain.txt")
+	d, err := ParseDomain(domain)
+	if err != nil || !d.DisabledComplete || d.Disabled["com.apple.Siri.agent"] != "disabled" || len(d.Disabled) != 5 {
+		t.Fatalf("disabled services = %v complete=%v, %v", d.Disabled, d.DisabledComplete, err)
+	}
+	enabled := strings.Replace(domain, "\t\t\"com.apple.Siri.agent\" => disabled\n", "\t\t\"com.apple.Siri.agent\" => disabled\n\t\t\"com.apple.heard\" => enabled\n", 1)
+	if d, err := ParseDomain(enabled); err != nil || !d.DisabledComplete || d.Disabled["com.apple.heard"] != "enabled" {
+		t.Fatalf("enabled override = %v, %v", d.Disabled, err)
+	}
+	for name, edited := range map[string]string{
+		"unquoted label": strings.Replace(domain, "\t\t\"com.apple.Siri.agent\" => disabled", "\t\tcom.apple.Siri.agent => disabled", 1),
+		"other state":    strings.Replace(domain, "\"com.apple.Siri.agent\" => disabled", "\"com.apple.Siri.agent\" => maybe", 1),
+		"repeated label": strings.Replace(domain, "\t\t\"com.apple.Siri.agent\" => disabled\n", "\t\t\"com.apple.Siri.agent\" => disabled\n\t\t\"com.apple.Siri.agent\" => enabled\n", 1),
+	} {
+		if d, err := ParseDomain(edited); err != nil || d.DisabledComplete {
+			t.Errorf("%s: complete=%v, %v", name, d.DisabledComplete, err)
+		}
+	}
+	if d, err := ParseDomain(strings.Replace(domain, "\tdisabled services = {", "\tdisabled services = {\n\t}\n\tdisabled services = {", 1)); err == nil {
+		t.Fatalf("second disabled services table accepted: %+v", d.Disabled)
+	}
+}
+
+// launchd prints `original` for an instance of a MultipleInstances service
+// (com.apple.mdworker.shared.<UUID> on macOS 27.0).
+func TestParseOriginalLabel(t *testing.T) {
+	finder := capture(t, "macos27-gui-finder.txt")
+	head, rest, _ := strings.Cut(finder, "\n")
+	instance := head + "\n\toriginal = com.apple.mdworker.shared\n" + rest
+	if s, err := Parse(instance); err != nil || s.Original != "com.apple.mdworker.shared" {
+		t.Fatalf("original = %q, %v", s.Original, err)
+	}
+	if s, err := Parse(finder); err != nil || s.Original != "" {
+		t.Fatalf("service without original = %q, %v", s.Original, err)
+	}
+	twice := head + "\n\toriginal = a\n\toriginal = b\n" + rest
+	if _, err := Parse(twice); err == nil {
+		t.Fatal("second original label accepted")
+	}
+}
+
+// The parser reports launchd's root type and path as printed, without pairing
+// them: a record whose type is Submitted but whose path names a SIP
+// LaunchAgents plist parses, so callers must check the type themselves.
+func TestParseDoesNotPairTypeWithPath(t *testing.T) {
+	dock := capture(t, "macos27-gui-dock.txt")
+	forged := strings.Replace(dock, "\ttype = LaunchAgent\n", "\ttype = Submitted\n", 1)
+	s, err := Parse(forged)
+	if forged == dock || err != nil || s.Type != "Submitted" || s.Path != "/System/Library/LaunchAgents/com.apple.Dock.plist" {
+		t.Fatalf("type %q path %q: %v", s.Type, s.Path, err)
+	}
+}
+
+// macOS 27.0 developer-tool services launchd starts in the job's user domain
+// and in pid domains while a build runs. DeviceFS (an Extension) carries a
+// JSON argument that opens and closes on its own line.
+func TestParseMacOS27DeveloperServices(t *testing.T) {
+	for name, want := range map[string]Snapshot{
+		"macos27-pid-devicefs.txt": {
+			Target: "pid/6397/com.apple.dt.CoreDevice.Extensions.DeviceFS.00000000-0000-0000-0000-000000000001", PID: 67438, Type: "Extension",
+			Original: "com.apple.dt.CoreDevice.Extensions.DeviceFS", BundleID: "com.apple.dt.CoreDevice.Extensions.DeviceFS",
+			Path: "/Library/Developer/PrivateFrameworks/CoreDevice.framework/Versions/A/PrivateApplications/CoreDeviceExtensions.app/Contents/Extensions/DeviceFS.appex",
+		},
+		"macos27-pid-extensionkitservice.txt":   {Target: "pid/6397/com.apple.extensionkitservice", PID: 67437, Type: "XPCService", BundleID: "com.apple.extensionkitservice", Path: "/System/Library/Frameworks/ExtensionFoundation.framework/Versions/A/XPCServices/extensionkitservice.xpc"},
+		"macos27-pid-simaudio.txt":              {Target: "pid/67431/com.apple.CoreSimulator.SimAudioProcessorServices.SimAudioProcessorService", PID: 67994, Type: "XPCService", BundleID: "com.apple.CoreSimulator.SimAudioProcessorServices.SimAudioProcessorService"},
+		"macos27-user-coresimulatorservice.txt": {Target: "user/501/com.apple.CoreSimulator.CoreSimulatorService", PID: 67431, Type: "XPCService", BundleID: "com.apple.CoreSimulator.CoreSimulatorService"},
+	} {
+		s, err := Parse(capture(t, name))
+		if err != nil || s.Target != want.Target || s.PID != want.PID || s.Type != want.Type || s.Original != want.Original || s.BundleID != want.BundleID || want.Path != "" && s.Path != want.Path {
+			t.Errorf("%s: %+v, %v", name, s, err)
+		}
+		if name == "macos27-pid-devicefs.txt" && (len(s.Arguments) != 5 || s.Arguments[2] != `{"XPCService":{"Services":{"MainService":{}}}}`) {
+			t.Errorf("DeviceFS arguments %q", s.Arguments)
+		}
+		if name != "macos27-user-coresimulatorservice.txt" && s.Inherited["HOME"] != "/Users/macservejob" {
+			t.Errorf("%s inherited %v", name, s.Inherited)
+		}
+	}
+}
+
+func TestInlineBalancedArgumentCannotChangeNesting(t *testing.T) {
+	for line, want := range map[string]bool{
+		`{"a":{"b":[1,2]}}`: true,
+		`[]`:                true,
+		`{"a":"}{"}`:        true,
+		`{`:                 false,
+		`{"a":1}}`:          false,
+		`{"a":1}{`:          false,
+		`{"a":1} x`:         false,
+		`{"a":"x}`:          false,
+		`x{}`:               false,
+		`{"a":[}`:           false,
+	} {
+		if inlineBalanced(line) != want {
+			t.Errorf("inlineBalanced(%q) = %v", line, !want)
+		}
+	}
+	devicefs := capture(t, "macos27-pid-devicefs.txt")
+	forged := strings.Replace(devicefs, `{"XPCService":{"Services":{"MainService":{}}}}`, `{"XPCService":{`, 1)
+	if _, err := Parse(forged); err == nil {
+		t.Fatal("unbalanced argument line parsed")
+	}
+	// Outside the root arguments and environment, a one-line container is
+	// still structure, never opaque text.
+	forged = strings.Replace(devicefs, "\tinherited environment = {\n", "\tinherited environment = {\n\t\tX => {\"a\":1}\n", 1)
+	if forged == devicefs {
+		t.Fatal("fixture lacks inherited environment")
+	}
+	if _, err := Parse(forged); err == nil {
+		t.Fatal("inline container accepted in inherited environment")
+	}
+	forged = strings.Replace(devicefs, "\tmanagedby_services = {\n", "\tmanagedby_services = {\n\t\t{\"a\":1}\n", 1)
+	if _, err := Parse(forged); err == nil || forged == devicefs {
+		t.Fatal("inline container accepted outside arguments")
+	}
+}

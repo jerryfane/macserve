@@ -45,8 +45,8 @@ const persistenceAdmissionTimeout = 30 * time.Second
 
 // Admission observes without terminating or adopting unexpected processes.
 // Delayed same-UID persistence after this snapshot remains a native trust limit.
-func (r *nativeRunner) Admission(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, persistenceAdmissionTimeout)
+func (r *nativeRunner) Admission(parent context.Context) error {
+	ctx, cancel := context.WithTimeout(parent, persistenceAdmissionTimeout)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return err
@@ -68,14 +68,23 @@ func (r *nativeRunner) Admission(ctx context.Context) error {
 	if err := r.persistence(ctx); err != nil {
 		return err
 	}
-	return r.scope.observeQuiet(ctx)
+	// The process census has its own budget: it may wait toleratedChildWait
+	// for children of tolerated launches to exit.
+	cancel()
+	quietCtx, quietCancel := context.WithTimeout(parent, r.scope.childWait+persistenceAdmissionTimeout)
+	defer quietCancel()
+	return r.scope.observeQuiet(quietCtx)
 }
 
 // observeQuiet refuses admission while any job process is outside the audited
 // baseline. As in quiesce, that is contamination evidence only if no audited
-// process is gone without a verified launchd relaunch.
+// process is gone without a verified launchd relaunch. Residual processes that
+// are all direct children of tolerated launches (see toleratedChildWait) are
+// waited for up to s.childWait and then refused without quarantine; they are
+// never admitted. Admission needs two consecutive clean snapshots.
 func (s *processScope) observeQuiet(ctx context.Context) error {
-	for i := 0; i < 2; i++ {
+	var waitUntil time.Time
+	for clean := 0; ; {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -87,26 +96,42 @@ func (s *processScope) observeQuiet(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if len(c.residual) != 0 {
+		if len(c.residual) == 0 {
+			if clean++; clean == 2 {
+				return nil
+			}
+		} else {
 			if c.unresolved {
 				return errRelaunchUnverified
 			}
-			return fmt.Errorf("%w: processes outside audited GUI baseline", ErrContamination)
-		}
-		if i == 0 {
-			timer := time.NewTimer(s.interval)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return ctx.Err()
-			case <-timer.C:
+			if !c.toleratedChildren {
+				return fmt.Errorf("%w: processes outside audited GUI baseline", ErrContamination)
 			}
+			if waitUntil.IsZero() {
+				waitUntil = time.Now().Add(s.childWait)
+			}
+			if !time.Now().Before(waitUntil) {
+				return errToleratedChildPersists
+			}
+			clean = 0
+		}
+		timer := time.NewTimer(s.interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
 		}
 	}
-	return ctx.Err()
 }
 
+// quarantine durably records contamination (quarantineRecord) and an admission
+// refused for a persisting child of a tolerated launch
+// (admissionInconclusiveRecord, never quarantine).
 func (e *Engine) quarantine(err error) error {
+	if errors.Is(err, errToleratedChildPersists) {
+		err = errors.Join(err, e.recordInconclusive())
+	}
 	if !errors.Is(err, ErrContamination) {
 		return err
 	}
@@ -125,7 +150,7 @@ func (e *Engine) admission(ctx context.Context) error {
 			return e.quarantine(err)
 		}
 	}
-	return nil
+	return e.clearInconclusive()
 }
 
 func (e *Engine) checkQuarantine() error {

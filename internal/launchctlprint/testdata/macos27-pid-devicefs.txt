@@ -1,0 +1,109 @@
+pid/6397/com.apple.dt.CoreDevice.Extensions.DeviceFS.00000000-0000-0000-0000-000000000001 = {
+	original = com.apple.dt.CoreDevice.Extensions.DeviceFS
+	active count = 2
+	path = /Library/Developer/PrivateFrameworks/CoreDevice.framework/Versions/A/PrivateApplications/CoreDeviceExtensions.app/Contents/Extensions/DeviceFS.appex
+	type = Extension
+	managed_by = com.apple.runningboard
+	managedby_services = {
+		com.apple.dt.CoreDevice.Extensions.DeviceFS
+		com.apple.dt.CoreDevice.Extensions.DeviceFS.xpc-session
+	}
+	state = running
+	bundle id = com.apple.dt.CoreDevice.Extensions.DeviceFS
+	extension point = com.apple.fskit.fsmodule
+
+	program = /Library/Developer/PrivateFrameworks/CoreDevice.framework/Versions/A/PrivateApplications/CoreDeviceExtensions.app/Contents/Extensions/DeviceFS.appex/Contents/MacOS/DeviceFS
+	arguments = {
+		/Library/Developer/PrivateFrameworks/CoreDevice.framework/Versions/A/PrivateApplications/CoreDeviceExtensions.app/Contents/Extensions/DeviceFS.appex/Contents/MacOS/DeviceFS
+		-BSServiceDomains
+		{"XPCService":{"Services":{"MainService":{}}}}
+		-LaunchArguments
+		eyJlbmhhbmNlZFNlY3VyaXR5IjpmYWxzZSwic2VydmljZU5hbWUiOiJjb20uYXBwbGUuZHQuQ29yZURldmljZS5FeHRlbnNpb25zLkRldmljZUZTIiwidHlwZSI6MX0=
+	}
+
+	container id = /private/var/root/Library/Containers/com.apple.dt.CoreDevice.Extensions.DeviceFS/Data
+	sandbox profile = application
+	inherited environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+		HOME => /Users/macservejob
+		TMPDIR => /var/folders/zz/zyxvpxvq6csfxvn_n0000000000000/T/
+	}
+
+	default environment = {
+		PATH => /usr/bin:/bin:/usr/sbin:/sbin
+	}
+
+	environment = {
+		BSServiceDomains => {"XPCService":{"Services":{"MainService":{}}}}
+		LaunchInstanceID => 00000000-0000-0000-0000-000000000001
+		XPC_SERVICE_NAME => com.apple.dt.CoreDevice.Extensions.DeviceFS
+		BSServiceDomains => {"XPCService":{"Services":{"MainService":{}}}}
+		MallocSpaceEfficient => 1
+		OSLogRateLimit => 64
+	}
+
+	domain = pid/6397 [fskit_agent]
+	asid = 100064
+	minimum runtime = 10
+	base minimum runtime = 10
+	exit timeout = 5
+	voluntary exit timeout = 5
+	launch watchdog timeout = 0
+	runs = 1
+	pid = 67438
+	immediate reason = launch job demand
+	forks = 0
+	execs = 1
+	initialized = 1
+	trampolined = 1
+	started suspended = 0
+	proxy started suspended = 0
+	extension alive = 1
+	checked allocations = 0 (queried = 1)
+	checked allocations reason = not XPCService
+	checked allocations flags = 0x0
+	spawn reason filter = launch job demand
+	last exit code = (never exited)
+
+	instance-specific endpoints = {
+		"com.apple.dt.CoreDevice.Extensions.DeviceFS.xpc-session" = {
+			port = 0x1cbeff
+			active = 0
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+		"com.apple.dt.CoreDevice.Extensions.DeviceFS" = {
+			port = 0x1b4b33
+			active = 1
+			managed = 1
+			reset = 0
+			hide = 0
+			watching = 0
+		}
+	}
+
+	resource coalition = {
+		ID = 3540
+		type = resource
+		state = active
+		active count = 1
+		name = com.apple.dt.CoreDevice.Extensions.DeviceFS.00000000-0000-0000-0000-000000000001
+		bundle ID = com.apple.dt.CoreDevice.Extensions.DeviceFS
+	}
+
+	spawn type = interactive (4)
+	jetsam priority = 140
+	jetsam memory limit (active, soft) = 25 MB
+	jetsam memory limit (inactive, soft) = 1000 MB
+	jetsamproperties category = extension
+	jetsam thread limit = 32
+	cpumon = default
+	exponential throttling grace limit = 10
+	job state = running
+	platform = 1
+	sanitizer flags = 0x0
+
+	properties = xpc bundle | supports transactions | joins host session | abandon coalition | extension | is copy | one-shot | exponential throttling
+}

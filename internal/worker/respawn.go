@@ -61,13 +61,24 @@ type agentProcess struct {
 }
 
 // agentInspector is the read-only native seam: kernel facts alone (kernel),
-// kernel facts with the launch arguments (process), and launchctl print of one
-// exact service target (service) or domain (domain).
+// kernel facts with the launch arguments (process), launchctl print of one
+// exact service target (service) or domain (domain), the SIP file check
+// (restricted, see sipRestrictedExecutable), symlink resolution of a system
+// path (resolve), a SIP-restricted launchd plist as XML (plist), hostguard's
+// toolchain policy for the job UID (toolchain), a bundle's Info.plist
+// identity (bundleInfo) and launchd's pid-domain XPC environment of the job
+// account (xpcEnvironment).
 type agentInspector interface {
 	kernel(pid int) (agentProcess, error)
 	process(pid int) (agentProcess, error)
 	service(ctx context.Context, target string) (launchctlprint.Snapshot, error)
 	domain(ctx context.Context, target string) (launchctlprint.Domain, error)
+	restricted(path string) error
+	resolve(path string) (string, error)
+	plist(ctx context.Context, path string) ([]byte, error)
+	toolchain(path string, directory bool, uid int) error
+	bundleInfo(ctx context.Context, bundle string) (id, executable string, err error)
+	xpcEnvironment(ctx context.Context, uid int) (map[string]string, error)
 }
 
 func validLaunchdLabel(label string) bool {
@@ -294,25 +305,34 @@ func describeServices(ctx context.Context, agents agentInspector, uid int, b GUI
 // hint; describeService takes authority from launchctl print of that exact
 // service. Each domain is printed at most once.
 type serviceHints struct {
-	agents agentInspector
-	uid    int
-	owners []int
-	tables map[string]map[int]string
+	agents  agentInspector
+	uid     int
+	owners  []int
+	domains map[string]launchctlprint.Domain
+	xpcRead bool
+	xpcEnv  map[string]string
+	xpcErr  error
 }
 
 func newServiceHints(agents agentInspector, uid int, owners []int) *serviceHints {
-	return &serviceHints{agents: agents, uid: uid, owners: owners, tables: make(map[string]map[int]string)}
+	return &serviceHints{agents: agents, uid: uid, owners: owners, domains: make(map[string]launchctlprint.Domain)}
+}
+
+// print returns launchctl print of target, or a zero Domain when it is
+// unavailable or names another target.
+func (h *serviceHints) print(ctx context.Context, target string) launchctlprint.Domain {
+	d, ok := h.domains[target]
+	if !ok {
+		if printed, err := h.agents.domain(ctx, target); err == nil && printed.Target == target {
+			d = printed
+		}
+		h.domains[target] = d
+	}
+	return d
 }
 
 func (h *serviceHints) table(ctx context.Context, target string) map[int]string {
-	services, ok := h.tables[target]
-	if !ok {
-		if d, err := h.agents.domain(ctx, target); err == nil && d.Target == target {
-			services = d.Services
-		}
-		h.tables[target] = services
-	}
-	return services
+	return h.print(ctx, target).Services
 }
 
 // find returns the domain, pid-domain owner and label listed for pid: the gui

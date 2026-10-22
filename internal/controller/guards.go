@@ -39,6 +39,10 @@ type Health struct {
 	PersistenceValid        bool              `json:"persistence_valid"`
 	PersistenceNeedsReview  bool              `json:"persistence_needs_review"`
 	PersistenceReason       string            `json:"persistence_reason,omitempty"`
+	// AdmissionInconclusive is the reason of the broker's record of
+	// admissions refused, without quarantine, for a persisting child of a
+	// tolerated launch; the gate reports it as worker_admission_inconclusive.
+	AdmissionInconclusive string `json:"admission_inconclusive,omitempty"`
 }
 type GuardOptions struct {
 	Root, HealthFile, PauseFile string
@@ -116,6 +120,9 @@ func (g *Guard) Check(ctx context.Context) (GateState, error) {
 		}
 		if !health.PersistenceValid || health.PersistenceNeedsReview || health.PersistenceLastVerified.IsZero() || health.PersistenceLastVerified.After(now) {
 			fail("persistence_attestation_unavailable", false)
+		}
+		if health.AdmissionInconclusive != "" {
+			fail("worker_admission_inconclusive", false)
 		}
 		if health.AccountedBytes < 0 || health.AccountedBytes > ServiceBudgetBytes {
 			fail("service_disk_budget_exceeded", true)

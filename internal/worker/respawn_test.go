@@ -42,16 +42,74 @@ func speechXPCService(owner int) LaunchdService {
 // replaces a PID's facts from the second read on (the binding re-read).
 // Domain prints list the running services published under the domain, with
 // the domain environment env holds for it.
+// sip lists SIP-restricted files, plists the XML of launchd plists, and
+// disabled each domain's `disabled services` table; incomplete marks a
+// domain whose table did not parse completely.
 type fakeAgents struct {
-	procs    map[int]agentProcess
-	reread   map[int]agentProcess
-	reads    map[int]int
-	services map[string]launchctlprint.Snapshot
-	env      map[string]map[string]string
+	procs      map[int]agentProcess
+	reread     map[int]agentProcess
+	reads      map[int]int
+	services   map[string]launchctlprint.Snapshot
+	env        map[string]map[string]string
+	sip        map[string]bool
+	plists     map[string]string
+	disabled   map[string]map[string]string
+	incomplete map[string]bool
+	links      map[string]string
+	untrusted  map[string]bool
+	bundles    map[string][2]string
+	xpcEnv     map[string]string
 }
 
 func newFakeAgents() *fakeAgents {
-	return &fakeAgents{procs: map[int]agentProcess{}, reread: map[int]agentProcess{}, reads: map[int]int{}, services: map[string]launchctlprint.Snapshot{}, env: map[string]map[string]string{}}
+	return &fakeAgents{procs: map[int]agentProcess{}, reread: map[int]agentProcess{}, reads: map[int]int{}, services: map[string]launchctlprint.Snapshot{}, env: map[string]map[string]string{}, sip: map[string]bool{}, plists: map[string]string{}, disabled: map[string]map[string]string{}, incomplete: map[string]bool{}, links: map[string]string{}, untrusted: map[string]bool{}, bundles: map[string][2]string{}}
+}
+
+func (f *fakeAgents) restricted(path string) error {
+	if !f.sip[path] {
+		return errors.New("not SIP-restricted")
+	}
+	return nil
+}
+
+// resolve treats every path as canonical unless links names its target.
+func (f *fakeAgents) resolve(path string) (string, error) {
+	if target, ok := f.links[path]; ok {
+		return target, nil
+	}
+	return path, nil
+}
+
+// toolchain fails for every path untrusted names (a chain that is not
+// root-owned or is writable by the job).
+func (f *fakeAgents) toolchain(path string, _ bool, _ int) error {
+	if f.untrusted[path] {
+		return errors.New("toolchain path writable by the job")
+	}
+	return nil
+}
+
+func (f *fakeAgents) bundleInfo(_ context.Context, bundle string) (string, string, error) {
+	info, ok := f.bundles[bundle]
+	if !ok {
+		return "", "", syscall.ENOENT
+	}
+	return info[0], info[1], nil
+}
+
+func (f *fakeAgents) xpcEnvironment(context.Context, int) (map[string]string, error) {
+	if f.xpcEnv == nil {
+		return nil, errors.New("no job XPC environment")
+	}
+	return maps.Clone(f.xpcEnv), nil
+}
+
+func (f *fakeAgents) plist(_ context.Context, path string) ([]byte, error) {
+	data, ok := f.plists[path]
+	if !ok || !f.sip[path] {
+		return nil, syscall.ENOENT
+	}
+	return []byte(data), nil
 }
 
 // kernel never carries launch arguments.
@@ -84,7 +142,7 @@ func (f *fakeAgents) service(_ context.Context, target string) (launchctlprint.S
 }
 
 func (f *fakeAgents) domain(_ context.Context, target string) (launchctlprint.Domain, error) {
-	d := launchctlprint.Domain{Target: target, Environment: maps.Clone(f.env[target]), Services: map[int]string{}}
+	d := launchctlprint.Domain{Target: target, Environment: maps.Clone(f.env[target]), Services: map[int]string{}, Disabled: maps.Clone(f.disabled[target]), DisabledComplete: !f.incomplete[target]}
 	listed := map[int]int{}
 	for t, s := range f.services {
 		if label, ok := strings.CutPrefix(t, target+"/"); ok && s.PID > 0 {

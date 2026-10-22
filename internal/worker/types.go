@@ -90,11 +90,14 @@ type Sink interface {
 }
 
 type Options struct {
-	Root              string
-	ExportRoot        string
-	WorkspaceRoot     string
-	JobUID            uint32
-	JobGID            uint32
+	Root          string
+	ExportRoot    string
+	WorkspaceRoot string
+	JobUID        uint32
+	JobGID        uint32
+	// JobUser is the job account's short name, set as USER and LOGNAME for job
+	// commands. New resolves it from JobUID (see jobAccountName).
+	JobUser           string
 	OwnerUID          uint32
 	ControllerUID     uint32
 	HelperPath        string
