@@ -476,13 +476,17 @@ Anything else stays residual and is contamination as before. That includes a `la
   - its bundle path and program resolve into the cryptex;
   - the executable and `Info.plist` are SIP `SF_RESTRICTED`.
   The App cryptex (Safari and its agents) and `/Library/Apple` LaunchAgents (XProtect) are not trusted.
-- **Not verified on the host.** Apple services that started briefly in pid domains of audited owners in the idle job session, about 40 in 73 minutes:
-  - `deleted`'s CacheDelete extensions (4 every ~30 min; Safari's is in the App cryptex and stays residual);
-  - `siriactionsd`'s BackgroundShortcutRunner (7);
-  - ReportCrash's ReportCrashService (4);
-  - `mlhostd`'s unilog and lighthouse workers (hourly);
-  - `chronod`'s PhotosReliveWidget (2).
-  None was running when it could be inspected. An admission that samples one while it runs and cannot verify it refuses as contamination, and the refusal lists it. One that exits first is a vanished candidate.
+- **Brief pid-domain services.** Apple services start briefly in the pid domains of audited owners in the idle job session: about 40 in 73 minutes, and 18 to 101 per label since boot. Their bundles were checked statically on the host:
+  - `deleted`'s Mail, Music and TV CacheDelete `.appex` extensions;
+  - WorkflowKit's BackgroundShortcutRunner;
+  - ReportCrashService;
+  - VTDecoderXPCService;
+  - unilog's and lighthouse's ExtensionKit workers and UnilogConfigXPCService;
+  - SAExtensionOrchestrator;
+  - FedStatsPluginStatic;
+  - PhotosReliveWidget.
+  All lie under `/System`, are SIP `restricted`, and their `Info.plist` `CFBundleIdentifier` is the launchd label (or `original`) with `CFBundleExecutable` as the bundle executable. So the developer-tool rule classifies a live instance if launchd's record matches. Their inherited environment is the one part not observed live.
+- **Safari CacheDeleteExtension stays residual.** It lies in the App cryptex (about 18 starts since boot, in bursts every ~30 min). An admission that samples it alive refuses as contamination, with the extension listed. One that sees it exit before the re-check is a vanished candidate.
 
 Threat model: a job can always make launchd start any Apple on-demand agent in its own domains by looking up a MachService, and have the agent do XPC work for it while the job runs. Quarantine afterwards never prevented that. The rule proves the process is Apple's SIP binary, exec'd by launchd from Apple's SIP plist with Apple's argv and no setenv or enable override: the code that lookup would run in any login session. That is the same exposure as the audited relaunches the census has tolerated since v0.1.9, with stronger cleanup. As with those relaunches, three things are not covered:
 

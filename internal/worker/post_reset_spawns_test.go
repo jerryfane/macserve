@@ -120,3 +120,36 @@ func TestPostResetRulesStayNarrow(t *testing.T) {
 		})
 	}
 }
+
+// Brief pid-domain services seen in the idle job session, in the bundle and
+// Info.plist shapes read on the host (macOS 27.0): an app-extension
+// (Extension type, .appex in /System/Applications) and an instance of a
+// MultipleInstances XPC service (<original>.<UUID>).
+func TestAdmissionAcceptsTransientPidDomainServices(t *testing.T) {
+	s, agents, rows := postResetWorld(t)
+	owner := "pid/" + strconv.Itoa(rmOwnerPID) + "/"
+	inherited := maps.Clone(jobXPCEnvironment())
+	inherited["SSH_AUTH_SOCK"] = jobSocket
+	for _, x := range []struct {
+		pid                     int
+		label, original, bundle string
+		name, kind              string
+	}{
+		{610, "com.apple.MailCacheDelete", "", "/System/Applications/Mail.app/Contents/PlugIns/MailCacheDelete.appex", "MailCacheDelete", "Extension"},
+		{611, "com.apple.WorkflowKit.BackgroundShortcutRunner.D5CDB00E-16AB-4CDF-93C2-35A5093CB12B", "com.apple.WorkflowKit.BackgroundShortcutRunner", "/System/Library/PrivateFrameworks/WorkflowKit.framework/XPCServices/BackgroundShortcutRunner.xpc", "BackgroundShortcutRunner", "XPCService"},
+	} {
+		id := x.label
+		if x.original != "" {
+			id = x.original
+		}
+		program := x.bundle + "/Contents/MacOS/" + x.name
+		agents.procs[x.pid] = agentProcess{start: "50:" + strconv.Itoa(x.pid), uid: testJobUID, ppid: 1, executable: program, platform: true, program: program, argv: program}
+		agents.services[owner+x.label] = launchctlprint.Snapshot{Target: owner + x.label, State: "running", PID: x.pid, Path: x.bundle, Type: x.kind, BundleID: id, Original: x.original, Program: program, Inherited: inherited}
+		agents.bundles[x.bundle] = [2]string{id, x.name}
+		rows = append(rows, sample(x.pid, "50:"+strconv.Itoa(x.pid)))
+	}
+	c, err := s.census(context.Background(), rows)
+	if err != nil || len(c.residual) != 0 {
+		t.Fatalf("transient pid-domain services residual %v: %v", pids(c.residual), err)
+	}
+}
