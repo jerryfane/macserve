@@ -328,13 +328,13 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 		result.CleanupOK = cleanupErr == nil
 		err = errors.Join(err, cleanupErr)
 		if cleanupErr != nil {
-			result.Reason = errors.Join(errors.New(result.Reason), cleanupErr).Error()
+			result.Reason = errors.Join(errors.New(result.Reason), errors.New(worker.PublicReason(cleanupErr))).Error()
 		}
 	}
 	if err != nil {
 		log.Printf("worker job %s failed: %v", lease.Job.ID, err)
 		if result.Reason == "" {
-			result.Reason = err.Error()
+			result.Reason = worker.PublicReason(err)
 		}
 	}
 	if result.State == "" {

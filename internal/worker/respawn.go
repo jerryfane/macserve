@@ -133,8 +133,13 @@ func launchdProgram(raw string) (string, bool) {
 	return filepath.Clean(raw), true
 }
 
-func systemAgentPlist(label string) string {
-	return "/System/Library/LaunchAgents/" + label + ".plist"
+// systemAgentPlist reports whether path is a plist directly in
+// /System/Library/LaunchAgents. Its file name is usually <label>.plist, but
+// not always: com.apple.AquaAppearanceHelper is defined by
+// com.apple.AquaAppearanceHelper.agent.plist on macOS 27.0. describeService
+// binds any other name to the label through the SIP plist's own Label.
+func systemAgentPlist(path string) bool {
+	return filepath.Dir(path) == systemLaunchAgents && filepath.Clean(path) == path && strings.HasSuffix(path, ".plist")
 }
 
 func (s LaunchdService) target(uid, owner int) string {
@@ -152,7 +157,7 @@ func (s LaunchdService) target(uid, owner int) string {
 // serviceType is launchd's `type` for s: only the system plist path is a
 // LaunchAgent, every bundle an XPCService.
 func (s LaunchdService) serviceType() string {
-	if s.Path == systemAgentPlist(s.Label) {
+	if systemAgentPlist(s.Path) {
 		return "LaunchAgent"
 	}
 	return "XPCService"
@@ -164,9 +169,9 @@ func (s LaunchdService) valid(self int) bool {
 	}
 	switch s.Domain {
 	case "gui":
-		return s.Owner == 0 && s.Path == systemAgentPlist(s.Label)
+		return s.Owner == 0 && systemAgentPlist(s.Path)
 	case "user":
-		return s.Owner == 0 && (s.Path == systemAgentPlist(s.Label) || xpcBundle(s.Path, s.Executable))
+		return s.Owner == 0 && (systemAgentPlist(s.Path) || xpcBundle(s.Path, s.Executable))
 	case "pid":
 		return s.Owner > 1 && s.Owner != self && xpcBundle(s.Path, s.Executable)
 	}
@@ -400,7 +405,20 @@ func describeService(ctx context.Context, agents agentInspector, uid int, p Proc
 		return LaunchdService{}, false
 	}
 	s.Path, s.InheritedSHA256 = snapshot.Path, inheritedDigest(snapshot.Inherited)
-	return s, s.valid(p.PID) && launchedBy(ctx, agents, uid, s, owner, p.PID, facts)
+	if !s.valid(p.PID) || systemAgentPlist(s.Path) && filepath.Base(s.Path) != label+".plist" && !plistLabel(ctx, agents, s.Path, label) {
+		return s, false
+	}
+	return s, launchedBy(ctx, agents, uid, s, owner, p.PID, facts)
+}
+
+// plistLabel reports whether the SIP-protected plist at path defines label.
+func plistLabel(ctx context.Context, agents agentInspector, path, label string) bool {
+	data, err := agents.plist(ctx, path)
+	if err != nil {
+		return false
+	}
+	fields, err := plistDict(data)
+	return err == nil && plistString(fields["Label"]) && fields["Label"].Text == label
 }
 
 // launchAgentInherited returns the inherited environment launchctl prints for

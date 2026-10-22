@@ -121,7 +121,7 @@ func (s *processScope) auditReset(ctx context.Context, anchors, paths map[int]st
 		if err != nil {
 			return result, err
 		}
-		if len(c.residual) != 0 {
+		if len(c.residual) != 0 || len(c.vanished) != 0 {
 			return result, errors.New("unselected job process remains during reset audit")
 		}
 		live := make(map[int]string, len(samples))

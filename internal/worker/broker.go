@@ -136,6 +136,12 @@ type processCensus struct {
 	// refused holds, by PID, why each residual process was not a tolerated
 	// launch (see toleratedLaunches); empty when those rules did not run.
 	refused map[int]refusal
+	// vanished are processes the tolerance rules refused that a fresh
+	// snapshot no longer lists with the same identity: they exited (or
+	// their PID was reused) between the sample and their verification, so
+	// nothing is known about them. Not residual, but not a settled snapshot
+	// either (see stillRunning).
+	vanished []processSample
 }
 
 // census classifies job-UID processes against the audited baseline. An audited
@@ -204,6 +210,12 @@ func (s *processScope) census(ctx context.Context, samples []processSample) (pro
 			audited = append(audited, r.pid)
 		}
 		c.residual, c.tolerated, c.refused = toleratedLaunches(ctx, s.agents, s.uid, *s.baseline.Launchd, audited, c.residual)
+		if len(c.residual) != 0 && s.sample != nil {
+			var err error
+			if c.residual, c.vanished, err = s.stillRunning(ctx, c.residual); err != nil {
+				return processCensus{}, err
+			}
+		}
 		c.toleratedChildren = s.childrenOf(c.residual, c.tolerated)
 	}
 	for _, pid := range reused {
@@ -240,6 +252,32 @@ func (s *processScope) childrenOf(residual, tolerated []processSample) bool {
 		}
 	}
 	return true
+}
+
+// stillRunning splits residual by a fresh snapshot into processes still
+// running with the sampled identity and those that exited or whose PID now
+// names another process. Apple agents launchd starts on demand can live for
+// 40 ms (heard on macOS 27.0 respawns every second): one sampled alive can be
+// gone before launchctl answers for it, and its refusal then says nothing
+// about it. Only the kernel's own process table decides; anything still
+// listed stays residual whatever the reason its verification failed.
+func (s *processScope) stillRunning(ctx context.Context, residual []processSample) (running, vanished []processSample, err error) {
+	samples, err := s.sample(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	live := make(map[int]processSample, len(samples))
+	for _, p := range samples {
+		live[p.pid] = p
+	}
+	for _, p := range residual {
+		if now, ok := live[p.pid]; ok && now.start == p.start && now.uid == p.uid && !now.zombie {
+			running = append(running, p)
+		} else {
+			vanished = append(vanished, p)
+		}
+	}
+	return running, vanished, nil
 }
 
 // launchdUnchanged refuses when the environment launchctl prints for the job's
@@ -308,16 +346,18 @@ func (s *processScope) quiesce(ctx context.Context) error {
 			}
 		}
 		if len(c.residual) == 0 {
-			if empty {
+			// A snapshot whose only refused processes vanished before
+			// verification is not settled; nothing is left to signal.
+			if empty && len(c.vanished) == 0 {
 				return nil
 			}
-			empty = true
+			empty = len(c.vanished) == 0
 		} else {
 			if !time.Now().Before(termUntil.Add(s.grace)) {
 				if c.unresolved {
 					return errors.Join(ErrCleanup, errRelaunchUnverified)
 				}
-				return fmt.Errorf("%w: job processes remain after termination", ErrContamination)
+				return s.contaminated("job processes remain after termination", c)
 			}
 			empty = false
 			for _, p := range c.residual {
