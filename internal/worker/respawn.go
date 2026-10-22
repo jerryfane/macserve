@@ -64,7 +64,10 @@ type agentProcess struct {
 // kernel facts with the launch arguments (process), launchctl print of one
 // exact service target (service) or domain (domain), the SIP file check
 // (restricted, see sipRestrictedExecutable), symlink resolution of a system
-// path (resolve) and a SIP-restricted launchd plist as XML (plist).
+// path (resolve), a SIP-restricted launchd plist as XML (plist), hostguard's
+// toolchain policy for the job UID (toolchain), a bundle's Info.plist
+// identity (bundleInfo) and launchd's pid-domain XPC environment of the job
+// account (xpcEnvironment).
 type agentInspector interface {
 	kernel(pid int) (agentProcess, error)
 	process(pid int) (agentProcess, error)
@@ -73,6 +76,9 @@ type agentInspector interface {
 	restricted(path string) error
 	resolve(path string) (string, error)
 	plist(ctx context.Context, path string) ([]byte, error)
+	toolchain(path string, directory bool, uid int) error
+	bundleInfo(ctx context.Context, bundle string) (id, executable string, err error)
+	xpcEnvironment(ctx context.Context, uid int) (map[string]string, error)
 }
 
 func validLaunchdLabel(label string) bool {
@@ -303,6 +309,9 @@ type serviceHints struct {
 	uid     int
 	owners  []int
 	domains map[string]launchctlprint.Domain
+	xpcRead bool
+	xpcEnv  map[string]string
+	xpcErr  error
 }
 
 func newServiceHints(agents agentInspector, uid int, owners []int) *serviceHints {

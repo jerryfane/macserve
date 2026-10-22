@@ -233,8 +233,8 @@ func TestAppleLaunchThroughSystemFrameworkSymlink(t *testing.T) {
 	p.executable = resolved
 	agents.procs[400] = p
 	c, err := s.census(context.Background(), rows)
-	if err != nil || len(c.residual) != 0 || len(c.apple) != 2 {
-		t.Fatalf("census residual %v apple %v: %v", c.residual, c.apple, err)
+	if err != nil || len(c.residual) != 0 || len(c.tolerated) != 2 {
+		t.Fatalf("census residual %v tolerated %v: %v", c.residual, c.tolerated, err)
 	}
 }
 
@@ -265,8 +265,8 @@ func TestAppleLaunchMultipleInstancesService(t *testing.T) {
 	const uuid = "0F000000-0200-0000-0000-000000000000"
 	s, rows := mdworkerWorld(t, "\t<key>MultipleInstances</key>\n\t<true/>\n", "com.apple.mdworker.shared", uuid)
 	c, err := s.census(context.Background(), rows)
-	if err != nil || len(c.residual) != 0 || len(c.apple) != 3 {
-		t.Fatalf("census residual %v apple %v: %v", c.residual, c.apple, err)
+	if err != nil || len(c.residual) != 0 || len(c.tolerated) != 3 {
+		t.Fatalf("census residual %v tolerated %v: %v", c.residual, c.tolerated, err)
 	}
 	for name, w := range map[string][3]string{
 		"plist without MultipleInstances": {"", "com.apple.mdworker.shared", uuid},
@@ -277,7 +277,7 @@ func TestAppleLaunchMultipleInstancesService(t *testing.T) {
 		s, rows := mdworkerWorld(t, w[0], w[1], w[2])
 		c, err := s.census(context.Background(), rows)
 		if err != nil || !slices.ContainsFunc(c.residual, func(p processSample) bool { return p.pid == 500 }) {
-			t.Errorf("%s: residual %v apple %v: %v", name, c.residual, c.apple, err)
+			t.Errorf("%s: residual %v tolerated %v: %v", name, c.residual, c.tolerated, err)
 		}
 	}
 }
@@ -288,8 +288,8 @@ func TestAppleLaunchesStayResidualDuringReset(t *testing.T) {
 	s, _, rows := appleWorld()
 	s.adopt = &adoption{initial: map[int]string{}, terminate: map[int]string{}, reference: map[string]string{}}
 	c, err := s.census(context.Background(), rows)
-	if err != nil || len(c.residual) != 2 || len(c.apple) != 0 {
-		t.Fatalf("reset census residual %v apple %v: %v", c.residual, c.apple, err)
+	if err != nil || len(c.residual) != 2 || len(c.tolerated) != 0 {
+		t.Fatalf("reset census residual %v tolerated %v: %v", c.residual, c.tolerated, err)
 	}
 }
 
@@ -299,8 +299,8 @@ func TestAppleLaunchOnReusedAuditedPID(t *testing.T) {
 	s, _, rows := appleWorld()
 	s.baseline.Processes = append(s.baseline.Processes, ProcessIdentity{PID: 400, Start: "9:0"})
 	c, err := s.census(context.Background(), rows)
-	if err != nil || len(c.residual) != 0 || len(c.apple) != 2 {
-		t.Fatalf("census residual %v apple %v: %v", c.residual, c.apple, err)
+	if err != nil || len(c.residual) != 0 || len(c.tolerated) != 2 {
+		t.Fatalf("census residual %v tolerated %v: %v", c.residual, c.tolerated, err)
 	}
 }
 

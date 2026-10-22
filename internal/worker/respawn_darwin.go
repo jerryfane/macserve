@@ -6,9 +6,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os/user"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"unsafe"
 
+	"github.com/jerryfane/macserve/internal/hostguard"
 	"github.com/jerryfane/macserve/internal/launchctlprint"
 	"golang.org/x/sys/unix"
 )
@@ -118,4 +123,55 @@ func (nativeAgents) plist(ctx context.Context, path string) ([]byte, error) {
 		return nil, errors.New("launchd plist too large")
 	}
 	return []byte(out), nil
+}
+
+func (nativeAgents) toolchain(path string, directory bool, uid int) error {
+	if directory {
+		return hostguard.ToolchainDirectory(path, uint32(uid))
+	}
+	return hostguard.ToolchainExecutable(path, uint32(uid))
+}
+
+// bundleInfo reads <bundle>/Contents/Info.plist, a root-owned regular file
+// writable by nobody else, through plutil (bounded, read-only).
+func (nativeAgents) bundleInfo(ctx context.Context, bundle string) (string, string, error) {
+	path := bundle + "/Contents/Info.plist"
+	var st unix.Stat_t
+	if err := unix.Lstat(path, &st); err != nil {
+		return "", "", err
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Uid != 0 || st.Mode&0o022 != 0 {
+		return "", "", errors.New("bundle Info.plist is not a root-owned regular file writable only by root")
+	}
+	out, _, err := inspectCommand(ctx, nil, "/usr/bin/plutil", "-convert", "xml1", "-o", "-", path)
+	if err != nil {
+		return "", "", err
+	}
+	if len(out) > maxLaunchdPlistBytes {
+		return "", "", errors.New("bundle Info.plist too large")
+	}
+	return bundleIdentity([]byte(out))
+}
+
+// xpcEnvironment is the environment launchd gives XPC services in the job
+// account's pid domains: its home, the default PATH and its per-user temporary
+// directory, read with getconf as the job credential.
+func (nativeAgents) xpcEnvironment(ctx context.Context, uid int) (map[string]string, error) {
+	account, err := user.LookupId(strconv.Itoa(uid))
+	if err != nil {
+		return nil, err
+	}
+	gid, err := strconv.ParseUint(account.Gid, 10, 32)
+	if err != nil {
+		return nil, err
+	}
+	out, _, err := inspectCommand(ctx, &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid), Groups: []uint32{}}, "/usr/bin/getconf", "DARWIN_USER_TEMP_DIR")
+	if err != nil {
+		return nil, err
+	}
+	tmp := strings.TrimSuffix(out, "\n")
+	if !strings.HasPrefix(tmp, "/var/folders/") || !strings.HasSuffix(tmp, "/T/") || filepath.Clean(tmp)+"/" != tmp || !filepath.IsAbs(account.HomeDir) {
+		return nil, errors.New("job temporary directory or home unavailable")
+	}
+	return map[string]string{"HOME": account.HomeDir, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "TMPDIR": tmp}, nil
 }

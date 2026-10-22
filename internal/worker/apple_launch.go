@@ -77,19 +77,6 @@ const systemLaunchAgents = "/System/Library/LaunchAgents"
 // label (LaunchInstanceID), as printed on macOS 27.0.
 var instanceID = regexp.MustCompile(`^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$`)
 
-// appleLaunches moves every Apple-defined launch out of candidates.
-func appleLaunches(ctx context.Context, agents agentInspector, uid int, env LaunchdEnvironment, candidates []processSample) (residual, apple []processSample) {
-	hints := newServiceHints(agents, uid, nil)
-	for _, c := range candidates {
-		if _, err := appleLaunch(ctx, agents, uid, env, hints, c); err == nil {
-			apple = append(apple, c)
-		} else {
-			residual = append(residual, c)
-		}
-	}
-	return residual, apple
-}
-
 // appleLaunch returns the launchd target of p when p is an Apple-defined
 // launch (see above), else why not.
 func appleLaunch(ctx context.Context, agents agentInspector, uid int, env LaunchdEnvironment, hints *serviceHints, p processSample) (string, error) {
@@ -184,30 +171,11 @@ func appleLaunch(ctx context.Context, agents agentInspector, uid int, env Launch
 // Program defaults to ProgramArguments[0] and argv to [Program]. A Disabled
 // plist, a BundleProgram or any value of an unexpected type refuses.
 func agentPlist(data []byte, label string) (string, []string, bool, error) {
-	var root servicePlistValue
-	if err := xml.Unmarshal(data, &root); err != nil {
+	fields, err := plistDict(data)
+	if err != nil {
 		return "", nil, false, err
 	}
-	if root.XMLName.Local != "plist" || len(root.Children) != 1 || root.Children[0].XMLName.Local != "dict" {
-		return "", nil, false, errors.New("unsupported plist")
-	}
-	children := root.Children[0].Children
-	if len(children)%2 != 0 {
-		return "", nil, false, errors.New("invalid plist dictionary")
-	}
-	fields := map[string]servicePlistValue{}
-	for i := 0; i < len(children); i += 2 {
-		key := children[i]
-		if key.XMLName.Local != "key" || len(key.Children) != 0 {
-			return "", nil, false, errors.New("invalid plist key")
-		}
-		if _, exists := fields[key.Text]; exists {
-			return "", nil, false, errors.New("duplicate plist key")
-		}
-		fields[key.Text] = children[i+1]
-	}
-	str := func(v servicePlistValue) bool { return v.XMLName.Local == "string" && len(v.Children) == 0 }
-	if name := fields["Label"]; !str(name) || name.Text != label {
+	if name := fields["Label"]; !plistString(name) || name.Text != label {
 		return "", nil, false, errors.New("plist names another label")
 	}
 	if disabled, ok := fields["Disabled"]; ok && disabled.XMLName.Local != "false" {
@@ -222,7 +190,7 @@ func agentPlist(data []byte, label string) (string, []string, bool, error) {
 			return "", nil, false, errors.New("invalid ProgramArguments")
 		}
 		for _, arg := range args.Children {
-			if !str(arg) {
+			if !plistString(arg) {
 				return "", nil, false, errors.New("invalid ProgramArguments")
 			}
 			argv = append(argv, arg.Text)
@@ -230,7 +198,7 @@ func agentPlist(data []byte, label string) (string, []string, bool, error) {
 	}
 	program := ""
 	if p, ok := fields["Program"]; ok {
-		if !str(p) {
+		if !plistString(p) {
 			return "", nil, false, errors.New("invalid Program")
 		}
 		program = p.Text
@@ -248,4 +216,50 @@ func agentPlist(data []byte, label string) (string, []string, bool, error) {
 		return "", nil, false, errors.New("invalid MultipleInstances")
 	}
 	return program, argv, ok && multiple.XMLName.Local == "true", nil
+}
+
+func plistString(v servicePlistValue) bool {
+	return v.XMLName.Local == "string" && len(v.Children) == 0
+}
+
+// plistDict returns the root dictionary of the XML plist data by key; a
+// repeated or malformed key refuses.
+func plistDict(data []byte) (map[string]servicePlistValue, error) {
+	var root servicePlistValue
+	if err := xml.Unmarshal(data, &root); err != nil {
+		return nil, err
+	}
+	if root.XMLName.Local != "plist" || len(root.Children) != 1 || root.Children[0].XMLName.Local != "dict" {
+		return nil, errors.New("unsupported plist")
+	}
+	children := root.Children[0].Children
+	if len(children)%2 != 0 {
+		return nil, errors.New("invalid plist dictionary")
+	}
+	fields := map[string]servicePlistValue{}
+	for i := 0; i < len(children); i += 2 {
+		key := children[i]
+		if key.XMLName.Local != "key" || len(key.Children) != 0 {
+			return nil, errors.New("invalid plist key")
+		}
+		if _, exists := fields[key.Text]; exists {
+			return nil, errors.New("duplicate plist key")
+		}
+		fields[key.Text] = children[i+1]
+	}
+	return fields, nil
+}
+
+// bundleIdentity returns CFBundleIdentifier and CFBundleExecutable of the XML
+// Info.plist data.
+func bundleIdentity(data []byte) (string, string, error) {
+	fields, err := plistDict(data)
+	if err != nil {
+		return "", "", err
+	}
+	id, exe := fields["CFBundleIdentifier"], fields["CFBundleExecutable"]
+	if !plistString(id) || !plistString(exe) || id.Text == "" || exe.Text == "" || strings.Contains(exe.Text, "/") {
+		return "", "", errors.New("Info.plist lacks a bundle identifier or executable")
+	}
+	return id.Text, exe.Text, nil
 }

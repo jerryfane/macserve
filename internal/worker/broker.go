@@ -58,6 +58,9 @@ type processScope struct {
 	signal   func(context.Context, processSample, syscall.Signal) error
 	interval time.Duration
 	grace    time.Duration
+	// childWait bounds admission's wait for children of tolerated launches
+	// (see toleratedChildWait).
+	childWait time.Duration
 }
 
 func loadBaseline(path string, uid uint32) (GUIBaseline, error) {
@@ -120,13 +123,16 @@ var (
 // processCensus is one snapshot classified against the audited baseline.
 // Unresolved means some audited process is gone without a verified launchd
 // relaunch in this snapshot. relaunched maps such an absent audited PID to
-// its verified relaunch. apple lists the Apple-defined launches outside the
-// baseline (see appleLaunch): not residual, but signalled by quiesce.
+// its verified relaunch. tolerated lists the Apple-defined and developer-tool
+// launches outside the baseline (see appleLaunch, developerToolLaunch): not
+// residual, but signalled by quiesce. toleratedChildren means every residual
+// process is a direct child of one of them.
 type processCensus struct {
-	residual   []processSample
-	unresolved bool
-	relaunched map[int]processSample
-	apple      []processSample
+	residual          []processSample
+	unresolved        bool
+	relaunched        map[int]processSample
+	tolerated         []processSample
+	toleratedChildren bool
 }
 
 // census classifies job-UID processes against the audited baseline. An audited
@@ -137,8 +143,9 @@ type processCensus struct {
 // of a recorded system service (see respawned); that includes a relaunch that
 // lands on the exited audited PID number. Any other holder of an audited PID
 // number is refused as a changed baseline. Outside worker-reset, a process
-// launchd's record proves to be an Apple-defined launch (see appleLaunch) is
-// not residual, also on a reused audited PID number. While worker-reset runs
+// launchd's record proves to be an Apple-defined or developer-tool launch (see
+// appleLaunch, developerToolLaunch) is not residual, also on a reused audited
+// PID number. While worker-reset runs
 // (s.adopt), the recorded unselected instances are residual although audited,
 // and a new system LaunchAgent that launchd started may be adopted (see
 // adoption).
@@ -152,6 +159,7 @@ func (s *processScope) census(ctx context.Context, samples []processSample) (pro
 	}
 	var c processCensus
 	var reused []int
+	present := make(map[int]bool, len(s.baseline.Processes))
 	for _, p := range samples {
 		if start, ok := absent[p.pid]; ok {
 			if p.uid != s.uid || p.zombie || p.start == "" {
@@ -159,6 +167,7 @@ func (s *processScope) census(ctx context.Context, samples []processSample) (pro
 			}
 			if p.start == start {
 				delete(absent, p.pid)
+				present[p.pid] = true
 				if s.adopt != nil && s.adopt.terminate[p.pid] == start {
 					c.residual = append(c.residual, p)
 				}
@@ -180,7 +189,19 @@ func (s *processScope) census(ctx context.Context, samples []processSample) (pro
 		c.residual, c.relaunched = respawned(ctx, s.agents, s.uid, s.baseline, absent, c.residual)
 	}
 	if s.adopt == nil && len(c.residual) != 0 && s.agents != nil && s.baseline.Launchd != nil {
-		c.residual, c.apple = appleLaunches(ctx, s.agents, s.uid, *s.baseline.Launchd, c.residual)
+		// Present or relaunched audited launchd services may own the pid
+		// domains of developer-tool XPC services.
+		var audited []int
+		for _, p := range s.baseline.Processes {
+			if present[p.PID] && p.Service.Domain != "" {
+				audited = append(audited, p.PID)
+			}
+		}
+		for _, r := range c.relaunched {
+			audited = append(audited, r.pid)
+		}
+		c.residual, c.tolerated = toleratedLaunches(ctx, s.agents, s.uid, *s.baseline.Launchd, audited, c.residual)
+		c.toleratedChildren = s.childrenOf(c.residual, c.tolerated)
 	}
 	for _, pid := range reused {
 		if slices.ContainsFunc(c.residual, func(p processSample) bool { return p.pid == pid }) {
@@ -197,6 +218,25 @@ func (s *processScope) census(ctx context.Context, samples []processSample) (pro
 	}
 	c.unresolved = len(c.relaunched) < len(absent)
 	return c, nil
+}
+
+// childrenOf reports whether every residual process is a direct child of one
+// of the tolerated launches, by kernel parent of the same process instance.
+func (s *processScope) childrenOf(residual, tolerated []processSample) bool {
+	if len(residual) == 0 || len(tolerated) == 0 {
+		return false
+	}
+	parents := make(map[int]bool, len(tolerated))
+	for _, p := range tolerated {
+		parents[p.pid] = true
+	}
+	for _, p := range residual {
+		k, err := s.agents.kernel(p.pid)
+		if err != nil || k.start != p.start || !parents[k.ppid] {
+			return false
+		}
+	}
+	return true
 }
 
 // launchdUnchanged refuses when the environment launchctl prints for the job's
@@ -235,8 +275,9 @@ func (s *processScope) residual(ctx context.Context, samples []processSample) ([
 // present or verifiably relaunched. If one is gone without a verified relaunch,
 // a survivor may be launchd bringing it back (KeepAlive) in a way this host
 // could not verify, so cleanup fails without durable quarantine, as in v0.1.8.
-// Apple-defined launches are signalled with the residual processes but never
-// awaited: launchd may start them again at once (heard respawns every second).
+// Tolerated launches are signalled with the residual processes but never
+// awaited: launchd may start them again at once (heard respawns every second,
+// the CoreSimulator/CoreDevice stack within seconds).
 func (s *processScope) quiesce(ctx context.Context) error {
 	termUntil := time.Now().Add(s.grace)
 	// Require a second empty snapshot after a settling interval. Never waive a
@@ -258,7 +299,7 @@ func (s *processScope) quiesce(ctx context.Context) error {
 		if !time.Now().Before(termUntil) {
 			sig = syscall.SIGKILL
 		}
-		for _, p := range c.apple {
+		for _, p := range c.tolerated {
 			if err := s.signal(ctx, p, sig); err != nil {
 				return errors.Join(ErrCleanup, err)
 			}
@@ -334,7 +375,7 @@ func NewNativeRunner(options Options) (Runner, error) {
 	runner.persistencePath = options.PersistencePath
 	runner.persistence = nativePersistenceInspector(options)
 	runner.console = func() error { return hostguard.CheckConsole(options.OwnerUID) }
-	runner.scope = &processScope{uid: runner.uid, sample: identityProcesses, agents: nativeAgents{}, interval: 50 * time.Millisecond, grace: 500 * time.Millisecond}
+	runner.scope = &processScope{uid: runner.uid, sample: identityProcesses, agents: nativeAgents{}, interval: 50 * time.Millisecond, grace: 500 * time.Millisecond, childWait: toleratedChildWait}
 	runner.scope.signal = func(ctx context.Context, p processSample, sig syscall.Signal) error {
 		// The kernel checks the job UID, not root, at the signal operation itself.
 		// A PID reused by the owner/controller/another UID can never be signalled.

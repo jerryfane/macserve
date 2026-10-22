@@ -56,10 +56,13 @@ type fakeAgents struct {
 	disabled   map[string]map[string]string
 	incomplete map[string]bool
 	links      map[string]string
+	untrusted  map[string]bool
+	bundles    map[string][2]string
+	xpcEnv     map[string]string
 }
 
 func newFakeAgents() *fakeAgents {
-	return &fakeAgents{procs: map[int]agentProcess{}, reread: map[int]agentProcess{}, reads: map[int]int{}, services: map[string]launchctlprint.Snapshot{}, env: map[string]map[string]string{}, sip: map[string]bool{}, plists: map[string]string{}, disabled: map[string]map[string]string{}, incomplete: map[string]bool{}, links: map[string]string{}}
+	return &fakeAgents{procs: map[int]agentProcess{}, reread: map[int]agentProcess{}, reads: map[int]int{}, services: map[string]launchctlprint.Snapshot{}, env: map[string]map[string]string{}, sip: map[string]bool{}, plists: map[string]string{}, disabled: map[string]map[string]string{}, incomplete: map[string]bool{}, links: map[string]string{}, untrusted: map[string]bool{}, bundles: map[string][2]string{}}
 }
 
 func (f *fakeAgents) restricted(path string) error {
@@ -75,6 +78,30 @@ func (f *fakeAgents) resolve(path string) (string, error) {
 		return target, nil
 	}
 	return path, nil
+}
+
+// toolchain fails for every path untrusted names (a chain that is not
+// root-owned or is writable by the job).
+func (f *fakeAgents) toolchain(path string, _ bool, _ int) error {
+	if f.untrusted[path] {
+		return errors.New("toolchain path writable by the job")
+	}
+	return nil
+}
+
+func (f *fakeAgents) bundleInfo(_ context.Context, bundle string) (string, string, error) {
+	info, ok := f.bundles[bundle]
+	if !ok {
+		return "", "", syscall.ENOENT
+	}
+	return info[0], info[1], nil
+}
+
+func (f *fakeAgents) xpcEnvironment(context.Context, int) (map[string]string, error) {
+	if f.xpcEnv == nil {
+		return nil, errors.New("no job XPC environment")
+	}
+	return maps.Clone(f.xpcEnv), nil
 }
 
 func (f *fakeAgents) plist(_ context.Context, path string) ([]byte, error) {

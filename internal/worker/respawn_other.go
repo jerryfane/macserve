@@ -31,3 +31,13 @@ func (nativeAgents) restricted(string) error { return errNoLaunchd }
 func (nativeAgents) resolve(string) (string, error) { return "", errNoLaunchd }
 
 func (nativeAgents) plist(context.Context, string) ([]byte, error) { return nil, errNoLaunchd }
+
+func (nativeAgents) toolchain(string, bool, int) error { return errNoLaunchd }
+
+func (nativeAgents) bundleInfo(context.Context, string) (string, string, error) {
+	return "", "", errNoLaunchd
+}
+
+func (nativeAgents) xpcEnvironment(context.Context, int) (map[string]string, error) {
+	return nil, errNoLaunchd
+}

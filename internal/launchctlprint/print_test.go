@@ -213,3 +213,67 @@ func TestParseOriginalLabel(t *testing.T) {
 		t.Fatal("second original label accepted")
 	}
 }
+
+// macOS 27.0 developer-tool services launchd starts in the job's user domain
+// and in pid domains while a build runs. DeviceFS (an Extension) carries a
+// JSON argument that opens and closes on its own line.
+func TestParseMacOS27DeveloperServices(t *testing.T) {
+	for name, want := range map[string]Snapshot{
+		"macos27-pid-devicefs.txt": {
+			Target: "pid/6397/com.apple.dt.CoreDevice.Extensions.DeviceFS.00000000-0000-0000-0000-000000000001", PID: 67438, Type: "Extension",
+			Original: "com.apple.dt.CoreDevice.Extensions.DeviceFS", BundleID: "com.apple.dt.CoreDevice.Extensions.DeviceFS",
+			Path: "/Library/Developer/PrivateFrameworks/CoreDevice.framework/Versions/A/PrivateApplications/CoreDeviceExtensions.app/Contents/Extensions/DeviceFS.appex",
+		},
+		"macos27-pid-extensionkitservice.txt":   {Target: "pid/6397/com.apple.extensionkitservice", PID: 67437, Type: "XPCService", BundleID: "com.apple.extensionkitservice", Path: "/System/Library/Frameworks/ExtensionFoundation.framework/Versions/A/XPCServices/extensionkitservice.xpc"},
+		"macos27-pid-simaudio.txt":              {Target: "pid/67431/com.apple.CoreSimulator.SimAudioProcessorServices.SimAudioProcessorService", PID: 67994, Type: "XPCService", BundleID: "com.apple.CoreSimulator.SimAudioProcessorServices.SimAudioProcessorService"},
+		"macos27-user-coresimulatorservice.txt": {Target: "user/501/com.apple.CoreSimulator.CoreSimulatorService", PID: 67431, Type: "XPCService", BundleID: "com.apple.CoreSimulator.CoreSimulatorService"},
+	} {
+		s, err := Parse(capture(t, name))
+		if err != nil || s.Target != want.Target || s.PID != want.PID || s.Type != want.Type || s.Original != want.Original || s.BundleID != want.BundleID || want.Path != "" && s.Path != want.Path {
+			t.Errorf("%s: %+v, %v", name, s, err)
+		}
+		if name == "macos27-pid-devicefs.txt" && (len(s.Arguments) != 5 || s.Arguments[2] != `{"XPCService":{"Services":{"MainService":{}}}}`) {
+			t.Errorf("DeviceFS arguments %q", s.Arguments)
+		}
+		if name != "macos27-user-coresimulatorservice.txt" && s.Inherited["HOME"] != "/Users/macservejob" {
+			t.Errorf("%s inherited %v", name, s.Inherited)
+		}
+	}
+}
+
+func TestInlineBalancedArgumentCannotChangeNesting(t *testing.T) {
+	for line, want := range map[string]bool{
+		`{"a":{"b":[1,2]}}`: true,
+		`[]`:                true,
+		`{"a":"}{"}`:        true,
+		`{`:                 false,
+		`{"a":1}}`:          false,
+		`{"a":1}{`:          false,
+		`{"a":1} x`:         false,
+		`{"a":"x}`:          false,
+		`x{}`:               false,
+		`{"a":[}`:           false,
+	} {
+		if inlineBalanced(line) != want {
+			t.Errorf("inlineBalanced(%q) = %v", line, !want)
+		}
+	}
+	devicefs := capture(t, "macos27-pid-devicefs.txt")
+	forged := strings.Replace(devicefs, `{"XPCService":{"Services":{"MainService":{}}}}`, `{"XPCService":{`, 1)
+	if _, err := Parse(forged); err == nil {
+		t.Fatal("unbalanced argument line parsed")
+	}
+	// Outside the root arguments and environment, a one-line container is
+	// still structure, never opaque text.
+	forged = strings.Replace(devicefs, "\tinherited environment = {\n", "\tinherited environment = {\n\t\tX => {\"a\":1}\n", 1)
+	if forged == devicefs {
+		t.Fatal("fixture lacks inherited environment")
+	}
+	if _, err := Parse(forged); err == nil {
+		t.Fatal("inline container accepted in inherited environment")
+	}
+	forged = strings.Replace(devicefs, "\tmanagedby_services = {\n", "\tmanagedby_services = {\n\t\t{\"a\":1}\n", 1)
+	if _, err := Parse(forged); err == nil || forged == devicefs {
+		t.Fatal("inline container accepted outside arguments")
+	}
+}

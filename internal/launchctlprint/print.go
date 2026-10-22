@@ -21,7 +21,8 @@ var errInvalid = errors.New("invalid launchctl running service snapshot")
 // the exact service they requested; nested state and pid fields are never used.
 // Path and Type are the root service path and type when launchctl printed them.
 // Original is the root `original` label launchd prints for an instance of a
-// MultipleInstances service (com.apple.mdworker.shared.<instance>).
+// MultipleInstances service (com.apple.mdworker.shared.<instance>) or of an
+// extension. BundleID is the root `bundle id` of a bundle-based service.
 // Program and Arguments are the root `program` and `arguments` launchd execs
 // (Arguments is nil when not printed, as for an inferred program). Environment
 // is the service's own root `environment` dictionary (its plist
@@ -39,6 +40,7 @@ type Snapshot struct {
 	Path        string
 	Type        string
 	Original    string
+	BundleID    string
 	Program     string
 	Arguments   []string
 	Environment map[string]string
@@ -67,7 +69,7 @@ type Domain struct {
 
 // Parse accepts a complete newline-terminated service dictionary with exactly
 // one unquoted state = running and one canonical positive 32-bit pid = N.
-// Root path, type, original, program, arguments, environment and inherited environment
+// Root path, type, original, bundle id, program, arguments, environment and inherited environment
 // are optional but unique; a value that injects a second root line (a
 // filename, or a `launchctl setenv` value printed in the inherited
 // environment, which comes before the root environment) therefore invalidates
@@ -77,7 +79,7 @@ type Domain struct {
 // trailing output fail.
 func Parse(text string) (Snapshot, error) {
 	var result Snapshot
-	stateSeen, pidSeen, pathSeen, typeSeen, programSeen, originalSeen := false, false, false, false, false, false
+	stateSeen, pidSeen, pathSeen, typeSeen, programSeen, originalSeen, bundleSeen := false, false, false, false, false, false, false
 	// envUsable is cleared by any root environment entry that is not a plain
 	// unique `KEY => value`.
 	envUsable := true
@@ -107,6 +109,11 @@ func Parse(text string) (Snapshot, error) {
 				return "", errInvalid
 			}
 			result.Type, typeSeen = value, true
+		case "bundle id":
+			if bundleSeen || arrow {
+				return "", errInvalid
+			}
+			result.BundleID, bundleSeen = value, true
 		case "original":
 			if originalSeen || arrow {
 				return "", errInvalid
@@ -338,7 +345,13 @@ func walk(text string, root func(key, value string, arrow bool) (string, error),
 			return "", errInvalid
 		}
 		value = strings.Trim(value, " \t")
-		if bracketedScalar(value) {
+		// Inside the root `arguments` array and root `environment` dictionary
+		// only, an element or `KEY => value` value that opens and closes all
+		// of its containers on its own line (quote-aware), such as an
+		// extension's `{"XPCService":{...}}` argv entry and the same
+		// BSServiceDomains environment value, is opaque text: it cannot change
+		// the nesting. Everywhere else such a line still fails.
+		if bracketedScalar(value) || depth == 2 && (section == "arguments" || section == "environment") && inlineBalanced(value) {
 			continue
 		}
 		bracket, valid := structural(value)
@@ -380,6 +393,45 @@ func walk(text string, root func(key, value string, arrow bool) (string, error),
 		}
 	}
 	return "", errInvalid
+}
+
+// inlineBalanced reports whether line is one container value that opens at its
+// first byte and closes at its last: brackets balance outside double-quoted
+// strings (backslash escapes inside them) and never close before the end.
+func inlineBalanced(line string) bool {
+	if line == "" || line[0] != '{' && line[0] != '[' {
+		return false
+	}
+	var stack []byte
+	quoted, escaped := false, false
+	for i := range len(line) {
+		c := line[i]
+		switch {
+		case escaped:
+			escaped = false
+		case quoted:
+			if c == '\\' {
+				escaped = true
+			} else if c == '"' {
+				quoted = false
+			}
+		case c == '"':
+			quoted = true
+		case c == '{' || c == '[':
+			stack = append(stack, c)
+		case c == '}' || c == ']':
+			if len(stack) == 0 || !matches(stack[len(stack)-1], c) {
+				return false
+			}
+			stack = stack[:len(stack)-1]
+			if len(stack) == 0 && i != len(line)-1 {
+				return false
+			}
+		case c < 0x20:
+			return false
+		}
+	}
+	return len(stack) == 0 && !quoted
 }
 
 func matches(open, close byte) bool {
