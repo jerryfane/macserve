@@ -110,6 +110,29 @@ func systemPath(path string) bool {
 	return false
 }
 
+// launchdProgram returns the clean form of a program path launchd reports and
+// a launchd plist names. Apple's own plists name some programs with
+// redundant separators that launchd execs verbatim, so KERN_PROCARGS2
+// carries them too: on macOS 27.0 com.apple.cloudphotod
+// (CloudPhotoLibrary.framework/Versions/A/Support//cloudphotod) and
+// com.apple.AquaAppearanceHelper (SkyLight.framework//Versions/...), the
+// only two of the 486 system LaunchAgents. Only empty components are
+// accepted: a "." or ".." component never is, so cleaning cannot move the
+// path out of the tree it names, where the kernel, which resolves ".." after
+// following symlinks, could. Callers still compare the raw strings with each
+// other and bind the resolved path to the kernel executable.
+func launchdProgram(raw string) (string, bool) {
+	if !filepath.IsAbs(raw) {
+		return "", false
+	}
+	for _, component := range strings.Split(raw, "/") {
+		if component == "." || component == ".." {
+			return "", false
+		}
+	}
+	return filepath.Clean(raw), true
+}
+
 func systemAgentPlist(label string) string {
 	return "/System/Library/LaunchAgents/" + label + ".plist"
 }

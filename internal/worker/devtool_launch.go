@@ -225,19 +225,29 @@ func developerToolLaunch(ctx context.Context, agents agentInspector, uid int, en
 	return target, nil
 }
 
+// refusal is why a residual process is not a tolerated launch: the launchd
+// target a rule found for it (if any) and each rule's last error.
+type refusal struct {
+	target               string
+	apple, developerTool error
+}
+
 // toleratedLaunches moves every Apple-defined and developer-tool launch out of
-// candidates. audited are present or relaunched audited launchd services,
-// which may own pid domains; tolerated launches verified earlier in the same
-// call are owners too, so passes repeat until none is added.
-func toleratedLaunches(ctx context.Context, agents agentInspector, uid int, env LaunchdEnvironment, audited []int, candidates []processSample) (residual, tolerated []processSample) {
+// candidates and returns, by PID, why each remaining one was refused.
+// audited are present or relaunched audited launchd services, which may own
+// pid domains; tolerated launches verified earlier in the same call are
+// owners too, so passes repeat until none is added.
+func toleratedLaunches(ctx context.Context, agents agentInspector, uid int, env LaunchdEnvironment, audited []int, candidates []processSample) (residual, tolerated []processSample, refused map[int]refusal) {
 	hints := newServiceHints(agents, uid, nil)
+	refused = make(map[int]refusal)
 	var owners []int
 	for _, c := range candidates {
-		if _, err := appleLaunch(ctx, agents, uid, env, hints, c); err == nil {
+		if target, err := appleLaunch(ctx, agents, uid, env, hints, c); err == nil {
 			tolerated = append(tolerated, c)
 			owners = append(owners, c.pid)
 		} else {
 			residual = append(residual, c)
+			refused[c.pid] = refusal{target: target, apple: err}
 		}
 	}
 	for progress := len(residual) != 0; progress; {
@@ -245,15 +255,22 @@ func toleratedLaunches(ctx context.Context, agents agentInspector, uid int, env 
 		verified := slices.Concat(owners, audited)
 		for i := 0; i < len(residual); {
 			c := residual[i]
-			if _, err := developerToolLaunch(ctx, agents, uid, env, hints, verified, c); err != nil {
+			if target, err := developerToolLaunch(ctx, agents, uid, env, hints, verified, c); err != nil {
+				r := refused[c.pid]
+				if r.target == "" {
+					r.target = target
+				}
+				r.developerTool = err
+				refused[c.pid] = r
 				i++
 				continue
 			}
+			delete(refused, c.pid)
 			tolerated = append(tolerated, c)
 			owners = append(owners, c.pid)
 			residual = slices.Delete(residual, i, i+1)
 			progress = true
 		}
 	}
-	return residual, tolerated
+	return residual, tolerated, refused
 }

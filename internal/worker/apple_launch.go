@@ -36,8 +36,10 @@ import (
 //     <original>.<UUID>, as for the mdworker_shared instances Spotlight
 //     starts while a build writes files) is checked against the original
 //     label's plist, which must set MultipleInstances;
-//   - exec: the KERN_PROCARGS2 exec path is that program, a system path that
-//     resolves to the kernel executable, and the argv is those arguments;
+//   - exec: the KERN_PROCARGS2 exec path is exactly that program (string
+//     equality, before any cleaning), a system path that resolves to the
+//     kernel executable, and the argv is those arguments (see launchdProgram
+//     for Apple's programs with redundant separators);
 //   - environment: the inherited environment launchd reports for the
 //     service is the domain environment recorded at reset, which the census
 //     has just required to be unchanged: no `launchctl setenv` was in effect
@@ -113,12 +115,15 @@ func appleLaunch(ctx context.Context, agents agentInspector, uid int, env Launch
 	if argv == nil {
 		argv = []string{snapshot.Program}
 	}
-	if facts.program != snapshot.Program || facts.argv != strings.Join(argv, "\x00") || !systemPath(snapshot.Program) {
-		return target, errors.New("exec path or argv differs from launchd's program and arguments")
+	if facts.program != snapshot.Program || facts.argv != strings.Join(argv, "\x00") {
+		return target, fmt.Errorf("exec path %q or argv differs from launchd's program %q and arguments", facts.program, snapshot.Program)
+	}
+	if program, ok := launchdProgram(snapshot.Program); !ok || !systemPath(program) {
+		return target, fmt.Errorf("launchd program %q is not a system path", snapshot.Program)
 	}
 	// launchd's program may name the executable through a framework's
 	// immutable system symlinks (ATS.framework/Support/fontd).
-	if resolved, err := agents.resolve(snapshot.Program); err != nil || resolved != facts.executable {
+	if resolved, err := agents.resolve(snapshot.Program); err != nil || filepath.Clean(resolved) != facts.executable {
 		return target, errors.Join(err, fmt.Errorf("launchd program %q does not resolve to the executable", snapshot.Program))
 	}
 	if !maps.Equal(snapshot.Inherited, reference) {
@@ -205,8 +210,8 @@ func agentPlist(data []byte, label string) (string, []string, bool, error) {
 	} else if len(argv) != 0 {
 		program = argv[0]
 	}
-	if !filepath.IsAbs(program) || filepath.Clean(program) != program {
-		return "", nil, false, errors.New("plist program is not an absolute path")
+	if _, ok := launchdProgram(program); !ok {
+		return "", nil, false, errors.New("plist program is not an absolute path without . or .. components")
 	}
 	if argv == nil {
 		argv = []string{program}

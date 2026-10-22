@@ -133,6 +133,9 @@ type processCensus struct {
 	relaunched        map[int]processSample
 	tolerated         []processSample
 	toleratedChildren bool
+	// refused holds, by PID, why each residual process was not a tolerated
+	// launch (see toleratedLaunches); empty when those rules did not run.
+	refused map[int]refusal
 }
 
 // census classifies job-UID processes against the audited baseline. An audited
@@ -200,7 +203,7 @@ func (s *processScope) census(ctx context.Context, samples []processSample) (pro
 		for _, r := range c.relaunched {
 			audited = append(audited, r.pid)
 		}
-		c.residual, c.tolerated = toleratedLaunches(ctx, s.agents, s.uid, *s.baseline.Launchd, audited, c.residual)
+		c.residual, c.tolerated, c.refused = toleratedLaunches(ctx, s.agents, s.uid, *s.baseline.Launchd, audited, c.residual)
 		c.toleratedChildren = s.childrenOf(c.residual, c.tolerated)
 	}
 	for _, pid := range reused {
