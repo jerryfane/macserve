@@ -84,6 +84,57 @@ const toleratedChildWait = 30 * time.Second
 
 var errToleratedChildPersists = errors.New("a child process of a tolerated launchd service outlived the admission wait; retry admission")
 
+// pidDomainEnvironment is the inherited environment launchd gives an XPC
+// service in owner's pid domain: HOME, PATH and TMPDIR of the job account
+// (xpcEnvironment), plus the domain environment recorded at reset of the gui
+// or user domain launchd lists owner in. A gui-domain owner's services
+// inherit its SSH_AUTH_SOCK (macOS 27.0: RemoteManagementAgent's
+// subscribers, assistantd's media-indexer); CoreSimulatorService in user has
+// none. Every value is the job account's or recorded at reset and censused
+// since, so a job's setenv still differs; a domain entry that would replace
+// one of the account's refuses.
+func pidDomainEnvironment(ctx context.Context, hints *serviceHints, env LaunchdEnvironment, owner int) (map[string]string, error) {
+	base, err := hints.xpcEnvironment(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("job XPC environment: %w", err)
+	}
+	reference := maps.Clone(base)
+	var domainEnv map[string]string
+	switch domain, _, _, ok := hints.listing(ctx, owner, nil); {
+	case ok && domain == "gui":
+		domainEnv = env.GUI
+	case ok && domain == "user":
+		domainEnv = env.User
+	}
+	for key, value := range domainEnv {
+		if _, exists := reference[key]; exists {
+			return nil, fmt.Errorf("domain environment replaces %s of the job XPC environment", key)
+		}
+		reference[key] = value
+	}
+	return reference, nil
+}
+
+// osCryptex is the sealed, SIP-protected OS cryptex: its files are
+// SF_RESTRICTED and its directories SF_NOUNLINK (macOS 27.0), so only Apple
+// installs what it contains. The App cryptex (Safari) is not trusted here.
+const osCryptex = "/System/Volumes/Preboot/Cryptexes/OS/"
+
+// appCryptex is the sealed, SIP-protected App cryptex (Safari and its
+// plug-ins). Trusted only for XPC services and extensions in a verified
+// owner's pid domain: deleted starts Safari's CacheDeleteExtension there in
+// bursts (about 18 starts per boot on macOS 27.0). Never for a gui or user
+// service.
+const appCryptex = "/System/Volumes/Preboot/Cryptexes/App/"
+
+func appCryptexPath(path string) bool {
+	return filepath.IsAbs(path) && filepath.Clean(path) == path && strings.HasPrefix(path, appCryptex)
+}
+
+func osCryptexPath(path string) bool {
+	return filepath.IsAbs(path) && filepath.Clean(path) == path && strings.HasPrefix(path, osCryptex)
+}
+
 func developerToolPath(path string) bool {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return false
@@ -140,15 +191,24 @@ func developerToolLaunch(ctx context.Context, agents agentInspector, uid int, en
 	if facts.start != p.start || facts.uid != uid || facts.ppid != 1 || !facts.platform {
 		return "", errors.New("not a platform binary launched by launchd as the job user")
 	}
-	if !developerToolPath(facts.executable) || codeRunner(facts.executable) {
+	appCryptex := appCryptexPath(facts.executable)
+	cryptex := osCryptexPath(facts.executable) || appCryptex
+	if !cryptex && !developerToolPath(facts.executable) || codeRunner(facts.executable) {
 		return "", fmt.Errorf("executable %q is outside the developer-tool roots", facts.executable)
 	}
-	if err := agents.toolchain(facts.executable, false, uid); err != nil {
+	if cryptex {
+		if err := agents.restricted(facts.executable); err != nil {
+			return "", fmt.Errorf("executable %q: %w", facts.executable, err)
+		}
+	} else if err := agents.toolchain(facts.executable, false, uid); err != nil {
 		return "", fmt.Errorf("executable %q: %w", facts.executable, err)
 	}
 	domain, owner, label, ok := hints.listing(ctx, p.pid, owners)
 	if !ok || !validLaunchdLabel(label) {
 		return "", errors.New("not listed by the job's launchd domains or a verified owner's pid domain")
+	}
+	if appCryptex && domain != "pid" {
+		return "", errors.New("an App-cryptex executable is tolerated only in a verified owner's pid domain")
 	}
 	target := domain + "/" + strconv.Itoa(uid) + "/" + label
 	if domain == "pid" {
@@ -162,21 +222,37 @@ func developerToolLaunch(ctx context.Context, agents agentInspector, uid int, en
 		return target, fmt.Errorf("launchd type %q is not an XPC service or extension", snapshot.Type)
 	}
 	bundle := snapshot.Path
-	if !developerToolPath(bundle) || !strings.HasSuffix(bundle, ".xpc") && !strings.HasSuffix(bundle, ".appex") {
+	if !developerToolPath(bundle) && !(appCryptex && appCryptexPath(bundle)) || !strings.HasSuffix(bundle, ".xpc") && !strings.HasSuffix(bundle, ".appex") {
 		return target, fmt.Errorf("launchd path %q is not a bundle under the developer-tool roots", bundle)
 	}
-	if filepath.Dir(facts.executable) != bundle+"/Contents/MacOS" {
+	// An OS-cryptex service is named by launchd through /System's SIP
+	// symlinks into the cryptex (SafariFoundation.framework on macOS 27.0);
+	// its bundle is where they resolve.
+	resolvedBundle := bundle
+	if cryptex {
+		if resolvedBundle, err = agents.resolve(bundle); err != nil || !osCryptexPath(resolvedBundle) && !(appCryptex && appCryptexPath(resolvedBundle)) {
+			return target, errors.Join(err, fmt.Errorf("launchd path %q does not resolve into the sealed cryptex", bundle))
+		}
+	}
+	if filepath.Dir(facts.executable) != resolvedBundle+"/Contents/MacOS" {
 		return target, errors.New("executable is not the bundle's")
 	}
-	if err := agents.toolchain(bundle, true, uid); err != nil {
+	if cryptex {
+		if err := agents.restricted(resolvedBundle + "/Contents/Info.plist"); err != nil {
+			return target, fmt.Errorf("bundle %q: %w", resolvedBundle, err)
+		}
+	} else if err := agents.toolchain(bundle, true, uid); err != nil {
 		return target, fmt.Errorf("bundle %q: %w", bundle, err)
 	}
 	argv := snapshot.Arguments
 	if argv == nil {
 		argv = []string{snapshot.Program}
 	}
-	if snapshot.Program != facts.executable || facts.program != snapshot.Program || facts.argv != strings.Join(argv, "\x00") {
+	if facts.program != snapshot.Program || facts.argv != strings.Join(argv, "\x00") {
 		return target, errors.New("exec path or argv differs from launchd's program and arguments")
+	}
+	if program, err := agents.resolve(snapshot.Program); err != nil || program != facts.executable || !cryptex && snapshot.Program != facts.executable {
+		return target, errors.Join(err, fmt.Errorf("launchd program %q is not the executable", snapshot.Program))
 	}
 	defined := label
 	if snapshot.Original != "" {
@@ -190,6 +266,11 @@ func developerToolLaunch(ctx context.Context, agents agentInspector, uid int, en
 		return target, fmt.Errorf("launchd bundle id %q is not the service label %q", snapshot.BundleID, defined)
 	}
 	id, executable, err := agents.bundleInfo(ctx, bundle)
+	if executable == "" {
+		// CFBundle's default when Info.plist names none: the bundle name
+		// (RemoteManagement's ASConfigurationSubscriber.xpc on macOS 27.0).
+		executable = strings.TrimSuffix(filepath.Base(bundle), filepath.Ext(bundle))
+	}
 	if err != nil || id != defined || executable != filepath.Base(facts.executable) {
 		return target, errors.Join(err, errors.New("bundle Info.plist differs from launchd's record"))
 	}
@@ -200,8 +281,8 @@ func developerToolLaunch(ctx context.Context, agents agentInspector, uid int, en
 	case "user":
 		reference = env.User
 	case "pid":
-		if reference, err = hints.xpcEnvironment(ctx); err != nil {
-			return target, fmt.Errorf("job XPC environment: %w", err)
+		if reference, err = pidDomainEnvironment(ctx, hints, env, owner); err != nil {
+			return target, err
 		}
 	}
 	if !maps.Equal(snapshot.Inherited, reference) {
@@ -225,19 +306,29 @@ func developerToolLaunch(ctx context.Context, agents agentInspector, uid int, en
 	return target, nil
 }
 
+// refusal is why a residual process is not a tolerated launch: the launchd
+// target a rule found for it (if any) and each rule's last error.
+type refusal struct {
+	target               string
+	apple, developerTool error
+}
+
 // toleratedLaunches moves every Apple-defined and developer-tool launch out of
-// candidates. audited are present or relaunched audited launchd services,
-// which may own pid domains; tolerated launches verified earlier in the same
-// call are owners too, so passes repeat until none is added.
-func toleratedLaunches(ctx context.Context, agents agentInspector, uid int, env LaunchdEnvironment, audited []int, candidates []processSample) (residual, tolerated []processSample) {
+// candidates and returns, by PID, why each remaining one was refused.
+// audited are present or relaunched audited launchd services, which may own
+// pid domains; tolerated launches verified earlier in the same call are
+// owners too, so passes repeat until none is added.
+func toleratedLaunches(ctx context.Context, agents agentInspector, uid int, env LaunchdEnvironment, audited []int, candidates []processSample) (residual, tolerated []processSample, refused map[int]refusal) {
 	hints := newServiceHints(agents, uid, nil)
+	refused = make(map[int]refusal)
 	var owners []int
 	for _, c := range candidates {
-		if _, err := appleLaunch(ctx, agents, uid, env, hints, c); err == nil {
+		if target, err := appleLaunch(ctx, agents, uid, env, hints, c); err == nil {
 			tolerated = append(tolerated, c)
 			owners = append(owners, c.pid)
 		} else {
 			residual = append(residual, c)
+			refused[c.pid] = refusal{target: target, apple: err}
 		}
 	}
 	for progress := len(residual) != 0; progress; {
@@ -245,15 +336,22 @@ func toleratedLaunches(ctx context.Context, agents agentInspector, uid int, env 
 		verified := slices.Concat(owners, audited)
 		for i := 0; i < len(residual); {
 			c := residual[i]
-			if _, err := developerToolLaunch(ctx, agents, uid, env, hints, verified, c); err != nil {
+			if target, err := developerToolLaunch(ctx, agents, uid, env, hints, verified, c); err != nil {
+				r := refused[c.pid]
+				if r.target == "" {
+					r.target = target
+				}
+				r.developerTool = err
+				refused[c.pid] = r
 				i++
 				continue
 			}
+			delete(refused, c.pid)
 			tolerated = append(tolerated, c)
 			owners = append(owners, c.pid)
 			residual = slices.Delete(residual, i, i+1)
 			progress = true
 		}
 	}
-	return residual, tolerated
+	return residual, tolerated, refused
 }

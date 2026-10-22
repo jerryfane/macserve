@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -81,9 +82,13 @@ func (r *nativeRunner) Admission(parent context.Context) error {
 // process is gone without a verified launchd relaunch. Residual processes that
 // are all direct children of tolerated launches (see toleratedChildWait) are
 // waited for up to s.childWait and then refused without quarantine; they are
-// never admitted. Admission needs two consecutive clean snapshots.
+// never admitted. A snapshot whose only refused processes exited before they
+// could be verified (processCensus.vanished) is sampled again, at most
+// maxUnsettledSnapshots times, then refused without quarantine
+// (errAdmissionUnsettled). Admission needs two consecutive clean snapshots.
 func (s *processScope) observeQuiet(ctx context.Context) error {
 	var waitUntil time.Time
+	unsettled := 0
 	for clean := 0; ; {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -96,16 +101,22 @@ func (s *processScope) observeQuiet(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if len(c.residual) == 0 {
+		switch {
+		case len(c.residual) == 0 && len(c.vanished) == 0:
 			if clean++; clean == 2 {
 				return nil
 			}
-		} else {
+		case len(c.residual) == 0:
+			if unsettled++; unsettled > maxUnsettledSnapshots {
+				return errAdmissionUnsettled
+			}
+			clean = 0
+		default:
 			if c.unresolved {
 				return errRelaunchUnverified
 			}
 			if !c.toleratedChildren {
-				return fmt.Errorf("%w: processes outside audited GUI baseline", ErrContamination)
+				return s.contaminated("processes outside audited GUI baseline", c)
 			}
 			if waitUntil.IsZero() {
 				waitUntil = time.Now().Add(s.childWait)
@@ -125,17 +136,44 @@ func (s *processScope) observeQuiet(ctx context.Context) error {
 	}
 }
 
-// quarantine durably records contamination (quarantineRecord) and an admission
-// refused for a persisting child of a tolerated launch
-// (admissionInconclusiveRecord, never quarantine).
+// maxUnsettledSnapshots bounds how often one admission samples again because
+// every refused process vanished before verification.
+const maxUnsettledSnapshots = 10
+
+// errAdmissionUnsettled is inconclusive, never contamination: nothing still
+// running was refused.
+var errAdmissionUnsettled = fmt.Errorf("job processes exited before they could be verified in %d admission snapshots; admission inconclusive", maxUnsettledSnapshots+1)
+
+// QuarantineRecord is quarantineRecord: why the worker was quarantined, for
+// the administrator who resets it (root-only, in the worker root). Only its
+// presence quarantines; reset removes it.
+type QuarantineRecord struct {
+	Quarantined bool      `json:"quarantined"`
+	Reason      string    `json:"reason"`
+	RecordedAt  time.Time `json:"recorded_at"`
+}
+
+// quarantineReasonBytes bounds QuarantineRecord.Reason.
+const quarantineReasonBytes = 8 << 10
+
+// quarantine durably records contamination (quarantineRecord, with the full
+// error, which lists the refused processes) and an admission refused for a
+// persisting child of a tolerated launch (admissionInconclusiveRecord, never
+// quarantine).
 func (e *Engine) quarantine(err error) error {
-	if errors.Is(err, errToleratedChildPersists) {
-		err = errors.Join(err, e.recordInconclusive())
+	for _, inconclusive := range []error{errToleratedChildPersists, errAdmissionUnsettled} {
+		if errors.Is(err, inconclusive) {
+			err = errors.Join(err, e.recordInconclusive(inconclusive))
+		}
 	}
 	if !errors.Is(err, ErrContamination) {
 		return err
 	}
-	return errors.Join(ErrRecovery, err, durableFile(e.root, quarantineRecord, []byte(`{"quarantined":true}`)))
+	record, marshalErr := json.Marshal(QuarantineRecord{Quarantined: true, Reason: clip(err.Error(), quarantineReasonBytes), RecordedAt: e.options.Now().UTC()})
+	if marshalErr != nil {
+		record = []byte(`{"quarantined":true}`)
+	}
+	return errors.Join(ErrRecovery, err, durableFile(e.root, quarantineRecord, record))
 }
 
 func (e *Engine) admission(ctx context.Context) error {

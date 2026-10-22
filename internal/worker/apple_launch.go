@@ -36,8 +36,10 @@ import (
 //     <original>.<UUID>, as for the mdworker_shared instances Spotlight
 //     starts while a build writes files) is checked against the original
 //     label's plist, which must set MultipleInstances;
-//   - exec: the KERN_PROCARGS2 exec path is that program, a system path that
-//     resolves to the kernel executable, and the argv is those arguments;
+//   - exec: the KERN_PROCARGS2 exec path is exactly that program (string
+//     equality, before any cleaning), a system path that resolves to the
+//     kernel executable, and the argv is those arguments (see launchdProgram
+//     for Apple's programs with redundant separators);
 //   - environment: the inherited environment launchd reports for the
 //     service is the domain environment recorded at reset, which the census
 //     has just required to be unchanged: no `launchctl setenv` was in effect
@@ -113,12 +115,15 @@ func appleLaunch(ctx context.Context, agents agentInspector, uid int, env Launch
 	if argv == nil {
 		argv = []string{snapshot.Program}
 	}
-	if facts.program != snapshot.Program || facts.argv != strings.Join(argv, "\x00") || !systemPath(snapshot.Program) {
-		return target, errors.New("exec path or argv differs from launchd's program and arguments")
+	if facts.program != snapshot.Program || facts.argv != strings.Join(argv, "\x00") {
+		return target, fmt.Errorf("exec path %q or argv differs from launchd's program %q and arguments", facts.program, snapshot.Program)
+	}
+	if program, ok := launchdProgram(snapshot.Program); !ok || !systemPath(program) {
+		return target, fmt.Errorf("launchd program %q is not a system path", snapshot.Program)
 	}
 	// launchd's program may name the executable through a framework's
 	// immutable system symlinks (ATS.framework/Support/fontd).
-	if resolved, err := agents.resolve(snapshot.Program); err != nil || resolved != facts.executable {
+	if resolved, err := agents.resolve(snapshot.Program); err != nil || filepath.Clean(resolved) != facts.executable {
 		return target, errors.Join(err, fmt.Errorf("launchd program %q does not resolve to the executable", snapshot.Program))
 	}
 	if !maps.Equal(snapshot.Inherited, reference) {
@@ -178,7 +183,7 @@ func agentPlist(data []byte, label string) (string, []string, bool, error) {
 	if name := fields["Label"]; !plistString(name) || name.Text != label {
 		return "", nil, false, errors.New("plist names another label")
 	}
-	if disabled, ok := fields["Disabled"]; ok && disabled.XMLName.Local != "false" {
+	if disabled, ok := fields["Disabled"]; ok && disabled.XMLName.Local != "false" && !featureFlagCondition(disabled) {
 		return "", nil, false, errors.New("plist is disabled")
 	}
 	if _, ok := fields["BundleProgram"]; ok {
@@ -205,8 +210,8 @@ func agentPlist(data []byte, label string) (string, []string, bool, error) {
 	} else if len(argv) != 0 {
 		program = argv[0]
 	}
-	if !filepath.IsAbs(program) || filepath.Clean(program) != program {
-		return "", nil, false, errors.New("plist program is not an absolute path")
+	if _, ok := launchdProgram(program); !ok {
+		return "", nil, false, errors.New("plist program is not an absolute path without . or .. components")
 	}
 	if argv == nil {
 		argv = []string{program}
@@ -216,6 +221,42 @@ func agentPlist(data []byte, label string) (string, []string, bool, error) {
 		return "", nil, false, errors.New("invalid MultipleInstances")
 	}
 	return program, argv, ok && multiple.XMLName.Local == "true", nil
+}
+
+// featureFlagCondition reports whether v is a feature-flag conditional value
+// launchd evaluates when it loads the plist: a dict with exactly one
+// #IfFeatureFlagEnabled or #IfFeatureFlagDisabled string, a #Then and an
+// optional #Else, each <true/>, <false/> or another such dict (macOS 27.0:
+// keychain-circle-notification, hybridsearchd, visualintelligenced, ...).
+// Feature flags are system state the job cannot set, and launchd only runs a
+// service it loaded as enabled; the running PID launchd reports for this
+// SIP plist, with the disabled-services overrides checked separately, is that
+// evidence. A literal <true/> stays refused.
+func featureFlagCondition(v servicePlistValue) bool {
+	if v.XMLName.Local != "dict" || len(v.Children)%2 != 0 {
+		return false
+	}
+	seen := map[string]bool{}
+	for i := 0; i < len(v.Children); i += 2 {
+		key, value := v.Children[i], v.Children[i+1]
+		if key.XMLName.Local != "key" || len(key.Children) != 0 || seen[key.Text] {
+			return false
+		}
+		seen[key.Text] = true
+		switch key.Text {
+		case "#IfFeatureFlagEnabled", "#IfFeatureFlagDisabled":
+			if !plistString(value) || value.Text == "" {
+				return false
+			}
+		case "#Then", "#Else":
+			if value.XMLName.Local != "true" && value.XMLName.Local != "false" && !featureFlagCondition(value) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return seen["#Then"] && seen["#IfFeatureFlagEnabled"] != seen["#IfFeatureFlagDisabled"]
 }
 
 func plistString(v servicePlistValue) bool {
@@ -251,15 +292,17 @@ func plistDict(data []byte) (map[string]servicePlistValue, error) {
 }
 
 // bundleIdentity returns CFBundleIdentifier and CFBundleExecutable of the XML
-// Info.plist data.
+// Info.plist data; the executable is "" when the plist names none (the
+// caller applies CFBundle's default, the bundle name).
 func bundleIdentity(data []byte) (string, string, error) {
 	fields, err := plistDict(data)
 	if err != nil {
 		return "", "", err
 	}
-	id, exe := fields["CFBundleIdentifier"], fields["CFBundleExecutable"]
-	if !plistString(id) || !plistString(exe) || id.Text == "" || exe.Text == "" || strings.Contains(exe.Text, "/") {
-		return "", "", errors.New("Info.plist lacks a bundle identifier or executable")
+	id := fields["CFBundleIdentifier"]
+	exe, named := fields["CFBundleExecutable"]
+	if !plistString(id) || id.Text == "" || named && (!plistString(exe) || exe.Text == "" || strings.Contains(exe.Text, "/")) {
+		return "", "", errors.New("Info.plist lacks a bundle identifier or has an invalid executable")
 	}
 	return id.Text, exe.Text, nil
 }

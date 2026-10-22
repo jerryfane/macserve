@@ -209,7 +209,7 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 			result.State = model.Succeeded
 		}
 		if returned != nil {
-			result.Reason = returned.Error()
+			result.Reason = PublicReason(returned)
 		}
 		result.FinishedAt = e.options.Now()
 	}()
