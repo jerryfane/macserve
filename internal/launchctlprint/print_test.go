@@ -169,3 +169,47 @@ func TestParseMacOS27Captures(t *testing.T) {
 		t.Fatalf("PID listed twice kept a label: %+v, %v", d.Services, err)
 	}
 }
+
+// v0.1.14: the `disabled services` table is the per-user override record an
+// Apple-defined launch must not appear in (worker appleLaunch).
+func TestParseDomainDisabledServices(t *testing.T) {
+	domain := capture(t, "macos27-gui-domain.txt")
+	d, err := ParseDomain(domain)
+	if err != nil || !d.DisabledComplete || d.Disabled["com.apple.Siri.agent"] != "disabled" || len(d.Disabled) != 5 {
+		t.Fatalf("disabled services = %v complete=%v, %v", d.Disabled, d.DisabledComplete, err)
+	}
+	enabled := strings.Replace(domain, "\t\t\"com.apple.Siri.agent\" => disabled\n", "\t\t\"com.apple.Siri.agent\" => disabled\n\t\t\"com.apple.heard\" => enabled\n", 1)
+	if d, err := ParseDomain(enabled); err != nil || !d.DisabledComplete || d.Disabled["com.apple.heard"] != "enabled" {
+		t.Fatalf("enabled override = %v, %v", d.Disabled, err)
+	}
+	for name, edited := range map[string]string{
+		"unquoted label": strings.Replace(domain, "\t\t\"com.apple.Siri.agent\" => disabled", "\t\tcom.apple.Siri.agent => disabled", 1),
+		"other state":    strings.Replace(domain, "\"com.apple.Siri.agent\" => disabled", "\"com.apple.Siri.agent\" => maybe", 1),
+		"repeated label": strings.Replace(domain, "\t\t\"com.apple.Siri.agent\" => disabled\n", "\t\t\"com.apple.Siri.agent\" => disabled\n\t\t\"com.apple.Siri.agent\" => enabled\n", 1),
+	} {
+		if d, err := ParseDomain(edited); err != nil || d.DisabledComplete {
+			t.Errorf("%s: complete=%v, %v", name, d.DisabledComplete, err)
+		}
+	}
+	if d, err := ParseDomain(strings.Replace(domain, "\tdisabled services = {", "\tdisabled services = {\n\t}\n\tdisabled services = {", 1)); err == nil {
+		t.Fatalf("second disabled services table accepted: %+v", d.Disabled)
+	}
+}
+
+// launchd prints `original` for an instance of a MultipleInstances service
+// (com.apple.mdworker.shared.<UUID> on macOS 27.0).
+func TestParseOriginalLabel(t *testing.T) {
+	finder := capture(t, "macos27-gui-finder.txt")
+	head, rest, _ := strings.Cut(finder, "\n")
+	instance := head + "\n\toriginal = com.apple.mdworker.shared\n" + rest
+	if s, err := Parse(instance); err != nil || s.Original != "com.apple.mdworker.shared" {
+		t.Fatalf("original = %q, %v", s.Original, err)
+	}
+	if s, err := Parse(finder); err != nil || s.Original != "" {
+		t.Fatalf("service without original = %q, %v", s.Original, err)
+	}
+	twice := head + "\n\toriginal = a\n\toriginal = b\n" + rest
+	if _, err := Parse(twice); err == nil {
+		t.Fatal("second original label accepted")
+	}
+}

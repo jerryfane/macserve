@@ -387,7 +387,7 @@ func (x *execution) invoke(ctx context.Context, command Command, stdout, stderr 
 }
 
 func (x *execution) command(executable string, args []string) Command {
-	return Command{Executable: executable, Args: args, Dir: x.workspace, Env: environment(x.workspace, x.job.Profile.DeveloperDir), MemoryLimitMiB: x.job.Profile.MemoryLimitMiB}
+	return Command{Executable: executable, Args: args, Dir: x.workspace, Env: environment(x.workspace, x.job.Profile.DeveloperDir, x.engine.options.JobUser), MemoryLimitMiB: x.job.Profile.MemoryLimitMiB}
 }
 
 func (x *execution) capture(ctx context.Context, executable string, args ...string) ([]byte, error) {

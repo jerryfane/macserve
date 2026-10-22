@@ -120,11 +120,13 @@ var (
 // processCensus is one snapshot classified against the audited baseline.
 // Unresolved means some audited process is gone without a verified launchd
 // relaunch in this snapshot. relaunched maps such an absent audited PID to
-// its verified relaunch.
+// its verified relaunch. apple lists the Apple-defined launches outside the
+// baseline (see appleLaunch): not residual, but signalled by quiesce.
 type processCensus struct {
 	residual   []processSample
 	unresolved bool
 	relaunched map[int]processSample
+	apple      []processSample
 }
 
 // census classifies job-UID processes against the audited baseline. An audited
@@ -134,9 +136,12 @@ type processCensus struct {
 // new process stands in for an absent one only as launchd's verified relaunch
 // of a recorded system service (see respawned); that includes a relaunch that
 // lands on the exited audited PID number. Any other holder of an audited PID
-// number is refused as a changed baseline. While worker-reset runs (s.adopt),
-// the recorded unselected instances are residual although audited, and a new
-// system LaunchAgent that launchd started may be adopted (see adoption).
+// number is refused as a changed baseline. Outside worker-reset, a process
+// launchd's record proves to be an Apple-defined launch (see appleLaunch) is
+// not residual, also on a reused audited PID number. While worker-reset runs
+// (s.adopt), the recorded unselected instances are residual although audited,
+// and a new system LaunchAgent that launchd started may be adopted (see
+// adoption).
 func (s *processScope) census(ctx context.Context, samples []processSample) (processCensus, error) {
 	if err := s.launchdUnchanged(ctx); err != nil {
 		return processCensus{}, err
@@ -173,6 +178,9 @@ func (s *processScope) census(ctx context.Context, samples []processSample) (pro
 	}
 	if len(absent) != 0 && len(c.residual) != 0 && s.agents != nil {
 		c.residual, c.relaunched = respawned(ctx, s.agents, s.uid, s.baseline, absent, c.residual)
+	}
+	if s.adopt == nil && len(c.residual) != 0 && s.agents != nil && s.baseline.Launchd != nil {
+		c.residual, c.apple = appleLaunches(ctx, s.agents, s.uid, *s.baseline.Launchd, c.residual)
 	}
 	for _, pid := range reused {
 		if slices.ContainsFunc(c.residual, func(p processSample) bool { return p.pid == pid }) {
@@ -227,6 +235,8 @@ func (s *processScope) residual(ctx context.Context, samples []processSample) ([
 // present or verifiably relaunched. If one is gone without a verified relaunch,
 // a survivor may be launchd bringing it back (KeepAlive) in a way this host
 // could not verify, so cleanup fails without durable quarantine, as in v0.1.8.
+// Apple-defined launches are signalled with the residual processes but never
+// awaited: launchd may start them again at once (heard respawns every second).
 func (s *processScope) quiesce(ctx context.Context) error {
 	termUntil := time.Now().Add(s.grace)
 	// Require a second empty snapshot after a settling interval. Never waive a
@@ -244,6 +254,15 @@ func (s *processScope) quiesce(ctx context.Context) error {
 		if err != nil {
 			return errors.Join(ErrCleanup, err)
 		}
+		sig := syscall.SIGTERM
+		if !time.Now().Before(termUntil) {
+			sig = syscall.SIGKILL
+		}
+		for _, p := range c.apple {
+			if err := s.signal(ctx, p, sig); err != nil {
+				return errors.Join(ErrCleanup, err)
+			}
+		}
 		if len(c.residual) == 0 {
 			if empty {
 				return nil
@@ -257,10 +276,6 @@ func (s *processScope) quiesce(ctx context.Context) error {
 				return fmt.Errorf("%w: job processes remain after termination", ErrContamination)
 			}
 			empty = false
-			sig := syscall.SIGTERM
-			if !time.Now().Before(termUntil) {
-				sig = syscall.SIGKILL
-			}
 			for _, p := range c.residual {
 				if err := s.signal(ctx, p, sig); err != nil {
 					return errors.Join(ErrCleanup, err)

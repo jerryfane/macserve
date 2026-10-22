@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"path/filepath"
 	"unsafe"
 
 	"github.com/jerryfane/macserve/internal/launchctlprint"
@@ -89,4 +90,32 @@ func (nativeAgents) domain(ctx context.Context, target string) (launchctlprint.D
 		return launchctlprint.Domain{}, err
 	}
 	return launchctlprint.ParseDomain(out)
+}
+
+func (nativeAgents) restricted(path string) error {
+	return sipRestrictedExecutable(path)
+}
+
+func (nativeAgents) resolve(path string) (string, error) {
+	return filepath.EvalSymlinks(path)
+}
+
+// plist returns a SIP-restricted launchd plist as XML converted by the
+// SIP-protected plutil (read-only, under inspectCommand's output bound and
+// deadline). It is Apple's own plist parser: a quarter of
+// /System/Library/LaunchAgents is binary on macOS 27.0, and some XML ones
+// (com.apple.familycircled) carry unquoted attributes that only
+// CoreFoundation accepts. Any failure refuses.
+func (nativeAgents) plist(ctx context.Context, path string) ([]byte, error) {
+	if err := sipRestrictedExecutable(path); err != nil {
+		return nil, err
+	}
+	out, _, err := inspectCommand(ctx, nil, "/usr/bin/plutil", "-convert", "xml1", "-o", "-", path)
+	if err != nil {
+		return nil, err
+	}
+	if len(out) > maxLaunchdPlistBytes {
+		return nil, errors.New("launchd plist too large")
+	}
+	return []byte(out), nil
 }

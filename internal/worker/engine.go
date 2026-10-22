@@ -10,9 +10,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -98,11 +100,15 @@ func New(options Options) (*Engine, error) {
 		options.Now = time.Now
 	}
 	var err error
-	if options.Runner == nil {
+	native := options.Runner == nil
+	if native {
 		options.Runner, err = NewNativeRunner(options)
 		if err != nil {
 			return nil, err
 		}
+	}
+	if options.JobUser, err = jobAccountName(options.JobUser, options.JobUID, native); err != nil {
+		return nil, err
 	}
 	for _, target := range []*string{&options.Root, &options.ExportRoot, &options.WorkspaceRoot} {
 		*target, err = filepath.Abs(*target)
@@ -168,6 +174,34 @@ func New(options Options) (*Engine, error) {
 		return fail(err)
 	}
 	return &Engine{options: options, root: root, exports: exports, workspaces: workspaces, lock: lock}, nil
+}
+
+var accountName = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,254}$`)
+
+// jobAccountName is the short name job commands see as USER and LOGNAME. A
+// native engine resolves it from the configured job UID through the directory
+// service (the account BrokerIdentity validated); a configured name must agree.
+// An engine with an injected runner runs commands as the current user, so an
+// unconfigured name is that user's. The caller's environment is never read.
+func jobAccountName(configured string, jobUID uint32, native bool) (string, error) {
+	uid := jobUID
+	if !native {
+		if configured != "" {
+			if !accountName.MatchString(configured) {
+				return "", errors.New("invalid job account name")
+			}
+			return configured, nil
+		}
+		uid = uint32(os.Geteuid())
+	}
+	account, err := user.LookupId(strconv.FormatUint(uint64(uid), 10))
+	if err != nil {
+		return "", fmt.Errorf("job account name: %w", err)
+	}
+	if !accountName.MatchString(account.Username) || native && configured != "" && configured != account.Username {
+		return "", errors.New("job account name does not match the job UID")
+	}
+	return account.Username, nil
 }
 
 func within(parent, child string) bool {

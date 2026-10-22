@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -190,6 +191,58 @@ func engineFixture(t *testing.T, runner Runner) *Engine {
 		}
 	})
 	return engine
+}
+
+// v0.1.13 field failure: XcodeGen exits 1 ("Couldn't find current username")
+// without USER. Every job command names the job account as USER and LOGNAME,
+// never the caller's; with an injected runner that account is the current
+// user (see jobAccountName).
+func TestJobCommandsNameTheJobAccount(t *testing.T) {
+	account, err := user.Current()
+	if err != nil {
+		t.Skip(err)
+	}
+	runner := &fakeRunner{}
+	engine := engineFixture(t, runner)
+	t.Setenv("USER", "caller")
+	t.Setenv("LOGNAME", "caller")
+	job := fixtureJob(t, model.Build)
+	source, data := sourceFixture(t)
+	if result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil); err != nil || result.State != model.Succeeded {
+		t.Fatalf("%+v %v", result, err)
+	}
+	if len(runner.commands) == 0 {
+		t.Fatal("no job commands ran")
+	}
+	for _, command := range runner.commands {
+		users := map[string]int{}
+		for _, variable := range command.Env {
+			if name, value, _ := strings.Cut(variable, "="); name == "USER" || name == "LOGNAME" {
+				if value != account.Username {
+					t.Fatalf("%s %v: %s", command.Executable, command.Args, variable)
+				}
+				users[name]++
+			}
+		}
+		if users["USER"] != 1 || users["LOGNAME"] != 1 {
+			t.Fatalf("%s %v lacks USER/LOGNAME: %v", command.Executable, command.Args, command.Env)
+		}
+	}
+}
+
+func TestJobAccountNameRefusesUnsafeOrMismatchedNames(t *testing.T) {
+	if name, err := jobAccountName("macservejob", 0, false); err != nil || name != "macservejob" {
+		t.Fatalf("configured name = %q, %v", name, err)
+	}
+	if _, err := jobAccountName("bad\nname", 0, false); err == nil {
+		t.Fatal("unsafe configured name accepted")
+	}
+	if _, err := jobAccountName("", 0, false); err != nil {
+		t.Fatalf("current account name unavailable: %v", err)
+	}
+	if _, err := jobAccountName("not-the-owner-of-uid", uint32(os.Geteuid()), true); err == nil {
+		t.Fatal("native name disagreeing with the job UID accepted")
+	}
 }
 
 func TestBuildExportsSurviveCleanupUntilAcknowledged(t *testing.T) {

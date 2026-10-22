@@ -8,10 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/jerryfane/macserve/internal/hostguard"
@@ -57,10 +59,81 @@ type SourcePin struct {
 }
 
 type ToolRun struct {
-	Profile       string        `json:"profile"`
-	ProfileDigest string        `json:"profile_digest"`
-	Result        worker.Result `json:"result"`
-	Error         string        `json:"error,omitempty"`
+	Profile       string         `json:"profile"`
+	ProfileDigest string         `json:"profile_digest"`
+	Result        worker.Result  `json:"result"`
+	Failure       *RecipeFailure `json:"failure,omitempty"`
+	Error         string         `json:"error,omitempty"`
+}
+
+// stderrTailBytes bounds RecipeFailure.StderrTail.
+const stderrTailBytes = 4096
+
+// RecipeFailure names the command that failed a recipe run: its index in
+// Result.Commands (observe, simulator and recipe commands in run order), its
+// argv and status, and the last stderrTailBytes of the run's root-captured
+// stderr log (evidence/stderr.log) when the engine exported one. It is what an
+// operator needs from tool-evidence.json without the export, which the run
+// removes.
+type RecipeFailure struct {
+	CommandIndex int      `json:"command_index"`
+	Executable   string   `json:"executable"`
+	Args         []string `json:"args"`
+	ExitCode     int      `json:"exit_code"`
+	Signal       string   `json:"signal,omitempty"`
+	StderrTail   string   `json:"stderr_tail,omitempty"`
+}
+
+func (f *RecipeFailure) String() string {
+	if f == nil {
+		return ""
+	}
+	return fmt.Sprintf("failed command %d: %s %q exit %d %s; stderr tail: %q", f.CommandIndex, f.Executable, f.Args, f.ExitCode, f.Signal, f.StderrTail)
+}
+
+// recipeFailure returns the last command of result that exited non-zero or by
+// signal, with the stderr tail read through stderr (nil when not exported).
+func recipeFailure(result worker.Result, stderr func(artifactID string) (string, error)) *RecipeFailure {
+	for i := len(result.Commands) - 1; i >= 0; i-- {
+		c := result.Commands[i]
+		if c.ExitCode == 0 && c.Signal == "" {
+			continue
+		}
+		f := &RecipeFailure{CommandIndex: i, Executable: c.Executable, Args: c.Args, ExitCode: c.ExitCode, Signal: c.Signal}
+		for _, a := range result.Artifacts {
+			if a.Name == "evidence/stderr.log" {
+				if tail, err := stderr(a.ID); err == nil {
+					f.StderrTail = tail
+				} else {
+					f.StderrTail = "(stderr unavailable: " + err.Error() + ")"
+				}
+			}
+		}
+		return f
+	}
+	return nil
+}
+
+// fileTail reads at most n final bytes of path as valid UTF-8.
+func fileTail(path string, n int64) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", errors.New("stderr log is not a regular file")
+	}
+	offset := max(info.Size()-n, 0)
+	b, err := io.ReadAll(io.NewSectionReader(f, offset, info.Size()-offset))
+	if err != nil {
+		return "", err
+	}
+	return strings.ToValidUTF8(string(b), "\uFFFD"), nil
 }
 
 type ToolEvidence struct {
@@ -190,9 +263,9 @@ func RunToolEvidence(ctx context.Context, id string) error {
 		run, err := runProfile(ctx, engine, c, p, pin, i)
 		if err != nil {
 			run.Error = err.Error()
-			failures = append(failures, fmt.Errorf("%s: %w", p.ID, err))
+			failures = append(failures, fmt.Errorf("%s: %w %s", p.ID, err, run.Failure))
 		} else if run.Result.State != model.Succeeded {
-			failures = append(failures, fmt.Errorf("%s: %s %s", p.ID, run.Result.State, run.Result.Reason))
+			failures = append(failures, fmt.Errorf("%s: %s %s %s", p.ID, run.Result.State, run.Result.Reason, run.Failure))
 		}
 		evidence.Runs = append(evidence.Runs, run)
 	}
@@ -242,6 +315,15 @@ func runProfile(ctx context.Context, engine *worker.Engine, c Challenge, p model
 	defer f.Close()
 	result, err := engine.Execute(ctx, job, worker.Source{Commit: pin.Commit, Tree: pin.Tree, SHA256: pin.SHA256, SizeBytes: pin.SizeBytes}, f, discardSink{})
 	run.Result = result
+	if result.State != model.Succeeded {
+		run.Failure = recipeFailure(result, func(id string) (string, error) {
+			path, err := engine.ArtifactPath(job.ID, id)
+			if err != nil {
+				return "", err
+			}
+			return fileTail(path, stderrTailBytes)
+		})
+	}
 	return run, errors.Join(err, engine.RemoveExport(job.ID))
 }
 

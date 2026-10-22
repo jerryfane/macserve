@@ -141,8 +141,17 @@ func (x *execution) simulator(ctx context.Context) error {
 	return err
 }
 
-func environment(workspace, developer string) []string {
-	return []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "DEVELOPER_DIR=" + developer, "HOME=" + filepath.Join(workspace, "home"), "TMPDIR=" + filepath.Join(workspace, "tmp"), "TMP=" + filepath.Join(workspace, "tmp"), "TEMP=" + filepath.Join(workspace, "tmp"), "CFFIXED_USER_HOME=" + filepath.Join(workspace, "home"), "XDG_CACHE_HOME=" + filepath.Join(workspace, "caches"), "CLANG_MODULE_CACHE_PATH=" + filepath.Join(workspace, "caches", "clang"), "SWIFT_MODULECACHE_PATH=" + filepath.Join(workspace, "caches", "swift"), "LANG=en_US.UTF-8", "LC_ALL=en_US.UTF-8"}
+// environment is the whole environment of every job command. HOME, TMPDIR and
+// the caches point into the job workspace. USER and LOGNAME name the job
+// account (Options.JobUser, resolved from the configured job UID, never from
+// the caller's environment): tools such as XcodeGen refuse to run without USER
+// ("Couldn't find current username"). Deliberately absent: SHELL (tools fall
+// back to the account's login shell or /bin/sh, and Xcode script phases name
+// their own shell), __CF_USER_TEXT_ENCODING (CoreFoundation derives the same
+// default without it), SSH_AUTH_SOCK and every other launchd session variable,
+// which would hand the job the GUI session's agents.
+func environment(workspace, developer, account string) []string {
+	return []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "USER=" + account, "LOGNAME=" + account, "DEVELOPER_DIR=" + developer, "HOME=" + filepath.Join(workspace, "home"), "TMPDIR=" + filepath.Join(workspace, "tmp"), "TMP=" + filepath.Join(workspace, "tmp"), "TEMP=" + filepath.Join(workspace, "tmp"), "CFFIXED_USER_HOME=" + filepath.Join(workspace, "home"), "XDG_CACHE_HOME=" + filepath.Join(workspace, "caches"), "CLANG_MODULE_CACHE_PATH=" + filepath.Join(workspace, "caches", "clang"), "SWIFT_MODULECACHE_PATH=" + filepath.Join(workspace, "caches", "swift"), "LANG=en_US.UTF-8", "LC_ALL=en_US.UTF-8"}
 }
 
 func (e *Engine) stopWriters(ctx context.Context, m *manifest) error {
@@ -170,7 +179,7 @@ func (e *Engine) stopDevice(ctx context.Context, m *manifest) error {
 		if !udidPattern.MatchString(m.DeviceUDID) {
 			return ErrRecovery
 		}
-		command := Command{Executable: "/usr/bin/xcrun", Dir: "/", Env: environment(filepath.Join(e.options.WorkspaceRoot, m.JobID), m.DeveloperDir)}
+		command := Command{Executable: "/usr/bin/xcrun", Dir: "/", Env: environment(filepath.Join(e.options.WorkspaceRoot, m.JobID), m.DeveloperDir, e.options.JobUser)}
 		var failures []error
 		for _, action := range []string{"shutdown", "delete"} {
 			command.Args = []string{"simctl", action, m.DeviceUDID}
@@ -229,7 +238,7 @@ func (e *Engine) deviceInventory(ctx context.Context, m *manifest) ([]string, er
 	defer cancel()
 	output := &boundedBuffer{max: 16 << 20}
 	stderr := &boundedBuffer{max: 1 << 20}
-	result, err := e.run(ctx, Command{Executable: "/usr/bin/xcrun", Args: []string{"simctl", "list", "devices", "--json"}, Dir: "/", Env: environment(filepath.Join(e.options.WorkspaceRoot, m.JobID), m.DeveloperDir)}, output, stderr)
+	result, err := e.run(ctx, Command{Executable: "/usr/bin/xcrun", Args: []string{"simctl", "list", "devices", "--json"}, Dir: "/", Env: environment(filepath.Join(e.options.WorkspaceRoot, m.JobID), m.DeveloperDir, e.options.JobUser)}, output, stderr)
 	if err != nil || result.ExitCode != 0 || result.Signal != "" || !result.CleanupOK || output.err != nil || stderr.err != nil {
 		return nil, errors.Join(err, output.err, stderr.err, errors.New("cannot verify recorded simulator inventory"))
 	}
