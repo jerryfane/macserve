@@ -230,9 +230,7 @@ func (h *rhHarness) observe(rows []rhRow) {
 			p.Class = "descendant"
 		case r.pgid != 0 && h.jobGroups[r.pgid]:
 			p.Class = "descendant"
-		case parentLive && h.foreignRoots[r.ppid] == parent.start && parent.start != "":
-			p.Class = "foreign"
-		case parentLive && parentProc != nil && parentProc.Class == "foreign":
+		case h.foreignAncestry(r, byPID):
 			p.Class = "foreign"
 		case r.ppid == 1:
 			p.Class = "launchd"
@@ -266,6 +264,27 @@ func (h *rhHarness) observe(rows []rhRow) {
 			}
 		}
 	}
+}
+
+// foreignAncestry reports whether a fixed foreign root (PID and start) or a
+// process already classified foreign is an ancestor of r, walking parents of
+// any UID (sandboxd-pf-helper starts the job-UID container CLI through a root
+// sudo). Caller holds h.mu.
+func (h *rhHarness) foreignAncestry(r rhRow, byPID map[int]rhRow) bool {
+	for depth := 0; depth < 64 && r.ppid > 1 && r.ppid != h.self; depth++ {
+		parent, ok := byPID[r.ppid]
+		if !ok {
+			return false
+		}
+		if start, root := h.foreignRoots[parent.pid]; root && start == parent.start {
+			return true
+		}
+		if p := h.procs[rhIdentity{parent.pid, parent.start}]; p != nil && p.Class == "foreign" {
+			return true
+		}
+		r = parent
+	}
+	return false
 }
 
 // jobSample is the census sampler: the production kernel snapshot without
