@@ -89,3 +89,35 @@ func TestWorkspaceBudgetAndLockfilesRefuseRealMount(t *testing.T) {
 		t.Fatalf("lockfile walk with a nested mount: %v %v", digests, err)
 	}
 }
+
+// Review F1 (round 1): a real mount exactly at a job's workspace directory is
+// refused as contamination; nothing inside it is removed.
+func TestWorkspaceCleanupRefusesRealMountAtJobRoot(t *testing.T) {
+	workspaces, control := t.TempDir(), t.TempDir()
+	jobDir := filepath.Join(workspaces, "job")
+	if err := os.Mkdir(jobDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	attachImage(t, jobDir)
+	kept := filepath.Join(jobDir, "kept")
+	if err := os.WriteFile(kept, []byte("mounted"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	wsRoot, err := os.OpenRoot(workspaces)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wsRoot.Close()
+	controlRoot, err := os.OpenRoot(control)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controlRoot.Close()
+	e := &Engine{options: Options{CleanupTimeout: time.Minute}, root: controlRoot, workspaces: wsRoot}
+	if err := e.cleanup(context.Background(), &manifest{JobID: "job"}); !errors.Is(err, ErrContamination) || !errors.Is(err, errWorkspaceMount) {
+		t.Fatalf("cleanup with a mount at the job root: %v", err)
+	}
+	if data, err := os.ReadFile(kept); err != nil || string(data) != "mounted" {
+		t.Fatalf("cleanup changed the mounted filesystem: %q %v", data, err)
+	}
+}
