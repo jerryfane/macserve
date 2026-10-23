@@ -24,6 +24,10 @@ var errWorkspaceMount = errors.New("mount point in workspace")
 // statAt is unix.Fstatat; tests replace it to present another device.
 type statAt func(dirfd int, name string, stat *unix.Stat_t, flags int) error
 
+// fstatFD is unix.Fstat of an opened descriptor; tests replace it to present
+// a mount between a name's stat and its open, or at a job's workspace root.
+var fstatFD = unix.Fstat
+
 // walkSameDevice visits every entry beneath dir with its lstat facts, the
 // open parent directory and its slash-separated path below rel. It works on
 // directory descriptors: no symlink is followed, and no entry or opened
@@ -82,7 +86,7 @@ func walkSameDevice(ctx context.Context, dir *os.File, rel string, device uint64
 				// Only the directory actually opened is walked: the name may
 				// have been renamed over or mounted on since the stat.
 				var opened unix.Stat_t
-				err = unix.Fstat(fd, &opened)
+				err = fstatFD(fd, &opened)
 				if err == nil && uint64(opened.Dev) != device {
 					err = mount(rel)
 				}
@@ -236,6 +240,23 @@ func (e *Engine) workspacePass(ctx context.Context, jobID string, prepare, repai
 		return err
 	}
 	defer file.Close()
+	// The job directory is opened by name, so a mount exactly at it would be
+	// entered, and walkWorkspace compares devices with the directory itself.
+	// It must be on the workspace root's device. A mount there is job state
+	// (contamination): it is quarantined, never retried or removed.
+	parent, err := e.workspaces.Open(".")
+	if err != nil {
+		return err
+	}
+	var parentStat, jobStat unix.Stat_t
+	err = errors.Join(fstatFD(int(parent.Fd()), &parentStat), fstatFD(int(file.Fd()), &jobStat))
+	parent.Close()
+	if err != nil {
+		return err
+	}
+	if parentStat.Dev != jobStat.Dev {
+		return fmt.Errorf("%w: %w: %s", ErrContamination, errWorkspaceMount, strconv.Quote(jobID))
+	}
 	owner, gid := e.options.JobUID, e.options.JobGID
 	if _, native := e.options.Runner.(*nativeRunner); !native {
 		// Injected runners never change machine identity. Their fixtures are owned
