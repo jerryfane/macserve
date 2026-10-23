@@ -143,6 +143,18 @@ func openArtifactAt(parent *os.File, name string) (*os.File, os.FileInfo, error)
 		file.Close()
 		return nil, nil, artifactError("special entry %q", name)
 	}
+	// Every traversal step stays on the root's filesystem: a mount point
+	// beneath an artifact root (any user can attach an image at a directory
+	// it owns) is never collected or descended.
+	var parentStat, entryStat unix.Stat_t
+	if err := errors.Join(unix.Fstat(int(parent.Fd()), &parentStat), unix.Fstat(fd, &entryStat)); err != nil {
+		file.Close()
+		return nil, nil, err
+	}
+	if entryStat.Dev != parentStat.Dev {
+		file.Close()
+		return nil, nil, artifactError("mount point %q", name)
+	}
 	return file, info, nil
 }
 

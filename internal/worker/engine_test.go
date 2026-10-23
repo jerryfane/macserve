@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -644,15 +645,29 @@ func TestWorkspaceBudgetAndBadArchivePreventSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	if err := root.WriteFile("oversize", []byte("12345"), 0600); err != nil {
+	if err := root.WriteFile("oversize", bytes.Repeat([]byte("12345"), 4096), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := workspaceBudget(root, 4); err == nil {
+	charged := allocatedBytes(t, root, "oversize")
+	if err := workspaceBudget(root, charged-1); err == nil {
 		t.Fatal("workspace oversize not detected")
 	}
-	if err := workspaceBudget(root, 5); err != nil {
+	if err := workspaceBudget(root, charged); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func allocatedBytes(t *testing.T, root *os.Root, name string) int64 {
+	t.Helper()
+	info, err := root.Lstat(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Blocks <= 0 {
+		t.Fatalf("no allocation for %s: %+v", name, info.Sys())
+	}
+	return stat.Blocks * 512
 }
 
 func TestVerifiedLiveProcessCleanupIsQuarantined(t *testing.T) {

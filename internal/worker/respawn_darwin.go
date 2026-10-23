@@ -126,10 +126,11 @@ func (nativeAgents) plist(ctx context.Context, path string) ([]byte, error) {
 }
 
 func (nativeAgents) toolchain(path string, directory bool, uid int) error {
+	policyUID := toolchainPolicyUID(uint32(uid))
 	if directory {
-		return hostguard.ToolchainDirectory(path, uint32(uid))
+		return hostguard.ToolchainDirectory(path, policyUID)
 	}
-	return hostguard.ToolchainExecutable(path, uint32(uid))
+	return hostguard.ToolchainExecutable(path, policyUID)
 }
 
 // bundleInfo reads <bundle>/Contents/Info.plist, a root-owned regular file

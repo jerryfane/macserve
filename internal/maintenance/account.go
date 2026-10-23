@@ -15,7 +15,11 @@ import (
 )
 
 // accountBytes uses descriptor-relative, no-follow traversal. Symlinks count as
-// links, never as their targets; regular files use max(logical, allocated) bytes.
+// links, never as their targets. A regular file is charged its allocated blocks,
+// so a sparse file counts what it occupies (Xcode 27 preallocates
+// derived-data/CompilationCache.noindex at 24 + 12 + 1 GiB logical, about 1 MiB
+// each on disk); a clone is charged per inode, which over-counts shared blocks.
+// Every other node is charged max(logical, allocated) bytes.
 // Hardlinks and nested roots are counted once. This is an approximate live budget
 // census, not a snapshot: concurrent changes can be missed or observed at different
 // times. Mount crossings, special nodes (except local sockets), and traversal
@@ -174,7 +178,7 @@ func (c census) account(ctx context.Context, roots []string) (int64, error) {
 		if st.Blocks < 0 || st.Blocks > math.MaxInt64/512 || size < 0 {
 			return fail(errors.New("invalid mutable size"))
 		}
-		if allocated := st.Blocks * 512; allocated > size {
+		if allocated := st.Blocks * 512; kind == unix.S_IFREG || allocated > size {
 			size = allocated
 		}
 		if total > math.MaxInt64-size {
