@@ -286,8 +286,14 @@ func TestMutableAccountingRetainsFailures(t *testing.T) {
 		t.Run(failure, func(t *testing.T) {
 			root := censusFixtureDir(t)
 			censusFixtureFile(t, filepath.Join(root, "payload"), 4096)
+			// Two near-maximum files overflow the total whatever the
+			// filesystem charges the directory itself.
+			censusFixtureFile(t, filepath.Join(root, "payload-2"), 4096)
 			statat := func(fd int, name string, st *unix.Stat_t, flags int) error {
 				err := unix.Fstatat(fd, name, st, flags)
+				if err == nil && failure == "total overflow" && name == "payload-2" {
+					st.Blocks = math.MaxInt64 / 512
+				}
 				if err != nil || name != "payload" {
 					return err
 				}
