@@ -202,7 +202,11 @@ func (h *rhHarness) observe(rows []rhRow) {
 		byPID[r.pid] = r
 	}
 	h.livePID = make(map[int]rhIdentity)
-	for _, r := range rows {
+	// Parents start before their children: classify in start order, so a
+	// child first seen in the same snapshot as its parent finds it classified.
+	ordered := slices.Clone(rows)
+	slices.SortStableFunc(ordered, func(a, b rhRow) int { return rhStartCompare(a.start, b.start) })
+	for _, r := range ordered {
 		if r.uid != h.uid || r.zombie {
 			continue
 		}
@@ -254,7 +258,7 @@ func (h *rhHarness) observe(rows []rhRow) {
 			if r.comm != "xcodebuild" && r.comm != "launchd_sim" || r.zombie {
 				continue
 			}
-			if p := h.procs[rhIdentity{r.pid, r.start}]; r.uid == h.uid && p != nil && p.Class == "descendant" {
+			if p := h.procs[rhIdentity{r.pid, r.start}]; r.uid == h.uid && p != nil && (p.Class == "descendant" || p.Class == "pending") {
 				continue
 			}
 			h.abort = fmt.Errorf("foreign %s pid %d uid %d (ppid %d) during %s", r.comm, r.pid, r.uid, r.ppid, h.phase)
@@ -264,6 +268,25 @@ func (h *rhHarness) observe(rows []rhRow) {
 			}
 		}
 	}
+}
+
+// rhStartCompare orders kernel start tokens ("sec:usec").
+func rhStartCompare(a, b string) int {
+	parse := func(s string) (int64, int64) {
+		sec, usec, _ := strings.Cut(s, ":")
+		x, _ := strconv.ParseInt(sec, 10, 64)
+		y, _ := strconv.ParseInt(usec, 10, 64)
+		return x, y
+	}
+	as, au := parse(a)
+	bs, bu := parse(b)
+	switch {
+	case as != bs:
+		return int(min(max(as-bs, -1), 1))
+	case au != bu:
+		return int(min(max(au-bu, -1), 1))
+	}
+	return 0
 }
 
 // foreignAncestry reports whether a fixed foreign root (PID and start) or a
