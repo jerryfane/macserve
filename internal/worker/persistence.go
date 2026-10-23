@@ -24,6 +24,10 @@ var ErrContamination = errors.New("job-user contamination observed")
 const quarantineRecord = "admission-quarantine.json"
 
 func (r *nativeRunner) loadBaseline() error {
+	if baseline, ok := harnessBaseline(); ok {
+		r.scope.baseline = baseline
+		return nil
+	}
 	if r.baselinePath == "" {
 		return errors.New("protected GUI baseline path unavailable")
 	}

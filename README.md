@@ -112,7 +112,16 @@ expire after seven days or under pool pressure, oldest completion first; active 
 idempotency records remain unchanged. Schema upgrades account for existing log bytes.
 
 Worker defaults are a 30 GiB workspace and 5 GiB artifact budget. Workspace usage is checked
-at stages and every five seconds; it can overshoot between samples. Unfinished resource cleanup blocks
+at stages and every five seconds; it can overshoot between samples. Since v0.1.16 the workspace
+budget, like the maintenance census, charges a regular file its allocated blocks, once per inode:
+sparse files (Xcode 27 preallocates `CompilationCache.noindex` at 37 GiB logical, about 3 MiB on
+disk) no longer inflate it, and APFS clones are charged per inode, which over-counts shared blocks.
+Exported artifacts keep a logical-size bound, because collection copies them densely. The budget,
+lockfile and artifact walks refuse a mount point inside the workspace and never descend it.
+Quiesce gives every residual process instance two graces from the snapshot that first lists it
+(SIGKILL at first sight after the first grace), so an extension orphaned when quiesce killed its
+host is terminated, not reported unsignalled; residual processes still appearing ten graces in
+are contamination. Unfinished resource cleanup blocks
 execution and retries without inventing process or simulator ownership.
 
 The root worker takes `--config` with a root-owned JSON file under root-controlled, non-writable ancestors.

@@ -15,7 +15,11 @@ import (
 )
 
 // accountBytes uses descriptor-relative, no-follow traversal. Symlinks count as
-// links, never as their targets; regular files use max(logical, allocated) bytes.
+// links, never as their targets. A regular file is charged its allocated blocks,
+// so a sparse file counts what it occupies (Xcode 27 preallocates
+// derived-data/CompilationCache.noindex at 24 + 12 + 1 GiB logical, about 1 MiB
+// each on disk); a clone is charged per inode, which over-counts shared blocks.
+// Every other node is charged max(logical, allocated) bytes.
 // Hardlinks and nested roots are counted once. This is an approximate live budget
 // census, not a snapshot: concurrent changes can be missed or observed at different
 // times. Mount crossings, special nodes (except local sockets), and traversal
@@ -33,8 +37,10 @@ func accountBytes(ctx context.Context, roots []string, jobHome string, jobUID ui
 // deterministic coverage of changes before directory open; mounts reports the
 // kernel mount table. jobHome and jobUID name the job-home root and its owner.
 type census struct {
-	base    string
-	statat  func(int, string, *unix.Stat_t, int) error
+	base   string
+	statat func(int, string, *unix.Stat_t, int) error
+	// fstat is unix.Fstat of an opened directory when nil.
+	fstat   func(int, *unix.Stat_t) error
 	mounts  func() ([]mountEntry, error)
 	jobHome string
 	jobUID  uint32
@@ -93,6 +99,10 @@ func (c census) coreDeviceMount(dev uint64) (mountEntry, error) {
 
 func (c census) account(ctx context.Context, roots []string) (int64, error) {
 	statat := c.statat
+	fstat := c.fstat
+	if fstat == nil {
+		fstat = unix.Fstat
+	}
 	type inode struct {
 		dev uint64
 		ino uint64
@@ -158,7 +168,7 @@ func (c census) account(ctx context.Context, roots []string) (int64, error) {
 			f = os.NewFile(uintptr(fd), name)
 			defer f.Close()
 			// Account the directory actually opened, not its possibly stale lstat.
-			if err = unix.Fstat(fd, &st); err != nil {
+			if err = fstat(fd, &st); err != nil {
 				return fail(err)
 			}
 			if uint64(st.Dev) != device {
@@ -174,7 +184,7 @@ func (c census) account(ctx context.Context, roots []string) (int64, error) {
 		if st.Blocks < 0 || st.Blocks > math.MaxInt64/512 || size < 0 {
 			return fail(errors.New("invalid mutable size"))
 		}
-		if allocated := st.Blocks * 512; allocated > size {
+		if allocated := st.Blocks * 512; kind == unix.S_IFREG || allocated > size {
 			size = allocated
 		}
 		if total > math.MaxInt64-size {

@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -117,7 +116,7 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 		return result, err
 	}
 	if _, native := e.options.Runner.(*nativeRunner); native {
-		if err := hostguard.ToolchainDirectory(job.Profile.DeveloperDir, e.options.JobUID); err != nil {
+		if err := hostguard.ToolchainDirectory(job.Profile.DeveloperDir, toolchainPolicyUID(e.options.JobUID)); err != nil {
 			return result, err
 		}
 	}
@@ -476,76 +475,103 @@ func noSymlinkPath(root *os.Root, name string) error {
 	return nil
 }
 
+// workspaceBudget charges every regular file and symlink in the workspace
+// once per inode (see chargedBytes) against limit; directories are not
+// charged. Special files and mount points refuse (walkSameDevice). Exported
+// artifacts keep their own logical-size bound: evidence.Collect copies them
+// densely.
 func workspaceBudget(root *os.Root, limit int64) error {
+	return workspaceBudgetWith(root, limit, unix.Fstatat)
+}
+
+func workspaceBudgetWith(root *os.Root, limit int64, statat statAt) error {
+	dir, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	var top unix.Stat_t
+	if err := unix.Fstat(int(dir.Fd()), &top); err != nil {
+		return err
+	}
+	type inode struct{ dev, ino uint64 }
+	seen := make(map[inode]bool)
 	var total int64
-	entries := 0
-	return fs.WalkDir(root.FS(), ".", func(name string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			if name != "." && os.IsNotExist(err) {
-				return nil
-			}
-			return err
-		}
-		entries++
-		if entries > maxArchiveEntries {
-			return errors.New("workspace entry limit exceeded")
-		}
-		if entry.IsDir() {
+	return walkSameDevice(context.Background(), dir, ".", uint64(top.Dev), statat, func(_ *os.File, _, _ string, stat *unix.Stat_t) error {
+		kind := stat.Mode & unix.S_IFMT
+		if kind == unix.S_IFDIR {
 			return nil
 		}
-		info, err := entry.Info()
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil
-			}
-			return err
-		}
-		if !info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 {
+		if kind != unix.S_IFREG && kind != unix.S_IFLNK {
 			return errors.New("special file in workspace")
 		}
-		total += info.Size()
-		if total > limit {
+		key := inode{uint64(stat.Dev), uint64(stat.Ino)}
+		if seen[key] {
+			return nil
+		}
+		seen[key] = true
+		size, err := chargedBytes(stat)
+		if err != nil {
+			return err
+		}
+		if size > limit-total {
 			return errors.New("workspace disk budget exceeded")
 		}
+		total += size
 		return nil
 	})
 }
 
 func lockfiles(ctx context.Context, root *os.Root, owner uint32) (map[string]string, error) {
+	return lockfilesWith(ctx, root, owner, unix.Fstatat)
+}
+
+// lockfilesWith digests the dependency lockfiles under checkout. It runs
+// after job code has run, so it walks only the workspace device (see
+// walkSameDevice) and opens each lockfile from its parent's descriptor.
+func lockfilesWith(ctx context.Context, root *os.Root, owner uint32, statat statAt) (map[string]string, error) {
+	top, err := root.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	var workspace unix.Stat_t
+	err = unix.Fstat(int(top.Fd()), &workspace)
+	top.Close()
+	if err != nil {
+		return nil, err
+	}
+	device := uint64(workspace.Dev)
+	checkout, err := root.OpenFile("checkout", os.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer checkout.Close()
 	digests := make(map[string]string)
-	err := fs.WalkDir(root.FS(), "checkout", func(name string, entry fs.DirEntry, err error) error {
-		if contextErr := ctx.Err(); contextErr != nil {
-			return contextErr
-		}
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
+	err = walkSameDevice(ctx, checkout, "checkout", device, statat, func(parent *os.File, name, rel string, stat *unix.Stat_t) error {
+		if stat.Mode&unix.S_IFMT == unix.S_IFDIR {
 			return nil
 		}
-		switch entry.Name() {
+		switch name {
 		case "Package.resolved", "Podfile.lock", "Cartfile.resolved", "Gemfile.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "Cargo.lock", "go.sum":
 		default:
 			return nil
 		}
-		if !entry.Type().IsRegular() {
+		if stat.Mode&unix.S_IFMT != unix.S_IFREG {
 			return errors.New("dependency lockfile is not regular")
 		}
-		if err := noSymlinkPath(root, name); err != nil {
-			return err
-		}
-		file, err := root.OpenFile(name, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+		fd, err := unix.Openat(int(parent.Fd()), name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
 		if err != nil {
 			return err
 		}
-		var stat unix.Stat_t
-		if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
+		file := os.NewFile(uintptr(fd), name)
+		var opened unix.Stat_t
+		if err := unix.Fstat(fd, &opened); err != nil {
 			file.Close()
 			return err
 		}
-		if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != owner || stat.Nlink != 1 || stat.Size > 16<<20 {
+		if opened.Mode&unix.S_IFMT != unix.S_IFREG || uint64(opened.Dev) != device || opened.Uid != owner || opened.Nlink != 1 || opened.Size > 16<<20 {
 			file.Close()
-			return errors.New("dependency lockfile has unsafe ownership, links, type or size")
+			return errors.New("dependency lockfile has unsafe ownership, links, type, device or size")
 		}
 		h := sha256.New()
 		n, copyErr := io.Copy(h, io.LimitReader(&contextReader{ctx: ctx, reader: file}, (16<<20)+1))
@@ -556,7 +582,7 @@ func lockfiles(ctx context.Context, root *os.Root, owner uint32) (map[string]str
 		if err := errors.Join(copyErr, closeErr); err != nil {
 			return err
 		}
-		digests[strings.TrimPrefix(name, "checkout/")] = hex.EncodeToString(h.Sum(nil))
+		digests[strings.TrimPrefix(rel, "checkout/")] = hex.EncodeToString(h.Sum(nil))
 		return nil
 	})
 	return digests, err
@@ -584,7 +610,7 @@ func (x *execution) checkLockfiles(ctx context.Context) error {
 func (x *execution) testEvidence(ctx context.Context) error {
 	tool := filepath.Join(x.job.Profile.DeveloperDir, "usr/bin/xcresulttool")
 	if _, native := x.engine.options.Runner.(*nativeRunner); native {
-		if err := hostguard.ToolchainExecutable(tool, x.engine.options.JobUID); err != nil {
+		if err := hostguard.ToolchainExecutable(tool, toolchainPolicyUID(x.engine.options.JobUID)); err != nil {
 			return err
 		}
 	}

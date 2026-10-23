@@ -311,16 +311,35 @@ func (s *processScope) residual(ctx context.Context, samples []processSample) ([
 	return c.residual, err
 }
 
-// quiesce terminates residual job processes. Processes that survive the
-// deadline are contamination evidence only when every audited process is
-// present or verifiably relaunched. If one is gone without a verified relaunch,
-// a survivor may be launchd bringing it back (KeepAlive) in a way this host
+// quiesceSettleGraces bounds one quiesce: residual processes still listed
+// this many graces after it began are contamination however recently each
+// instance appeared (a job that keeps starting new processes).
+const quiesceSettleGraces = 10
+
+// quiesce terminates residual job processes. Every residual instance (PID
+// and start) has two graces from the snapshot that first listed it: SIGTERM
+// while the quiesce is within its first grace, SIGKILL after, and listed in a
+// snapshot taken two graces after its first one, it is a survivor. An
+// instance that first appears late, such as the DeviceFS extension of an
+// fskit_agent this quiesce killed (launchd tears that pid domain down with a
+// SIGTERM and a 5 s cleanup delay, v0.1.15 tool evidence), is SIGKILLed when
+// first seen and judged on its own time, not the quiesce's. Survivors are
+// contamination evidence only when every audited process is present or
+// verifiably relaunched. If one is gone without a verified relaunch, a
+// survivor may be launchd bringing it back (KeepAlive) in a way this host
 // could not verify, so cleanup fails without durable quarantine, as in v0.1.8.
 // Tolerated launches are signalled with the residual processes but never
 // awaited: launchd may start them again at once (heard respawns every second,
 // the CoreSimulator/CoreDevice stack within seconds).
 func (s *processScope) quiesce(ctx context.Context) error {
-	termUntil := time.Now().Add(s.grace)
+	begun := time.Now()
+	termUntil := begun.Add(s.grace)
+	settleUntil := begun.Add(quiesceSettleGraces * s.grace)
+	type instance struct {
+		pid   int
+		start string
+	}
+	firstSeen := make(map[instance]time.Time)
 	// Require a second empty snapshot after a settling interval. Never waive a
 	// failed observation, signal, changed baseline or deadline as successful cleanup.
 	empty := false
@@ -328,6 +347,7 @@ func (s *processScope) quiesce(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return errors.Join(ErrCleanup, err)
 		}
+		sampled := time.Now()
 		samples, err := s.sample(ctx)
 		if err != nil {
 			return errors.Join(ErrCleanup, err)
@@ -353,11 +373,23 @@ func (s *processScope) quiesce(ctx context.Context) error {
 			}
 			empty = len(c.vanished) == 0
 		} else {
-			if !time.Now().Before(termUntil.Add(s.grace)) {
+			survivor := false
+			for _, p := range c.residual {
+				first, seen := firstSeen[instance{p.pid, p.start}]
+				if !seen {
+					first = sampled
+					firstSeen[instance{p.pid, p.start}] = first
+				}
+				survivor = survivor || !sampled.Before(first.Add(2*s.grace))
+			}
+			if survivor || !sampled.Before(settleUntil) {
 				if c.unresolved {
 					return errors.Join(ErrCleanup, errRelaunchUnverified)
 				}
-				return s.contaminated("job processes remain after termination", c)
+				if survivor {
+					return s.contaminated("job processes remain after termination", c)
+				}
+				return s.contaminated("job processes keep appearing after termination", c)
 			}
 			empty = false
 			for _, p := range c.residual {
@@ -401,6 +433,12 @@ func NewNativeRunner(options Options) (Runner, error) {
 			return nil, err
 		}
 	}
+	return nativeRunnerFor(options), nil
+}
+
+// nativeRunnerFor wires the root broker's runner for options whose identities
+// and protected paths NewNativeRunner has verified.
+func nativeRunnerFor(options Options) *nativeRunner {
 	runner := newProcessRunner()
 	runner.uid = int(options.JobUID)
 	runner.sample = func(ctx context.Context) ([]processSample, error) {
@@ -430,7 +468,7 @@ func NewNativeRunner(options Options) (Runner, error) {
 		return cmd.Run()
 	}
 	runner.signalProcess = runner.scope.signal
-	return runner, nil
+	return runner
 }
 
 type childCredentials struct {

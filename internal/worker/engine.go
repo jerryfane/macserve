@@ -327,7 +327,7 @@ func (e *Engine) recoverOwned(ctx context.Context, reset bool) error {
 			continue
 		}
 		if _, native := e.options.Runner.(*nativeRunner); native {
-			if err := hostguard.ToolchainDirectory(m.DeveloperDir, e.options.JobUID); err != nil {
+			if err := hostguard.ToolchainDirectory(m.DeveloperDir, toolchainPolicyUID(e.options.JobUID)); err != nil {
 				failures = append(failures, err)
 				continue
 			}

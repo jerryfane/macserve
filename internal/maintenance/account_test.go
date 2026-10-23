@@ -1,6 +1,7 @@
 package maintenance
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"math"
@@ -22,25 +23,55 @@ func censusFixtureDir(t *testing.T) string {
 	return path
 }
 
+// censusFixtureFile writes size bytes of data: the census charges a regular
+// file its allocated blocks, so a fixture must occupy what it claims.
 func censusFixtureFile(t *testing.T, path string, size int64) {
 	t.Helper()
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	if err := f.Truncate(size); err != nil {
+	if err := os.WriteFile(path, bytes.Repeat([]byte{0xa5}, int(size)), 0600); err != nil {
 		t.Fatal(err)
 	}
 }
 
+// censusFixtureBytes is what the census charges path: allocated bytes for a
+// regular file, max(logical, allocated) for anything else.
 func censusFixtureBytes(t *testing.T, path string) int64 {
 	t.Helper()
 	var st unix.Stat_t
 	if err := unix.Lstat(path, &st); err != nil {
 		t.Fatal(err)
 	}
+	if st.Mode&unix.S_IFMT == unix.S_IFREG {
+		return st.Blocks * 512
+	}
 	return max(st.Size, st.Blocks*512)
+}
+
+// Xcode 27 preallocates derived-data/CompilationCache.noindex sparse: 24, 12
+// and 1 GiB logical, about 1 MiB each on disk (v0.1.15 tool evidence). The
+// census charges what a file occupies, not its logical size.
+func TestMutableAccountingChargesSparseFilesAllocatedBytes(t *testing.T) {
+	root := censusFixtureDir(t)
+	cache := filepath.Join(root, "CompilationCache.noindex")
+	if err := os.Mkdir(cache, 0700); err != nil {
+		t.Fatal(err)
+	}
+	data := filepath.Join(cache, "data.v1")
+	censusFixtureFile(t, data, 64*1024)
+	if err := os.Truncate(data, 24<<30); err != nil {
+		t.Fatal(err)
+	}
+	var st unix.Stat_t
+	if err := unix.Lstat(data, &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Blocks*512 >= 1<<30 {
+		t.Skipf("filesystem does not keep sparse files: %d bytes allocated", st.Blocks*512)
+	}
+	want := censusFixtureBytes(t, root) + censusFixtureBytes(t, cache) + st.Blocks*512
+	n, err := accountBytes(context.Background(), []string{root}, "", 0)
+	if err != nil || n != want || n >= 1<<30 {
+		t.Fatalf("sparse file charged by logical size: bytes=%d want=%d err=%v", n, want, err)
+	}
 }
 
 func TestMutableAccountingEntryChurn(t *testing.T) {
@@ -233,7 +264,7 @@ func TestMutableAccountingFileGrowthUsesLiveObservations(t *testing.T) {
 	statat := func(fd int, name string, st *unix.Stat_t, flags int) error {
 		err := unix.Fstatat(fd, name, st, flags)
 		if err == nil && name == "growing" {
-			if err := os.Truncate(payload, 64*1024); err != nil {
+			if err := os.WriteFile(payload, bytes.Repeat([]byte{0xa5}, 64*1024), 0600); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -255,8 +286,14 @@ func TestMutableAccountingRetainsFailures(t *testing.T) {
 		t.Run(failure, func(t *testing.T) {
 			root := censusFixtureDir(t)
 			censusFixtureFile(t, filepath.Join(root, "payload"), 4096)
+			// Two near-maximum files overflow the total whatever the
+			// filesystem charges the directory itself.
+			censusFixtureFile(t, filepath.Join(root, "payload-2"), 4096)
 			statat := func(fd int, name string, st *unix.Stat_t, flags int) error {
 				err := unix.Fstatat(fd, name, st, flags)
+				if err == nil && failure == "total overflow" && name == "payload-2" {
+					st.Blocks = math.MaxInt64 / 512
+				}
 				if err != nil || name != "payload" {
 					return err
 				}
@@ -274,7 +311,7 @@ func TestMutableAccountingRetainsFailures(t *testing.T) {
 				case "block overflow":
 					st.Blocks = math.MaxInt64/512 + 1
 				case "total overflow":
-					st.Size = math.MaxInt64
+					st.Blocks = math.MaxInt64 / 512
 				}
 				return nil
 			}

@@ -89,6 +89,9 @@ func pathWithin(parent, child string) bool {
 // OpenRoot supplies the confinement boundary. All subsequent traversal uses
 // directory descriptors with O_NOFOLLOW, including intermediate components;
 // neither a symlink swap nor a FIFO can redirect or block a source open.
+// fstatFD is unix.Fstat; tests replace it to present a mount at a root.
+var fstatFD = unix.Fstat
+
 func openArtifactRoot(name string, private bool) (*os.File, error) {
 	before, err := os.Lstat(name)
 	if err != nil {
@@ -113,6 +116,24 @@ func openArtifactRoot(name string, private bool) (*os.File, error) {
 	if err != nil || !os.SameFile(before, after) || (private && after.Mode().Perm()&0077 != 0) {
 		file.Close()
 		return nil, artifactError("root changed while opening")
+	}
+	// The root is opened by name: a mount exactly at it would be entered.
+	// It must be on its parent directory's device.
+	parent, err := os.Open(filepath.Dir(name))
+	if err != nil {
+		file.Close()
+		return nil, err
+	}
+	var parentStat, rootStat unix.Stat_t
+	err = errors.Join(fstatFD(int(parent.Fd()), &parentStat), fstatFD(int(file.Fd()), &rootStat))
+	parent.Close()
+	if err != nil {
+		file.Close()
+		return nil, err
+	}
+	if parentStat.Dev != rootStat.Dev {
+		file.Close()
+		return nil, artifactError("root is a mount point")
 	}
 	if private {
 		var stat unix.Stat_t
@@ -142,6 +163,18 @@ func openArtifactAt(parent *os.File, name string) (*os.File, os.FileInfo, error)
 	if !info.IsDir() && !info.Mode().IsRegular() {
 		file.Close()
 		return nil, nil, artifactError("special entry %q", name)
+	}
+	// Every traversal step stays on the root's filesystem: a mount point
+	// beneath an artifact root (any user can attach an image at a directory
+	// it owns) is never collected or descended.
+	var parentStat, entryStat unix.Stat_t
+	if err := errors.Join(unix.Fstat(int(parent.Fd()), &parentStat), unix.Fstat(fd, &entryStat)); err != nil {
+		file.Close()
+		return nil, nil, err
+	}
+	if entryStat.Dev != parentStat.Dev {
+		file.Close()
+		return nil, nil, artifactError("mount point %q", name)
 	}
 	return file, info, nil
 }
