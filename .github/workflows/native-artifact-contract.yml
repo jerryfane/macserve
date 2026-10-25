@@ -1,0 +1,89 @@
+name: Public native artifact contract
+
+# Source-only proposal: do not upload before exact-source review and acceptance
+# of the separately pending cooperative hosted supervision policy. PR upload
+# triggers CI; neither this file nor its receipts grant that authorization.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-native-artifact-contract
+  cancel-in-progress: false
+
+jobs:
+  native-contract:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      GOMAXPROCS: "2"
+      SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+      WORKFLOW_HEAD: ${{ github.workflow_sha }}
+      PUBLIC_RUN_ID: ${{ github.run_id }}
+      PUBLIC_RUN_ATTEMPT: ${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: source
+          persist-credentials: false
+      - name: Check out the exact executing workflow source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: workflow-source
+          persist-credentials: false
+      - name: Bind event head and executing workflow bytes
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_HEAD" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$WORKFLOW_HEAD" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_HEAD" ]]
+          [[ "$(git -C ../workflow-source rev-parse HEAD)" == "$WORKFLOW_HEAD" ]]
+          /usr/bin/cmp .github/workflows/native-artifact-contract.yml ../workflow-source/.github/workflows/native-artifact-contract.yml
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.26.4"
+          cache: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - name: Serialized build, receipt-bound native proof and unprivileged export
+        timeout-minutes: 38
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHON="$(command -v python3)"
+          GO="$(command -v go)"
+          MANIFEST_LINE="$(/usr/bin/shasum -a 256 PUBLIC-SOURCE-MANIFEST.json)"
+          MANIFEST_SHA="${MANIFEST_LINE%% *}"
+          [[ "$MANIFEST_SHA" =~ ^[0-9a-f]{64}$ ]]
+          "$PYTHON" -I -S -B checks/native-history-fixture/ci.py run \
+            --manifest-sha256 "$MANIFEST_SHA" --head "$SOURCE_HEAD" \
+            --workflow-head "$WORKFLOW_HEAD" \
+            --run-id "$PUBLIC_RUN_ID" --attempt "$PUBLIC_RUN_ATTEMPT" \
+            --go "$GO" \
+            --work "$RUNNER_TEMP/native-run-$PUBLIC_RUN_ID-$PUBLIC_RUN_ATTEMPT-work" \
+            --export "$RUNNER_TEMP/native-run-$PUBLIC_RUN_ID-$PUBLIC_RUN_ATTEMPT-export"
+      - name: Retain only allowlisted public source and synthetic proof receipts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: public-native-run-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/native-run-${{ github.run_id }}-${{ github.run_attempt }}-export/build-provenance.json
+            ${{ runner.temp }}/native-run-${{ github.run_id }}-${{ github.run_attempt }}-export/public-corpus.json
+            ${{ runner.temp }}/native-run-${{ github.run_id }}-${{ github.run_attempt }}-export/provenance.json
+            ${{ runner.temp }}/native-run-${{ github.run_id }}-${{ github.run_attempt }}-export/command-receipts.json
+            ${{ runner.temp }}/native-run-${{ github.run_id }}-${{ github.run_attempt }}-export/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          include-hidden-files: false
