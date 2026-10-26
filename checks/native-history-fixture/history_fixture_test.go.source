@@ -1,0 +1,413 @@
+package qualification
+
+// This file is copied ONLY into an isolated native source copy. Host observations,
+// report outcomes and category decisions are simulated; native byte writers,
+// collection names, unapproved summaries and protected artifact verification are
+// not. This does not execute Collect, approve a sitting or prove host isolation.
+import (
+	"bufio"
+	"context"
+	"crypto/sha256"
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/jerryfane/macserve/internal/maintenance"
+)
+
+type historyRequest struct {
+	Mode             string            `json:"mode"`
+	Challenge        Challenge         `json:"challenge"`
+	Current          bool              `json:"current"`
+	Files            map[string][]byte `json:"files"`
+	TamperProtection string            `json:"tamper_protection,omitempty"`
+}
+
+type historyResponse struct {
+	NativeVerified bool              `json:"native_verified"`
+	Files          map[string][]byte `json:"files,omitempty"`
+}
+
+// TestMain makes the isolated go test -c output a single-request JSON program.
+// It intentionally never invokes the package test suite.
+func TestMain(_ *testing.M) {
+	entry := historyMain
+	if os.Getenv("MACSERVE_NATIVE_BROKER") == "1" {
+		entry = historyBroker
+	}
+	if err := entry(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+func historyMain() error {
+	if err := rootOnly(); err != nil {
+		return err
+	}
+	base := os.Getenv("MACSERVE_NATIVE_HISTORY_SCRATCH")
+	if base == "" {
+		return errors.New("set MACSERVE_NATIVE_HISTORY_SCRATCH to an existing real root-protected Darwin directory")
+	}
+	if err := protectedDirectory(base); err != nil {
+		return err
+	}
+	var request historyRequest
+	const limit = 32 << 20
+	rawRequest, err := io.ReadAll(io.LimitReader(os.Stdin, limit+1))
+	if err != nil || len(rawRequest) > limit {
+		return errors.New("history fixture input exceeds limit or cannot be read")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(rawRequest))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		return err
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return errors.New("expected exactly one request")
+	}
+	dir, err := os.MkdirTemp(base, "native-history-")
+	if err != nil {
+		return err
+	}
+	// Broker-owned requests retain original persisted native evidence, including
+	// negative controls, until the unprivileged corpus readback ACK. On any
+	// protocol failure the disposable VM lifecycle owns eventual removal.
+	if os.Getenv("MACSERVE_NATIVE_RETAIN") != "1" {
+		defer os.RemoveAll(dir)
+	}
+	if err := protectedDirectory(dir); err != nil {
+		return err
+	}
+	switch request.Mode {
+	case "generate":
+		if err := historyGenerate(dir, request.Challenge, request.Current); err != nil {
+			return err
+		}
+	case "verify":
+		for name, raw := range request.Files {
+			if name == "." || name == ".." || filepath.IsAbs(name) || filepath.Base(name) != name {
+				return errors.New("unsafe bundle filename")
+			}
+			mode := os.FileMode(0600)
+			if name == "challenge.json" {
+				mode = 0644
+			}
+			if err := saveNew(filepath.Join(dir, name), raw, mode); err != nil {
+				return err
+			}
+		}
+	default:
+		return errors.New("mode must be generate or verify")
+	}
+	if request.TamperProtection != "" {
+		if request.Mode != "verify" {
+			return errors.New("protection mutation requires verify mode")
+		}
+		if err := historyDamageProtection(dir, request.TamperProtection); err != nil {
+			return err
+		}
+	}
+	// Verify reloaded persisted bytes, not the pre-write typed value. There is no
+	// protectedRead override, fake-root path adapter, or synthetic ACL response.
+	raw, err := protectedRead(filepath.Join(dir, "candidate.json"))
+	if err != nil {
+		return err
+	}
+	var candidate Candidate
+	if err := decode(raw, &candidate); err != nil {
+		return err
+	}
+	if err := verifyArtifacts(dir, candidate); err != nil {
+		if request.TamperProtection != "" {
+			return fmt.Errorf("tamper_protection %s refused: %w", request.TamperProtection, err)
+		}
+		return err
+	}
+	if request.TamperProtection != "" {
+		return errors.New("native verifier unexpectedly accepted protection mutation")
+	}
+	response := historyResponse{NativeVerified: true}
+	if request.Mode == "generate" {
+		response.Files = make(map[string][]byte, len(candidate.Artifacts)+3)
+		for name := range candidate.Artifacts {
+			b, err := protectedRead(filepath.Join(dir, name))
+			if err != nil {
+				return err
+			}
+			response.Files[name] = b
+		}
+		for _, name := range []string{"candidate.json", "boundary-evidence.json", "qualification.json"} {
+			b, err := protectedRead(filepath.Join(dir, name))
+			if err != nil {
+				return err
+			}
+			response.Files[name] = b
+		}
+	}
+	return json.NewEncoder(os.Stdout).Encode(response)
+}
+
+func historyGenerate(dir string, c Challenge, current bool) error {
+	if c.Schema != schema || c.Profiles == nil || c.Environment.JobUID != c.Observation.JobUID {
+		return errors.New("typed challenge requires schema, nonnull profiles and matching simulated job UID")
+	}
+	if len(c.Profiles) == 0 {
+		c.SourcesSHA256 = ""
+	}
+	if len(c.Profiles) > 0 && len(c.SourcesSHA256) != 64 {
+		return errors.New("configured profiles require source digest")
+	}
+	if err := fresh(c, c.Created); err != nil {
+		return err
+	}
+	cb, err := encode(c)
+	if err != nil {
+		return err
+	}
+	if err := saveNew(filepath.Join(dir, "challenge.json"), cb, 0644); err != nil {
+		return err
+	}
+	before := Snapshot{At: c.Created.Add(time.Second), Observation: c.Observation}
+	bb, err := encode(before)
+	if err != nil {
+		return err
+	}
+	if err := saveNew(filepath.Join(dir, "before.json"), bb, 0600); err != nil {
+		return err
+	}
+	attempt, err := collectionAttempt(dir)
+	if err != nil {
+		return err
+	}
+	v := Candidate{Schema: schema, ChallengeSHA256: digest(cb), Collected: c.Created.Add(11 * time.Minute), Observation: c.Observation, Artifacts: map[string]string{"challenge.json": digest(cb), "before.json": digest(bb)}, Categories: map[string]Category{}}
+	preserveTyped := func(name string, value any) error {
+		b, err := encode(value)
+		if err != nil {
+			return err
+		}
+		return preserve(dir, attempt+name, b, v.Artifacts)
+	}
+	// Typed evidence represents simulated host facts, NOT real launcher/tool runs.
+	if err := preserveTyped(jobLaunchFile, JobProbeLaunch{Schema: schema, ChallengeSHA256: v.ChallengeSHA256}); err != nil {
+		return err
+	}
+	for _, role := range []string{"job", "owner"} {
+		report := Report{Schema: schema, ChallengeSHA256: v.ChallengeSHA256, Role: role, Started: c.Created.Add(time.Minute), Finished: c.Created.Add(2 * time.Minute)}
+		if err := preserveTyped(role+"-report.json", report); err != nil {
+			return err
+		}
+	}
+	if err := preserveTyped("after.json", Snapshot{At: v.Collected, Observation: c.Observation}); err != nil {
+		return err
+	}
+	if len(c.Profiles) > 0 {
+		if err := preserveTyped(toolEvidenceFile, ToolEvidence{Schema: schema, ChallengeSHA256: v.ChallengeSHA256, SourcesSHA256: c.SourcesSHA256, Started: c.Created.Add(time.Minute), Finished: c.Created.Add(2 * time.Minute)}); err != nil {
+			return err
+		}
+	}
+	evidence := make([]string, 0, len(v.Artifacts))
+	for name := range v.Artifacts {
+		evidence = append(evidence, name)
+	}
+	slices.Sort(evidence)
+	for _, name := range categories {
+		status := "pass"
+		if name == "network_reachability" {
+			status = networkStatus
+		}
+		if name == "reboot" && !current {
+			status = "pending"
+		}
+		v.Categories[name] = Category{Status: status, Reason: "fixture simulated host outcome; native writer/verifier only", Evidence: slices.Clone(evidence), Probe: maintenance.Probe{Category: name, Attempts: 3, AuthorizedControlSuccesses: 3}}
+	}
+	// Exact production summary/framing writer, including unapproved/encode.
+	return writeCandidate(dir, c, v)
+}
+
+// Fault injection is confined to this invocation's fresh protected scratch.
+// The production verifier/protection implementation is never changed or mocked.
+func historyDamageProtection(dir, kind string) error {
+	path := filepath.Join(dir, "challenge.json")
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return errors.New("protection control requires regular scratch challenge")
+	}
+	switch kind {
+	case "mode":
+		return os.Chmod(path, 0666)
+	case "owner":
+		return os.Chown(path, 65534, -1)
+	case "acl":
+		output, err := exec.Command("/bin/chmod", "+a", "everyone allow write", path).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("scratch ACL mutation failed: %w: %s", err, output)
+		}
+		return nil
+	case "symlink":
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dir, "fixture-same-byte-target")
+		if err := saveNew(target, raw, 0600); err != nil {
+			return err
+		}
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+		return os.Symlink(target, path)
+	default:
+		return errors.New("unknown scratch protection mutation")
+	}
+}
+
+// The broker has no path/argv dispatch. Only this frozen executable is invoked;
+// the original native request parser and production protection remain unchanged.
+type brokerFrame struct {
+	Operation string `json:"operation"`
+	Request []byte `json:"request,omitempty"`
+	Transcript string `json:"transcript,omitempty"`
+	Corpus string `json:"corpus,omitempty"`
+}
+
+type boundedBuffer struct {
+	buffer bytes.Buffer
+	limit int
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	if len(p) > b.limit-b.buffer.Len() {
+		return 0, errors.New("native output limit")
+	}
+	return b.buffer.Write(p)
+}
+
+func (b *boundedBuffer) Bytes() []byte { return b.buffer.Bytes() }
+
+func historyBroker() error {
+	if err := rootOnly(); err != nil { return err }
+	// The unprivileged monitor creates a new session whose leader is the corpus
+	// caller, not the monitor. Never accept a signal target from protocol data.
+	pgid, err := syscall.Getpgid(0)
+	if err != nil { return err }
+	session, _, errno := syscall.Syscall(syscall.SYS_GETSID, 0, 0, 0)
+	if errno != 0 || pgid <= 1 || int(session) != pgid || pgid == os.Getpid() {
+		return errors.New("broker requires inherited dedicated caller session")
+	}
+	// Root enforces its own finite lifetime; Python cannot reliably kill root.
+	// Signal only this still-owned original cooperative group. No PID discovery
+	// or detached-descendant claim. The live broker pins its PGID against reuse.
+	stop := func() {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		os.Exit(1)
+	}
+	success := false
+	timer := time.AfterFunc(700*time.Second, stop)
+	defer timer.Stop()
+	defer func() { if !success { stop() } }()
+	root, err := os.Getwd()
+	if err != nil { return err }
+	if filepath.Dir(root) != "/private/var/root" { return errors.New("broker root parent") }
+	if err := protectedDirectory(root); err != nil { return err }
+	executable := filepath.Join(root, "native")
+	info, err := os.Lstat(executable)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 64<<20 {
+		return errors.New("broker executable identity")
+	}
+	identity, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || identity.Uid != 0 || identity.Nlink != 1 || info.Mode().Perm() != 0500 {
+		return errors.New("broker executable ownership")
+	}
+	self, err := os.Executable()
+	if err != nil || self != executable { return errors.New("broker executable path") }
+	// Bootstrap already checked this digest BEFORE exec. Repeat for the receipt.
+	file, err := os.Open(executable)
+	if err != nil { return err }
+	hash := sha256.New()
+	_, hashErr := io.Copy(hash, file)
+	closeErr := file.Close()
+	if hashErr != nil { return hashErr }
+	if closeErr != nil { return closeErr }
+	sum := fmt.Sprintf("%x", hash.Sum(nil))
+	if sum != os.Getenv("MACSERVE_NATIVE_BUILD_SHA256") { return errors.New("broker build-receipt digest") }
+	scratch := filepath.Join(root, "scratch")
+	if err := os.Mkdir(scratch, 0700); err != nil { return err }
+	if err := protectedDirectory(scratch); err != nil { return err }
+	encoder := json.NewEncoder(os.Stdout)
+	if err := encoder.Encode(map[string]any{"ready": true, "helper_sha256": sum,
+		"uid": os.Getuid(), "euid": os.Geteuid(), "pgid": pgid, "session": session,
+		"helper_device": identity.Dev, "helper_inode": identity.Ino,
+		"helper_mode": "0500", "helper_links": identity.Nlink,
+		"protected_scratch": true}); err != nil { return err }
+	reader := bufio.NewReaderSize(os.Stdin, 6<<20)
+	transcript := sha256.New()
+	for count := 0; count <= 32; count++ {
+		line, err := reader.ReadSlice('\n')
+		if err != nil { return errors.New("broker framing") }
+		if err := uniqueJSON(line); err != nil { return err }
+		var frame brokerFrame
+		decoder := json.NewDecoder(bytes.NewReader(line))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&frame); err != nil { return err }
+		if err := decoder.Decode(new(any)); err != io.EOF { return errors.New("broker trailing data") }
+		switch frame.Operation {
+		case "native":
+			if count >= 32 || len(frame.Request) == 0 || len(frame.Request) > 4<<20 ||
+				frame.Transcript != "" || frame.Corpus != "" { return errors.New("broker request bounds") }
+			ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+			cmd := exec.CommandContext(ctx, executable)
+			cmd.Dir = root
+			cmd.Env = []string{"PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C",
+				"MACSERVE_NATIVE_HISTORY_SCRATCH="+scratch, "MACSERVE_NATIVE_RETAIN=1"}
+			cmd.Stdin = bytes.NewReader(frame.Request)
+			out := boundedBuffer{limit: 4<<20}
+			stderr := boundedBuffer{limit: 64<<10}
+			cmd.Stdout, cmd.Stderr = &out, &stderr
+			err := cmd.Run()
+			timedOut := ctx.Err() != nil
+			cancel()
+			status := 0
+			if err != nil {
+				exit, ok := err.(*exec.ExitError)
+				if !ok || exit.ExitCode() != 1 { return errors.New("broker native execution") }
+				status = 1
+			}
+			if timedOut { return errors.New("broker native deadline") }
+			response, err := json.Marshal(map[string]any{"status": status, "stdout": out.Bytes(), "stderr": stderr.Bytes()})
+			if err != nil { return err }
+			transcript.Write(line)
+			transcript.Write(response)
+			transcript.Write([]byte{'\n'})
+			if _, err := os.Stdout.Write(response); err != nil { return err }
+			if _, err := os.Stdout.Write([]byte{'\n'}); err != nil { return err }
+		case "ack":
+			if count != 32 || len(frame.Request) != 0 ||
+				frame.Transcript != fmt.Sprintf("%x", transcript.Sum(nil)) || len(frame.Corpus) != 64 {
+				return errors.New("broker custody acknowledgement")
+			}
+			for _, c := range frame.Corpus {
+				if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') { return errors.New("broker corpus digest") }
+			}
+			entries, err := os.ReadDir(scratch)
+			if err != nil || len(entries) != 32 { return errors.New("broker retained request count") }
+			if err := encoder.Encode(map[string]any{"acknowledged": true,
+				"transcript": frame.Transcript, "corpus": frame.Corpus}); err != nil { return err }
+			success = true
+			return nil
+		default:
+			return errors.New("broker operation")
+		}
+	}
+	return errors.New("broker request count")
+}

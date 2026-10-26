@@ -1,0 +1,72 @@
+{
+  "execution_authority": "NONE in this source-only packet; pre-upload exact-source review and separate pending hosted-policy decision required; no new repository configuration",
+  "files": [
+    {
+      "bytes": 4129,
+      "path": ".github/workflows/native-artifact-contract.yml",
+      "sha256": "e5d1ca7139986c3ff84696622e751277baff02cfa603cbbbf42f883ea379ebdb"
+    },
+    {
+      "bytes": 13275,
+      "path": "PUBLIC-PLAN.md",
+      "sha256": "51378fe816c7290d41164b1b62062aafeb48283e6a783681794c5666a15346d7"
+    },
+    {
+      "bytes": 3599,
+      "path": "PUBLIC-PR.md",
+      "sha256": "65525a310f09d45a0be458292a421edda1f1e16cb9766d07136966099180799d"
+    },
+    {
+      "bytes": 442,
+      "path": "PUBLIC-SOURCE-ALLOWLIST.txt",
+      "sha256": "856476af1c0a77d0ec42e0816e9eac3f0dca63a3455edbd687c94c92392871ea"
+    },
+    {
+      "bytes": 28432,
+      "path": "checks/native-history-fixture/budget.py",
+      "sha256": "f75f7a62b8d82c7ace4129931263e2e40d56b4aeb248809708b17284cb779218"
+    },
+    {
+      "bytes": 16106,
+      "path": "checks/native-history-fixture/ci.py",
+      "sha256": "7b2eaaafcfb287b8b5644e4789f6b6aa0d4beea74cef88ae4a34c8fa2a2d73f2"
+    },
+    {
+      "bytes": 14912,
+      "path": "checks/native-history-fixture/history_fixture_test.go.source",
+      "sha256": "cce973e0fcceddc2738d93eb3c7d2a235e9a53e14430e8c684b4f467e0996be6"
+    },
+    {
+      "bytes": 3665,
+      "path": "checks/native-history-fixture/prepare.py",
+      "sha256": "db0e3283baa09431d7e1ccec8e669177c4db479532bfabc927c9b1186353f7e9"
+    },
+    {
+      "bytes": 18545,
+      "path": "checks/native-history-fixture/public_contract.py",
+      "sha256": "904d002f2971a1dac703b05d1664bf8438a7919cb3c4ca660ff79a5dfba67b67"
+    },
+    {
+      "bytes": 6506,
+      "path": "checks/native-history-fixture/root_protocol.py",
+      "sha256": "47735ebce62459b5c6e549df261c1642e9f4a959c1f13c42a89d22611ba4e8f6"
+    },
+    {
+      "bytes": 917,
+      "path": "checks/native-profile-oracle/main.go",
+      "sha256": "79dfb0e08284e0b7bba4c0b7380c49145da0f07f81ca0c574062becf4afc79e5"
+    }
+  ],
+  "manifest_self_hash": "excluded; recorded externally by pre-upload source review; CI measures checkout bytes for post-run comparison, not authorization",
+  "native_archive_sha256": "9440aedf29fa10b9fb879f018cdd034162c20527732176e999d239d566647ba2",
+  "native_archive_url": "https://codeload.github.com/jerryfane/macserve/tar.gz/refs/tags/v0.1.16",
+  "native_module_sha256": {
+    "go.mod": "3450762136865aa091c5cc245feb3ee1d032f38e6a1a7656f6102ca151d13945",
+    "go.sum": "c31cd1a8b7973f212d426dc55fb58890cd3d16b28a892d35e41ae634dbd86add"
+  },
+  "native_tag": "v0.1.16",
+  "public_base_commit": "40bba7e4d15395e794e2719ed750a90fca7be9fe",
+  "public_repository": "jerryfane/macserve",
+  "schema": 1,
+  "supervision_policy": "PENDING cooperative hosted process-group plus disposable hosted-VM deadline; not whole-tree containment"
+}
