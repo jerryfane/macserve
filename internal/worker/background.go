@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -29,13 +30,37 @@ var btmHeader = regexp.MustCompile(`^Records for UID (-?[0-9]+) : ([[:xdigit:]]{
 var btmRecordHeader = regexp.MustCompile(`^#([1-9][0-9]*):$`)
 var btmReference = regexp.MustCompile(`^#([1-9][0-9]*): (.+)$`)
 var btmUUID = regexp.MustCompile(`^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$`)
+var btmLastUse = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})$`)
+
+// btmLastUseField is the macOS 27 per-record "Last Use: <timestamp>" line.
+const btmLastUseField = "Last Use"
+
+// checkBTMLastUse validates the macOS 27 "Last Use" value. It is volatile
+// (rewritten on every daemon or app run) and never identity: callers validate
+// and discard it, so it cannot reach Fields, a manifest, a digest or review.
+func checkBTMLastUse(value string, seen *bool) error {
+	if *seen {
+		return errors.New("duplicate background last use")
+	}
+	*seen = true
+	if value == "(null)" {
+		return nil
+	}
+	if !btmLastUse.MatchString(value) {
+		return errors.New("invalid background last use")
+	}
+	if _, err := time.Parse("2006-01-02 15:04:05Z07:00", value); err != nil {
+		return errors.New("invalid background last use")
+	}
+	return nil
+}
 
 func parseBackgroundItems(output string, uid uint32) (BTMCensus, error) {
 	var census BTMCensus
 	if len(output) > 1<<20 || !utf8.ValidString(output) || strings.ContainsRune(output, 0) {
 		return census, errors.New("invalid or oversized background census")
 	}
-	found, target, items, embedded, explicitEmpty := false, false, false, false, false
+	found, target, items, embedded, explicitEmpty, lastUse := false, false, false, false, false, false
 	var record *BTMRecord
 	ids, uuids := map[string]bool{}, map[string]bool{}
 	for _, raw := range strings.Split(output, "\n") {
@@ -66,7 +91,7 @@ func parseBackgroundItems(output string, uid uint32) (BTMCensus, error) {
 			}
 			census.Records = append(census.Records, BTMRecord{Fields: map[string]string{}})
 			record = &census.Records[len(census.Records)-1]
-			embedded = false
+			embedded, lastUse = false, false
 			continue
 		}
 		if record == nil {
@@ -83,6 +108,13 @@ func parseBackgroundItems(output string, uid uint32) (BTMCensus, error) {
 				return census, errors.New("unsupported background section metadata")
 			}
 			census.Metadata[key] = value
+			continue
+		}
+		// Last Use may follow the embedded list; "#N: " references never begin with it.
+		if value, ok := strings.CutPrefix(line, btmLastUseField+": "); ok {
+			if err := checkBTMLastUse(value, &lastUse); err != nil {
+				return census, err
+			}
 			continue
 		}
 		if line == "Embedded Item Identifiers:" {
