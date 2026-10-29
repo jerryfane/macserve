@@ -70,12 +70,18 @@ func ownedReferences(output string, census BTMCensus) ([]BTMRecord, error) {
 			return nil
 		}
 		r := BTMRecord{Fields: map[string]string{}}
+		lastUse := false
 		for _, line := range lines {
 			key, value, ok := strings.Cut(line, ": ")
 			if !ok || value == "" || r.Fields[key] != "" {
 				return errors.New("ambiguous owned service record")
 			}
 			switch key {
+			case btmLastUseField:
+				// Volatile on every daemon run; validated, never bound.
+				if err := checkBTMLastUse(value, &lastUse); err != nil {
+					return err
+				}
 			case "UUID", "Name", "Developer Name", "Team Identifier", "Type", "Flags", "Disposition", "Identifier", "URL", "Generation", "Bundle Identifier", "Parent Identifier", "Executable Path":
 				r.Fields[key] = value
 			default:

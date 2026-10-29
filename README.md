@@ -302,6 +302,11 @@ and does not treat the six-hour schedule as a cached-success TTL.
 
 The parser intentionally supports a bounded observed schema, not arbitrary future `dumpbtm` or ACL formats.
 Native code verification and complete account qualification still need host evidence.
+Since v0.1.18 the macOS 27 per-record `Last Use: <timestamp>` line (for example
+`2026-10-29 13:16:14+04:00`, or `(null)`) is accepted on job-UID and owned root-daemon records as a volatile,
+non-identity field: at most once per record, strictly validated, then discarded, so it never reaches the
+census, manifest, digest or review export and a daemon run cannot invalidate accepted persistence. Every
+other unknown record field still refuses.
 The per-UID census **header UUID is part of the exact reviewed identity**, not a decorative field. Stability
 across reboot/store migration is an operational assumption requiring host evidence. A changed header UUID
 refuses admission and requires explicit re-review/acceptance followed by baseline reset and requalification;
