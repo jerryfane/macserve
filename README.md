@@ -520,8 +520,10 @@ be denied while owner read controls succeed. The installer never changes owner-h
 
 `macserve maintenance --config PATH` publishes short-lived root-owned health after checking protected
 qualification/evidence bindings, the job's `;ShadowHash;` authentication authority, exact GUI baseline identities, profile
-digests, memory pressure and mutable storage including the entire job home. Failed observations publish
-invalid health; startup/shutdown invalidate it. Probe cadence is measured from probe start, not completion.
+digests, memory pressure and mutable storage including the entire job home. Since v0.1.17 only critical
+kernel memory pressure blocks admission; warning admits (unknown levels and sysctl errors still fail
+closed). Failed observations publish invalid health; startup/shutdown invalidate it. Probe cadence is
+measured from probe start, not completion.
 `maintenance-observe` collects live inputs without approving the host or writing health. Both require
 macOS root; neither modifies host policy, adopts processes or generates boundary-test evidence.
 
