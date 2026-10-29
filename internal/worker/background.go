@@ -30,7 +30,10 @@ var btmHeader = regexp.MustCompile(`^Records for UID (-?[0-9]+) : ([[:xdigit:]]{
 var btmRecordHeader = regexp.MustCompile(`^#([1-9][0-9]*):$`)
 var btmReference = regexp.MustCompile(`^#([1-9][0-9]*): (.+)$`)
 var btmUUID = regexp.MustCompile(`^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$`)
-var btmLastUse = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-][0-9]{2}:[0-9]{2})$`)
+
+// Zone offsets are limited to real-world ranges (hours 00-14, minutes 00-59):
+// time.Parse alone accepts +24:00 and +00:60.
+var btmLastUse = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}(Z|[+-](0[0-9]|1[0-4]):[0-5][0-9])$`)
 
 // btmLastUseField is the macOS 27 per-record "Last Use: <timestamp>" line.
 const btmLastUseField = "Last Use"
