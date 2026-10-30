@@ -32,6 +32,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y shellcheck
           shellcheck --shell=bash assets/*.sh
+      - name: Public CI failure redaction tests
+        run: python3 -m unittest discover -s checks/native-history-fixture -p 'test_ci.py' -v
       - name: Vet
         run: nice -n 10 go vet -p 2 ./...
       - name: Test

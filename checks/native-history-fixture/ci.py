@@ -28,6 +28,56 @@ TOOLS = ['checks/native-history-fixture/public_contract.py',
          'checks/native-history-fixture/history_fixture_test.go.source']
 SUPERVISION_POLICY = 'cooperative-hosted-vm-v1'
 
+PUBLIC_STAGES = frozenset({
+    'go-version', 'runner-memory', 'download-archive', 'prepare-source',
+    'download-modules', 'verify-modules', 'compile-history', 'compile-oracle',
+    'native-corpus',
+})
+PUBLIC_FAILURE_CODES = frozenset({
+    'child_group_leftovers', 'cleanup_deadline_exceeded', 'cleanup_failure',
+    'cleanup_verification_failure', 'command_exit_nonzero', 'command_not_started',
+    'deadline_exceeded', 'descendant_escaped_owned_group', 'group_signal_failure',
+    'group_verification_failure', 'interrupted', 'invalid_arguments',
+    'invalid_budget', 'invalid_command', 'invalid_label', 'invalid_new_log_directory',
+    'invalid_ps_leader', 'invalid_ps_snapshot', 'leader_reap_failure',
+    'log_sync_failure', 'missing_command_separator', 'monitor_failure',
+    'noncanonical_output_path', 'output_drain_timeout', 'output_write_failure',
+    'owned_group_not_verified_gone', 'owned_group_remains', 'pipe_close_failure',
+    'ps_cleanup_failure', 'ps_deadline_exceeded', 'ps_failed',
+    'ps_output_limit_exceeded', 'receipt_unavailable', 'rss_budget_exceeded',
+    'rss_unmeasured', 'sampling_gap_exceeded', 'setup_failure',
+    'stdout_limit_exceeded', 'stderr_limit_exceeded', 'unsupported_python_version',
+})
+
+
+def public_failure(work, label, monitor_exit):
+    """Project an untrusted receipt onto fixed codes and bounded exit integers."""
+    summary = {'stage': label if label in PUBLIC_STAGES else 'unknown',
+               'monitor_exit': monitor_exit, 'command_exit': None,
+               'reasons': ['receipt_unavailable']}
+    if label not in PUBLIC_STAGES:
+        return summary
+    try:
+        path = work / (label + '.json')
+        regular(path)
+        receipt = json.loads(small(path, 128 << 10))
+        require(receipt['schema'] == 'native-budget-monitor/v1' and
+                receipt['label'] == label, 'receipt binding differs')
+        failures = receipt['failures']
+        require(isinstance(failures, list) and len(failures) <= 64 and
+                all(isinstance(code, str) for code in failures), 'invalid failure codes')
+        reasons = sorted({code for code in failures if code in PUBLIC_FAILURE_CODES})
+        if not failures or any(code not in PUBLIC_FAILURE_CODES for code in failures):
+            reasons.append('unclassified_failure')
+        summary['reasons'] = reasons
+        exit_code = receipt.get('command_exit_code')
+        if type(exit_code) is int and -255 <= exit_code <= 255:
+            summary['command_exit'] = exit_code
+    except Exception:
+        # Never serialize exception text, argv, paths, environment or stream data.
+        pass
+    return summary
+
 def require(ok, message):
     if not ok:
         raise RuntimeError(message)
@@ -124,6 +174,9 @@ def step(work, label, seconds, rss, command, env, cwd):
     # Cooperative sampled monitor only; privileged survivors/escapes rely on the
     # separately admitted disposable hosted-VM job deadline boundary.
     result = subprocess.run(monitor, cwd=cwd, env=env, check=False)
+    if result.returncode != 0:
+        print(json.dumps(public_failure(work, label, result.returncode), sort_keys=True),
+              file=sys.stderr)
     require(result.returncode == 0, 'bounded command failed: ' + label)
     receipt = json.loads(small(work / (label + '.json'), 128 << 10))
     return receipt

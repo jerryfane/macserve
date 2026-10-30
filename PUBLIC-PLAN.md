@@ -196,6 +196,14 @@ console errors are bounded/sanitized. Export hashes are read back before deletin
 build caches; no broad privileged cleanup. Failed root scratch is left for VM
 teardown, not reclaimed through untrusted paths.
 
+On a bounded-command failure, the console also reports only a fixed stage name,
+allowlisted monitor reason codes, the monitor exit status and a bounded command
+exit status (or null). Unknown receipt strings become `unclassified_failure`;
+missing, malformed, oversized or wrongly bound receipts disclose no contents.
+Raw stdout/stderr, argv, environment, paths and exception text remain private.
+This diagnostic does not change refusal, resource limits, root authority or the
+five-file export allowlist.
+
 Independent post-run review must compare source/workflow heads and measured
 manifest with the pre-upload review, verify source/archive/module/toolchain and
 binary hashes against the build receipt, bind the root frozen-helper identity and
