@@ -120,11 +120,11 @@ func pidDomainEnvironment(ctx context.Context, hints *serviceHints, env LaunchdE
 // installs what it contains. The App cryptex (Safari) is not trusted here.
 const osCryptex = "/System/Volumes/Preboot/Cryptexes/OS/"
 
-// appCryptex is the sealed, SIP-protected App cryptex (Safari and its
-// plug-ins). Trusted only for XPC services and extensions in a verified
-// owner's pid domain: deleted starts Safari's CacheDeleteExtension there in
-// bursts (about 18 starts per boot on macOS 27.0). Never for a gui or user
-// service.
+// appCryptex is the sealed, SIP-protected App cryptex. The developer-tool
+// rules accept its XPC services and extensions only in a verified owner's
+// pid domain (for example, deleted's CacheDeleteExtension), never as a gui
+// or user service. appleLaunch separately verifies LaunchAgents defined in
+// this image's own system LaunchAgents directory.
 const appCryptex = "/System/Volumes/Preboot/Cryptexes/App/"
 
 func appCryptexPath(path string) bool {

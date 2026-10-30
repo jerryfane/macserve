@@ -89,7 +89,9 @@ func appleLaunch(ctx context.Context, agents agentInspector, uid int, env Launch
 	if facts.start != p.start || facts.uid != uid || facts.ppid != 1 || !facts.platform {
 		return "", errors.New("not a platform binary launched by launchd as the job user")
 	}
-	if !systemPath(facts.executable) || codeRunner(facts.executable) {
+	systemAgent := systemPath(facts.executable)
+	appAgent := !systemAgent && appCryptexPath(facts.executable)
+	if (!systemAgent && !appAgent) || codeRunner(facts.executable) {
 		return "", fmt.Errorf("executable %q is not a system agent", facts.executable)
 	}
 	if err := agents.restricted(facts.executable); err != nil {
@@ -108,7 +110,13 @@ func appleLaunch(ctx context.Context, agents agentInspector, uid int, env Launch
 	if err != nil || snapshot.Target != target || snapshot.PID != p.pid {
 		return target, errors.Join(err, errors.New("launchd does not report this PID for the service"))
 	}
-	if snapshot.Type != "LaunchAgent" || filepath.Dir(snapshot.Path) != systemLaunchAgents || filepath.Clean(snapshot.Path) != snapshot.Path || !strings.HasSuffix(snapshot.Path, ".plist") {
+	// App-Cryptex executables require a definition in that same sealed
+	// image's system LaunchAgents directory, not an arbitrary Preboot plist.
+	plistDirectory := systemLaunchAgents
+	if appAgent {
+		plistDirectory = appCryptex + "System/Library/LaunchAgents"
+	}
+	if snapshot.Type != "LaunchAgent" || filepath.Dir(snapshot.Path) != plistDirectory || filepath.Clean(snapshot.Path) != snapshot.Path || !strings.HasSuffix(snapshot.Path, ".plist") {
 		return target, fmt.Errorf("launchd type %q path %q is not a system LaunchAgent plist", snapshot.Type, snapshot.Path)
 	}
 	argv := snapshot.Arguments
@@ -118,7 +126,7 @@ func appleLaunch(ctx context.Context, agents agentInspector, uid int, env Launch
 	if facts.program != snapshot.Program || facts.argv != strings.Join(argv, "\x00") {
 		return target, fmt.Errorf("exec path %q or argv differs from launchd's program %q and arguments", facts.program, snapshot.Program)
 	}
-	if program, ok := launchdProgram(snapshot.Program); !ok || !systemPath(program) {
+	if program, ok := launchdProgram(snapshot.Program); !ok || (!systemPath(program) && !(appAgent && appCryptexPath(program))) {
 		return target, fmt.Errorf("launchd program %q is not a system path", snapshot.Program)
 	}
 	// launchd's program may name the executable through a framework's
