@@ -163,7 +163,7 @@ scratch protections. Failed mutation/setup cannot count as verifier rejection.
 No fake ACL/ownership verifier, real profile collection, recipe, Collect, Approve,
 service install or installed-reset execution is introduced.
 
-## Cooperative supervision remains a separate pending decision
+## Cooperative supervision and the scoped timing trial
 
 The monitor measures a sampled cooperative process group, not an OS memory cap
 or hostile-process sandbox. It detects observed escapes but cannot guarantee
@@ -172,8 +172,8 @@ Unprivileged Python cannot reliably signal root. The broker checks that it
 inherits the dedicated caller session/group, enforces its own700s lifetime and
 120s request limits, and signals only that still-owned original group on failure.
 The 45-minute disposable hosted-VM job deadline is a separate provider boundary,
-not proof of immediate tree termination. Pending policy acceptance is NOT
-manufactured by a string argument, environment variable or build receipt.
+not proof of immediate tree termination. Policy acceptance must come from an
+explicit decision, not a string argument, environment variable or build receipt.
 
 Reviewed non-detaching graph: monitor creates one caller session; Python client
 inherits it when starting sudo; fixed bootstrap creates no background jobs or
@@ -184,6 +184,28 @@ functions operate on scratch bytes. No production service/recipe/host collector
 entrypoint is reached. Trusted hosted sudo/session behavior and actual controls
 still need runtime evidence. This policy is not transferred to other harnesses
 whose production children create separate groups.
+
+The owner-authorized hosted timing trial changes only the paired sampling limits:
+
+| Policy | Previous | Trial |
+|---|---:|---:|
+| Per-sample deadline (execution, drainage and parsing) | 200 ms | 250 ms |
+| Maximum sample-start gap | 250 ms | 300 ms |
+| Nominal sample interval | 100 ms | 100 ms |
+
+This preserves the 50 ms allowance between the two limits. It is a deliberate
+cooperative-policy relaxation, not a demonstrated implementation fix, an optimal
+threshold or a promised pass. Longer tolerated observation gaps retain the
+existing unbounded RSS-overshoot risk. `PS_REAP_TIMEOUT` remains 200 ms; RSS
+budgets, overall stage deadlines, TERM/KILL grace, ownership checks, cleanup,
+failure refusal, root protocol and diagnostic allowlist are unchanged.
+
+All nine orchestrator stages and standalone `budget.py` use the same policy.
+Existing receipt fields record the actual limits; prior failed receipts retain
+their original source/policy bindings. One independent exact-head review is
+required before one trial run; normal Go CI may accompany that push. Stop after
+that run, including failure. No automatic retry, added telemetry, Studio action,
+merge, release or deployment follows from this trial authorization.
 
 ## Export and independent post-run binding
 
@@ -218,9 +240,10 @@ These are receipt observations, not independent build or runtime attestation.
 No per-phase timing, PID/PGID, UID, errno, raw stream, argv, environment, runtime
 path or arbitrary exception text is exported. The console projection needs no
 additional artifact upload and still runs before the original nonzero refusal.
-Monitor code, safety limits, root authority and the five-file artifact allowlist
-are unchanged. One instrumented hosted run requires independent exact-head
-review before its triggering push; this does not authorize retries or deployment.
+Failure diagnostics do not themselves change monitor policy, root authority or
+the five-file artifact allowlist. The separately authorized timing trial above
+requires independent exact-head review before its single triggering push; it
+does not authorize retries or deployment.
 
 Independent post-run review must compare source/workflow heads and measured
 manifest with the pre-upload review, verify source/archive/module/toolchain and

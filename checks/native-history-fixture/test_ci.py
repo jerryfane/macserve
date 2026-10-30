@@ -5,13 +5,20 @@ import io
 import json
 import os
 from pathlib import Path
+import selectors
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 SPEC = importlib.util.spec_from_file_location('native_ci', Path(__file__).with_name('ci.py'))
 ci = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ci)
+BUDGET_SPEC = importlib.util.spec_from_file_location(
+    'native_budget', Path(__file__).with_name('budget.py'))
+budget = importlib.util.module_from_spec(BUDGET_SPEC)
+BUDGET_SPEC.loader.exec_module(budget)
 
 EMPTY_EVIDENCE = {
     'measurements': dict.fromkeys((
@@ -187,6 +194,81 @@ class PublicFailureTests(unittest.TestCase):
                 self.assertEqual(result['monitor_exit'], 1)
                 self.assertEqual(result['command_exit'], 7)
                 self.assertIn('command_exit_nonzero', result['reasons'])
+
+
+class SamplingPolicyTests(unittest.TestCase):
+    def sample(self):
+        monitor = budget.Monitor(SimpleNamespace(rss_mib=1), None)
+        parent = os.getpid()
+        leader = parent + 1
+        monitor.proc = SimpleNamespace(pid=leader)
+        monitor.pgid = leader
+        monitor.ps = SimpleNamespace(poll=lambda: 0)
+        monitor.ps_started = 0
+        monitor.ps_eof = {'stdout': True, 'stderr': True}
+        monitor.ps_buffers = {
+            'stdout': f'{parent} 1 {parent} 100 S\n{leader} {parent} {leader} 64 S\n'.encode(),
+            'stderr': b'',
+        }
+        monitor.deadline = 10
+        return monitor
+
+    def test_sample_accepts_trial_window_and_refuses_deadline_overrun(self):
+        for elapsed in (.24, .25):
+            with self.subTest(elapsed=elapsed):
+                monitor = self.sample()
+                with mock.patch.object(budget.time, 'monotonic', return_value=elapsed):
+                    self.assertFalse(monitor.finish_sample(elapsed))
+                self.assertEqual((monitor.samples, monitor.positive_samples, monitor.peak_kib),
+                                 (1, 1, 64))
+                self.assertEqual(monitor.failures, [])
+                self.assertIsNone(monitor.ps)
+        monitor = self.sample()
+        with self.assertRaisesRegex(budget.MonitorProblem, '^ps_deadline_exceeded$'):
+            monitor.finish_sample(.250001)
+        self.assertEqual(monitor.samples, 0)
+
+    def test_sample_deadline_includes_parse_completion(self):
+        for completed, rejected in ((.25, False), (.250001, True)):
+            with self.subTest(completed=completed):
+                monitor = self.sample()
+                with mock.patch.object(budget.time, 'monotonic', return_value=completed):
+                    if rejected:
+                        with self.assertRaisesRegex(budget.MonitorProblem,
+                                                    '^ps_deadline_exceeded$'):
+                            monitor.finish_sample(.24)
+                    else:
+                        self.assertFalse(monitor.finish_sample(.24))
+                self.assertEqual(monitor.samples, 1)
+                self.assertEqual(monitor.peak_kib, 64)
+                self.assertEqual(monitor.max_sample_duration, completed)
+
+    def test_sampling_start_gap_accepts_trial_window_and_refuses_overrun(self):
+        for gap in (.275, .30, .300001):
+            with self.subTest(gap=gap):
+                monitor = budget.Monitor(SimpleNamespace(rss_mib=1), None)
+                monitor.started = 0
+                monitor.selector = selectors.DefaultSelector()
+                try:
+                    with mock.patch.object(budget.time, 'monotonic', return_value=gap):
+                        if gap > .30:
+                            with self.assertRaisesRegex(budget.MonitorProblem,
+                                                        '^sampling_gap_exceeded$'):
+                                monitor.start_sample(0)
+                            self.assertIsNone(monitor.ps)
+                            continue
+                        monitor.start_sample(0)
+                    out, err = monitor.ps.communicate(timeout=5)
+                    self.assertEqual((monitor.ps.returncode, err), (0, b''))
+                    self.assertIn(str(os.getpid()).encode(),
+                                  [line.split()[0] for line in out.splitlines()])
+                    self.assertEqual(monitor.max_sample_gap, gap)
+                finally:
+                    if monitor.ps is not None and monitor.ps.poll() is None:
+                        monitor.ps.kill()
+                        monitor.ps.communicate(timeout=5)
+                    monitor.selector.close()
+
 
 
 if __name__ == '__main__':

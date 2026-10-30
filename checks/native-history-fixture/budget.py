@@ -27,8 +27,8 @@ commands may opt into --allow-unmeasured: missing positive coverage then records
 unmeasured/null rather than failing, never proof of zero memory use. This option
 does not relax ps errors, sample timing, group cleanup or any other policy.
 
-Samples start nominally every 0.10s, with a 0.25s maximum observed start gap
-and a 0.20s deadline per ps invocation, including pipe drainage. Violations
+Samples start nominally every 0.10s, with a 0.30s maximum observed start gap
+and a 0.25s deadline per ps invocation, including pipe drainage and parsing. Violations
 fail closed. Polling can miss short-lived processes, transient RSS spikes,
 escaped/reparented descendants, and descendants created after enumeration.
 The RSS overshoot has NO finite byte bound. A deadline/overage initiates TERM,
@@ -71,8 +71,8 @@ import sys
 import time
 
 SAMPLE_INTERVAL = 0.10
-MAX_SAMPLE_GAP = 0.25
-PS_TIMEOUT = 0.20
+MAX_SAMPLE_GAP = 0.30
+PS_TIMEOUT = 0.25
 PS_REAP_TIMEOUT = 0.20
 EVENT_INTERVAL = 0.025
 TERM_GRACE = 1.0
