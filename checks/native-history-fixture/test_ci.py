@@ -214,7 +214,7 @@ class SamplingPolicyTests(unittest.TestCase):
         return monitor
 
     def test_sample_accepts_trial_window_and_refuses_deadline_overrun(self):
-        for elapsed in (.24, .25):
+        for elapsed in (.49, .50):
             with self.subTest(elapsed=elapsed):
                 monitor = self.sample()
                 with mock.patch.object(budget.time, 'monotonic', return_value=elapsed):
@@ -225,33 +225,33 @@ class SamplingPolicyTests(unittest.TestCase):
                 self.assertIsNone(monitor.ps)
         monitor = self.sample()
         with self.assertRaisesRegex(budget.MonitorProblem, '^ps_deadline_exceeded$'):
-            monitor.finish_sample(.250001)
+            monitor.finish_sample(.500001)
         self.assertEqual(monitor.samples, 0)
 
     def test_sample_deadline_includes_parse_completion(self):
-        for completed, rejected in ((.25, False), (.250001, True)):
+        for completed, rejected in ((.50, False), (.500001, True)):
             with self.subTest(completed=completed):
                 monitor = self.sample()
                 with mock.patch.object(budget.time, 'monotonic', return_value=completed):
                     if rejected:
                         with self.assertRaisesRegex(budget.MonitorProblem,
                                                     '^ps_deadline_exceeded$'):
-                            monitor.finish_sample(.24)
+                            monitor.finish_sample(.49)
                     else:
-                        self.assertFalse(monitor.finish_sample(.24))
+                        self.assertFalse(monitor.finish_sample(.49))
                 self.assertEqual(monitor.samples, 1)
                 self.assertEqual(monitor.peak_kib, 64)
                 self.assertEqual(monitor.max_sample_duration, completed)
 
     def test_sampling_start_gap_accepts_trial_window_and_refuses_overrun(self):
-        for gap in (.275, .30, .300001):
+        for gap in (.65, .75, .750001):
             with self.subTest(gap=gap):
                 monitor = budget.Monitor(SimpleNamespace(rss_mib=1), None)
                 monitor.started = 0
                 monitor.selector = selectors.DefaultSelector()
                 try:
                     with mock.patch.object(budget.time, 'monotonic', return_value=gap):
-                        if gap > .30:
+                        if gap > .75:
                             with self.assertRaisesRegex(budget.MonitorProblem,
                                                         '^sampling_gap_exceeded$'):
                                 monitor.start_sample(0)

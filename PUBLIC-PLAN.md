@@ -185,15 +185,15 @@ entrypoint is reached. Trusted hosted sudo/session behavior and actual controls
 still need runtime evidence. This policy is not transferred to other harnesses
 whose production children create separate groups.
 
-The owner-authorized hosted timing trial changes only the paired sampling limits:
+The reconciled owner-authorized hosted trial changes only the paired sampling limits:
 
 | Policy | Previous | Trial |
 |---|---:|---:|
-| Per-sample deadline (execution, drainage and parsing) | 200 ms | 250 ms |
-| Maximum sample-start gap | 250 ms | 300 ms |
+| Per-sample deadline (execution, drainage and parsing) | 250 ms | 500 ms |
+| Maximum sample-start gap | 300 ms | 750 ms |
 | Nominal sample interval | 100 ms | 100 ms |
 
-This preserves the 50 ms allowance between the two limits. It is a deliberate
+This allows 250 ms between the two limits. It is a deliberate
 cooperative-policy relaxation, not a demonstrated implementation fix, an optimal
 threshold or a promised pass. Longer tolerated observation gaps retain the
 existing unbounded RSS-overshoot risk. `PS_REAP_TIMEOUT` remains 200 ms; RSS
@@ -204,8 +204,8 @@ All nine orchestrator stages and standalone `budget.py` use the same policy.
 Existing receipt fields record the actual limits; prior failed receipts retain
 their original source/policy bindings. One independent exact-head review is
 required before one trial run; normal Go CI may accompany that push. Stop after
-that run, including failure. No automatic retry, added telemetry, Studio action,
-merge, release or deployment follows from this trial authorization.
+that run, including failure. Do not ratchet beyond 500/750 ms or retry. No added
+telemetry, Studio action, merge, release or deployment follows from this trial.
 
 ## Export and independent post-run binding
 
