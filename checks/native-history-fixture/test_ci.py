@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -11,6 +12,18 @@ import unittest
 SPEC = importlib.util.spec_from_file_location('native_ci', Path(__file__).with_name('ci.py'))
 ci = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(ci)
+
+EMPTY_EVIDENCE = {
+    'measurements': dict.fromkeys((
+        'elapsed_seconds', 'deadline_overshoot_seconds',
+        'max_observed_ps_duration_seconds', 'max_observed_sample_start_gap_seconds',
+        'sample_count', 'positive_sample_count', 'peak_sample_process_count',
+        'sampled_aggregate_peak_kib')),
+    'build_hashes': dict.fromkeys((
+        'native_archive_sha256', 'fixture_source_sha256', 'go_executable_sha256',
+        'python_executable_sha256', 'native-history-fixture', 'native-profile-oracle',
+        'history-fixture-source.json', 'build_receipt_sha256')),
+}
 
 
 class PublicFailureTests(unittest.TestCase):
@@ -27,6 +40,77 @@ class PublicFailureTests(unittest.TestCase):
         self.assertIn(result.pop('monitor_exit'), (1, 2))
         return result
 
+    def test_ordered_failures_and_bounded_evidence_preserve_privacy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            failures = ['ps_deadline_exceeded', 'SECRET_REASON', 'group_signal_failure',
+                        'command_exit_nonzero']
+            measurements = {
+                'elapsed_seconds': 2.5, 'deadline_overshoot_seconds': 0,
+                'max_observed_ps_duration_seconds': .23,
+                'max_observed_sample_start_gap_seconds': .11,
+                'sample_count': 3, 'positive_sample_count': 2,
+                'peak_sample_process_count': 4, 'sampled_aggregate_peak_kib': 1024,
+            }
+            (work / 'compile-history.json').write_text(json.dumps({
+                'schema': 'native-budget-monitor/v1', 'label': 'compile-history',
+                'failures': failures, 'command_exit_code': -15, **measurements,
+                'cleanup': {'owned_pgid': 'SECRET_PID', 'errno': 'SECRET_ERRNO'},
+                'stdout': 'SECRET_STDOUT', 'uid': 'SECRET_UID',
+            }))
+            (work / 'stage').mkdir()
+            build = {'schema': 1, 'native_archive_sha256': ci.ARCHIVE_SHA,
+                     'independent_runtime_approval': False,
+                     'fixture_source_sha256': 'a' * 64,
+                     'go_executable_sha256': 'b' * 64,
+                     'python_executable_sha256': 'SECRET_HASH',
+                     'build_outputs': {'native-history-fixture': 'c' * 64,
+                                       'native-profile-oracle': 'd' * 64,
+                                       'history-fixture-source.json': 'e' * 64,
+                                       'SECRET_PATH': 'SECRET_VALUE'},
+                     'command_receipts': [{'argv': 'SECRET_ARGV'}]}
+            raw = json.dumps(build).encode()
+            (work / 'stage/build-provenance.json').write_bytes(raw)
+            result = self.failed_report(work)
+            self.assertEqual(result, {
+                'stage': 'compile-history', 'command_exit': -15,
+                'reasons': ['ps_deadline_exceeded', 'unclassified_failure',
+                            'group_signal_failure', 'command_exit_nonzero'],
+                'measurements': measurements,
+                'build_hashes': {'native_archive_sha256': ci.ARCHIVE_SHA,
+                                'fixture_source_sha256': 'a' * 64,
+                                'go_executable_sha256': 'b' * 64,
+                                'python_executable_sha256': None,
+                                'native-history-fixture': 'c' * 64,
+                                'native-profile-oracle': 'd' * 64,
+                                'history-fixture-source.json': 'e' * 64,
+                                'build_receipt_sha256': hashlib.sha256(raw).hexdigest()},
+            })
+
+    def test_invalid_measurements_and_build_receipts_are_unavailable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            (work / 'stage').mkdir()
+            build_path = work / 'stage/build-provenance.json'
+            for invalid in ['SECRET_VALUE', True, -1, float('nan'), float('inf'), 1 << 100]:
+                with self.subTest(kind=type(invalid).__name__):
+                    (work / 'compile-history.json').write_text(json.dumps({
+                        'schema': 'native-budget-monitor/v1', 'label': 'compile-history',
+                        'failures': ['ps_deadline_exceeded'],
+                        **dict.fromkeys(EMPTY_EVIDENCE['measurements'], invalid),
+                    }))
+                    build_path.write_text(json.dumps({'schema': 1,
+                        'native_archive_sha256': 'SECRET_WRONG_ARCHIVE',
+                        'independent_runtime_approval': False,
+                        'build_outputs': {'native-history-fixture': 'a' * 64}}))
+                    result = self.failed_report(work)
+                    self.assertEqual(result['measurements'], EMPTY_EVIDENCE['measurements'])
+                    self.assertEqual(result['build_hashes'], EMPTY_EVIDENCE['build_hashes'])
+            for raw in ['SECRET_MALFORMED', 'SECRET_OVERSIZE' * (1 << 20)]:
+                build_path.write_text(raw)
+                self.assertEqual(self.failed_report(work)['build_hashes'],
+                                 EMPTY_EVIDENCE['build_hashes'])
+
     def test_reports_fixed_codes_without_private_receipt_data(self):
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
@@ -38,6 +122,7 @@ class PublicFailureTests(unittest.TestCase):
             }))
             self.assertEqual(self.failed_report(work), {
                 'stage': 'compile-history', 'command_exit': -9,
+                **EMPTY_EVIDENCE,
                 'reasons': ['rss_budget_exceeded', 'unclassified_failure'],
             })
 
@@ -61,6 +146,7 @@ class PublicFailureTests(unittest.TestCase):
                     self.assertEqual(self.failed_report(work), {
                         'stage': 'compile-history', 'command_exit': None,
                         'reasons': ['receipt_unavailable'],
+                        **EMPTY_EVIDENCE,
                     })
 
     def test_unknown_stage_and_noninteger_exit_do_not_leak(self):
@@ -69,6 +155,7 @@ class PublicFailureTests(unittest.TestCase):
             self.assertEqual(self.failed_report(work, 'SECRET_STAGE\nforged log'), {
                 'stage': 'unknown', 'command_exit': None,
                 'reasons': ['receipt_unavailable'],
+                **EMPTY_EVIDENCE,
             })
             for exit_code in ['SECRET_EXIT', True, 1 << 100]:
                 (work / 'compile-history.json').write_text(json.dumps({
@@ -90,7 +177,8 @@ class PublicFailureTests(unittest.TestCase):
                 ci.step(work, 'go-version', 5, 256, command, os.environ.copy(), work)
             self.assertNotIn('SECRET', report.getvalue())
             result = json.loads(report.getvalue())
-            self.assertEqual(set(result), {'stage', 'monitor_exit', 'command_exit', 'reasons'})
+            self.assertEqual(set(result), {'stage', 'monitor_exit', 'command_exit', 'reasons',
+                                          'measurements', 'build_hashes'})
             self.assertEqual(result['stage'], 'go-version')
             if os.getuid() == 0:
                 self.assertEqual(result['monitor_exit'], 2)

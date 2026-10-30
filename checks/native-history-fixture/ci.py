@@ -49,12 +49,25 @@ PUBLIC_FAILURE_CODES = frozenset({
     'stdout_limit_exceeded', 'stderr_limit_exceeded', 'unsupported_python_version',
 })
 
+PUBLIC_TIMINGS = ('elapsed_seconds', 'deadline_overshoot_seconds',
+                  'max_observed_ps_duration_seconds',
+                  'max_observed_sample_start_gap_seconds')
+PUBLIC_COUNTS = ('sample_count', 'positive_sample_count',
+                 'peak_sample_process_count', 'sampled_aggregate_peak_kib')
+PUBLIC_BUILD_HASHES = ('native_archive_sha256', 'fixture_source_sha256',
+                      'go_executable_sha256', 'python_executable_sha256')
+PUBLIC_BUILD_OUTPUTS = ('native-history-fixture', 'native-profile-oracle',
+                       'history-fixture-source.json')
+
 
 def public_failure(work, label, monitor_exit):
-    """Project an untrusted receipt onto fixed codes and bounded exit integers."""
+    """Publish only reviewed receipt fields; null means unavailable or invalid."""
     summary = {'stage': label if label in PUBLIC_STAGES else 'unknown',
                'monitor_exit': monitor_exit, 'command_exit': None,
-               'reasons': ['receipt_unavailable']}
+               'reasons': ['receipt_unavailable'],
+               'measurements': dict.fromkeys(PUBLIC_TIMINGS + PUBLIC_COUNTS),
+               'build_hashes': dict.fromkeys(
+                   PUBLIC_BUILD_HASHES + PUBLIC_BUILD_OUTPUTS + ('build_receipt_sha256',))}
     if label not in PUBLIC_STAGES:
         return summary
     try:
@@ -66,15 +79,41 @@ def public_failure(work, label, monitor_exit):
         failures = receipt['failures']
         require(isinstance(failures, list) and len(failures) <= 64 and
                 all(isinstance(code, str) for code in failures), 'invalid failure codes')
-        reasons = sorted({code for code in failures if code in PUBLIC_FAILURE_CODES})
-        if not failures or any(code not in PUBLIC_FAILURE_CODES for code in failures):
-            reasons.append('unclassified_failure')
-        summary['reasons'] = reasons
+        summary['reasons'] = [
+            code if code in PUBLIC_FAILURE_CODES else 'unclassified_failure'
+            for code in failures] or ['unclassified_failure']
         exit_code = receipt.get('command_exit_code')
         if type(exit_code) is int and -255 <= exit_code <= 255:
             summary['command_exit'] = exit_code
+        for name in PUBLIC_TIMINGS:
+            value = receipt.get(name)
+            if type(value) in (int, float) and 0 <= value <= 86400:
+                summary['measurements'][name] = value
+        for name in PUBLIC_COUNTS:
+            value = receipt.get(name)
+            if type(value) is int and 0 <= value <= (1 << 53) - 1:
+                summary['measurements'][name] = value
     except Exception:
         # Never serialize exception text, argv, paths, environment or stream data.
+        pass
+    try:
+        path = work / 'stage' / 'build-provenance.json'
+        regular(path)
+        raw = small(path, 1 << 20)
+        build = json.loads(raw)
+        require(type(build['schema']) is int and build['schema'] == 1 and
+                build['native_archive_sha256'] == ARCHIVE_SHA and
+                build['independent_runtime_approval'] is False,
+                'build receipt binding differs')
+        outputs = build.get('build_outputs')
+        require(isinstance(outputs, dict), 'invalid build output hashes')
+        for name in PUBLIC_BUILD_HASHES + PUBLIC_BUILD_OUTPUTS:
+            value = build.get(name) if name in PUBLIC_BUILD_HASHES else outputs.get(name)
+            if isinstance(value, str) and re.fullmatch('[0-9a-f]{64}', value):
+                summary['build_hashes'][name] = value
+        summary['build_hashes']['build_receipt_sha256'] = hashlib.sha256(raw).hexdigest()
+    except Exception:
+        # Never dump the receipt, arbitrary keys or exception details on failure.
         pass
     return summary
 

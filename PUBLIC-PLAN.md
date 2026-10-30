@@ -196,13 +196,31 @@ console errors are bounded/sanitized. Export hashes are read back before deletin
 build caches; no broad privileged cleanup. Failed root scratch is left for VM
 teardown, not reclaimed through untrusted paths.
 
-On a bounded-command failure, the console also reports only a fixed stage name,
-allowlisted monitor reason codes, the monitor exit status and a bounded command
-exit status (or null). Unknown receipt strings become `unclassified_failure`;
-missing, malformed, oversized or wrongly bound receipts disclose no contents.
-Raw stdout/stderr, argv, environment, paths and exception text remain private.
-This diagnostic does not change refusal, resource limits, root authority or the
-five-file export allowlist.
+On a bounded-command failure, the console reports a fixed stage, monitor exit,
+bounded command exit and allowlisted reason codes **in recorded order**. Unknown
+codes become `unclassified_failure` in place; missing/malformed/oversized or
+wrongly bound receipts disclose no contents.
+
+The owner-authorized bounded diagnostic projection additionally permits:
+
+- Existing aggregate timings: `elapsed_seconds`, `deadline_overshoot_seconds`,
+  `max_observed_ps_duration_seconds`, `max_observed_sample_start_gap_seconds`.
+- Existing counts: `sample_count`, `positive_sample_count`,
+  `peak_sample_process_count`, `sampled_aggregate_peak_kib`.
+- Build hashes: archive, fixture source, Go executable, Python executable,
+  `native-history-fixture`, `native-profile-oracle`, `history-fixture-source.json`
+  and the build receipt itself.
+
+Timings must be nonboolean finite numbers in 0..86400; counts must be nonboolean
+integers in 0..2^53-1; hashes must be 64 lowercase hexadecimal characters.
+Every missing or invalid field is explicitly `null`, never an invented zero.
+These are receipt observations, not independent build or runtime attestation.
+No per-phase timing, PID/PGID, UID, errno, raw stream, argv, environment, runtime
+path or arbitrary exception text is exported. The console projection needs no
+additional artifact upload and still runs before the original nonzero refusal.
+Monitor code, safety limits, root authority and the five-file artifact allowlist
+are unchanged. One instrumented hosted run requires independent exact-head
+review before its triggering push; this does not authorize retries or deployment.
 
 Independent post-run review must compare source/workflow heads and measured
 manifest with the pre-upload review, verify source/archive/module/toolchain and
