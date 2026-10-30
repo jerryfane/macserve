@@ -106,6 +106,117 @@ func TestAdmissionAcceptsAppleDefinedLaunchesAfterBuild(t *testing.T) {
 	}
 }
 
+const (
+	cryptexAgentLabel   = "com.apple.guidedbrowsingd"
+	cryptexAgentPlist   = appCryptex + "System/Library/LaunchAgents/" + cryptexAgentLabel + ".plist"
+	cryptexAgentBinary  = appCryptex + "usr/libexec/guidedbrowsingd"
+	cryptexAgentProgram = "/System/Cryptexes/App/usr/libexec/guidedbrowsingd"
+)
+
+// This LaunchAgent appeared after the approved baseline on the Studio.
+// launchd prints the App-Cryptex plist's canonical path and the program's
+// system alias; the kernel reports the resolved App-Cryptex executable.
+func appCryptexAgentWorld() (*processScope, *fakeAgents, []processSample) {
+	s, agents, rows := appleWorld()
+	gui := "gui/" + strconv.Itoa(testJobUID)
+	delete(agents.services, gui+"/"+heardLabel)
+	p := agents.procs[400]
+	p.executable, p.program, p.argv = cryptexAgentBinary, cryptexAgentProgram, cryptexAgentProgram
+	agents.procs[400] = p
+	agents.links[cryptexAgentProgram] = cryptexAgentBinary
+	agents.services[gui+"/"+cryptexAgentLabel] = launchctlprint.Snapshot{
+		Target: gui + "/" + cryptexAgentLabel, State: "running", PID: 400,
+		Path: cryptexAgentPlist, Type: "LaunchAgent", Program: cryptexAgentProgram,
+		Inherited: map[string]string{"SSH_AUTH_SOCK": jobSocket},
+	}
+	agents.sip[cryptexAgentBinary], agents.sip[cryptexAgentPlist] = true, true
+	agents.plists[cryptexAgentPlist] = agentPlistXML(cryptexAgentLabel,
+		"\t<key>Program</key>\n\t<string>"+cryptexAgentProgram+"</string>\n")
+	// An exited audited helper must not turn a verified new system service
+	// into the unverified-relaunch refusal seen on the live worker.
+	s.baseline.Processes = append(s.baseline.Processes, ProcessIdentity{PID: 99, Start: "9:0"})
+	quietScope(s, rows)
+	return s, agents, rows
+}
+
+func TestAdmissionAcceptsVerifiedAppCryptexLaunchAgent(t *testing.T) {
+	for _, direct := range []bool{false, true} {
+		name := "system-alias"
+		if direct {
+			name = "canonical-program"
+		}
+		t.Run(name, func(t *testing.T) {
+			s, agents, _ := appCryptexAgentWorld()
+			if direct {
+				target := "gui/" + strconv.Itoa(testJobUID) + "/" + cryptexAgentLabel
+				entry := agents.services[target]
+				entry.Program = cryptexAgentBinary
+				agents.services[target] = entry
+				p := agents.procs[400]
+				p.program, p.argv = cryptexAgentBinary, cryptexAgentBinary
+				agents.procs[400] = p
+				agents.plists[cryptexAgentPlist] = agentPlistXML(cryptexAgentLabel,
+					"\t<key>Program</key>\n\t<string>"+cryptexAgentBinary+"</string>\n")
+			}
+			if err := s.observeQuiet(context.Background()); err != nil {
+				t.Fatalf("verified App-Cryptex LaunchAgent blocked admission: %v", err)
+			}
+		})
+	}
+}
+
+func TestAdmissionRefusesUnprovenAppCryptexLaunchAgent(t *testing.T) {
+	target := "gui/" + strconv.Itoa(testJobUID) + "/" + cryptexAgentLabel
+	for name, mutate := range map[string]func(*fakeAgents){
+		"not-platform-signed": func(a *fakeAgents) {
+			p := a.procs[400]
+			p.platform = false
+			a.procs[400] = p
+		},
+		"executable-not-protected": func(a *fakeAgents) { a.sip[cryptexAgentBinary] = false },
+		"plist-not-protected":      func(a *fakeAgents) { a.sip[cryptexAgentPlist] = false },
+		"argv-changed": func(a *fakeAgents) {
+			p := a.procs[400]
+			p.argv += "\x00unapproved"
+			a.procs[400] = p
+		},
+		"environment-changed": func(a *fakeAgents) {
+			entry := a.services[target]
+			entry.Inherited = map[string]string{"SSH_AUTH_SOCK": jobSocket, "DYLD_INSERT_LIBRARIES": "/tmp/inject"}
+			a.services[target] = entry
+		},
+		"system-plist-cannot-authorize-cryptex-agent": func(a *fakeAgents) {
+			entry := a.services[target]
+			entry.Path = "/System/Library/LaunchAgents/" + cryptexAgentLabel + ".plist"
+			a.sip[entry.Path] = true
+			a.plists[entry.Path] = a.plists[cryptexAgentPlist]
+			a.services[target] = entry
+		},
+		"plist-outside-system-launchagents": func(a *fakeAgents) {
+			entry := a.services[target]
+			entry.Path = appCryptex + "Library/LaunchAgents/" + cryptexAgentLabel + ".plist"
+			a.sip[entry.Path] = true
+			a.plists[entry.Path] = a.plists[cryptexAgentPlist]
+			a.services[target] = entry
+		},
+		"other-preboot-tree": func(a *fakeAgents) {
+			p := a.procs[400]
+			p.executable = "/System/Volumes/Preboot/Other/usr/libexec/guidedbrowsingd"
+			a.procs[400] = p
+			a.links[cryptexAgentProgram] = p.executable
+			a.sip[p.executable] = true
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, agents, _ := appCryptexAgentWorld()
+			mutate(agents)
+			if err := s.observeQuiet(context.Background()); !errors.Is(err, errRelaunchUnverified) {
+				t.Fatalf("unproven App-Cryptex process must block admission: %v", err)
+			}
+		})
+	}
+}
+
 // heard respawns every second: quiesce signals each instance but must not wait
 // for an absence launchd will not allow, nor call the survivor contamination.
 func TestQuiesceSignalsRespawningAppleAgentWithoutContamination(t *testing.T) {
