@@ -100,6 +100,12 @@ func (b *boundedBuffer) Write(p []byte) (int, error) {
 	return b.Buffer.Write(p)
 }
 
+// Do not inherit bytes.Buffer.ReadFrom: os/exec's io.Copy would otherwise
+// bypass Write and silently discard the output limit.
+func (b *boundedBuffer) ReadFrom(r io.Reader) (int64, error) {
+	return io.Copy(struct{ io.Writer }{b}, r)
+}
+
 func (e *Engine) Execute(parent context.Context, job model.Job, source Source, archive io.Reader, sink Sink) (result Result, returned error) {
 	result = Result{State: model.Failed, Source: source, StartedAt: e.options.Now()}
 	if !e.mu.TryLock() {

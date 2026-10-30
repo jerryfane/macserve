@@ -14,6 +14,23 @@ import (
 	"github.com/jerryfane/macserve/internal/model"
 )
 
+func TestInspectionCommandEnforcesOutputLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inspection-output")
+	for _, size := range []int{1 << 20, (1 << 20) + 1} {
+		if err := os.WriteFile(path, bytes.Repeat([]byte("x"), size), 0600); err != nil {
+			t.Fatal(err)
+		}
+		out, diagnostic, err := inspectCommand(context.Background(), nil, "/bin/cat", path)
+		if size == 1<<20 {
+			if err != nil || diagnostic != "" || out != strings.Repeat("x", size) {
+				t.Fatalf("valid boundary output changed: bytes=%d stderr=%q err=%v", len(out), diagnostic, err)
+			}
+		} else if err == nil || !strings.Contains(err.Error(), "command output limit exceeded") || len(out) > 1<<20 {
+			t.Fatalf("oversized subprocess output escaped limit: bytes=%d err=%v", len(out), err)
+		}
+	}
+}
+
 func TestLaunchAgentInspectionRefusesEntriesAndUnknownPaths(t *testing.T) {
 	for _, mode := range []string{"absent", "empty", "entry", "symlink", "not-directory", "missing-home"} {
 		t.Run(mode, func(t *testing.T) {
