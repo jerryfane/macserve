@@ -437,6 +437,27 @@ During the approved sitting, with admission disabled and the broker stopped, pre
   --config /Library/macserve/config/worker.json --pids "$AUDITED_PIDS"
 ```
 
+The three GUI anchors are a minimum, not the complete retained-process audit.
+macOS can run a system LaunchAgent that the job account cannot terminate even
+when its real, effective and saved UIDs all match. For example, the signed
+Safari Safe Browsing service may carry
+`com.apple.private.security.signal-exempt=true`. Omitting such an instance
+from `$AUDITED_PIDS` leaves it subject to ordinary residual termination;
+`EPERM` correctly stops reset.
+
+Do not retry with an exception inferred from the error or executable name.
+Before proposing retention, inspect the exact instance's kernel identity,
+platform signature, SIP-protected executable, system launch definition and
+launchd provenance. Treat signed entitlements as additional evidence, not as
+an automatic admission rule. If the owner explicitly approves retaining that
+trusted required service, include its freshly audited PID alongside the GUI
+anchors in the existing baseline selection. Do not add arbitrary processes or
+infer that other processes are signalable merely because this entitlement is
+absent. The native reset must still validate the selection, provenance,
+environment and final baseline; unselected residuals and unclassified signal
+failures must continue to refuse. A failed reset may already have side effects:
+preserve its evidence and review recovery before another authorized attempt.
+
 `AUDITED_PIDS` is an explicitly audited comma-separated list of current retained GUI PIDs, never a blind process-list substitution. Reset holds the exclusive broker lock, removes job-home LaunchAgents entries, the job crontab and legacy login items, and terminates extra exact same-UID processes outside the selected baseline. It rechecks selected process start identities, records `job_uid`, kernel `boot` and `processes` with `pid`/`start`, retries owned-resource cleanup, then clears `admission-quarantine.json` only after full clean verification. It never adopts unselected processes or signals owner/controller processes. This is a mutating administrative operation even on first initialization, not a read-only qualification command; retain evidence and approve the job-account cleanup scope beforehand.
 
 **Launchd relaunches (v0.1.9).** For each audited process that is verifiably a system launchd service, reset also records launchd provenance in the baseline (`processes[].service`): domain (`gui` LaunchAgent, `user` XPC service, or `pid` XPC service with its audited `owner` PID), label, launchd `path`, kernel `executable` path, `launch_sha256`, a digest of the exact exec path and arguments from `KERN_PROCARGS2` (since v0.1.11 nothing after argv is read), and `inherited_sha256`, a digest of the `inherited environment` that root `launchctl print` lists for the service. Only LaunchAgents whose launchd path is exactly `/System/Library/LaunchAgents/<label>.plist` and XPC services whose `.xpc` bundle lies under `/System` (not `/System/Volumes`), `/usr` (not `/usr/local`), `/bin` or `/sbin` qualify, and only when the rule below already holds for the audited instance itself; `worker-reset` prints how many audited processes received a record. After an audited PID exits, a new job-UID process stands in for it (cleanup does not terminate it, admission does not refuse it) only if **all** hold: (1) the kernel reports a valid platform binary whose executable is the recorded path; (2) its parent is launchd (PPID 1); (3) it started after the audited process; (4) its launch digest equals the recorded one; (5) root `launchctl print` of the recorded target shows that PID running with the recorded path, type (`LaunchAgent` or `XPCService`) and inherited environment, and kernel facts read again afterwards are unchanged; (6) an XPC service is looked up only in the domain of its audited owner or of that owner's verified relaunch, in any baseline order (owners that are themselves XPC services resolve first). A relaunch that lands on the exited audited PID number is accepted under the same rule. Every other process stays residual and is terminated as before.
