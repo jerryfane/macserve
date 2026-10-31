@@ -7,9 +7,9 @@
       "sha256": "e5d1ca7139986c3ff84696622e751277baff02cfa603cbbbf42f883ea379ebdb"
     },
     {
-      "bytes": 13275,
+      "bytes": 17447,
       "path": "PUBLIC-PLAN.md",
-      "sha256": "51378fe816c7290d41164b1b62062aafeb48283e6a783681794c5666a15346d7"
+      "sha256": "1c3fa1bc5273ba7e02eeb459a4b984bfd2a641363aa39c3d8c5c6f4f854c5610"
     },
     {
       "bytes": 3599,
@@ -22,14 +22,14 @@
       "sha256": "856476af1c0a77d0ec42e0816e9eac3f0dca63a3455edbd687c94c92392871ea"
     },
     {
-      "bytes": 28432,
+      "bytes": 29041,
       "path": "checks/native-history-fixture/budget.py",
-      "sha256": "f75f7a62b8d82c7ace4129931263e2e40d56b4aeb248809708b17284cb779218"
+      "sha256": "f0ecd2bfaccc0e97835f99893f66c3d20f8297162cbdd867e9bd7e294db577a4"
     },
     {
-      "bytes": 16106,
+      "bytes": 21835,
       "path": "checks/native-history-fixture/ci.py",
-      "sha256": "7b2eaaafcfb287b8b5644e4789f6b6aa0d4beea74cef88ae4a34c8fa2a2d73f2"
+      "sha256": "d5cd7ee4272bc92ffa08ac9e84b3c45f13db2e4cbd093d773dd884f6fcee7927"
     },
     {
       "bytes": 14912,

@@ -7,12 +7,55 @@ import (
 	"os/exec"
 	"reflect"
 	"slices"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 )
 
 const testJobUID = 12345
+
+func TestNativeSignalFailureRetainsTargetAndDiagnostic(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("production signal launcher sets job credentials; requires root")
+	}
+	// A real child fails to open these nonexistent filenames. Exercise the
+	// production credential-changing launcher, not a replacement signal callback.
+	runner := nativeRunnerFor(Options{JobUID: testJobUID, JobGID: testJobUID, HelperPath: "/bin/ls"})
+	target := processSample{pid: 2147483647, uid: testJobUID, start: "diagnostic-missing-target"}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := runner.scope.signal(ctx, target, syscall.SIGTERM)
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() == 0 {
+		t.Fatalf("helper failure lost its exit status: %v", err)
+	}
+	for _, evidence := range []string{"pid=2147483647", `start="diagnostic-missing-target"`, "signal=15", "_job-signal"} {
+		if !strings.Contains(err.Error(), evidence) {
+			t.Fatalf("cleanup failure lost %q: %v", evidence, err)
+		}
+	}
+}
+
+func TestNativeSignalFailureBoundsHelperDiagnostic(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("production signal launcher sets job credentials; requires root")
+	}
+	runner := nativeRunnerFor(Options{JobUID: testJobUID, JobGID: testJobUID, HelperPath: "/bin/ls"})
+	target := processSample{pid: 2147483647, uid: testJobUID, start: strings.Repeat("x", 32768)}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := runner.scope.signal(ctx, target, syscall.SIGTERM)
+	if err == nil || !strings.Contains(err.Error(), "command output limit exceeded") {
+		t.Fatalf("oversized helper diagnostic not identified: %v", err)
+	}
+	// The target is separately reported. Bound only the child's retained output,
+	// including possible quoting expansion, rather than conflating the two.
+	parts := strings.SplitN(err.Error(), "; helper stderr=", 2)
+	if len(parts) != 2 || len(parts[1]) > 4096*4+2 {
+		t.Fatalf("helper diagnostic exceeded its bound: %v", err)
+	}
+}
 
 func trustedGUI() processSample {
 	return processSample{pid: 100, group: 100, uid: testJobUID, start: "boot:100"}

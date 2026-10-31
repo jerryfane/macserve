@@ -27,8 +27,8 @@ commands may opt into --allow-unmeasured: missing positive coverage then records
 unmeasured/null rather than failing, never proof of zero memory use. This option
 does not relax ps errors, sample timing, group cleanup or any other policy.
 
-Samples start nominally every 0.10s, with a 0.25s maximum observed start gap
-and a 0.20s deadline per ps invocation, including pipe drainage. Violations
+Samples start nominally every 0.10s, with a 0.75s maximum observed start gap
+and a 0.50s deadline per ps invocation, including pipe drainage and parsing. Violations
 fail closed. Polling can miss short-lived processes, transient RSS spikes,
 escaped/reparented descendants, and descendants created after enumeration.
 The RSS overshoot has NO finite byte bound. A deadline/overage initiates TERM,
@@ -71,8 +71,8 @@ import sys
 import time
 
 SAMPLE_INTERVAL = 0.10
-MAX_SAMPLE_GAP = 0.25
-PS_TIMEOUT = 0.20
+MAX_SAMPLE_GAP = 0.75
+PS_TIMEOUT = 0.50
 PS_REAP_TIMEOUT = 0.20
 EVENT_INTERVAL = 0.025
 TERM_GRACE = 1.0
@@ -216,6 +216,7 @@ class Monitor:
         self.ps_started = None
         self.ps_buffers = None
         self.ps_eof = None
+        self.ps_timeout = None
         self.last_sample_start = None
         self.next_sample = None
         self.samples = 0
@@ -398,10 +399,21 @@ class Monitor:
         else:
             self.fail('owned_group_remains')
 
+    def record_sample_timeout(self, phase):
+        # Snapshot cached observations before cleanup. Do not poll/wait again:
+        # null exit means unobserved, not proof that ps is still running.
+        self.ps_timeout = {
+            'phase': phase,
+            'exit_code': self.ps.returncode,
+            'stdout_eof': self.ps_eof['stdout'],
+            'stderr_eof': self.ps_eof['stderr'],
+        }
+
     def finish_sample(self, now):
         duration = now - self.ps_started
         self.max_sample_duration = max(self.max_sample_duration, duration)
         if duration > PS_TIMEOUT:
+            self.record_sample_timeout('pre_completion_check')
             raise MonitorProblem('ps_deadline_exceeded')
         result = self.ps.poll()
         if result is None or not all(self.ps_eof.values()):
@@ -412,6 +424,7 @@ class Monitor:
         duration = time.monotonic() - self.ps_started
         self.max_sample_duration = max(self.max_sample_duration, duration)
         if duration > PS_TIMEOUT:
+            self.record_sample_timeout('post_parse')
             raise MonitorProblem('ps_deadline_exceeded')
         sample_start = self.ps_started
         self.ps = None
@@ -544,6 +557,7 @@ class Monitor:
             'label': self.args.label,
             'status': 'failed' if self.failures else 'ok',
             'failures': list(self.failures),
+            'ps_timeout': self.ps_timeout,
             'started_at_utc': self.started_utc,
             'elapsed_seconds': elapsed,
             'deadline_monotonic_seconds': self.deadline,

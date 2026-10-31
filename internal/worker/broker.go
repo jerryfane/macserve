@@ -465,7 +465,14 @@ func nativeRunnerFor(options Options) *nativeRunner {
 		cmd.Env = []string{"PATH=/usr/bin:/bin", "LC_ALL=C"}
 		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: options.JobUID, Gid: options.JobGID, Groups: []uint32{}}}
 		cmd.WaitDelay = 100 * time.Millisecond
-		return cmd.Run()
+		diagnostic := &boundedBuffer{max: 4096}
+		cmd.Stderr = diagnostic
+		err := cmd.Run()
+		if err != nil || diagnostic.err != nil {
+			return fmt.Errorf("signal job process pid=%d start=%q signal=%d: %w; helper stderr=%q",
+				p.pid, p.start, sig, errors.Join(err, diagnostic.err), diagnostic.String())
+		}
+		return nil
 	}
 	runner.signalProcess = runner.scope.signal
 	return runner

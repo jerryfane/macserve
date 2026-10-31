@@ -163,7 +163,7 @@ scratch protections. Failed mutation/setup cannot count as verifier rejection.
 No fake ACL/ownership verifier, real profile collection, recipe, Collect, Approve,
 service install or installed-reset execution is introduced.
 
-## Cooperative supervision remains a separate pending decision
+## Cooperative supervision and the scoped timing trial
 
 The monitor measures a sampled cooperative process group, not an OS memory cap
 or hostile-process sandbox. It detects observed escapes but cannot guarantee
@@ -172,8 +172,8 @@ Unprivileged Python cannot reliably signal root. The broker checks that it
 inherits the dedicated caller session/group, enforces its own700s lifetime and
 120s request limits, and signals only that still-owned original group on failure.
 The 45-minute disposable hosted-VM job deadline is a separate provider boundary,
-not proof of immediate tree termination. Pending policy acceptance is NOT
-manufactured by a string argument, environment variable or build receipt.
+not proof of immediate tree termination. Policy acceptance must come from an
+explicit decision, not a string argument, environment variable or build receipt.
 
 Reviewed non-detaching graph: monitor creates one caller session; Python client
 inherits it when starting sudo; fixed bootstrap creates no background jobs or
@@ -185,6 +185,28 @@ entrypoint is reached. Trusted hosted sudo/session behavior and actual controls
 still need runtime evidence. This policy is not transferred to other harnesses
 whose production children create separate groups.
 
+The reconciled owner-authorized hosted trial changes only the paired sampling limits:
+
+| Policy | Previous | Trial |
+|---|---:|---:|
+| Per-sample deadline (execution, drainage and parsing) | 250 ms | 500 ms |
+| Maximum sample-start gap | 300 ms | 750 ms |
+| Nominal sample interval | 100 ms | 100 ms |
+
+This allows 250 ms between the two limits. It is a deliberate
+cooperative-policy relaxation, not a demonstrated implementation fix, an optimal
+threshold or a promised pass. Longer tolerated observation gaps retain the
+existing unbounded RSS-overshoot risk. `PS_REAP_TIMEOUT` remains 200 ms; RSS
+budgets, overall stage deadlines, TERM/KILL grace, ownership checks, cleanup,
+failure refusal, root protocol and diagnostic allowlist are unchanged.
+
+All nine orchestrator stages and standalone `budget.py` use the same policy.
+Existing receipt fields record the actual limits; prior failed receipts retain
+their original source/policy bindings. One independent exact-head review is
+required before one trial run; normal Go CI may accompany that push. Stop after
+that run, including failure. Do not ratchet beyond 500/750 ms or retry. No added
+telemetry, Studio action, merge, release or deployment follows from this trial.
+
 ## Export and independent post-run binding
 
 Only five bounded public artifacts are exported:
@@ -195,6 +217,52 @@ at32MiB and total export at36MiB. Receipts omit raw argv/env/process listings an
 console errors are bounded/sanitized. Export hashes are read back before deleting
 build caches; no broad privileged cleanup. Failed root scratch is left for VM
 teardown, not reclaimed through untrusted paths.
+
+On a bounded-command failure, the console reports a fixed stage, monitor exit,
+bounded command exit and allowlisted reason codes **in recorded order**. Unknown
+codes become `unclassified_failure` in place; missing/malformed/oversized or
+wrongly bound receipts disclose no contents.
+
+The owner-authorized bounded diagnostic projection additionally permits:
+
+- Existing aggregate timings: `elapsed_seconds`, `deadline_overshoot_seconds`,
+  `max_observed_ps_duration_seconds`, `max_observed_sample_start_gap_seconds`.
+- Existing counts: `sample_count`, `positive_sample_count`,
+  `peak_sample_process_count`, `sampled_aggregate_peak_kib`.
+- Build hashes: archive, fixture source, Go executable, Python executable,
+  `native-history-fixture`, `native-profile-oracle`, `history-fixture-source.json`
+  and the build receipt itself.
+- Targeted timeout observations under `ps_timeout`: fixed `phase`
+  (`pre_completion_check` or `post_parse`), cached `exit_code` in -255..255,
+  and boolean `stdout_eof` / `stderr_eof`. Missing or invalid observations are
+  explicitly null; unknown phase invalidates the whole observation.
+
+These four timeout fields are captured before the exception and cleanup, only
+when the sampling deadline fails. `pre_completion_check` means the deadline
+check ran before confirming process and pipe completion, not that `ps` was
+necessarily running. Null cached exit means no exit was observed; no added poll
+or wait is performed. EOF booleans describe what the monitor consumed, not
+whether the process has finished writing. `post_parse` means parsing returned
+before the late deadline check; it does not identify parsing as the delay source.
+The elapsed timeout observations remain censored, not completed `ps` latency.
+Cleanup cannot overwrite this snapshot. No phase-duration attribution is added.
+
+The targeted-diagnostic authorization permits one exact-head independently
+reviewed run at unchanged 500/750 ms limits, then requires stopping. All other
+guards and the existing public artifact allowlist remain unchanged. No further
+fields, retries, Studio actions, merge or release are authorized.
+
+Timings must be nonboolean finite numbers in 0..86400; counts must be nonboolean
+integers in 0..2^53-1; hashes must be 64 lowercase hexadecimal characters.
+Every missing or invalid field is explicitly `null`, never an invented zero.
+These are receipt observations, not independent build or runtime attestation.
+No per-phase timing, PID/PGID, UID, errno, raw stream, argv, environment, runtime
+path or arbitrary exception text is exported. The console projection needs no
+additional artifact upload and still runs before the original nonzero refusal.
+Failure diagnostics do not themselves change monitor policy, root authority or
+the five-file artifact allowlist. The separately authorized timing trial above
+requires independent exact-head review before its single triggering push; it
+does not authorize retries or deployment.
 
 Independent post-run review must compare source/workflow heads and measured
 manifest with the pre-upload review, verify source/archive/module/toolchain and

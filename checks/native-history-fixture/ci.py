@@ -28,6 +28,108 @@ TOOLS = ['checks/native-history-fixture/public_contract.py',
          'checks/native-history-fixture/history_fixture_test.go.source']
 SUPERVISION_POLICY = 'cooperative-hosted-vm-v1'
 
+PUBLIC_STAGES = frozenset({
+    'go-version', 'runner-memory', 'download-archive', 'prepare-source',
+    'download-modules', 'verify-modules', 'compile-history', 'compile-oracle',
+    'native-corpus',
+})
+PUBLIC_FAILURE_CODES = frozenset({
+    'child_group_leftovers', 'cleanup_deadline_exceeded', 'cleanup_failure',
+    'cleanup_verification_failure', 'command_exit_nonzero', 'command_not_started',
+    'deadline_exceeded', 'descendant_escaped_owned_group', 'group_signal_failure',
+    'group_verification_failure', 'interrupted', 'invalid_arguments',
+    'invalid_budget', 'invalid_command', 'invalid_label', 'invalid_new_log_directory',
+    'invalid_ps_leader', 'invalid_ps_snapshot', 'leader_reap_failure',
+    'log_sync_failure', 'missing_command_separator', 'monitor_failure',
+    'noncanonical_output_path', 'output_drain_timeout', 'output_write_failure',
+    'owned_group_not_verified_gone', 'owned_group_remains', 'pipe_close_failure',
+    'ps_cleanup_failure', 'ps_deadline_exceeded', 'ps_failed',
+    'ps_output_limit_exceeded', 'receipt_unavailable', 'rss_budget_exceeded',
+    'rss_unmeasured', 'sampling_gap_exceeded', 'setup_failure',
+    'stdout_limit_exceeded', 'stderr_limit_exceeded', 'unsupported_python_version',
+})
+
+PUBLIC_TIMINGS = ('elapsed_seconds', 'deadline_overshoot_seconds',
+                  'max_observed_ps_duration_seconds',
+                  'max_observed_sample_start_gap_seconds')
+PUBLIC_COUNTS = ('sample_count', 'positive_sample_count',
+                 'peak_sample_process_count', 'sampled_aggregate_peak_kib')
+PUBLIC_BUILD_HASHES = ('native_archive_sha256', 'fixture_source_sha256',
+                      'go_executable_sha256', 'python_executable_sha256')
+PUBLIC_BUILD_OUTPUTS = ('native-history-fixture', 'native-profile-oracle',
+                       'history-fixture-source.json')
+
+
+def public_failure(work, label, monitor_exit):
+    """Publish only reviewed receipt fields; null means unavailable or invalid."""
+    summary = {'stage': label if label in PUBLIC_STAGES else 'unknown',
+               'monitor_exit': monitor_exit, 'command_exit': None,
+               'reasons': ['receipt_unavailable'],
+               'ps_timeout': dict.fromkeys(('phase', 'exit_code', 'stdout_eof', 'stderr_eof')),
+               'measurements': dict.fromkeys(PUBLIC_TIMINGS + PUBLIC_COUNTS),
+               'build_hashes': dict.fromkeys(
+                   PUBLIC_BUILD_HASHES + PUBLIC_BUILD_OUTPUTS + ('build_receipt_sha256',))}
+    if label not in PUBLIC_STAGES:
+        return summary
+    try:
+        path = work / (label + '.json')
+        regular(path)
+        receipt = json.loads(small(path, 128 << 10))
+        require(receipt['schema'] == 'native-budget-monitor/v1' and
+                receipt['label'] == label, 'receipt binding differs')
+        failures = receipt['failures']
+        require(isinstance(failures, list) and len(failures) <= 64 and
+                all(isinstance(code, str) for code in failures), 'invalid failure codes')
+        summary['reasons'] = [
+            code if code in PUBLIC_FAILURE_CODES else 'unclassified_failure'
+            for code in failures] or ['unclassified_failure']
+        exit_code = receipt.get('command_exit_code')
+        if type(exit_code) is int and -255 <= exit_code <= 255:
+            summary['command_exit'] = exit_code
+        for name in PUBLIC_TIMINGS:
+            value = receipt.get(name)
+            if type(value) in (int, float) and 0 <= value <= 86400:
+                summary['measurements'][name] = value
+        for name in PUBLIC_COUNTS:
+            value = receipt.get(name)
+            if type(value) is int and 0 <= value <= (1 << 53) - 1:
+                summary['measurements'][name] = value
+        observation = receipt.get('ps_timeout')
+        if 'ps_deadline_exceeded' in failures and isinstance(observation, dict):
+            phase = observation.get('phase')
+            if type(phase) is str and phase in ('pre_completion_check', 'post_parse'):
+                summary['ps_timeout']['phase'] = phase
+                code = observation.get('exit_code')
+                if type(code) is int and -255 <= code <= 255:
+                    summary['ps_timeout']['exit_code'] = code
+                for channel in ('stdout_eof', 'stderr_eof'):
+                    value = observation.get(channel)
+                    if type(value) is bool:
+                        summary['ps_timeout'][channel] = value
+    except Exception:
+        # Never serialize exception text, argv, paths, environment or stream data.
+        pass
+    try:
+        path = work / 'stage' / 'build-provenance.json'
+        regular(path)
+        raw = small(path, 1 << 20)
+        build = json.loads(raw)
+        require(type(build['schema']) is int and build['schema'] == 1 and
+                build['native_archive_sha256'] == ARCHIVE_SHA and
+                build['independent_runtime_approval'] is False,
+                'build receipt binding differs')
+        outputs = build.get('build_outputs')
+        require(isinstance(outputs, dict), 'invalid build output hashes')
+        for name in PUBLIC_BUILD_HASHES + PUBLIC_BUILD_OUTPUTS:
+            value = build.get(name) if name in PUBLIC_BUILD_HASHES else outputs.get(name)
+            if isinstance(value, str) and re.fullmatch('[0-9a-f]{64}', value):
+                summary['build_hashes'][name] = value
+        summary['build_hashes']['build_receipt_sha256'] = hashlib.sha256(raw).hexdigest()
+    except Exception:
+        # Never dump the receipt, arbitrary keys or exception details on failure.
+        pass
+    return summary
+
 def require(ok, message):
     if not ok:
         raise RuntimeError(message)
@@ -124,6 +226,9 @@ def step(work, label, seconds, rss, command, env, cwd):
     # Cooperative sampled monitor only; privileged survivors/escapes rely on the
     # separately admitted disposable hosted-VM job deadline boundary.
     result = subprocess.run(monitor, cwd=cwd, env=env, check=False)
+    if result.returncode != 0:
+        print(json.dumps(public_failure(work, label, result.returncode), sort_keys=True),
+              file=sys.stderr)
     require(result.returncode == 0, 'bounded command failed: ' + label)
     receipt = json.loads(small(work / (label + '.json'), 128 << 10))
     return receipt
