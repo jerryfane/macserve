@@ -72,6 +72,13 @@ func (f *fakeAgents) restricted(path string) error {
 	return nil
 }
 
+func (f *fakeAgents) restrictedDirectory(path string) error {
+	if f.untrusted[path] || f.links[path] != "" {
+		return errors.New("not a protected directory")
+	}
+	return f.restricted(path)
+}
+
 // resolve treats every path as canonical unless links names its target.
 func (f *fakeAgents) resolve(path string) (string, error) {
 	if target, ok := f.links[path]; ok {

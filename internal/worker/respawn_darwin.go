@@ -101,6 +101,10 @@ func (nativeAgents) restricted(path string) error {
 	return sipRestrictedExecutable(path)
 }
 
+func (nativeAgents) restrictedDirectory(path string) error {
+	return sipRestrictedDirectory(path)
+}
+
 func (nativeAgents) resolve(path string) (string, error) {
 	return filepath.EvalSymlinks(path)
 }
