@@ -216,6 +216,7 @@ class Monitor:
         self.ps_started = None
         self.ps_buffers = None
         self.ps_eof = None
+        self.ps_timeout = None
         self.last_sample_start = None
         self.next_sample = None
         self.samples = 0
@@ -398,10 +399,21 @@ class Monitor:
         else:
             self.fail('owned_group_remains')
 
+    def record_sample_timeout(self, phase):
+        # Snapshot cached observations before cleanup. Do not poll/wait again:
+        # null exit means unobserved, not proof that ps is still running.
+        self.ps_timeout = {
+            'phase': phase,
+            'exit_code': self.ps.returncode,
+            'stdout_eof': self.ps_eof['stdout'],
+            'stderr_eof': self.ps_eof['stderr'],
+        }
+
     def finish_sample(self, now):
         duration = now - self.ps_started
         self.max_sample_duration = max(self.max_sample_duration, duration)
         if duration > PS_TIMEOUT:
+            self.record_sample_timeout('pre_completion_check')
             raise MonitorProblem('ps_deadline_exceeded')
         result = self.ps.poll()
         if result is None or not all(self.ps_eof.values()):
@@ -412,6 +424,7 @@ class Monitor:
         duration = time.monotonic() - self.ps_started
         self.max_sample_duration = max(self.max_sample_duration, duration)
         if duration > PS_TIMEOUT:
+            self.record_sample_timeout('post_parse')
             raise MonitorProblem('ps_deadline_exceeded')
         sample_start = self.ps_started
         self.ps = None
@@ -544,6 +557,7 @@ class Monitor:
             'label': self.args.label,
             'status': 'failed' if self.failures else 'ok',
             'failures': list(self.failures),
+            'ps_timeout': self.ps_timeout,
             'started_at_utc': self.started_utc,
             'elapsed_seconds': elapsed,
             'deadline_monotonic_seconds': self.deadline,

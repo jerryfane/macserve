@@ -232,6 +232,25 @@ The owner-authorized bounded diagnostic projection additionally permits:
 - Build hashes: archive, fixture source, Go executable, Python executable,
   `native-history-fixture`, `native-profile-oracle`, `history-fixture-source.json`
   and the build receipt itself.
+- Targeted timeout observations under `ps_timeout`: fixed `phase`
+  (`pre_completion_check` or `post_parse`), cached `exit_code` in -255..255,
+  and boolean `stdout_eof` / `stderr_eof`. Missing or invalid observations are
+  explicitly null; unknown phase invalidates the whole observation.
+
+These four timeout fields are captured before the exception and cleanup, only
+when the sampling deadline fails. `pre_completion_check` means the deadline
+check ran before confirming process and pipe completion, not that `ps` was
+necessarily running. Null cached exit means no exit was observed; no added poll
+or wait is performed. EOF booleans describe what the monitor consumed, not
+whether the process has finished writing. `post_parse` means parsing returned
+before the late deadline check; it does not identify parsing as the delay source.
+The elapsed timeout observations remain censored, not completed `ps` latency.
+Cleanup cannot overwrite this snapshot. No phase-duration attribution is added.
+
+The targeted-diagnostic authorization permits one exact-head independently
+reviewed run at unchanged 500/750 ms limits, then requires stopping. All other
+guards and the existing public artifact allowlist remain unchanged. No further
+fields, retries, Studio actions, merge or release are authorized.
 
 Timings must be nonboolean finite numbers in 0..86400; counts must be nonboolean
 integers in 0..2^53-1; hashes must be 64 lowercase hexadecimal characters.

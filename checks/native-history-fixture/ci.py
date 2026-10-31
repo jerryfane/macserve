@@ -65,6 +65,7 @@ def public_failure(work, label, monitor_exit):
     summary = {'stage': label if label in PUBLIC_STAGES else 'unknown',
                'monitor_exit': monitor_exit, 'command_exit': None,
                'reasons': ['receipt_unavailable'],
+               'ps_timeout': dict.fromkeys(('phase', 'exit_code', 'stdout_eof', 'stderr_eof')),
                'measurements': dict.fromkeys(PUBLIC_TIMINGS + PUBLIC_COUNTS),
                'build_hashes': dict.fromkeys(
                    PUBLIC_BUILD_HASHES + PUBLIC_BUILD_OUTPUTS + ('build_receipt_sha256',))}
@@ -93,6 +94,18 @@ def public_failure(work, label, monitor_exit):
             value = receipt.get(name)
             if type(value) is int and 0 <= value <= (1 << 53) - 1:
                 summary['measurements'][name] = value
+        observation = receipt.get('ps_timeout')
+        if 'ps_deadline_exceeded' in failures and isinstance(observation, dict):
+            phase = observation.get('phase')
+            if type(phase) is str and phase in ('pre_completion_check', 'post_parse'):
+                summary['ps_timeout']['phase'] = phase
+                code = observation.get('exit_code')
+                if type(code) is int and -255 <= code <= 255:
+                    summary['ps_timeout']['exit_code'] = code
+                for channel in ('stdout_eof', 'stderr_eof'):
+                    value = observation.get(channel)
+                    if type(value) is bool:
+                        summary['ps_timeout'][channel] = value
     except Exception:
         # Never serialize exception text, argv, paths, environment or stream data.
         pass

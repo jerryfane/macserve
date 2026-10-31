@@ -21,6 +21,7 @@ budget = importlib.util.module_from_spec(BUDGET_SPEC)
 BUDGET_SPEC.loader.exec_module(budget)
 
 EMPTY_EVIDENCE = {
+    'ps_timeout': dict.fromkeys(('phase', 'exit_code', 'stdout_eof', 'stderr_eof')),
     'measurements': dict.fromkeys((
         'elapsed_seconds', 'deadline_overshoot_seconds',
         'max_observed_ps_duration_seconds', 'max_observed_sample_start_gap_seconds',
@@ -81,6 +82,7 @@ class PublicFailureTests(unittest.TestCase):
             result = self.failed_report(work)
             self.assertEqual(result, {
                 'stage': 'compile-history', 'command_exit': -15,
+                'ps_timeout': EMPTY_EVIDENCE['ps_timeout'],
                 'reasons': ['ps_deadline_exceeded', 'unclassified_failure',
                             'group_signal_failure', 'command_exit_nonzero'],
                 'measurements': measurements,
@@ -93,6 +95,39 @@ class PublicFailureTests(unittest.TestCase):
                                 'history-fixture-source.json': 'e' * 64,
                                 'build_receipt_sha256': hashlib.sha256(raw).hexdigest()},
             })
+
+    def test_timeout_observations_are_strictly_projected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            empty = EMPTY_EVIDENCE['ps_timeout']
+            cases = [
+                ({'phase': 'pre_completion_check', 'exit_code': None,
+                  'stdout_eof': False, 'stderr_eof': True, 'SECRET_PID': 'SECRET'},
+                 {'phase': 'pre_completion_check', 'exit_code': None,
+                  'stdout_eof': False, 'stderr_eof': True}),
+                ({'phase': 'post_parse', 'exit_code': 0,
+                  'stdout_eof': True, 'stderr_eof': True},
+                 {'phase': 'post_parse', 'exit_code': 0,
+                  'stdout_eof': True, 'stderr_eof': True}),
+                ({'phase': 'SECRET_PHASE', 'exit_code': 0}, empty),
+                ({'phase': ['SECRET_PHASE']}, empty),
+                ({'phase': 'post_parse', 'exit_code': True,
+                  'stdout_eof': 1, 'stderr_eof': 'SECRET_EOF'},
+                 {'phase': 'post_parse', 'exit_code': None,
+                  'stdout_eof': None, 'stderr_eof': None}),
+                ({'phase': 'pre_completion_check', 'exit_code': 256},
+                 {'phase': 'pre_completion_check', 'exit_code': None,
+                  'stdout_eof': None, 'stderr_eof': None}),
+            ]
+            for observation, expected in cases:
+                (work / 'compile-history.json').write_text(json.dumps({
+                    'schema': 'native-budget-monitor/v1', 'label': 'compile-history',
+                    'failures': ['ps_deadline_exceeded'], 'ps_timeout': observation}))
+                self.assertEqual(self.failed_report(work)['ps_timeout'], expected)
+            (work / 'compile-history.json').write_text(json.dumps({
+                'schema': 'native-budget-monitor/v1', 'label': 'compile-history',
+                'failures': ['command_exit_nonzero'], 'ps_timeout': cases[1][0]}))
+            self.assertEqual(self.failed_report(work)['ps_timeout'], empty)
 
     def test_invalid_measurements_and_build_receipts_are_unavailable(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -185,7 +220,7 @@ class PublicFailureTests(unittest.TestCase):
             self.assertNotIn('SECRET', report.getvalue())
             result = json.loads(report.getvalue())
             self.assertEqual(set(result), {'stage', 'monitor_exit', 'command_exit', 'reasons',
-                                          'measurements', 'build_hashes'})
+                                          'measurements', 'build_hashes', 'ps_timeout'})
             self.assertEqual(result['stage'], 'go-version')
             if os.getuid() == 0:
                 self.assertEqual(result['monitor_exit'], 2)
@@ -203,7 +238,7 @@ class SamplingPolicyTests(unittest.TestCase):
         leader = parent + 1
         monitor.proc = SimpleNamespace(pid=leader)
         monitor.pgid = leader
-        monitor.ps = SimpleNamespace(poll=lambda: 0)
+        monitor.ps = SimpleNamespace(poll=lambda: 0, returncode=0)
         monitor.ps_started = 0
         monitor.ps_eof = {'stdout': True, 'stderr': True}
         monitor.ps_buffers = {
@@ -227,6 +262,9 @@ class SamplingPolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(budget.MonitorProblem, '^ps_deadline_exceeded$'):
             monitor.finish_sample(.500001)
         self.assertEqual(monitor.samples, 0)
+        self.assertEqual(monitor.ps_timeout, {
+            'phase': 'pre_completion_check', 'exit_code': 0,
+            'stdout_eof': True, 'stderr_eof': True})
 
     def test_sample_deadline_includes_parse_completion(self):
         for completed, rejected in ((.50, False), (.500001, True)):
@@ -242,6 +280,26 @@ class SamplingPolicyTests(unittest.TestCase):
                 self.assertEqual(monitor.samples, 1)
                 self.assertEqual(monitor.peak_kib, 64)
                 self.assertEqual(monitor.max_sample_duration, completed)
+                self.assertEqual(monitor.ps_timeout, {
+                    'phase': 'post_parse', 'exit_code': 0,
+                    'stdout_eof': True, 'stderr_eof': True} if rejected else None)
+
+    def test_timeout_preserves_cached_state_without_polling_or_cleanup_changes(self):
+        monitor = self.sample()
+        monitor.ps.returncode = None
+        monitor.ps.poll = mock.Mock(side_effect=AssertionError('unexpected poll'))
+        monitor.ps_eof = {'stdout': False, 'stderr': True}
+        with self.assertRaisesRegex(budget.MonitorProblem, '^ps_deadline_exceeded$'):
+            monitor.finish_sample(.6)
+        self.assertEqual(monitor.ps_timeout, {
+            'phase': 'pre_completion_check', 'exit_code': None,
+            'stdout_eof': False, 'stderr_eof': True})
+        monitor.ps.returncode = -9
+        monitor.ps_eof['stdout'] = True
+        self.assertEqual(monitor.ps_timeout['exit_code'], None)
+        self.assertFalse(monitor.ps_timeout['stdout_eof'])
+        self.assertEqual(monitor.samples, 0)
+        self.assertEqual(monitor.stage, 'running')
 
     def test_sampling_start_gap_accepts_trial_window_and_refuses_overrun(self):
         for gap in (.65, .75, .750001):
