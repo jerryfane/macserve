@@ -62,8 +62,8 @@ type agentProcess struct {
 
 // agentInspector is the read-only native seam: kernel facts alone (kernel),
 // kernel facts with the launch arguments (process), launchctl print of one
-// exact service target (service) or domain (domain), the SIP file check
-// (restricted, see sipRestrictedExecutable), symlink resolution of a system
+// exact service target (service) or domain (domain), SIP file and directory
+// checks (restricted and restrictedDirectory), symlink resolution of a system
 // path (resolve), a SIP-restricted launchd plist as XML (plist), hostguard's
 // toolchain policy for the job UID (toolchain), a bundle's Info.plist
 // identity (bundleInfo) and launchd's pid-domain XPC environment of the job
@@ -74,6 +74,7 @@ type agentInspector interface {
 	service(ctx context.Context, target string) (launchctlprint.Snapshot, error)
 	domain(ctx context.Context, target string) (launchctlprint.Domain, error)
 	restricted(path string) error
+	restrictedDirectory(path string) error
 	resolve(path string) (string, error)
 	plist(ctx context.Context, path string) ([]byte, error)
 	toolchain(path string, directory bool, uid int) error
@@ -154,17 +155,23 @@ func (s LaunchdService) target(uid, owner int) string {
 	return ""
 }
 
-// serviceType is launchd's `type` for s: only the system plist path is a
-// LaunchAgent, every bundle an XPCService.
+// serviceType is launchd's type: system and Apple-managed app plists describe
+// LaunchAgents; bundle records describe XPC services.
 func (s LaunchdService) serviceType() string {
-	if systemAgentPlist(s.Path) {
+	if systemAgentPlist(s.Path) || appleManagedAgentBundle(s) != "" {
 		return "LaunchAgent"
 	}
 	return "XPCService"
 }
 
 func (s LaunchdService) valid(self int) bool {
-	if !validLaunchdLabel(s.Label) || !systemPath(s.Executable) || !validLaunchDigest(s.LaunchSHA256) || !validLaunchDigest(s.InheritedSHA256) {
+	if !validLaunchdLabel(s.Label) || !validLaunchDigest(s.LaunchSHA256) || !validLaunchDigest(s.InheritedSHA256) {
+		return false
+	}
+	if appleManagedAgentBundle(s) != "" {
+		return true
+	}
+	if !systemPath(s.Executable) {
 		return false
 	}
 	switch s.Domain {
@@ -217,6 +224,9 @@ func launchedBy(ctx context.Context, agents agentInspector, uid int, s LaunchdSe
 	target := s.target(uid, owner)
 	snapshot, err := agents.service(ctx, target)
 	if err != nil || snapshot.Target != target || snapshot.PID != pid || snapshot.Path != s.Path || snapshot.Type != s.serviceType() || inheritedDigest(snapshot.Inherited) != s.InheritedSHA256 {
+		return false
+	}
+	if bundle := appleManagedAgentBundle(s); bundle != "" && !verifiedAppleManagedAgent(ctx, agents, s, snapshot, facts, bundle) {
 		return false
 	}
 	again, err := agents.process(pid)
@@ -306,8 +316,8 @@ func startedAfter(later, earlier string) bool {
 }
 
 // describeServices records launchd provenance for audited processes that are
-// verifiably system LaunchAgents or system XPC services. Anything else keeps
-// no record: it may still exit without refusal, but no replacement is accepted.
+// verifiably system or Apple-managed LaunchAgents, or system XPC services.
+// Anything else keeps no record: it may exit, but no replacement is accepted.
 func describeServices(ctx context.Context, agents agentInspector, uid int, b GUIBaseline) GUIBaseline {
 	owners := make([]int, 0, len(b.Processes))
 	for _, p := range b.Processes {

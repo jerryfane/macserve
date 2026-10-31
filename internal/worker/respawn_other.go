@@ -28,6 +28,8 @@ func (nativeAgents) domain(context.Context, string) (launchctlprint.Domain, erro
 
 func (nativeAgents) restricted(string) error { return errNoLaunchd }
 
+func (nativeAgents) restrictedDirectory(string) error { return errNoLaunchd }
+
 func (nativeAgents) resolve(string) (string, error) { return "", errNoLaunchd }
 
 func (nativeAgents) plist(context.Context, string) ([]byte, error) { return nil, errNoLaunchd }

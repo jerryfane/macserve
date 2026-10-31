@@ -462,6 +462,28 @@ preserve its evidence and review recovery before another authorized attempt.
 
 **Launchd relaunches (v0.1.9).** For each audited process that is verifiably a system launchd service, reset also records launchd provenance in the baseline (`processes[].service`): domain (`gui` LaunchAgent, `user` XPC service, or `pid` XPC service with its audited `owner` PID), label, launchd `path`, kernel `executable` path, `launch_sha256`, a digest of the exact exec path and arguments from `KERN_PROCARGS2` (since v0.1.11 nothing after argv is read), and `inherited_sha256`, a digest of the `inherited environment` that root `launchctl print` lists for the service. Only LaunchAgents whose launchd path is exactly `/System/Library/LaunchAgents/<label>.plist` and XPC services whose `.xpc` bundle lies under `/System` (not `/System/Volumes`), `/usr` (not `/usr/local`), `/bin` or `/sbin` qualify, and only when the rule below already holds for the audited instance itself; `worker-reset` prints how many audited processes received a record. After an audited PID exits, a new job-UID process stands in for it (cleanup does not terminate it, admission does not refuse it) only if **all** hold: (1) the kernel reports a valid platform binary whose executable is the recorded path; (2) its parent is launchd (PPID 1); (3) it started after the audited process; (4) its launch digest equals the recorded one; (5) root `launchctl print` of the recorded target shows that PID running with the recorded path, type (`LaunchAgent` or `XPCService`) and inherited environment, and kernel facts read again afterwards are unchanged; (6) an XPC service is looked up only in the domain of its audited owner or of that owner's verified relaunch, in any baseline order (owners that are themselves XPC services resolve first). A relaunch that lands on the exited audited PID number is accepted under the same rule. Every other process stays residual and is terminated as before.
 
+**Audited Apple-managed LaunchAgents.** The recorded-relaunch rule also covers
+an explicitly selected `gui` or `user` LaunchAgent defined by
+`/Library/Apple/System/Library/<app>.app/Contents/Resources/<label>.plist`,
+with its executable inside that same app's `Contents` tree. This covers the
+observed XProtect service: despite its executable living in an `.xpc` bundle,
+launchd runs this instance as a GUI LaunchAgent, not an application XPC service.
+Both files and every directory through `/Library/Apple` must be root-owned,
+SIP-restricted, non-symlinks and not group/other writable. The native inspector
+checks the protected plist's label, enabled state, program and arguments
+against launchd and the kernel exec/argv; the recorded identity, platform
+signature, inherited environment and final process-identity recheck still apply.
+These checks run when provenance is recorded and on each replacement.
+
+This does not make `/Library/Apple` a general system path, automatically retain
+unselected services, or forgive signal failures. Explicitly audit and select
+required retained instances before reset. An unselected signal-exempt service
+still causes reset to refuse; a changed or unverified replacement stays residual.
+Static `codesign --verify --strict` rejecting XProtect's obsolete resource
+envelope is not silently treated as passing: this native rule uses the live
+kernel's valid platform signature plus SIP-protected files and ancestors,
+not that distinct static resource-envelope check.
+
 **Reset keeps what survives (v0.1.10).** Reset takes minutes: it removes job persistence, terminates job processes, runs the full persistence attestation, terminates again and audits. Apple helpers in the job GUI session exit on their own in that time, and launchd starts them again on demand (MachServices) or keeps them alive. Reset therefore defines the new baseline from the selection as it survives:
 
 - **Provenance first.** Launchd provenance is recorded from the selected instances themselves before cleanup, while they still run. A Background-session system LaunchAgent in the job's `user` domain (for example `com.apple.TrustEvaluationAgent`, `LimitLoadToSessionType=Background`) now qualifies like a `gui` one: its launchd path must be exactly `/System/Library/LaunchAgents/<label>.plist` with type `LaunchAgent`.
