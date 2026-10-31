@@ -25,9 +25,10 @@ func appleManagedAgentBundle(s LaunchdService) string {
 		return ""
 	}
 	bundle := s.Path[:len(root)+i+len(".app")]
-	if filepath.Dir(s.Path) != bundle+"/Contents/Resources" ||
-		filepath.Base(s.Path) != s.Label+".plist" ||
-		!strings.HasPrefix(s.Executable, bundle+"/Contents/") {
+	name, plist := strings.CutSuffix(s.Path[len(bundle)+len("/Contents/Resources/"):], ".plist")
+	executable, sameApp := strings.CutPrefix(s.Executable, bundle)
+	if !plist || name != s.Label || strings.ContainsRune(name, '/') ||
+		!sameApp || !strings.HasPrefix(executable, "/Contents/") {
 		return ""
 	}
 	return bundle
@@ -45,7 +46,7 @@ func verifiedAppleManagedAgent(ctx context.Context, agents agentInspector, s Lau
 		stop := "/Library"
 		if i == 1 {
 			// The definition's walk already checked Contents and its ancestors.
-			stop = bundle + "/Contents"
+			stop = s.Path[:len(bundle)+len("/Contents")]
 		}
 		for dir := filepath.Dir(leaf); dir != stop; dir = filepath.Dir(dir) {
 			if agents.restrictedDirectory(dir) != nil {
