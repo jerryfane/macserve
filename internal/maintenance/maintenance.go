@@ -98,6 +98,9 @@ func Run(ctx context.Context, c Config) error {
 	if c.path == "" {
 		return errors.New("maintenance config must be loaded from a protected file")
 	}
+	if err := leaveBackgroundScheduling(); err != nil {
+		return fmt.Errorf("leave background scheduling: %w", err)
+	}
 	const health = "/Library/macserve/health/current.json"
 	if err := hostguard.RootDirectory(filepath.Dir(health)); err != nil {
 		return err
@@ -138,8 +141,12 @@ func Run(ctx context.Context, c Config) error {
 			h, err = observe(probeCtx, current)
 			cancel()
 		}
-		if err != nil && h.CheckedAt.IsZero() {
-			h, _ = Evaluate(time.Now(), Qualification{}, BoundaryEvidence{}, Observation{})
+		if err != nil {
+			// The published health carries no reason; keep it diagnosable.
+			fmt.Fprintf(os.Stderr, "macserve maintenance: probe failed: %v\n", err)
+			if h.CheckedAt.IsZero() {
+				h, _ = Evaluate(time.Now(), Qualification{}, BoundaryEvidence{}, Observation{})
+			}
 		}
 		if err = publish(health, h); err != nil {
 			return err
