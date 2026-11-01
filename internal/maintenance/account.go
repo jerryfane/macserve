@@ -40,7 +40,9 @@ type census struct {
 	base   string
 	statat func(int, string, *unix.Stat_t, int) error
 	// fstat is unix.Fstat of an opened directory when nil.
-	fstat   func(int, *unix.Stat_t) error
+	fstat func(int, *unix.Stat_t) error
+	// openat is unix.Openat when nil.
+	openat  func(int, string, int, uint32) (int, error)
 	mounts  func() ([]mountEntry, error)
 	jobHome string
 	jobUID  uint32
@@ -98,10 +100,30 @@ func (c census) coreDeviceMount(dev uint64) (mountEntry, error) {
 }
 
 func (c census) account(ctx context.Context, roots []string) (int64, error) {
-	statat := c.statat
-	fstat := c.fstat
-	if fstat == nil {
-		fstat = unix.Fstat
+	// Raw x/sys calls, unlike package os, do not retry EINTR. On macOS opening a
+	// sandboxed container directory can be interrupted by the Go runtime's
+	// preemption signal; that is a transient condition, not a census failure.
+	rawStatat, rawFstat, rawOpenat := c.statat, c.fstat, c.openat
+	if rawFstat == nil {
+		rawFstat = unix.Fstat
+	}
+	if rawOpenat == nil {
+		rawOpenat = unix.Openat
+	}
+	statat := func(fd int, name string, st *unix.Stat_t, flags int) error {
+		return ignoringEINTR(func() error { return rawStatat(fd, name, st, flags) })
+	}
+	fstat := func(fd int, st *unix.Stat_t) error {
+		return ignoringEINTR(func() error { return rawFstat(fd, st) })
+	}
+	openat := func(fd int, name string, flags int, mode uint32) (int, error) {
+		var opened int
+		err := ignoringEINTR(func() error {
+			var err error
+			opened, err = rawOpenat(fd, name, flags, mode)
+			return err
+		})
+		return opened, err
 	}
 	type inode struct {
 		dev uint64
@@ -158,7 +180,7 @@ func (c census) account(ctx context.Context, roots []string) (int64, error) {
 		fd := -1
 		if kind == unix.S_IFDIR {
 			var err error
-			fd, err = unix.Openat(parent, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+			fd, err = openat(parent, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 			if err != nil {
 				if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ENOTDIR) || errors.Is(err, unix.ELOOP) {
 					return nil
@@ -221,13 +243,13 @@ func (c census) account(ctx context.Context, roots []string) (int64, error) {
 			return -1, errors.New("invalid mutable root")
 		}
 		// Open every ancestor without following a link, not just the final component.
-		fd, err := unix.Open(c.base, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+		fd, err := openat(unix.AT_FDCWD, c.base, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 		if err != nil {
 			return -1, err
 		}
 		parts := strings.Split(strings.TrimPrefix(root, "/"), "/")
 		for _, part := range parts[:len(parts)-1] {
-			next, e := unix.Openat(fd, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+			next, e := openat(fd, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 			unix.Close(fd)
 			if e != nil {
 				return -1, fmt.Errorf("mutable census %s: ancestor %s: %w", root, strconv.Quote(part), e)
@@ -268,4 +290,14 @@ func (c census) account(ctx context.Context, roots []string) (int64, error) {
 		}
 	}
 	return total, ctx.Err()
+}
+
+// ignoringEINTR retries a system call interrupted by a signal before it did any
+// work, as package os does for its own calls.
+func ignoringEINTR(call func() error) error {
+	for {
+		if err := call(); !errors.Is(err, unix.EINTR) {
+			return err
+		}
+	}
 }
