@@ -74,6 +74,58 @@ func TestMutableAccountingChargesSparseFilesAllocatedBytes(t *testing.T) {
 	}
 }
 
+// A signal interrupting a stat or a directory open (EINTR, seen on the Mac
+// Studio opening Library/Containers/*/Data during a build) is transient. It must
+// be retried, not published as an invalid census that cancels the running job.
+func TestMutableAccountingRetriesInterruptedCalls(t *testing.T) {
+	for _, call := range []string{"statat", "openat"} {
+		t.Run(call, func(t *testing.T) {
+			root := censusFixtureDir(t)
+			data := filepath.Join(root, "Data")
+			if err := os.Mkdir(data, 0700); err != nil {
+				t.Fatal(err)
+			}
+			censusFixtureFile(t, filepath.Join(data, "payload"), 4096)
+			want, err := census{base: "/", statat: unix.Fstatat}.account(context.Background(), []string{root})
+			if err != nil {
+				t.Fatal(err)
+			}
+			interrupted := map[string]bool{}
+			interrupt := func(name string) bool {
+				if interrupted[name] {
+					return false
+				}
+				interrupted[name] = true
+				return true
+			}
+			c := census{base: "/", statat: unix.Fstatat}
+			switch call {
+			case "statat":
+				c.statat = func(fd int, name string, st *unix.Stat_t, flags int) error {
+					if interrupt(name) {
+						return unix.EINTR
+					}
+					return unix.Fstatat(fd, name, st, flags)
+				}
+			case "openat":
+				c.openat = func(fd int, name string, flags int, mode uint32) (int, error) {
+					if interrupt(name) {
+						return -1, unix.EINTR
+					}
+					return unix.Openat(fd, name, flags, mode)
+				}
+			}
+			n, err := c.account(context.Background(), []string{root})
+			if err != nil || n != want {
+				t.Fatalf("interrupted %s not retried: bytes=%d want=%d err=%v", call, n, want, err)
+			}
+			if !interrupted["Data"] || !interrupted["payload"] && call == "statat" {
+				t.Fatalf("fixture did not interrupt the expected calls: %v", interrupted)
+			}
+		})
+	}
+}
+
 func TestMutableAccountingEntryChurn(t *testing.T) {
 	for _, change := range []string{"unlink before stat", "unlink before open", "replace with file", "replace with symlink", "replace with directory", "create within directory"} {
 		t.Run(change, func(t *testing.T) {
