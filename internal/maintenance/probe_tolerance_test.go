@@ -18,35 +18,48 @@ import (
 func TestKeepLastValidOnlyForTimeoutsWithinLifetime(t *testing.T) {
 	now := time.Date(2026, 11, 1, 21, 9, 0, 0, time.UTC)
 	valid := controller.Health{BoundaryValidated: true, CheckedAt: now.Add(-12 * time.Second), ExpiresAt: now.Add(18 * time.Second)}
-	timeout := fmt.Errorf("mutable census /Users/macservejob: %w", context.DeadlineExceeded)
+	// Exactly the error the Studio produced: Inspect's own 8 s deadline,
+	// wrapped by the census, while the outer probe context was still live.
+	inner := fmt.Errorf("mutable census /Users/macservejob: %w", context.DeadlineExceeded)
 	for _, tc := range []struct {
-		name     string
-		err      error
-		timedOut bool
-		last     controller.Health
-		at       time.Time
-		want     bool
+		name string
+		err  error
+		last controller.Health
+		at   time.Time
+		want bool
 	}{
-		{"timeout within lifetime", timeout, true, valid, now, true},
-		{"timeout after expiry", timeout, true, valid, valid.ExpiresAt, false},
-		{"timeout without prior valid health", timeout, true, controller.Health{}, now, false},
-		{"prior health invalid", timeout, true, controller.Health{ExpiresAt: now.Add(time.Minute)}, now, false},
-		{"finding while deadline also passed", errors.New("GUI baseline process changed; worker-reset required"), true, valid, now, false},
-		{"deadline error but probe did not time out", timeout, false, valid, now, false},
-		{"other failure", errors.New("persistence attestation changed during qualification"), false, valid, now, false},
+		{"inner Inspect deadline within lifetime", inner, valid, now, true},
+		{"timeout after expiry", inner, valid, valid.ExpiresAt, false},
+		{"timeout without prior valid health", inner, controller.Health{}, now, false},
+		{"prior health invalid", inner, controller.Health{ExpiresAt: now.Add(time.Minute)}, now, false},
+		{"real finding", errors.New("GUI baseline process changed; worker-reset required"), valid, now, false},
+		{"permission failure", errors.New(`mutable census /Library/macserve/var: "controller/Library/Mail": operation not permitted`), valid, now, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := keepLastValid(tc.err, tc.timedOut, tc.last, tc.at); got != tc.want {
+			if got := keepLastValid(tc.err, tc.last, tc.at); got != tc.want {
 				t.Fatalf("keepLastValid = %v, want %v", got, tc.want)
 			}
 		})
 	}
 }
 
-// The deadline must leave room to publish inside the 30 s health lifetime, and
-// exceed the slowest observed loaded probe (8 s) with margin.
-func TestProbeTimeoutFitsHealthLifetime(t *testing.T) {
-	if probeTimeout <= 8*time.Second || probeTimeout >= 30*time.Second {
-		t.Fatalf("probeTimeout %v outside (8s, 30s)", probeTimeout)
+// Measured on the Studio (real binary, ProcessType=Background, real macserve
+// build): probe seconds per 10 s cycle, one inner-deadline failure at 8 s.
+// With the 30 s health lifetime, isolated misses never let health lapse.
+func TestStudioLoadedProbeSequenceNeverInvalidates(t *testing.T) {
+	durations := []int{2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 4, 4, 4, 8, 4, 7, 7, 2, 2, 2, 2, 2, 6, 2}
+	start := time.Date(2026, 11, 1, 16, 6, 0, 0, time.UTC)
+	var last controller.Health
+	for i, d := range durations {
+		at := start.Add(time.Duration(i) * 10 * time.Second)
+		done := at.Add(time.Duration(d) * time.Second)
+		if d >= 8 {
+			err := fmt.Errorf("mutable census /Users/macservejob: %w", context.DeadlineExceeded)
+			if !keepLastValid(err, last, done) {
+				t.Fatalf("cycle %d (%ds) would publish invalid health and cancel the build", i, d)
+			}
+			continue
+		}
+		last = controller.Health{BoundaryValidated: true, CheckedAt: at, ExpiresAt: at.Add(30 * time.Second)}
 	}
 }

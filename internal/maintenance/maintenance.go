@@ -137,11 +137,13 @@ func Run(ctx context.Context, c Config) error {
 		var h controller.Health
 		if err == nil {
 			interval = time.Duration(current.IntervalSeconds) * time.Second
-			probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+			probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 			h, err = observe(probeCtx, current)
-			timedOut := errors.Is(probeCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
 			cancel()
-			if err != nil && keepLastValid(err, timedOut, lastValid, time.Now()) {
+			// Inspect bounds itself (8 s) inside the probe, so a deadline error
+			// can come from either context; only the daemon's own shutdown is not
+			// a timeout.
+			if err != nil && ctx.Err() == nil && keepLastValid(err, lastValid, time.Now()) {
 				fmt.Fprintf(os.Stderr, "macserve maintenance: probe timed out; keeping last valid health until %s: %v\n",
 					lastValid.ExpiresAt.Format(time.RFC3339), err)
 				if !sleepUntil(ctx, started.Add(interval)) {
@@ -171,18 +173,14 @@ func Run(ctx context.Context, c Config) error {
 	}
 }
 
-// probeTimeout bounds one observation. Under launchd ProcessType=Background a
-// census of a job home that a build is writing into measured up to 8 s (1-2 s
-// typical); 15 s still publishes well inside the 30 s health lifetime.
-const probeTimeout = 15 * time.Second
-
 // keepLastValid reports whether a failed probe may leave the last valid health
-// in place: only when the probe itself ran out of time (inconclusive, never a
-// finding) and that health has not expired. Every other error, and any timeout
-// once the last valid health has expired, publishes invalid health.
-func keepLastValid(err error, probeTimedOut bool, last controller.Health, now time.Time) bool {
-	return probeTimedOut && errors.Is(err, context.DeadlineExceeded) &&
-		last.BoundaryValidated && last.ExpiresAt.After(now)
+// in place: only when the probe ran out of time (inconclusive, never a finding;
+// under launchd ProcessType=Background a census of a job home that a build is
+// writing into measured up to 8 s, 1-2 s typical) and that health has not yet
+// expired. Every other error, and any timeout once the last valid health has
+// expired, publishes invalid health.
+func keepLastValid(err error, last controller.Health, now time.Time) bool {
+	return errors.Is(err, context.DeadlineExceeded) && last.BoundaryValidated && last.ExpiresAt.After(now)
 }
 
 func sleepUntil(ctx context.Context, at time.Time) bool {
