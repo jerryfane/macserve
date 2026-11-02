@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -232,6 +233,13 @@ func TestMutableAccountingSkipsJobCoreDeviceMount(t *testing.T) {
 			rel := strings.TrimPrefix(strings.TrimPrefix(tc.mountAt, "Users/macservejob/"), "Library/macserve/var/")
 			if n != -1 || err == nil || !strings.Contains(err.Error(), strconv.Quote(rel)+": "+tc.want) {
 				t.Fatalf("nested mount was not refused: bytes=%d err=%v", n, err)
+			}
+			// Only the accepted mount changing under the census is inconclusive
+			// (the daemon keeps last valid health until it expires); every
+			// other refusal must stay a finding.
+			raced := tc.want == "mutable mount table changed during census"
+			if errors.Is(err, errCoreDeviceMountChanged) != raced {
+				t.Fatalf("errors.Is(err, errCoreDeviceMountChanged)=%v, want %v: %v", !raced, raced, err)
 			}
 		})
 	}
