@@ -286,11 +286,18 @@ func (c census) account(ctx context.Context, roots []string) (int64, error) {
 			}
 		}
 		if same != 1 {
-			return -1, fmt.Errorf("mutable census %s: %s: mutable mount table changed during census", c.jobHome, strconv.Quote(coreDeviceMountPoint))
+			return -1, fmt.Errorf("mutable census %s: %s: %w", c.jobHome, strconv.Quote(coreDeviceMountPoint), errCoreDeviceMountChanged)
 		}
 	}
 	return total, ctx.Err()
 }
+
+// errCoreDeviceMountChanged reports that the one accepted CoreDevice devicefs
+// changed (remounted or unmounted) while the census ran. Xcode's
+// CoreDeviceService does this on its own schedule, notably as a build
+// finishes, so it makes that census inconclusive rather than a finding; a
+// mount that is actually wrong is refused by the next census.
+var errCoreDeviceMountChanged = errors.New("mutable mount table changed during census")
 
 // ignoringEINTR retries a system call interrupted by a signal before it did any
 // work, as package os does for its own calls.

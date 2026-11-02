@@ -144,7 +144,7 @@ func Run(ctx context.Context, c Config) error {
 			// can come from either context; only the daemon's own shutdown is not
 			// a timeout.
 			if err != nil && ctx.Err() == nil && keepLastValid(err, lastValid, time.Now()) {
-				fmt.Fprintf(os.Stderr, "macserve maintenance: probe timed out; keeping last valid health until %s: %v\n",
+				fmt.Fprintf(os.Stderr, "macserve maintenance: probe inconclusive; keeping last valid health until %s: %v\n",
 					lastValid.ExpiresAt.Format(time.RFC3339), err)
 				if !sleepUntil(ctx, started.Add(interval)) {
 					return ctx.Err()
@@ -174,13 +174,16 @@ func Run(ctx context.Context, c Config) error {
 }
 
 // keepLastValid reports whether a failed probe may leave the last valid health
-// in place: only when the probe ran out of time (inconclusive, never a finding;
-// under launchd ProcessType=Background a census of a job home that a build is
-// writing into measured up to 8 s, 1-2 s typical) and that health has not yet
-// expired. Every other error, and any timeout once the last valid health has
+// in place: only when the probe was inconclusive, never a finding, and that
+// health has not yet expired. Inconclusive means it ran out of time (under
+// launchd ProcessType=Background a census of a job home that a build is
+// writing into measured up to 8 s, 1-2 s typical) or the accepted CoreDevice
+// devicefs changed mid-census (Xcode does this as a build finishes). Every
+// other error, and any inconclusive probe once the last valid health has
 // expired, publishes invalid health.
 func keepLastValid(err error, last controller.Health, now time.Time) bool {
-	return errors.Is(err, context.DeadlineExceeded) && last.BoundaryValidated && last.ExpiresAt.After(now)
+	inconclusive := errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errCoreDeviceMountChanged)
+	return inconclusive && last.BoundaryValidated && last.ExpiresAt.After(now)
 }
 
 func sleepUntil(ctx context.Context, at time.Time) bool {
