@@ -144,7 +144,7 @@ JOB=$(jq -n --arg sha "$(git rev-parse HEAD)" --argjson xcode "$XCODE" \
 `tls-cert.pem` is the controller certificate installed at `/Library/macserve/config/tls-cert.pem`. The token needs
 the `jobs:submit` and `jobs:read` scopes for that repository (or an `owner/*` entry). Resending the identical
 request with the same `Idempotency-Key` returns the existing job; a different request under that key is refused.
-The full API is in [configuration.md](docs/configuration.md).
+All routes, including cancel, artifacts and admin pause, are listed in [configuration.md](docs/configuration.md).
 
 ## Security model
 
