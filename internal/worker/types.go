@@ -31,9 +31,21 @@ type Observation struct {
 	DeviceUDID       string            `json:"device_udid,omitempty"`
 	GeneratedDigests map[string]string `json:"generated_digests,omitempty"`
 	LockfileDigests  map[string]string `json:"lockfile_digests,omitempty"`
+	// MetalToolchain is what `xcodebuild -showComponent MetalToolchain`
+	// reported for the job; see observeMetalToolchain.
+	MetalToolchain *MetalToolchain `json:"metal_toolchain,omitempty"`
 	// Recipe is set for template jobs only: the .macserve.json digest, its
 	// parsed form and the commands derived from it.
 	Recipe *model.RepoRecipe `json:"recipe,omitempty"`
+}
+
+// MetalToolchain records the per-job Metal toolchain probe. Status and
+// BuildVersion are the tool's "Status:" and "Build Version:" lines; Error is
+// set instead when the probe failed. Neither outcome fails the job.
+type MetalToolchain struct {
+	Status       string `json:"status,omitempty"`
+	BuildVersion string `json:"build_version,omitempty"`
+	Error        string `json:"error,omitempty"`
 }
 
 type Result struct {
