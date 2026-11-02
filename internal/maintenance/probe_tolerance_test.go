@@ -48,23 +48,71 @@ func TestKeepLastValidOnlyForTimeoutsWithinLifetime(t *testing.T) {
 	}
 }
 
-// Measured on the Studio (real binary, ProcessType=Background, real macserve
-// build): probe seconds per 10 s cycle, one inner-deadline failure at 8 s.
-// With the 30 s health lifetime, isolated misses never let health lapse.
-func TestStudioLoadedProbeSequenceNeverInvalidates(t *testing.T) {
-	durations := []int{2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 4, 4, 4, 8, 4, 7, 7, 2, 2, 2, 2, 2, 6, 2}
-	start := time.Date(2026, 11, 1, 16, 6, 0, 0, time.UTC)
-	var last controller.Health
+// gateAccepts mirrors the controller's freshness rule for published health
+// (internal/controller/guards.go): checked no more than 45 s ago, not expired,
+// and a lifetime of at most 45 s.
+func gateAccepts(h controller.Health, now time.Time) bool {
+	return h.BoundaryValidated && now.Sub(h.CheckedAt) <= 45*time.Second && h.ExpiresAt.After(now) &&
+		h.ExpiresAt.Sub(h.CheckedAt) <= 45*time.Second
+}
+
+// replayProbes runs the maintenance loop's publish/keep decisions over probe
+// durations (seconds, 10 s cadence; >= 8 s is an inconclusive deadline miss)
+// and reports the first second at which the controller would see no valid
+// health, which cancels the running build.
+func replayProbes(t *testing.T, durations []int, lifetime time.Duration) (lapse time.Duration, lapsed bool) {
+	t.Helper()
+	start := time.Date(2026, 11, 2, 14, 56, 0, 0, time.UTC)
+	var published, last controller.Health
+	publishAt := map[time.Duration]controller.Health{}
 	for i, d := range durations {
 		at := start.Add(time.Duration(i) * 10 * time.Second)
 		done := at.Add(time.Duration(d) * time.Second)
 		if d >= 8 {
 			err := fmt.Errorf("mutable census /Users/macservejob: %w", context.DeadlineExceeded)
-			if !keepLastValid(err, last, done) {
-				t.Fatalf("cycle %d (%ds) would publish invalid health and cancel the build", i, d)
+			if keepLastValid(err, last, done) {
+				continue
 			}
+			publishAt[done.Sub(start)] = controller.Health{}
+			last = controller.Health{}
 			continue
 		}
-		last = controller.Health{BoundaryValidated: true, CheckedAt: at, ExpiresAt: at.Add(30 * time.Second)}
+		h := controller.Health{BoundaryValidated: true, CheckedAt: at, ExpiresAt: at.Add(lifetime)}
+		publishAt[done.Sub(start)] = h
+		last = h
+	}
+	end := time.Duration(len(durations)) * 10 * time.Second
+	for s := time.Duration(0); s < end; s += time.Second {
+		if h, ok := publishAt[s]; ok {
+			published = h
+		}
+		if s >= 10*time.Second && !gateAccepts(published, start.Add(s)) {
+			return s, true
+		}
+	}
+	return 0, false
+}
+
+// Measured on the Studio under real builds: isolated 8 s misses (v0.1.22
+// launchd diagnostic) and two consecutive misses (v0.1.24 maintenance log,
+// "keeping last valid health until 14:59:13" twice, then the build was
+// cancelled at 14:59:18 with no failed probe logged).
+func TestStudioLoadedProbeSequencesKeepGateValid(t *testing.T) {
+	for name, durations := range map[string][]int{
+		"isolated misses":     {2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 4, 4, 4, 8, 4, 7, 7, 2, 2, 2, 2, 2, 6, 2},
+		"two misses in a row": {2, 2, 8, 8, 2, 2, 2, 8, 2, 2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if at, lapsed := replayProbes(t, durations, healthLifetime); lapsed {
+				t.Fatalf("controller sees no valid health %v into the run; the build would be cancelled", at)
+			}
+		})
+	}
+	// The 30 s lifetime of v0.1.24 lapses on two misses in a row, as on the Studio.
+	if _, lapsed := replayProbes(t, []int{2, 2, 8, 8, 2, 2}, 30*time.Second); !lapsed {
+		t.Fatal("replay does not reproduce the Studio lapse with the old 30 s lifetime")
+	}
+	if healthLifetime > 45*time.Second {
+		t.Fatalf("healthLifetime %v exceeds the controller's 45 s acceptance", healthLifetime)
 	}
 }
