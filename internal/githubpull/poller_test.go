@@ -211,7 +211,7 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry, err := profiles.New([]model.Profile{{ID: testProfile, Version: 1, Repo: testRepo, Kind: model.Build, Xcode: model.Xcode{Version: "26.0", Build: "17A100"}, DeveloperDir: "/Applications/ExampleToolchain.app/Contents/Developer", WorkDir: ".", Run: model.Command{Executable: "/usr/bin/true"}, DefaultTimeoutSeconds: 60, MaxTimeoutSeconds: 600, MemoryLimitMiB: 512}})
+	registry, err := profiles.New([]model.Profile{{ID: testProfile, Version: 1, Repo: testRepo, Kind: model.Build, Xcode: model.Xcode{Version: "26.0", Build: "17A100"}, DeveloperDir: "/Applications/ExampleToolchain.app/Contents/Developer", WorkDir: ".", Run: model.Command{Executable: "/usr/bin/true"}, DefaultTimeoutSeconds: 60, MaxTimeoutSeconds: 600, MemoryLimitMiB: 512}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

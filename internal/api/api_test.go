@@ -53,7 +53,7 @@ func setup(t *testing.T) *fixture {
 	}
 	t.Cleanup(func() { f.db.Close() })
 	profile := model.Profile{ID: "build-v1", Version: 1, Repo: "example-org/example-app", Kind: model.Build, Xcode: model.Xcode{Version: "27.0", Build: "27A100"}, DeveloperDir: "/Applications/Example.app/Contents/Developer", WorkDir: ".", Run: model.Command{Executable: "/usr/bin/true"}, GeneratedFiles: []model.GeneratedFile{{Path: "config", Content: "recipe-private-value"}}, DefaultTimeoutSeconds: 60, MaxTimeoutSeconds: 600}
-	registry, err := profiles.New([]model.Profile{profile})
+	registry, err := profiles.New([]model.Profile{profile}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +146,7 @@ func TestStrictRequestsAndSnapshotReplay(t *testing.T) {
 		}
 	}
 	job := f.submit(t, "stable")
-	registry, err := profiles.New(nil)
+	registry, err := profiles.New(nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

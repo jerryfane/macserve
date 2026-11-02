@@ -94,8 +94,15 @@ func (c *Client) repository(ctx context.Context, repo, token string) (Repository
 	if err != nil {
 		return Repository{}, err
 	}
-	if result.ID <= 0 || !strings.EqualFold(result.FullName, repo) || (c.appID != 0 && result.ID != c.repositories[strings.ToLower(repo)]) {
+	if result.ID <= 0 || !strings.EqualFold(result.FullName, repo) {
 		return Repository{}, errors.New("GitHub repository identity mismatch")
+	}
+	if c.appID != 0 {
+		id, known := c.RepositoryID(repo)
+		_, pinned := c.repositories[strings.ToLower(repo)]
+		if !known || result.ID != id || !pinned && !strings.EqualFold(result.Owner.Login, repoOwner(repo)) {
+			return Repository{}, errors.New("GitHub repository identity mismatch")
+		}
 	}
 	return result, nil
 }

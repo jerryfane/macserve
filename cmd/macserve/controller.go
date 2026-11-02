@@ -8,7 +8,6 @@ import (
 	"github.com/jerryfane/macserve/internal/api"
 	"github.com/jerryfane/macserve/internal/controller"
 	"github.com/jerryfane/macserve/internal/hostguard"
-	"github.com/jerryfane/macserve/internal/model"
 	"github.com/jerryfane/macserve/internal/profiles"
 	"github.com/jerryfane/macserve/internal/source"
 	"github.com/jerryfane/macserve/internal/store"
@@ -18,7 +17,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 )
@@ -63,14 +61,8 @@ func serveController(parent context.Context, config controller.Config) error {
 	if err != nil {
 		return err
 	}
-	qualified := make(map[string]string)
-	for _, p := range registry.List() {
-		a, err := registry.Resolve(model.Request{Repo: p.Repo, SHA: strings.Repeat("0", 40), Kind: p.Kind, Profile: p.ID, Xcode: p.Xcode, Simulator: p.Simulator})
-		if err != nil {
-			return err
-		}
-		qualified[p.ID] = a.ProfileDigest
-	}
+	// Health must qualify every configured profile and template digest.
+	qualified := registry.Digests()
 	certificate, err := tls.LoadX509KeyPair(config.TLSCertificate, config.TLSKey)
 	if err != nil {
 		return err

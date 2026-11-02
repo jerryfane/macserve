@@ -358,13 +358,9 @@ func Inspect(ctx context.Context, c Config) (Observation, error) {
 	if err != nil {
 		return invalid, err
 	}
-	for _, p := range registry.List() {
-		raw, err := json.Marshal(p)
-		if err != nil {
-			return invalid, err
-		}
-		o.Profiles[p.ID] = digest(raw)
-	}
+	// Profile digests are sha256 of each normalized profile's JSON; template
+	// digests are sha256 of each normalized template's JSON.
+	o.Profiles = registry.Digests()
 	o.MemoryPressure, err = memoryPressure()
 	if err != nil {
 		return invalid, err

@@ -27,6 +27,7 @@ import (
 	"github.com/jerryfane/macserve/internal/hostguard"
 	"github.com/jerryfane/macserve/internal/maintenance"
 	"github.com/jerryfane/macserve/internal/model"
+	"github.com/jerryfane/macserve/internal/profiles"
 )
 
 const maxArtifact = 4 << 20
@@ -56,8 +57,12 @@ type Challenge struct {
 	PrivatePaths      []string                `json:"private_paths"`
 	Socket            string                  `json:"socket"`
 	Profiles          []model.Profile         `json:"profiles"`
-	Previous          string                  `json:"previous,omitempty"`
-	PreviousSHA256    string                  `json:"previous_sha256,omitempty"`
+	// Templates are the enabled org-level build templates. Each is qualified
+	// like a profile: by digest in the observation and by one tool-evidence
+	// run on its pinned source. Omitted when none are configured.
+	Templates      []model.Template `json:"templates,omitempty"`
+	Previous       string           `json:"previous,omitempty"`
+	PreviousSHA256 string           `json:"previous_sha256,omitempty"`
 	// BootSession is kern.bootsessionuuid. A reboot transition needs both it
 	// and Observation.Boot (a kern.boottime digest) to change.
 	BootSession string `json:"boot_session"`
@@ -67,6 +72,17 @@ type Challenge struct {
 	// owner last approved (the activation anchor).
 	Requalify bool `json:"requalify,omitempty"`
 }
+
+// recipes returns one qualification unit per enabled profile and template, in
+// configuration order; a template appears as its repository-less job snapshot.
+func (c Challenge) recipes() []model.Profile {
+	list := slices.Clone(c.Profiles)
+	for _, t := range c.Templates {
+		list = append(list, profiles.TemplateSnapshot(t, ""))
+	}
+	return list
+}
+
 type Result struct {
 	Category string `json:"category"`
 	Target   string `json:"target"`

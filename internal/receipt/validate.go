@@ -140,8 +140,9 @@ func validateDetails(p Payload, require func(bool, string)) {
 	d := p.Details
 	r := d.Result
 	profile := d.Profile
-	raw, err := json.Marshal(profile)
-	require(err == nil && hashBytes(raw) == p.ProfileDigest && profile.ID == p.Request.Profile && profile.Version == p.ProfileVersion && profile.Repo == p.Request.Repo && profile.Kind == p.Request.Kind && profile.Xcode == p.Request.Xcode && sameSimulator(profile.Simulator, p.Request.Simulator) && sameStrings(profile.RequiredTests, p.Tests.Required) && profile.MemoryLimitMiB == p.Resources.MemoryLimitMiB, "recipe manifest")
+	snapshotDigest, err := profile.SnapshotDigest()
+	require(err == nil && snapshotDigest == p.ProfileDigest && profile.ID == p.Request.Profile && profile.Version == p.ProfileVersion && profile.Repo == p.Request.Repo && profile.Kind == p.Request.Kind && profile.Xcode == p.Request.Xcode && sameSimulator(profile.Simulator, p.Request.Simulator) && sameStrings(profile.RequiredTests, p.Tests.Required) && profile.MemoryLimitMiB == p.Resources.MemoryLimitMiB, "recipe manifest")
+	require((profile.Template != nil) == (r.Observation.Recipe != nil), "template recipe manifest")
 	require(r.State == p.State && r.Source == p.Source && r.StartedAt.Equal(p.StartedAt) && r.FinishedAt.Equal(p.FinishedAt) && r.CleanupOK == p.Resources.CleanupOK && reflect.DeepEqual(r.ExitCode, p.ExitCode) && r.Signal == p.Signal && r.Reason == p.Reason && r.LogsTruncated == p.LogsTruncated && r.PeakMemoryMiB == p.Resources.PeakMemoryMiB && observed(r.Observation) == p.Observation, "execution manifest")
 	require(len(r.Commands) == p.CommandCount && len(r.Artifacts) == p.ArtifactCount, "manifest counts")
 	for _, item := range []struct {

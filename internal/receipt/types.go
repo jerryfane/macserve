@@ -95,6 +95,9 @@ type Observation struct {
 	RuntimeVersion string      `json:"runtime_version,omitempty"`
 	RuntimeBuild   string      `json:"runtime_build,omitempty"`
 	DeviceUDID     string      `json:"device_udid,omitempty"`
+	// RepoConfigSHA256 is the sha256 of a template job's .macserve.json bytes;
+	// the derived commands are in the details manifest's result observation.
+	RepoConfigSHA256 string `json:"repo_config_sha256,omitempty"`
 }
 type ResourcePolicy struct {
 	TimeoutSeconds  int   `json:"timeout_seconds"`

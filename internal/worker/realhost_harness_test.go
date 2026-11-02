@@ -786,7 +786,7 @@ func TestRealHostEndToEnd(t *testing.T) {
 		if err := engine.Recover(ctx); err != nil {
 			run.Recover = err.Error()
 		}
-		single, err := profiles.New([]model.Profile{p})
+		single, err := profiles.New([]model.Profile{p}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

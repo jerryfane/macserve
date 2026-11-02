@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -72,7 +73,17 @@ func validRepo(repo string) bool {
 
 func profileBytes(admission model.Admission) ([]byte, error) {
 	request, profile := admission.Request, admission.Profile
-	if profile.ID != request.Profile || profile.Repo != request.Repo || profile.Kind != request.Kind || profile.Xcode != request.Xcode || profile.Version <= 0 || profile.DefaultTimeoutSeconds <= 0 || profile.MaxTimeoutSeconds < profile.DefaultTimeoutSeconds || profile.MaxTimeoutSeconds > 3600 || request.TimeoutSeconds > profile.MaxTimeoutSeconds || profile.MemoryLimitMiB <= 0 || !validOpaque(profile.Run.Executable, 4096) || !validOpaque(profile.DeveloperDir, 4096) {
+	if profile.ID != request.Profile || profile.Repo != request.Repo || profile.Kind != request.Kind || profile.Xcode != request.Xcode || profile.Version <= 0 || profile.DefaultTimeoutSeconds <= 0 || profile.MaxTimeoutSeconds < profile.DefaultTimeoutSeconds || profile.MaxTimeoutSeconds > 3600 || request.TimeoutSeconds > profile.MaxTimeoutSeconds || profile.MemoryLimitMiB <= 0 || !validOpaque(profile.DeveloperDir, 4096) {
+		return nil, ErrInvalid
+	}
+	if t := profile.Template; t != nil {
+		// A template snapshot carries no recipe: the worker derives it from the
+		// repository's .macserve.json. Everything else must come from the template.
+		owner, _, _ := strings.Cut(request.Repo, "/")
+		if t.ID != profile.ID || t.Version != profile.Version || t.Kind != profile.Kind || t.Xcode != profile.Xcode || t.DeveloperDir != profile.DeveloperDir || t.DefaultTimeoutSeconds != profile.DefaultTimeoutSeconds || t.MaxTimeoutSeconds != profile.MaxTimeoutSeconds || t.MemoryLimitMiB != profile.MemoryLimitMiB || !slices.Contains(t.Owners, owner) || profile.Simulator != nil || profile.WorkDir != "" || len(profile.Prepare) != 0 || profile.Run.Executable != "" || len(profile.Run.Args) != 0 || len(profile.GeneratedFiles) != 0 || len(profile.Artifacts) != 0 || len(profile.RequiredTests) != 0 {
+			return nil, ErrInvalid
+		}
+	} else if !validOpaque(profile.Run.Executable, 4096) {
 		return nil, ErrInvalid
 	}
 	if (request.Simulator == nil) != (profile.Simulator == nil) || request.Simulator != nil && *request.Simulator != *profile.Simulator {
@@ -85,8 +96,8 @@ func profileBytes(admission model.Admission) ([]byte, error) {
 	if len(data) > 1<<20 {
 		return nil, ErrInvalid
 	}
-	digest := sha256.Sum256(data)
-	if admission.ProfileDigest != hex.EncodeToString(digest[:]) {
+	digest, err := profile.SnapshotDigest()
+	if err != nil || admission.ProfileDigest != digest {
 		return nil, ErrInvalid
 	}
 	return data, nil

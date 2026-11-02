@@ -205,6 +205,20 @@ func (h *handler) capabilities(w http.ResponseWriter, r *http.Request, p store.P
 		}
 		items = append(items, map[string]any{"id": profile.ID, "version": profile.Version, "repo": profile.Repo, "kind": profile.Kind, "xcode": profile.Xcode, "simulator": profile.Simulator, "default_timeout_seconds": profile.DefaultTimeoutSeconds, "max_timeout_seconds": profile.MaxTimeoutSeconds})
 	}
+	// Templates admit any repository of their owners; list those the
+	// principal may submit for, with the owners it may use them for.
+	var templates []map[string]any
+	for _, template := range h.Profiles.Templates() {
+		var owners []string
+		for _, owner := range template.Owners {
+			if p.AllowsOwner(owner) {
+				owners = append(owners, owner)
+			}
+		}
+		if len(owners) > 0 {
+			templates = append(templates, map[string]any{"id": template.ID, "version": template.Version, "owners": owners, "kind": template.Kind, "xcode": template.Xcode, "repo_config": ".macserve.json", "default_timeout_seconds": template.DefaultTimeoutSeconds, "max_timeout_seconds": template.MaxTimeoutSeconds})
+		}
+	}
 	// Do not expose active job IDs, trusted command recipes or filesystem paths.
 	blocked := append([]string{}, status.Gate.Blockers...)
 	if status.Service.Paused {
@@ -213,7 +227,11 @@ func (h *handler) capabilities(w http.ResponseWriter, r *http.Request, p store.P
 	if status.Service.Quarantined {
 		blocked = append(blocked, "quarantined")
 	}
-	writeJSON(w, 200, map[string]any{"api_version": "v1", "service_version": "development", "repositories": p.Repositories, "profiles": items, "worker_ready": status.WorkerReady, "gui_ready": status.WorkerReady && status.Gate.Ready, "quiescent": status.Quiescent, "blocked_by": blocked, "paused": status.Service.Paused})
+	body := map[string]any{"api_version": "v1", "service_version": "development", "repositories": p.Repositories, "profiles": items, "worker_ready": status.WorkerReady, "gui_ready": status.WorkerReady && status.Gate.Ready, "quiescent": status.Quiescent, "blocked_by": blocked, "paused": status.Service.Paused}
+	if templates != nil {
+		body["templates"] = templates
+	}
+	writeJSON(w, 200, body)
 }
 
 func (h *handler) blocked(r *http.Request) []string {

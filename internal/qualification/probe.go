@@ -395,7 +395,7 @@ func probeReport(ctx context.Context, c Challenge, raw []byte, role string) (Rep
 	}
 	if role == "job" {
 		developerDirs := []string{c.Environment.DeveloperDir}
-		for _, p := range c.Profiles {
+		for _, p := range c.recipes() {
 			developerDirs = append(developerDirs, p.DeveloperDir)
 		}
 		slices.Sort(developerDirs)
@@ -414,12 +414,12 @@ func probeReport(ctx context.Context, c Challenge, raw []byte, role string) (Rep
 			}
 			text, diag, err := command(ctx, developer, exe, "-version")
 			ok := err == nil && strings.HasPrefix(text, "Xcode ") && strings.Contains(text, "\nBuild version ")
-			for _, p := range c.Profiles {
+			for _, p := range c.recipes() {
 				if p.DeveloperDir == developer {
 					ok = ok && text == "Xcode "+p.Xcode.Version+"\nBuild version "+p.Xcode.Build+"\n"
 				}
 			}
-			detail := fmt.Sprintf("stdout:\n%sstderr:\n%serror: %v; enabled profiles: %d; inspection is NOT recipe/UI execution", text, diag, err, len(c.Profiles))
+			detail := fmt.Sprintf("stdout:\n%sstderr:\n%serror: %v; enabled profiles: %d; inspection is NOT recipe/UI execution", text, diag, err, len(c.recipes()))
 			extraOK, extra := inspectTools(ctx, c, developer)
 			ok = ok && extraOK
 			detail += "\n" + extra

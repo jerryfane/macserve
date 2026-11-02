@@ -31,6 +31,9 @@ type Observation struct {
 	DeviceUDID       string            `json:"device_udid,omitempty"`
 	GeneratedDigests map[string]string `json:"generated_digests,omitempty"`
 	LockfileDigests  map[string]string `json:"lockfile_digests,omitempty"`
+	// Recipe is set for template jobs only: the .macserve.json digest, its
+	// parsed form and the commands derived from it.
+	Recipe *model.RepoRecipe `json:"recipe,omitempty"`
 }
 
 type Result struct {

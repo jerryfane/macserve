@@ -33,16 +33,39 @@ func (p Principal) HasScope(scope string) bool {
 	return false
 }
 
+// AllowsRepository matches an exact "owner/name" entry or an account-level
+// "owner/*" entry, which allows every repository of that GitHub account.
 func (p Principal) AllowsRepository(repo string) bool {
 	if p.Revoked {
 		return false
 	}
+	owner, _, _ := strings.Cut(repo, "/")
 	for _, value := range p.Repositories {
-		if strings.EqualFold(value, repo) {
+		if strings.EqualFold(value, repo) || strings.EqualFold(value, owner+"/*") && validRepo(repo) {
 			return true
 		}
 	}
 	return false
+}
+
+// AllowsOwner reports whether the principal may submit for some repository
+// of a GitHub account: through an "owner/*" entry or an exact repository.
+func (p Principal) AllowsOwner(owner string) bool {
+	if p.Revoked {
+		return false
+	}
+	for _, value := range p.Repositories {
+		if entryOwner, _, _ := strings.Cut(value, "/"); strings.EqualFold(entryOwner, owner) {
+			return true
+		}
+	}
+	return false
+}
+
+// validOwnerWildcard accepts "owner/*" with a GitHub account login owner.
+func validOwnerWildcard(entry string) bool {
+	owner, ok := strings.CutSuffix(entry, "/*")
+	return ok && validRepo(owner+"/x") && !strings.ContainsAny(owner, "_.")
 }
 
 // ReplacePrincipals atomically replaces the complete configured credential set.
@@ -63,7 +86,7 @@ func (s *Store) ReplacePrincipals(ctx context.Context, principals []Principal) e
 		p.Repositories = append([]string{}, p.Repositories...)
 		for j, repo := range p.Repositories {
 			repo = strings.ToLower(repo)
-			if !validRepo(repo) {
+			if !validRepo(repo) && !validOwnerWildcard(repo) {
 				return ErrInvalid
 			}
 			p.Repositories[j] = repo
