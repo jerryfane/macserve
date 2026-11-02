@@ -48,10 +48,13 @@ type SourcePins struct {
 	Sources []SourcePin `json:"sources"`
 }
 
-// SourcePin pins one profile's source: a git archive stored root-owned at
-// sourcesDir/<sha256>.tar.
+// SourcePin pins one profile's or template's source: a git archive stored
+// root-owned at sourcesDir/<sha256>.tar. A template pin also names the
+// repository the archive came from (its owner must be a template owner); the
+// archive must contain a valid .macserve.json.
 type SourcePin struct {
 	Profile   string `json:"profile"`
+	Repo      string `json:"repo,omitempty"`
 	Commit    string `json:"commit"`
 	Tree      string `json:"tree"`
 	SHA256    string `json:"sha256"`
@@ -146,7 +149,8 @@ type ToolEvidence struct {
 	Runs            []ToolRun `json:"runs"`
 }
 
-// loadSourcePins reads the protected pins and requires one pin per profile.
+// loadSourcePins reads the protected pins and requires one pin per profile or
+// template; a template pin must name a repository of one of its owners.
 func loadSourcePins(list []model.Profile) (SourcePins, string, error) {
 	var pins SourcePins
 	b, err := protectedRead(sourcesPinsPath)
@@ -164,8 +168,26 @@ func loadSourcePins(list []model.Profile) (SourcePins, string, error) {
 		if !ok || !sha40.MatchString(pin.Commit) || !sha40.MatchString(pin.Tree) || !sha64.MatchString(pin.SHA256) || pin.SizeBytes <= 0 {
 			return pins, "", fmt.Errorf("qualification source pin missing or invalid for profile %s", p.ID)
 		}
+		if p.Template != nil {
+			if _, err := pinRequest(p, pin, 0); err != nil {
+				return pins, "", fmt.Errorf("qualification source pin for template %s must name a repository of a template owner", p.ID)
+			}
+		}
 	}
 	return pins, digest(b), nil
+}
+
+// pinRequest is the admission request that runs a recipe on its pinned source.
+func pinRequest(p model.Profile, pin SourcePin, timeoutSeconds int) (model.Admission, error) {
+	registry, err := profiles.ForSnapshot(p)
+	if err != nil {
+		return model.Admission{}, err
+	}
+	repo := p.Repo
+	if p.Template != nil {
+		repo = pin.Repo
+	}
+	return registry.Resolve(model.Request{Repo: repo, SHA: pin.Commit, Kind: p.Kind, Profile: p.ID, Xcode: p.Xcode, Simulator: p.Simulator, TimeoutSeconds: timeoutSeconds})
 }
 
 func sourcePin(pins SourcePins, profile string) (SourcePin, bool) {
@@ -214,10 +236,10 @@ func RunToolEvidence(ctx context.Context, id string) error {
 	if _, err := os.Lstat(filepath.Join(dir, "candidate.json")); !errors.Is(err, os.ErrNotExist) {
 		return errors.New("session already collected; begin a new session")
 	}
-	if len(c.Profiles) == 0 {
+	if len(c.recipes()) == 0 {
 		return errors.New("no enabled profiles: tool evidence is not applicable")
 	}
-	pins, pinsDigest, err := loadSourcePins(c.Profiles)
+	pins, pinsDigest, err := loadSourcePins(c.recipes())
 	if err != nil {
 		return err
 	}
@@ -247,7 +269,7 @@ func RunToolEvidence(ctx context.Context, id string) error {
 	if err = saveJSON(filepath.Join(dir, "tool-evidence-attempt.json"), evidence, 0600); err != nil {
 		return fmt.Errorf("one tool evidence run per session; begin a new session: %w", err)
 	}
-	list := slices.Clone(c.Profiles)
+	list := c.recipes()
 	slices.SortFunc(list, func(a, b model.Profile) int {
 		if a.ID < b.ID {
 			return -1
@@ -281,11 +303,7 @@ func runProfile(ctx context.Context, engine *worker.Engine, c Challenge, p model
 		return run, errors.New("not enough challenge lifetime left for a recipe run; begin a new session")
 	}
 	timeout := min(time.Duration(p.DefaultTimeoutSeconds)*time.Second, remaining)
-	registry, err := profiles.New([]model.Profile{p})
-	if err != nil {
-		return run, err
-	}
-	admission, err := registry.Resolve(model.Request{Repo: p.Repo, SHA: pin.Commit, Kind: p.Kind, Profile: p.ID, Xcode: p.Xcode, Simulator: p.Simulator, TimeoutSeconds: int(timeout / time.Second)})
+	admission, err := pinRequest(p, pin, int(timeout/time.Second))
 	if err != nil {
 		return run, err
 	}
@@ -337,13 +355,16 @@ func toolEvidencePasses(dir string, c Challenge, raw []byte) ([]byte, bool, stri
 	if err = decode(b, &t); err != nil {
 		return b, false, "tool evidence is not a valid document"
 	}
-	if t.Schema != schema || t.Session != filepath.Base(dir) || t.ChallengeSHA256 != digest(raw) || t.SourcesSHA256 != c.SourcesSHA256 || t.Started.Before(c.Created) || t.Finished.Before(t.Started) || t.Finished.After(c.Expires) || len(t.Runs) != len(c.Profiles) {
+	recipes := c.recipes()
+	if t.Schema != schema || t.Session != filepath.Base(dir) || t.ChallengeSHA256 != digest(raw) || t.SourcesSHA256 != c.SourcesSHA256 || t.Started.Before(c.Created) || t.Finished.Before(t.Started) || t.Finished.After(c.Expires) || len(t.Runs) != len(recipes) {
 		return b, false, "tool evidence does not bind this session"
 	}
-	for _, p := range c.Profiles {
+	for _, p := range recipes {
 		ok := false
 		for _, run := range t.Runs {
-			if run.Profile == p.ID && run.Error == "" && run.ProfileDigest == c.Observation.Profiles[p.ID] && run.Result.State == model.Succeeded && run.Result.CleanupOK && run.Result.Observation.Xcode == p.Xcode {
+			// A template run must also report the recipe it derived from the
+			// pinned source's .macserve.json.
+			if run.Profile == p.ID && run.Error == "" && run.ProfileDigest == c.Observation.Profiles[p.ID] && run.Result.State == model.Succeeded && run.Result.CleanupOK && run.Result.Observation.Xcode == p.Xcode && (p.Template == nil) == (run.Result.Observation.Recipe == nil) {
 				ok = true
 			}
 		}

@@ -363,7 +363,7 @@ func validateJob(job model.Job, source Source) (model.Job, error) {
 	if !sha40.MatchString(source.Commit) || !sha40.MatchString(source.Tree) || !sha64.MatchString(source.SHA256) || source.Commit != job.Request.SHA || source.SizeBytes <= 0 {
 		return job, errors.New("invalid immutable source identity")
 	}
-	registry, err := profiles.New([]model.Profile{job.Profile})
+	registry, err := profiles.ForSnapshot(job.Profile)
 	if err != nil {
 		return job, err
 	}

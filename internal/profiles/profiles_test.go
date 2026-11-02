@@ -58,7 +58,7 @@ func request(p model.Profile) model.Request {
 
 func registry(t *testing.T, p model.Profile) *profiles.Registry {
 	t.Helper()
-	r, err := profiles.New([]model.Profile{p})
+	r, err := profiles.New([]model.Profile{p}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,18 +240,18 @@ func TestRejectInvalidRecipes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			p := recipe()
 			tc.change(&p)
-			if _, err := profiles.New([]model.Profile{p}); !errors.Is(err, profiles.ErrInvalid) {
+			if _, err := profiles.New([]model.Profile{p}, nil); !errors.Is(err, profiles.ErrInvalid) {
 				t.Fatalf("got %v, want invalid profile", err)
 			}
 		})
 	}
 	p := recipe()
 	p.Kind = "archive"
-	if _, err := profiles.New([]model.Profile{p}); !errors.Is(err, profiles.ErrUnsupported) {
+	if _, err := profiles.New([]model.Profile{p}, nil); !errors.Is(err, profiles.ErrUnsupported) {
 		t.Fatalf("archive profile accepted: %v", err)
 	}
 	p = recipe()
-	if _, err := profiles.New([]model.Profile{p, p}); !errors.Is(err, profiles.ErrInvalid) {
+	if _, err := profiles.New([]model.Profile{p, p}, nil); !errors.Is(err, profiles.ErrInvalid) {
 		t.Fatalf("duplicate profile IDs accepted: %v", err)
 	}
 }
@@ -269,7 +269,7 @@ func TestPathsCannotEscape(t *testing.T) {
 				case "artifact":
 					p.Artifacts[0].Path = value
 				}
-				if _, err := profiles.New([]model.Profile{p}); !errors.Is(err, profiles.ErrInvalid) {
+				if _, err := profiles.New([]model.Profile{p}, nil); !errors.Is(err, profiles.ErrInvalid) {
 					t.Fatalf("unsafe %s path accepted: %v", field, err)
 				}
 			})

@@ -4,8 +4,6 @@ package profiles
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +11,7 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/jerryfane/macserve/internal/model"
@@ -33,6 +32,7 @@ var (
 	buildPattern   = regexp.MustCompile(`^[0-9]+[A-Za-z][0-9]+[A-Za-z]?$`)
 	runtimePattern = regexp.MustCompile(`^com\.apple\.CoreSimulator\.SimRuntime\.[A-Za-z]+-[0-9]+(-[0-9]+)+$`)
 	devicePattern  = regexp.MustCompile(`^com\.apple\.CoreSimulator\.SimDeviceType\.[A-Za-z0-9][A-Za-z0-9.-]*$`)
+	ownerPattern   = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,38}$`)
 )
 
 type entry struct {
@@ -40,18 +40,27 @@ type entry struct {
 	digest  string
 }
 
-// Registry owns all recipe storage; its read-only methods are safe concurrently.
-// List preserves configuration order. No method exposes the owned storage.
-type Registry struct {
-	entries []entry
-	byID    map[string]int
+type templateEntry struct {
+	template model.Template
+	digest   string
 }
 
-// New validates and normalizes copies of controller-approved profiles. Missing
-// timeouts default to 1800 seconds (2400 for UI tests), with a 3600-second maximum;
-// missing memory budgets default to 32768 MiB. It does not probe installed tools.
-func New(profiles []model.Profile) (*Registry, error) {
-	r := &Registry{entries: make([]entry, 0, len(profiles)), byID: make(map[string]int, len(profiles))}
+// Registry owns all recipe storage; its read-only methods are safe concurrently.
+// List preserves configuration order. No method exposes the owned storage.
+// Profile and template IDs share one namespace.
+type Registry struct {
+	entries   []entry
+	byID      map[string]int
+	templates []templateEntry
+	byTmplID  map[string]int
+}
+
+// New validates and normalizes copies of controller-approved profiles and
+// templates. Missing timeouts default to 1800 seconds (2400 for UI tests), with
+// a 3600-second maximum; missing memory budgets default to 32768 MiB. It does
+// not probe installed tools.
+func New(profiles []model.Profile, templates []model.Template) (*Registry, error) {
+	r := &Registry{entries: make([]entry, 0, len(profiles)), byID: make(map[string]int, len(profiles)), byTmplID: make(map[string]int, len(templates))}
 	for _, original := range profiles {
 		p := cloneProfile(original)
 		if err := normalizeProfile(&p); err != nil {
@@ -60,19 +69,44 @@ func New(profiles []model.Profile) (*Registry, error) {
 		if _, exists := r.byID[p.ID]; exists {
 			return nil, fmt.Errorf("%w: duplicate profile ID %q", ErrInvalid, p.ID)
 		}
-		encoded, err := json.Marshal(p)
+		digest, err := p.SnapshotDigest()
 		if err != nil {
 			return nil, fmt.Errorf("%w: profile encoding: %v", ErrInvalid, err)
 		}
-		digest := sha256.Sum256(encoded)
 		r.byID[p.ID] = len(r.entries)
-		r.entries = append(r.entries, entry{profile: p, digest: hex.EncodeToString(digest[:])})
+		r.entries = append(r.entries, entry{profile: p, digest: digest})
+	}
+	for _, original := range templates {
+		t := cloneTemplate(original)
+		if err := normalizeTemplate(&t); err != nil {
+			return nil, fmt.Errorf("template %q: %w", t.ID, err)
+		}
+		_, profile := r.byID[t.ID]
+		if _, exists := r.byTmplID[t.ID]; exists || profile {
+			return nil, fmt.Errorf("%w: duplicate profile or template ID %q", ErrInvalid, t.ID)
+		}
+		digest, err := t.Digest()
+		if err != nil {
+			return nil, fmt.Errorf("%w: template encoding: %v", ErrInvalid, err)
+		}
+		r.byTmplID[t.ID] = len(r.templates)
+		r.templates = append(r.templates, templateEntry{template: t, digest: digest})
 	}
 	return r, nil
 }
 
-// Load reads at most 1 MiB of strict JSON shaped as {"profiles":[...]}. An
-// explicit empty array disables all profiles; missing or null profiles is invalid.
+// ForSnapshot is the single-entry registry that re-admits an admitted recipe
+// snapshot: its template for a template job, otherwise the profile itself.
+func ForSnapshot(p model.Profile) (*Registry, error) {
+	if p.Template != nil {
+		return New(nil, []model.Template{*p.Template})
+	}
+	return New([]model.Profile{p}, nil)
+}
+
+// Load reads at most 1 MiB of strict JSON shaped as {"profiles":[...]} with an
+// optional "templates" array. An explicit empty profiles array disables all
+// profiles; missing or null profiles is invalid.
 func Load(filename string) (*Registry, error) {
 	f, err := os.Open(filename)
 	if err != nil {
@@ -87,7 +121,8 @@ func Load(filename string) (*Registry, error) {
 		return nil, fmt.Errorf("%w: configuration exceeds 1 MiB", ErrInvalid)
 	}
 	var document struct {
-		Profiles []model.Profile `json:"profiles"`
+		Profiles  []model.Profile  `json:"profiles"`
+		Templates []model.Template `json:"templates"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -100,13 +135,16 @@ func Load(filename string) (*Registry, error) {
 	if document.Profiles == nil {
 		return nil, fmt.Errorf("%w: profiles array is required", ErrInvalid)
 	}
-	return New(document.Profiles)
+	return New(document.Profiles, document.Templates)
 }
 
 // Resolve admits only the configured repository, kind and exact toolchain pins.
 // SHA and repository casing are canonicalized, but no client paths, executable
 // arguments or environment are accepted. The returned recipe and request are
 // independent snapshots, including their nested slices and simulator pointers.
+//
+// A template ID admits any repository of a template owner that has no
+// explicit profile of the same kind: explicit profiles keep precedence.
 func (r *Registry) Resolve(request model.Request) (model.Admission, error) {
 	if !supportedKind(request.Kind) {
 		return model.Admission{}, fmt.Errorf("%w: job kind", ErrUnsupported)
@@ -118,7 +156,7 @@ func (r *Registry) Resolve(request model.Request) (model.Admission, error) {
 	request.SHA = strings.ToLower(request.SHA)
 	index, found := r.byID[request.Profile]
 	if !found {
-		return model.Admission{}, fmt.Errorf("%w: profile", ErrUnsupported)
+		return r.resolveTemplate(request)
 	}
 	e := r.entries[index]
 	p := e.profile
@@ -135,6 +173,42 @@ func (r *Registry) Resolve(request model.Request) (model.Admission, error) {
 	return model.Admission{Request: request, Profile: cloneProfile(p), ProfileDigest: e.digest}, nil
 }
 
+func (r *Registry) resolveTemplate(request model.Request) (model.Admission, error) {
+	index, found := r.byTmplID[request.Profile]
+	if !found {
+		return model.Admission{}, fmt.Errorf("%w: profile", ErrUnsupported)
+	}
+	e := r.templates[index]
+	t := e.template
+	owner, _, _ := strings.Cut(request.Repo, "/")
+	if !slices.Contains(t.Owners, owner) {
+		return model.Admission{}, fmt.Errorf("%w: repository owner is not approved for template", ErrUnsupported)
+	}
+	if request.Kind != t.Kind || request.Xcode != t.Xcode || request.Simulator != nil {
+		return model.Admission{}, fmt.Errorf("%w: repository, kind or toolchain pins", ErrUnsupported)
+	}
+	for _, explicit := range r.entries {
+		if explicit.profile.Repo == request.Repo && explicit.profile.Kind == request.Kind {
+			return model.Admission{}, fmt.Errorf("%w: repository has an explicit profile", ErrUnsupported)
+		}
+	}
+	if request.TimeoutSeconds == 0 {
+		request.TimeoutSeconds = t.DefaultTimeoutSeconds
+	}
+	if request.TimeoutSeconds > t.MaxTimeoutSeconds {
+		return model.Admission{}, fmt.Errorf("%w: timeout exceeds profile maximum", ErrInvalid)
+	}
+	return model.Admission{Request: request, Profile: TemplateSnapshot(t, request.Repo), ProfileDigest: e.digest}, nil
+}
+
+// TemplateSnapshot is the admitted recipe snapshot of a template job for repo:
+// the template's identity, pins and budgets with no recipe commands, which the
+// worker derives from the repository's .macserve.json.
+func TemplateSnapshot(t model.Template, repo string) model.Profile {
+	snapshot := cloneTemplate(t)
+	return model.Profile{ID: t.ID, Version: t.Version, Repo: repo, Kind: t.Kind, Xcode: t.Xcode, DeveloperDir: t.DeveloperDir, DefaultTimeoutSeconds: t.DefaultTimeoutSeconds, MaxTimeoutSeconds: t.MaxTimeoutSeconds, MemoryLimitMiB: t.MemoryLimitMiB, Template: &snapshot}
+}
+
 func (r *Registry) List() []model.Profile {
 	profiles := make([]model.Profile, len(r.entries))
 	for i, e := range r.entries {
@@ -143,7 +217,56 @@ func (r *Registry) List() []model.Profile {
 	return profiles
 }
 
+// Templates lists the configured templates in configuration order.
+func (r *Registry) Templates() []model.Template {
+	templates := make([]model.Template, len(r.templates))
+	for i, e := range r.templates {
+		templates[i] = cloneTemplate(e.template)
+	}
+	return templates
+}
+
+// Digests maps every profile and template ID to the digest that qualification,
+// health and the readiness guard bind.
+func (r *Registry) Digests() map[string]string {
+	digests := make(map[string]string, len(r.entries)+len(r.templates))
+	for _, e := range r.entries {
+		digests[e.profile.ID] = e.digest
+	}
+	for _, e := range r.templates {
+		digests[e.template.ID] = e.digest
+	}
+	return digests
+}
+
+func normalizeTemplate(t *model.Template) error {
+	if !idPattern.MatchString(t.ID) || t.Version <= 0 {
+		return fmt.Errorf("%w: ID or version", ErrInvalid)
+	}
+	if t.Kind != model.Build {
+		return fmt.Errorf("%w: templates support only build jobs", ErrUnsupported)
+	}
+	if len(t.Owners) == 0 {
+		return fmt.Errorf("%w: at least one owner is required", ErrInvalid)
+	}
+	for i, owner := range t.Owners {
+		if !ownerPattern.MatchString(owner) || slices.Contains(t.Owners[:i], owner) {
+			return fmt.Errorf("%w: owners must be unique lowercase GitHub account logins", ErrInvalid)
+		}
+	}
+	if !versionPattern.MatchString(t.Xcode.Version) || !buildPattern.MatchString(t.Xcode.Build) {
+		return fmt.Errorf("%w: exact Xcode version and build required", ErrInvalid)
+	}
+	if !absolutePath(t.DeveloperDir) {
+		return fmt.Errorf("%w: developer directory", ErrInvalid)
+	}
+	return normalizeBudgets(t.Kind, &t.DefaultTimeoutSeconds, &t.MaxTimeoutSeconds, &t.MemoryLimitMiB)
+}
+
 func normalizeProfile(p *model.Profile) error {
+	if p.Template != nil {
+		return fmt.Errorf("%w: configured profiles cannot embed a template", ErrInvalid)
+	}
 	if !idPattern.MatchString(p.ID) || p.Version <= 0 || !validRepo(p.Repo) {
 		return fmt.Errorf("%w: ID, version or repository", ErrInvalid)
 	}
@@ -189,22 +312,26 @@ func normalizeProfile(p *model.Profile) error {
 			return fmt.Errorf("%w: artifact pattern", ErrInvalid)
 		}
 	}
-	if p.DefaultTimeoutSeconds == 0 {
-		p.DefaultTimeoutSeconds = 1800
-		if p.Kind == model.SimulatorUITest {
-			p.DefaultTimeoutSeconds = 2400
+	return normalizeBudgets(p.Kind, &p.DefaultTimeoutSeconds, &p.MaxTimeoutSeconds, &p.MemoryLimitMiB)
+}
+
+func normalizeBudgets(kind model.Kind, defaultTimeout, maxTimeout, memory *int) error {
+	if *defaultTimeout == 0 {
+		*defaultTimeout = 1800
+		if kind == model.SimulatorUITest {
+			*defaultTimeout = 2400
 		}
 	}
-	if p.MaxTimeoutSeconds == 0 {
-		p.MaxTimeoutSeconds = 3600
+	if *maxTimeout == 0 {
+		*maxTimeout = 3600
 	}
-	if p.DefaultTimeoutSeconds < 1 || p.MaxTimeoutSeconds < 1 || p.MaxTimeoutSeconds > 3600 || p.DefaultTimeoutSeconds > p.MaxTimeoutSeconds {
+	if *defaultTimeout < 1 || *maxTimeout < 1 || *maxTimeout > 3600 || *defaultTimeout > *maxTimeout {
 		return fmt.Errorf("%w: timeout limits", ErrInvalid)
 	}
-	if p.MemoryLimitMiB == 0 {
-		p.MemoryLimitMiB = 32768
+	if *memory == 0 {
+		*memory = 32768
 	}
-	if p.MemoryLimitMiB < 1 {
+	if *memory < 1 {
 		return fmt.Errorf("%w: memory limit", ErrInvalid)
 	}
 	return nil
@@ -316,5 +443,14 @@ func cloneProfile(p model.Profile) model.Profile {
 	p.GeneratedFiles = append([]model.GeneratedFile(nil), p.GeneratedFiles...)
 	p.Artifacts = append([]model.ArtifactRule(nil), p.Artifacts...)
 	p.RequiredTests = append([]string(nil), p.RequiredTests...)
+	if p.Template != nil {
+		t := cloneTemplate(*p.Template)
+		p.Template = &t
+	}
 	return p
+}
+
+func cloneTemplate(t model.Template) model.Template {
+	t.Owners = append([]string(nil), t.Owners...)
+	return t
 }

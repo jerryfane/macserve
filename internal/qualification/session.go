@@ -216,13 +216,13 @@ func Begin(ctx context.Context, o BeginOptions) error {
 		return e
 	}
 	now := time.Now().UTC()
-	c := Challenge{Schema: schema, ID: id, Created: now, Expires: now.Add(lifetime), Environment: env, EnvironmentSHA256: digest(envRaw), TCP: targets, Allow: allow, UDP: udp, OwnerCanary: o.OwnerCanary, PrivatePaths: private, Socket: cc.Socket, Profiles: registry.List(), Requalify: o.Requalify}
+	c := Challenge{Schema: schema, ID: id, Created: now, Expires: now.Add(lifetime), Environment: env, EnvironmentSHA256: digest(envRaw), TCP: targets, Allow: allow, UDP: udp, OwnerCanary: o.OwnerCanary, PrivatePaths: private, Socket: cc.Socket, Profiles: registry.List(), Templates: registry.Templates(), Requalify: o.Requalify}
 	if c.BootSession, e = bootSession(); e != nil {
 		return e
 	}
-	if len(c.Profiles) > 0 {
+	if len(c.recipes()) > 0 {
 		if _, err := os.Lstat(sourcesPinsPath); err == nil {
-			if _, c.SourcesSHA256, e = loadSourcePins(c.Profiles); e != nil {
+			if _, c.SourcesSHA256, e = loadSourcePins(c.recipes()); e != nil {
 				return e
 			}
 		}
@@ -397,7 +397,7 @@ func Collect(ctx context.Context, dir, ownerPath, receiptPaths string) error {
 	if facts.rebootOK, facts.rebootReason, e = rebootTransition(c); e != nil {
 		return e
 	}
-	if len(c.Profiles) > 0 {
+	if len(c.recipes()) > 0 {
 		var tb []byte
 		tb, facts.toolOK, facts.toolReason = toolEvidencePasses(dir, c, raw)
 		if tb != nil {
@@ -574,7 +574,7 @@ func aggregate(c Challenge, j, o Report, receipts []Receipts, facts sittingFacts
 	canaryControls, canaryCount := ownerCanaryControls(c, j, o, receipts)
 	set("owner_home_denial", home && homeOwner && canaryControls, hc, hoc+canaryCount, "owner reads the exact canary before/after both probes and lists actual home; job must receive permission denial on every path")
 	dirs := []string{c.Environment.DeveloperDir}
-	for _, p := range c.Profiles {
+	for _, p := range c.recipes() {
 		dirs = append(dirs, p.DeveloperDir)
 	}
 	slices.Sort(dirs)

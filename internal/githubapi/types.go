@@ -16,10 +16,17 @@ type HTTPOptions struct {
 	Now     func() time.Time
 }
 
+// AppOptions configures a GitHub App client. InstallationID is the legacy
+// single installation; Installations selects an installation by repository
+// owner login and takes precedence. Repositories pins exact repositories to
+// numeric IDs; Owners approves every repository of those account logins, whose
+// IDs are learned from, and verified against, the installation token reply.
 type AppOptions struct {
 	AppID, InstallationID int64
+	Installations         map[string]int64
 	PrivateKey            *rsa.PrivateKey
 	Repositories          map[string]int64
+	Owners                []string
 	HTTP                  HTTPOptions
 }
 
@@ -33,8 +40,13 @@ type Error struct {
 func (e *Error) Error() string { return fmt.Sprintf("GitHub HTTP status %d", e.Status) }
 
 type Repository struct {
-	ID       int64  `json:"id"`
-	FullName string `json:"full_name"`
+	ID       int64           `json:"id"`
+	FullName string          `json:"full_name"`
+	Owner    RepositoryOwner `json:"owner"`
+}
+
+type RepositoryOwner struct {
+	Login string `json:"login"`
 }
 
 type PullRequest struct {

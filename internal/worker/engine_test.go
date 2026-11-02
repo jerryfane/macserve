@@ -131,7 +131,7 @@ func fixtureJob(t *testing.T, kind model.Kind) model.Job {
 		profile.RequiredTests = []string{"ExampleTests/testExample()"}
 		profile.Run.Args = []string{"test", "-resultBundlePath", "${RESULT_BUNDLE}"}
 	}
-	registry, err := profiles.New([]model.Profile{profile})
+	registry, err := profiles.New([]model.Profile{profile}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +146,7 @@ func fixtureJob(t *testing.T, kind model.Kind) model.Job {
 
 func resignJob(t *testing.T, job *model.Job) {
 	t.Helper()
-	registry, err := profiles.New([]model.Profile{job.Profile})
+	registry, err := profiles.ForSnapshot(job.Profile)
 	if err != nil {
 		t.Fatal(err)
 	}

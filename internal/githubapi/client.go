@@ -38,14 +38,19 @@ type Client struct {
 	base                  *url.URL
 	now                   func() time.Time
 	appID, installationID int64
+	installations         map[string]int64
 	key                   *rsa.PrivateKey
 	repositories          map[string]int64
-	token                 string
-	mu                    sync.Mutex
-	tokens                map[string]cachedToken
-	rateMu                sync.Mutex
-	blockedUntil          time.Time
-	blockedStatus         int
+	owners                map[string]bool
+	// verified holds repository IDs learned for owner-approved repositories
+	// from installation token replies; guarded by mu.
+	verified      map[string]int64
+	token         string
+	mu            sync.Mutex
+	tokens        map[string]cachedToken
+	rateMu        sync.Mutex
+	blockedUntil  time.Time
+	blockedStatus int
 }
 
 func newClient(o HTTPOptions) (*Client, error) {
@@ -95,7 +100,7 @@ func NewToken(token string, o HTTPOptions) (*Client, error) {
 }
 
 func NewApp(o AppOptions) (*Client, error) {
-	if o.AppID <= 0 || o.InstallationID <= 0 || o.PrivateKey == nil || o.PrivateKey.N == nil || o.PrivateKey.N.BitLen() < 2048 || len(o.Repositories) == 0 {
+	if o.AppID <= 0 || o.InstallationID < 0 || o.InstallationID == 0 && len(o.Installations) == 0 || o.PrivateKey == nil || o.PrivateKey.N == nil || o.PrivateKey.N.BitLen() < 2048 || len(o.Repositories) == 0 && len(o.Owners) == 0 {
 		return nil, errors.New("invalid GitHub App configuration")
 	}
 	if err := o.PrivateKey.Validate(); err != nil {
@@ -106,6 +111,13 @@ func NewApp(o AppOptions) (*Client, error) {
 		return nil, err
 	}
 	c.appID, c.installationID, c.key = o.AppID, o.InstallationID, o.PrivateKey
+	c.installations = make(map[string]int64, len(o.Installations))
+	for owner, id := range o.Installations {
+		if !ValidOwner(owner) || id <= 0 {
+			return nil, errors.New("invalid GitHub App installation")
+		}
+		c.installations[owner] = id
+	}
 	c.repositories = make(map[string]int64, len(o.Repositories))
 	for repo, id := range o.Repositories {
 		if !validRepo(repo) || id <= 0 {
@@ -117,7 +129,58 @@ func NewApp(o AppOptions) (*Client, error) {
 		}
 		c.repositories[canonical] = id
 	}
+	c.owners = make(map[string]bool, len(o.Owners))
+	for _, owner := range o.Owners {
+		if !ValidOwner(owner) || c.owners[owner] {
+			return nil, errors.New("invalid or duplicate approved GitHub owner")
+		}
+		c.owners[owner] = true
+	}
+	c.verified = make(map[string]int64)
 	return c, nil
+}
+
+// ValidOwner reports whether owner is a canonical lowercase GitHub login.
+func ValidOwner(owner string) bool {
+	if owner == "" || len(owner) > 39 || owner[0] == '-' {
+		return false
+	}
+	for _, r := range owner {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+func repoOwner(repo string) string {
+	owner, _, _ := strings.Cut(strings.ToLower(repo), "/")
+	return owner
+}
+
+// installation selects the App installation for a repository's owner, falling
+// back to the legacy single installation.
+func (c *Client) installation(repo string) (int64, error) {
+	if id := c.installations[repoOwner(repo)]; id > 0 {
+		return id, nil
+	}
+	if c.installationID > 0 {
+		return c.installationID, nil
+	}
+	return 0, errors.New("no GitHub App installation for the repository owner")
+}
+
+// RepositoryID returns the pinned ID of an exact approved repository, or the ID
+// verified from a token reply for an owner-approved repository.
+func (c *Client) RepositoryID(repo string) (int64, bool) {
+	repo = strings.ToLower(repo)
+	if id := c.repositories[repo]; id > 0 {
+		return id, true
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	id := c.verified[repo]
+	return id, id > 0
 }
 
 func (c *Client) AppID() int64 { return c.appID }
@@ -156,7 +219,7 @@ func (c *Client) approved(repo string) error {
 	if !validRepo(repo) {
 		return errors.New("invalid GitHub repository name")
 	}
-	if c.appID != 0 && c.repositories[strings.ToLower(repo)] == 0 {
+	if c.appID != 0 && c.repositories[strings.ToLower(repo)] == 0 && !c.owners[repoOwner(repo)] {
 		return errors.New("GitHub repository is not approved")
 	}
 	return nil
@@ -189,6 +252,10 @@ func (c *Client) repositoryToken(ctx context.Context, repo string) (string, erro
 		return c.token, nil
 	}
 	repo = strings.ToLower(repo)
+	installation, err := c.installation(repo)
+	if err != nil {
+		return "", err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -201,24 +268,44 @@ func (c *Client) repositoryToken(ctx context.Context, repo string) (string, erro
 	if err != nil {
 		return "", err
 	}
+	// A pinned repository is scoped by its ID; an owner-approved one by name,
+	// and the reply must then name exactly that repository and owner.
+	pinned := c.repositories[repo]
+	owner, name, _ := strings.Cut(repo, "/")
 	input := struct {
-		RepositoryIDs []int64           `json:"repository_ids"`
+		RepositoryIDs []int64           `json:"repository_ids,omitempty"`
+		Repositories  []string          `json:"repositories,omitempty"`
 		Permissions   map[string]string `json:"permissions"`
-	}{[]int64{c.repositories[repo]}, map[string]string{"contents": "read", "metadata": "read", "pull_requests": "read", "checks": "write"}}
+	}{Permissions: map[string]string{"contents": "read", "metadata": "read", "pull_requests": "read", "checks": "write"}}
+	if pinned > 0 {
+		input.RepositoryIDs = []int64{pinned}
+	} else {
+		input.Repositories = []string{name}
+	}
 	var reply struct {
 		Token        string       `json:"token"`
 		Expires      time.Time    `json:"expires_at"`
 		Repositories []Repository `json:"repositories"`
 	}
-	_, _, err = c.request(ctx, http.MethodPost, "/app/installations/"+strconv.FormatInt(c.installationID, 10)+"/access_tokens", jwt, "", input, &reply)
+	_, _, err = c.request(ctx, http.MethodPost, "/app/installations/"+strconv.FormatInt(installation, 10)+"/access_tokens", jwt, "", input, &reply)
 	if err != nil {
 		return "", err
 	}
 	if !validToken(reply.Token) || !c.now().Add(time.Minute).Before(reply.Expires) {
 		return "", errors.New("invalid GitHub installation token response")
 	}
-	if len(reply.Repositories) > 0 && (len(reply.Repositories) != 1 || reply.Repositories[0].ID != c.repositories[repo] || !strings.EqualFold(reply.Repositories[0].FullName, repo)) {
-		return "", errors.New("GitHub installation token repository scope mismatch")
+	if pinned > 0 {
+		if len(reply.Repositories) > 0 && (len(reply.Repositories) != 1 || reply.Repositories[0].ID != pinned || !strings.EqualFold(reply.Repositories[0].FullName, repo)) {
+			return "", errors.New("GitHub installation token repository scope mismatch")
+		}
+	} else {
+		if len(reply.Repositories) != 1 || reply.Repositories[0].ID <= 0 || reply.Repositories[0].ID > 9007199254740991 || !strings.EqualFold(reply.Repositories[0].FullName, repo) || !strings.EqualFold(reply.Repositories[0].Owner.Login, owner) {
+			return "", errors.New("GitHub installation token repository scope mismatch")
+		}
+		if prior := c.verified[repo]; prior != 0 && prior != reply.Repositories[0].ID {
+			return "", errors.New("GitHub repository ID changed")
+		}
+		c.verified[repo] = reply.Repositories[0].ID
 	}
 	c.tokens[repo] = cachedToken{reply.Token, reply.Expires}
 	return reply.Token, nil

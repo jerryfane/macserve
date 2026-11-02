@@ -2,6 +2,8 @@
 package model
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"time"
 )
@@ -117,6 +119,68 @@ type Profile struct {
 	DefaultTimeoutSeconds int             `json:"default_timeout_seconds"`
 	MaxTimeoutSeconds     int             `json:"max_timeout_seconds"`
 	MemoryLimitMiB        int             `json:"memory_limit_mib"`
+	// Template is set only on the admitted snapshot of a template job. Its
+	// work_dir, prepare and run are derived by the worker from the template and
+	// the repository's .macserve.json; configured profiles never carry it.
+	Template *Template `json:"template,omitempty"`
+}
+
+// Template is a controller-owned, owner-scoped build recipe. Every repository
+// of a listed GitHub account may use it by declaring its Xcode project or
+// workspace and scheme in .macserve.json; the command line is fixed in code.
+type Template struct {
+	ID                    string   `json:"id"`
+	Version               int      `json:"version"`
+	Kind                  Kind     `json:"kind"`
+	Owners                []string `json:"owners"`
+	Xcode                 Xcode    `json:"xcode"`
+	DeveloperDir          string   `json:"developer_dir"`
+	DefaultTimeoutSeconds int      `json:"default_timeout_seconds"`
+	MaxTimeoutSeconds     int      `json:"max_timeout_seconds"`
+	MemoryLimitMiB        int      `json:"memory_limit_mib"`
+}
+
+// RepoConfig is the parsed repository-root .macserve.json. It may only name
+// the work directory, project or workspace, scheme and two fixed steps.
+type RepoConfig struct {
+	Version         int    `json:"version"`
+	WorkDir         string `json:"work_dir"`
+	Project         string `json:"project,omitempty"`
+	Workspace       string `json:"workspace,omitempty"`
+	Scheme          string `json:"scheme"`
+	XcodeGen        bool   `json:"xcodegen,omitempty"`
+	ResolvePackages bool   `json:"resolve_packages,omitempty"`
+}
+
+// RepoRecipe is the worker's evidence of what a template job ran: the digest of
+// the exact .macserve.json bytes, their parsed form, and the derived commands.
+type RepoRecipe struct {
+	ConfigSHA256 string     `json:"config_sha256"`
+	Config       RepoConfig `json:"config"`
+	WorkDir      string     `json:"work_dir"`
+	Prepare      []Command  `json:"prepare"`
+	Run          Command    `json:"run"`
+}
+
+func digestJSON(value any) (string, error) {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// Digest is the qualified identity of a template: sha256 of its canonical JSON.
+func (t Template) Digest() (string, error) { return digestJSON(t) }
+
+// SnapshotDigest is the qualified identity bound to an admitted recipe snapshot:
+// the profile's canonical JSON digest, or its template's digest for a template job.
+func (p Profile) SnapshotDigest() (string, error) {
+	if p.Template != nil {
+		return p.Template.Digest()
+	}
+	return digestJSON(p)
 }
 
 type Admission struct {

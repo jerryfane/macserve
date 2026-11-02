@@ -267,6 +267,11 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 		return result, err
 	}
 	err = extractSource(prepareCtx, checkout, archive, source, e.options.MaxWorkspaceBytes)
+	if err == nil && x.job.Profile.Template != nil {
+		// Template jobs: the recipe is derived from the repository's
+		// .macserve.json before any toolchain or recipe command runs.
+		x.job.Profile, result.Observation.Recipe, err = templateRecipe(checkout, x.job.Profile)
+	}
 	closeErr := checkout.Close()
 	if err = errors.Join(err, closeErr); err != nil {
 		prepareCancel()
@@ -324,7 +329,7 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 		}
 	}
 	x.ranRecipe = true
-	returned = x.recipe(ctx, job.Profile.Run)
+	returned = x.recipe(ctx, x.job.Profile.Run)
 	return result, returned
 }
 

@@ -97,7 +97,7 @@ func TestReplayCannotBecomeNewAdmissionWhenRetentionRuns(t *testing.T) {
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("pruned key bypassed readiness: %d %s", w.Code, w.Body.String())
 	}
-	registry, err := profiles.New(nil)
+	registry, err := profiles.New(nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,0 +1,111 @@
+{
+  "profiles": [
+    {
+      "id": "entmoot-ios-sim-build-v1",
+      "version": 1,
+      "repo": "themartianapp/entmoot-app",
+      "kind": "build",
+      "xcode": {
+        "version": "27.1",
+        "build": "27A9275"
+      },
+      "developer_dir": "/Applications/Xcode.app/Contents/Developer",
+      "work_dir": "ios",
+      "prepare": [
+        {
+          "executable": "/Library/macserve/tools/xcodegen",
+          "args": [
+            "generate",
+            "--spec",
+            "project.yml"
+          ]
+        },
+        {
+          "executable": "/usr/bin/xcrun",
+          "args": [
+            "xcodebuild",
+            "-project",
+            "Entmoot.xcodeproj",
+            "-scheme",
+            "Entmoot",
+            "-resolvePackageDependencies"
+          ]
+        }
+      ],
+      "run": {
+        "executable": "/usr/bin/xcrun",
+        "args": [
+          "xcodebuild",
+          "-project",
+          "Entmoot.xcodeproj",
+          "-scheme",
+          "Entmoot",
+          "-configuration",
+          "Debug",
+          "-sdk",
+          "iphonesimulator",
+          "-destination",
+          "generic/platform=iOS Simulator",
+          "-derivedDataPath",
+          "${DERIVED_DATA}",
+          "CODE_SIGNING_ALLOWED=NO",
+          "build"
+        ]
+      },
+      "default_timeout_seconds": 1800,
+      "max_timeout_seconds": 3600,
+      "memory_limit_mib": 32768
+    },
+    {
+      "id": "keephair-ios-sim-build-v1",
+      "version": 1,
+      "repo": "themartianapp/keephair",
+      "kind": "build",
+      "xcode": {
+        "version": "27.1",
+        "build": "27A9275"
+      },
+      "developer_dir": "/Applications/Xcode.app/Contents/Developer",
+      "work_dir": "ios",
+      "prepare": [
+        {
+          "executable": "/Library/macserve/tools/xcodegen",
+          "args": [
+            "generate",
+            "--spec",
+            "project.yml"
+          ]
+        }
+      ],
+      "run": {
+        "executable": "/usr/bin/xcrun",
+        "args": [
+          "xcodebuild",
+          "-project",
+          "KeepHair.xcodeproj",
+          "-scheme",
+          "KeepHair",
+          "-configuration",
+          "Debug",
+          "-sdk",
+          "iphonesimulator",
+          "-destination",
+          "generic/platform=iOS Simulator",
+          "-derivedDataPath",
+          "${DERIVED_DATA}",
+          "CODE_SIGNING_ALLOWED=NO",
+          "build"
+        ]
+      },
+      "default_timeout_seconds": 1800,
+      "max_timeout_seconds": 3600,
+      "memory_limit_mib": 32768,
+      "generated_files": [
+        {
+          "path": "ios/KeepHair/App/Secrets.swift",
+          "content": "enum Secrets {\n    static let posthogProjectToken = \"\"\n}\n"
+        }
+      ]
+    }
+  ]
+}

@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"time"
 
@@ -61,6 +62,13 @@ func newIntegrations(ctx context.Context, config controller.Config, db *store.St
 	for _, profile := range registry.List() {
 		if config.Receipt.Repositories[profile.Repo] <= 0 {
 			return nil, errors.New("every profile requires a pinned numeric repository ID")
+		}
+	}
+	for _, template := range registry.Templates() {
+		for _, owner := range template.Owners {
+			if !slices.Contains(config.Receipt.Owners, owner) {
+				return nil, errors.New("every template owner requires a receipt owners entry")
+			}
 		}
 	}
 	data, err := privateKeyBytes(config.Receipt.PrivateKeyFile)
@@ -112,10 +120,23 @@ func newIntegrations(ctx context.Context, config controller.Config, db *store.St
 	service.signer, err = receipt.NewSigner(receipt.Options{
 		Root: filepath.Join(config.Root, "receipts"), KeyID: config.Receipt.KeyID, PrivateKey: key,
 		Service: receipt.ServiceIdentity{ID: config.Receipt.ServiceID, HostID: config.Receipt.HostID, Version: version, BinarySHA256: hex.EncodeToString(hash.Sum(nil))},
-		Repository: func(_ context.Context, job model.Job) (receipt.Repository, error) {
-			id := config.Receipt.Repositories[job.Request.Repo]
-			if id <= 0 {
+		Repository: func(ctx context.Context, job model.Job) (receipt.Repository, error) {
+			if id := config.Receipt.Repositories[job.Request.Repo]; id > 0 {
+				return receipt.Repository{ID: id, Name: job.Request.Repo}, nil
+			}
+			owner, _, _ := strings.Cut(job.Request.Repo, "/")
+			if service.app == nil || !slices.Contains(config.Receipt.Owners, owner) {
 				return receipt.Repository{}, errors.New("receipt repository identity is not pinned")
+			}
+			// Owner-approved repositories: the ID verified from the installation
+			// token reply when the source was fetched, re-verified if not cached.
+			id, ok := service.app.RepositoryID(job.Request.Repo)
+			if !ok {
+				repository, err := service.app.Repository(ctx, job.Request.Repo)
+				if err != nil {
+					return receipt.Repository{}, errors.New("receipt repository identity is unavailable")
+				}
+				id = repository.ID
 			}
 			return receipt.Repository{ID: id, Name: job.Request.Repo}, nil
 		},
@@ -162,7 +183,7 @@ func newIntegrations(ctx context.Context, config controller.Config, db *store.St
 		if err != nil || key == nil {
 			return nil, errors.New("GitHub App key must be an RSA private key")
 		}
-		service.app, err = githubapi.NewApp(githubapi.AppOptions{AppID: cfg.AppID, InstallationID: cfg.InstallationID, PrivateKey: key, Repositories: config.Receipt.Repositories})
+		service.app, err = githubapi.NewApp(githubapi.AppOptions{AppID: cfg.AppID, InstallationID: cfg.InstallationID, Installations: cfg.Installations, PrivateKey: key, Repositories: config.Receipt.Repositories, Owners: config.Receipt.Owners})
 		if err != nil {
 			return nil, err
 		}

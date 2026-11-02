@@ -72,7 +72,11 @@ func validJobID(id string) bool {
 	return true
 }
 func observed(o worker.Observation) Observation {
-	return Observation{Xcode: o.Xcode, SDKVersion: o.SDKVersion, SDKBuild: o.SDKBuild, SwiftVersion: o.SwiftVersion, OSVersion: o.OSVersion, OSBuild: o.OSBuild, Architecture: o.Architecture, RuntimeVersion: o.RuntimeVersion, RuntimeBuild: o.RuntimeBuild, DeviceUDID: o.DeviceUDID}
+	value := Observation{Xcode: o.Xcode, SDKVersion: o.SDKVersion, SDKBuild: o.SDKBuild, SwiftVersion: o.SwiftVersion, OSVersion: o.OSVersion, OSBuild: o.OSBuild, Architecture: o.Architecture, RuntimeVersion: o.RuntimeVersion, RuntimeBuild: o.RuntimeBuild, DeviceUDID: o.DeviceUDID}
+	if o.Recipe != nil {
+		value.RepoConfigSHA256 = o.Recipe.ConfigSHA256
+	}
+	return value
 }
 
 func (s *Signer) Seal(ctx context.Context, job model.Job, result worker.Result) (json.RawMessage, error) {

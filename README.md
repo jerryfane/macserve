@@ -18,6 +18,9 @@ needs network credentials for your private network. No VM required.
 - Runs `build`, `unit_test` and `simulator_ui_test` jobs for a repository at an **exact 40-character commit SHA**.
 - Uses controller-owned, versioned **profiles** (project/workspace, scheme, destination, allowed tests, artifacts);
   clients cannot inject shell commands, environment variables or paths.
+- **Org-level build templates**: any repository of an approved GitHub owner builds by committing a small
+  `.macserve.json` (project or workspace, scheme, work directory, optional XcodeGen/package resolution); the
+  xcodebuild command line stays fixed in code. See *Onboarding a repository* in `docs/install.md`.
 - Pins the **Xcode version and build** and the **simulator runtime** per job.
 - Returns status, paged logs, an `xcresult` summary (JSON/JUnit), artifacts, and a signed receipt
   (repo, SHA, tree, toolchain, runtime, exit status, test counts, log/artifact digests).
