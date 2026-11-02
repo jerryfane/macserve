@@ -5,15 +5,67 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/jerryfane/macserve/internal/evidence"
 )
 
+// metalProbeTimeout bounds the Metal toolchain probe.
+const metalProbeTimeout = 30 * time.Second
+
+// observeMetalToolchain runs the fixed `xcodebuild -showComponent
+// MetalToolchain` as the job, with the job environment, before any other job
+// command. Since Xcode 26, xcrun and xcodebuild find the downloaded Metal
+// toolchain only through ~/Library/Developer/Xcode/
+// XcodeToMetalToolchainIndexMapping.plist (Apple FB20389216), and the job's
+// HOME is a fresh empty directory; this command writes that mapping into it.
+// A failed or not-installed probe is recorded, never fatal, so projects
+// without Metal sources keep building. Contamination, unconfirmed process
+// cleanup and cancellation of the job itself still fail the job.
+func (x *execution) observeMetalToolchain(ctx context.Context) error {
+	probe, cancel := context.WithTimeout(ctx, metalProbeTimeout)
+	defer cancel()
+	output := &boundedBuffer{max: evidence.MaxTestsBytes}
+	result, err := x.invoke(probe, x.command("/usr/bin/xcodebuild", []string{"-showComponent", "MetalToolchain"}), io.MultiWriter(output, x.stdout), x.stderr)
+	err = errors.Join(err, output.err)
+	if err != nil && (!result.CleanupOK || errors.Is(err, ErrContamination) || errors.Is(err, ErrRecovery) || ctx.Err() != nil) {
+		return err
+	}
+	observed := parseMetalToolchain(output.Bytes())
+	if err != nil {
+		observed.Error = clip(err.Error(), 1024)
+	}
+	x.result.Observation.MetalToolchain = &observed
+	return nil
+}
+
+func parseMetalToolchain(output []byte) MetalToolchain {
+	var observed MetalToolchain
+	for _, line := range strings.Split(string(output), "\n") {
+		key, value, found := strings.Cut(line, ":")
+		if !found {
+			continue
+		}
+		switch strings.TrimSpace(key) {
+		case "Status":
+			observed.Status = strings.TrimSpace(value)
+		case "Build Version":
+			observed.BuildVersion = strings.TrimSpace(value)
+		}
+	}
+	return observed
+}
+
 func (x *execution) observe(ctx context.Context) error {
+	if err := x.observeMetalToolchain(ctx); err != nil {
+		return err
+	}
 	version, err := x.capture(ctx, "/usr/bin/xcodebuild", "-version")
 	if err != nil {
 		return err
