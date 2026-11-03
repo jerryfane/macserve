@@ -19,7 +19,7 @@ var onboardingCommands = []struct {
 	run                 func(args []string, stdout, stderr io.Writer) int
 }{
 	{"setup", "First-time setup of this Mac (--plan: read-only preflight)", setupHelp, runSetup},
-	{"connect-github", "Create and install the GitHub App from a manifest (not in this release)", connectGitHubHelp, nil},
+	{"connect-github", "Create the GitHub App from a manifest and install it on one repository (sudo, after deploy-install)", connectGitHubHelp, runConnectGitHub},
 	{"doctor", "Explain failures with fixed check IDs and fixes (not in this release)", doctorHelp, nil},
 	{"build", "Start a build of a repository and verify its receipt (not in this release)", buildHelp, nil},
 	{"upgrade", "Upgrade behind the stopped gate with verified release bytes (not in this release)", upgradeHelp, nil},
@@ -43,16 +43,6 @@ evidence that qualification needs is refused under sudo.
 
 Only --plan is available in this release. Exit status: 0 ready, 1 blocked,
 2 usage.
-`
-
-const connectGitHubHelp = `Usage: macserve connect-github
-
-Creates a private GitHub App from a manifest (metadata, contents and pull
-requests read; checks write; no webhook), installs it on one repository you
-choose, confirms the installation with the App's own credentials, and
-installs the App key controller-owned without overwriting an existing key.
-
-Not available in this release.
 `
 
 const doctorHelp = `Usage: macserve doctor [--json]

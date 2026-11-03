@@ -52,7 +52,7 @@ func TestOnboardingNamesDoNotShadowCommands(t *testing.T) {
 }
 
 func TestOnboardingShellsAreNotAvailable(t *testing.T) {
-	for _, name := range []string{"connect-github", "doctor", "build", "upgrade"} {
+	for _, name := range []string{"doctor", "build", "upgrade"} {
 		var stdout, stderr bytes.Buffer
 		if got := run([]string{name}, &stdout, &stderr); got != 2 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "not available in this release") {
 			t.Errorf("%s: exit %d stdout %q stderr %q", name, got, stdout.String(), stderr.String())
