@@ -29,6 +29,7 @@ jobs:
         id: build
         run: |
           line=$(rebuild/macserve/checks/release-build.sh "$RUNNER_TEMP/rebuild")
+          echo "$line"
           echo "sha256=${line%% *}" >> "$GITHUB_OUTPUT"
 
   release:
