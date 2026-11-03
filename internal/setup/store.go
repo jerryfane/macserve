@@ -93,8 +93,9 @@ func (s Store) ensureDir(dir string, perm fs.FileMode) error {
 		return err
 	}
 	if err := os.Mkdir(dir, perm); err == nil {
-		// A new directory takes its parent's group on macOS.
-		if err := os.Lchown(dir, int(s.RootUID), int(s.RootGID)); err != nil {
+		// A new directory takes its parent's group on macOS, and mkdir
+		// applies the umask (the helper runs with 077): set both exactly.
+		if err := errors.Join(os.Lchown(dir, int(s.RootUID), int(s.RootGID)), os.Chmod(dir, perm)); err != nil {
 			return err
 		}
 	} else if !errors.Is(err, fs.ErrExist) {
@@ -125,6 +126,41 @@ func uidName(uid uint32) string {
 		return "root"
 	}
 	return fmt.Sprint(uid)
+}
+
+// LockName is the helper lock file in the socket directory.
+const LockName = ".lock"
+
+// Lock takes the exclusive helper lock dir/.lock, creating dir (root 0711)
+// and the lock file (RootUID:RootGID 0600) if missing. A link, another
+// owner or mode, or a second link is refused. The lock is held until the
+// returned file is closed; a second helper gets an error at once.
+func (s Store) Lock(dir string) (*os.File, error) {
+	if err := s.ensureDir(dir, 0o711); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(dir, LockName)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err == nil {
+		uid, gid, nlink, ok := statOwner(info)
+		if !ok || !info.Mode().IsRegular() || uid != s.RootUID || gid != s.RootGID || info.Mode().Perm() != 0o600 || nlink != 1 {
+			err = fmt.Errorf("%s must be a root-owned 0600 single-link regular file", path)
+		}
+	}
+	if err == nil {
+		if ferr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); ferr != nil {
+			err = errors.New("another macserve setup helper is running; finish or close that setup first")
+		}
+	}
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
 }
 
 // EnsureStaging creates or checks the root-only staging directory.

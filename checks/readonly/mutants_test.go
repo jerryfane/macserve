@@ -217,6 +217,7 @@ var mutants = []mutant{
 	{"E02 listed embed file also linknames", []edit{{embedGo, embedLine, "//go:linkname extra runtime.x\n" + embedLine}}},
 	{"E03 embed pattern leaves the package", []edit{{embedGo, embedLine, "//go:embed ../go.mod\n" + embedLine}}},
 	{"E04 embed glob", []edit{{embedGo, embedLine, "//go:embed launchd/*\n" + embedLine}}},
+	{"E06 go:embed in another package", []edit{{"internal/setup/zz_embed.go", "", "package setup\n\nimport _ \"embed\"\n\n//go:embed ledger.go\nvar extra []byte\n"}}},
 	{"E05 listed embed file's package imports plan", []edit{{embedGo, "import \"embed\"\n", "import (\n\t\"embed\"\n\n\t_ \"github.com/jerryfane/macserve/internal/setup/plan\"\n)\n"}}},
 }
 

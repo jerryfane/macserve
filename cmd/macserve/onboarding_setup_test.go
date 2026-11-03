@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -114,18 +116,25 @@ type wizardRun struct {
 	out     bytes.Buffer
 	stderr  bytes.Buffer
 	opens   [][]string
-	started []string
+	started [][2]string
 	ran     int
+	sha     string
 }
 
 func newWizardRun(t *testing.T, input string) *wizardRun {
 	r := &wizardRun{}
 	root := filepath.Join(t.TempDir(), "Library/macserve")
 	r.helper = &fakeHelper{t: t, root: root}
+	self := filepath.Join(t.TempDir(), "macserve-darwin-arm64")
+	if err := os.WriteFile(self, []byte("release binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte("release binary"))
+	r.sha = hex.EncodeToString(sum[:])
 	r.w = &setupWizard{
-		probe: fakeSetupHost(t, &r.ran), in: bufio.NewReader(strings.NewReader(input)), out: &r.out, root: root,
-		start: func(sha string) (setupSession, error) {
-			r.started = append(r.started, sha)
+		probe: fakeSetupHost(t, &r.ran), in: bufio.NewReader(strings.NewReader(input)), out: &r.out, root: root, self: self,
+		start: func(path, digest string) (setupSession, error) {
+			r.started = append(r.started, [2]string{path, digest})
 			return r.helper, nil
 		},
 		open:  func(args ...string) error { r.opens = append(r.opens, args); return nil },
@@ -135,7 +144,7 @@ func newWizardRun(t *testing.T, input string) *wizardRun {
 }
 
 func (r *wizardRun) run(choices plan.Choices) int {
-	return r.w.run(choices, "", &r.stderr)
+	return r.w.run(choices, r.sha, &r.stderr)
 }
 
 func repoChoices() plan.Choices {
@@ -177,8 +186,8 @@ func TestSetupApplyRunsToRound1(t *testing.T) {
 	if got != 0 {
 		t.Fatalf("exit %d stderr %s\n%s", got, r.stderr.String(), out)
 	}
-	if len(r.started) != 1 || !r.helper.closed {
-		t.Errorf("helper started %d times, closed %v", len(r.started), r.helper.closed)
+	if len(r.started) != 1 || !r.helper.closed || r.started[0] != [2]string{r.w.self, r.sha} {
+		t.Errorf("helper started %v, closed %v", r.started, r.helper.closed)
 	}
 	for _, want := range []string{
 		"temporary until O5/O7",
@@ -290,5 +299,72 @@ func TestInternalCommandsHiddenAndStrict(t *testing.T) {
 	stderr.Reset()
 	if got := run([]string{"_setup-root", "--sha256", strings.Repeat("a", 64)}, &stdout, &stderr); got == 0 {
 		t.Errorf("_setup-root ran as a test user: %q", stderr.String())
+	}
+}
+
+// TestSetupApplyDigestComesFromTheRelease: before install the digest is the
+// owner's (--sha256 or SHA256SUMS), never this binary's own, and a binary
+// that does not match is refused before sudo.
+func TestSetupApplyDigestComesFromTheRelease(t *testing.T) {
+	r := newWizardRun(t, "yes\n")
+	r.sha = ""
+	if got := r.run(repoChoices()); got != 2 || len(r.started) != 0 || r.ran != 0 || !strings.Contains(r.stderr.String(), "--sha256sums") {
+		t.Fatalf("no digest: exit %d started %v ran %d stderr %q", got, r.started, r.ran, r.stderr.String())
+	}
+	r.stderr.Reset()
+	r.sha = strings.Repeat("0", 64)
+	if got := r.run(repoChoices()); got != 2 || len(r.started) != 0 || r.ran != 0 || !strings.Contains(r.stderr.String(), "not the release digest") {
+		t.Fatalf("mismatch: exit %d started %v stderr %q", got, r.started, r.stderr.String())
+	}
+}
+
+func TestReleaseDigestFromSHA256SUMS(t *testing.T) {
+	a, b := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	if got, err := releaseDigest([]byte(a+"  macserve-darwin-arm64\n"+b+" *macserve.rb\n"), releaseAsset); err != nil || got != a {
+		t.Errorf("valid: %q %v", got, err)
+	}
+	for name, data := range map[string]string{
+		"missing":    b + "  macserve.rb\n",
+		"twice":      a + "  macserve-darwin-arm64\n" + b + "  macserve-darwin-arm64\n",
+		"uppercase":  strings.ToUpper(a) + "  macserve-darwin-arm64\n",
+		"path":       a + "  bin/macserve-darwin-arm64\n",
+		"extra text": a + "  macserve-darwin-arm64 extra\n",
+		"empty":      "",
+	} {
+		if _, err := releaseDigest([]byte(data), releaseAsset); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+}
+
+// TestHelperIdentityAfterInstall: once installed, the helper is the
+// installed binary, refused if it is writable by others; a given digest
+// must match it.
+func TestHelperIdentityAfterInstall(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "Library/macserve")
+	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	installed := filepath.Join(root, "bin", "macserve")
+	if err := os.WriteFile(installed, []byte("installed"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte("installed"))
+	digest := hex.EncodeToString(sum[:])
+	if os.Getuid() == 0 {
+		if path, got, err := helperIdentity(root, "/elsewhere/macserve", ""); err != nil || path != installed || got != digest {
+			t.Errorf("installed: %q %q %v", path, got, err)
+		}
+		if _, _, err := helperIdentity(root, "/elsewhere/macserve", strings.Repeat("0", 64)); err == nil {
+			t.Error("accepted a --sha256 that does not match the installed binary")
+		}
+	} else if _, _, err := helperIdentity(root, "/elsewhere/macserve", ""); err == nil || !strings.Contains(err.Error(), "not a root-owned binary") {
+		t.Errorf("non-root-owned installed binary: %v", err)
+	}
+	if err := os.Chmod(installed, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := helperIdentity(root, "/elsewhere/macserve", digest); err == nil || !strings.Contains(err.Error(), "not a root-owned binary") {
+		t.Errorf("writable installed binary: %v", err)
 	}
 }

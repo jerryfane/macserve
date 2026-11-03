@@ -27,7 +27,7 @@ func (h *Helper) github(l *Ledger, loc LedgerLocation) (Response, error) {
 	if next, _, _ := l.Next(); next.Step != StepGitHub {
 		return Response{}, fmt.Errorf("setup continues at %s, not github", next.Step)
 	}
-	e, _, err := h.installedEnv()
+	e, _, err := h.installedEnv(l)
 	if err != nil {
 		return Response{}, err
 	}
@@ -103,7 +103,7 @@ func (h *Helper) jobLoginVerb(l *Ledger, loc LedgerLocation) (Response, error) {
 	if err := h.ownerActionsNext(l); err != nil {
 		return Response{}, err
 	}
-	e, _, err := h.installedEnv()
+	e, _, err := h.installedEnv(l)
 	if err != nil {
 		return Response{}, err
 	}
@@ -121,7 +121,7 @@ func (h *Helper) ownerActions(l *Ledger, loc LedgerLocation) (Response, error) {
 	if err := h.ownerActionsNext(l); err != nil {
 		return Response{}, err
 	}
-	e, envData, err := h.installedEnv()
+	e, envData, err := h.installedEnv(l)
 	if err != nil {
 		return Response{}, err
 	}

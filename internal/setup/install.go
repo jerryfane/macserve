@@ -28,10 +28,13 @@ const maxBinary = 256 << 20
 // interruption, blocks setup: deploy-install must not be rerun.
 func (h *Helper) install(l *Ledger, loc LedgerLocation) (Response, error) {
 	if r := l.record(StepInstall); r.Status == StatusRunning {
-		return Response{}, errors.New("install was interrupted; deploy-install is not rerun. Keep services disabled and reconcile the named accounts, the job home, /Library/macserve and the three launchd plists by hand (macserve doctor will list them)")
+		return Response{}, errors.New("install was interrupted; deploy-install is not rerun. Keep services disabled and reconcile by hand: the controller and build accounts and groups, the build account's home, /Library/macserve and /Library/LaunchDaemons/org.macserve.{controller,worker,maintenance}.plist")
 	}
 	if next, _, _ := l.Next(); next.Step != StepInstall {
 		return Response{}, fmt.Errorf("setup continues at %s, not install", next.Step)
+	}
+	if err := h.TerminalCheck(); err != nil {
+		return Response{}, err
 	}
 	env, err := h.Store.StagedFile(stagedEnv, deploy.MaxEnvironment)
 	if err != nil {

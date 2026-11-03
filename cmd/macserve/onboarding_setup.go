@@ -41,8 +41,10 @@ type setupWizard struct {
 	out   io.Writer
 	// root is deploy.Prefix.
 	root string
-	// start runs `sudo macserve _setup-root` and connects to it.
-	start func(sha string) (setupSession, error)
+	// self is this binary's resolved path.
+	self string
+	// start runs `sudo path _setup-root --sha256 digest` and connects to it.
+	start func(path, digest string) (setupSession, error)
 	// open runs /usr/bin/open as the owner with fixed arguments.
 	open  func(args ...string) error
 	sleep func(time.Duration)
@@ -55,11 +57,12 @@ func runSetupApply(args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(io.Discard)
 	choices := plan.DefaultChoices()
 	var planOnly bool
-	var sha string
+	var sha, sums string
 	flags.BoolVar(&planOnly, "plan", false, "")
 	flags.StringVar(&choices.Repository, "repository", "", "")
 	flags.StringVar(&choices.JobRealName, "job-real-name", choices.JobRealName, "")
 	flags.StringVar(&sha, "sha256", "", "")
+	flags.StringVar(&sums, "sha256sums", "", "")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Fprint(stdout, setupHelp)
@@ -76,8 +79,30 @@ func runSetupApply(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "macserve setup: --sha256 needs 64 lowercase hexadecimal characters")
 		return 2
 	}
+	if sha != "" && sums != "" {
+		fmt.Fprintln(stderr, "macserve setup: give --sha256 or --sha256sums, not both")
+		return 2
+	}
+	if sums != "" {
+		data, err := readSmallFile(sums, 64<<10)
+		if err == nil {
+			sha, err = releaseDigest(data, releaseAsset)
+		}
+		if err != nil {
+			fmt.Fprintln(stderr, "macserve setup: --sha256sums:", err)
+			return 2
+		}
+	}
+	self, err := os.Executable()
+	if err == nil {
+		self, err = filepath.EvalSymlinks(self)
+	}
+	if err != nil {
+		fmt.Fprintln(stderr, "macserve setup:", err)
+		return 1
+	}
 	w := &setupWizard{
-		probe: plan.SystemProbe(), in: bufio.NewReader(os.Stdin), out: stdout, root: deploy.Prefix,
+		probe: plan.SystemProbe(), in: bufio.NewReader(os.Stdin), out: stdout, root: deploy.Prefix, self: self,
 		open: func(args ...string) error {
 			cmd := exec.Command("/usr/bin/open", args...)
 			cmd.Env, cmd.Dir = []string{setup.FixedPath}, "/"
@@ -85,7 +110,7 @@ func runSetupApply(args []string, stdout, stderr io.Writer) int {
 		},
 		sleep: time.Sleep, loginPoll: 5 * time.Second, loginWait: 30 * time.Minute,
 	}
-	w.start = func(want string) (setupSession, error) { return startRootHelper(w.root, want, stderr) }
+	w.start = func(path, digest string) (setupSession, error) { return startRootHelper(path, digest, stderr) }
 	return w.run(choices, sha, stderr)
 }
 
@@ -113,6 +138,11 @@ func (w *setupWizard) run(choices plan.Choices, sha string, stderr io.Writer) in
 		fmt.Fprintln(stderr, "macserve setup: run it as yourself, not with sudo; qualification refuses owner evidence gathered under sudo, and setup asks for your password once when it needs it.")
 		return 2
 	}
+	helper, digest, err := helperIdentity(w.root, w.self, sha)
+	if err != nil {
+		fmt.Fprintln(stderr, "macserve setup:", err)
+		return 2
+	}
 	var env []byte
 	if _, err := os.Lstat(w.root); errors.Is(err, fs.ErrNotExist) {
 		if choices.Repository == "" {
@@ -134,7 +164,7 @@ func (w *setupWizard) run(choices plan.Choices, sha string, stderr io.Writer) in
 	} else if err != nil {
 		return fail(err)
 	}
-	session, err := w.start(sha)
+	session, err := w.start(helper, digest)
 	if err != nil {
 		return fail(err)
 	}
@@ -375,28 +405,90 @@ func (w *setupWizard) ownerActions(s setupSession) error {
 	return nil
 }
 
-// startRootHelper starts the one root helper with sudo and connects to
-// it. Before install the helper is this binary (sudo runs it once); after
-// install it is the root-owned /Library/macserve/bin/macserve. The digest
-// passed is that file's, and must equal want if the owner gave --sha256.
-func startRootHelper(root, want string, stderr io.Writer) (setupSession, error) {
-	path := filepath.Join(root, "bin", "macserve")
-	if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() || info.Sys().(*syscall.Stat_t).Uid != 0 {
-		self, err := os.Executable()
-		if err != nil {
-			return nil, err
+// releaseAsset is the release binary's name in SHA256SUMS.
+const releaseAsset = "macserve-darwin-arm64"
+
+var sumsLine = regexp.MustCompile(`^([0-9a-f]{64}) [ *]([A-Za-z0-9._-]+)$`)
+
+// releaseDigest returns name's digest from a release SHA256SUMS file. Every
+// line must be a shasum line, and name must appear exactly once.
+func releaseDigest(data []byte, name string) (string, error) {
+	found := ""
+	for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+		m := sumsLine.FindStringSubmatch(line)
+		if m == nil {
+			return "", fmt.Errorf("not a SHA256SUMS line: %q", line)
 		}
-		if path, err = filepath.EvalSymlinks(self); err != nil {
-			return nil, err
+		if m[2] == name {
+			if found != "" {
+				return "", fmt.Errorf("%s is listed twice", name)
+			}
+			found = m[1]
 		}
 	}
-	digest, err := fileDigest(path)
+	if found == "" {
+		return "", fmt.Errorf("%s is not listed", name)
+	}
+	return found, nil
+}
+
+func readSmallFile(path string, max int64) ([]byte, error) {
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	if want != "" && digest != want {
-		return nil, fmt.Errorf("%s has SHA-256 %s, not the --sha256 you gave; nothing was changed", path, digest)
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, max+1))
+	if err == nil && int64(len(data)) > max {
+		err = errors.New("file too large")
 	}
+	return data, err
+}
+
+// helperIdentity picks the binary sudo runs as the root helper and the
+// digest it is started with; the helper re-hashes itself and refuses a
+// mismatch.
+//   - After install it is the root-owned root/bin/macserve. Its digest
+//     identifies it; the helper requires that digest to be the one install
+//     recorded. A given --sha256 must match too.
+//   - Before install it is this binary, which the owner downloaded. Its
+//     digest is never taken from the file itself: want must come from the
+//     release (--sha256 or --sha256sums), and this binary must match it
+//     before sudo is asked for.
+func helperIdentity(root, self, want string) (string, string, error) {
+	installed := filepath.Join(root, "bin", "macserve")
+	if info, err := os.Lstat(installed); err == nil {
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if !info.Mode().IsRegular() || !ok || st.Uid != 0 || info.Mode().Perm()&0o022 != 0 {
+			return "", "", fmt.Errorf("%s is not a root-owned binary; macserve setup does not run it", installed)
+		}
+		digest, err := fileDigest(installed)
+		if err != nil {
+			return "", "", err
+		}
+		if want != "" && digest != want {
+			return "", "", fmt.Errorf("%s has SHA-256 %s, not the one you gave; nothing was changed", installed, digest)
+		}
+		return installed, digest, nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return "", "", err
+	}
+	if want == "" {
+		return "", "", fmt.Errorf("before install, give the release digest of this binary: --sha256sums SHA256SUMS (from the same release; verify it first with gh attestation verify %s --repo jerryfane/macserve) or --sha256 HEX", releaseAsset)
+	}
+	digest, err := fileDigest(self)
+	if err != nil {
+		return "", "", err
+	}
+	if digest != want {
+		return "", "", fmt.Errorf("%s has SHA-256 %s, not the release digest %s; nothing was changed", self, digest, want)
+	}
+	return self, digest, nil
+}
+
+// startRootHelper starts the one root helper, sudo path _setup-root
+// --sha256 digest, and connects to it.
+func startRootHelper(path, digest string, stderr io.Writer) (setupSession, error) {
 	cmd := exec.Command("/usr/bin/sudo", path, "_setup-root", "--sha256", digest)
 	cmd.Env, cmd.Dir = []string{setup.FixedPath, "LANG=C"}, "/"
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, stderr

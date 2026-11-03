@@ -34,7 +34,8 @@ func ParseRootArgs(args []string) (string, error) {
 }
 
 // SudoOwner resolves SUDO_UID: a canonical decimal, not root, a local
-// account of at least uid 501 whose name is a valid owner name.
+// account of at least uid 501 whose name is a valid owner name, with its
+// primary group and an absolute home directory.
 func SudoOwner(sudoUID string, lookup func(string) (*user.User, error)) (Owner, error) {
 	uid, err := strconv.ParseUint(sudoUID, 10, 32)
 	if sudoUID == "" || err != nil || strconv.FormatUint(uid, 10) != sudoUID || uid < 501 {
@@ -47,7 +48,11 @@ func SudoOwner(sudoUID string, lookup func(string) (*user.User, error)) (Owner, 
 	if !ownerName.MatchString(u.Username) {
 		return Owner{}, fmt.Errorf("account name %q is not supported", u.Username)
 	}
-	return Owner{UID: uint32(uid), Name: u.Username}, nil
+	gid, err := strconv.ParseUint(u.Gid, 10, 32)
+	if err != nil || strconv.FormatUint(gid, 10) != u.Gid || !filepath.IsAbs(u.HomeDir) || filepath.Clean(u.HomeDir) != u.HomeDir {
+		return Owner{}, fmt.Errorf("account %s has no usable primary group or home directory", u.Username)
+	}
+	return Owner{UID: uint32(uid), GID: uint32(gid), Name: u.Username, Home: u.HomeDir}, nil
 }
 
 // RootHelper is the production helper.
@@ -68,7 +73,7 @@ func RootHelper(owner Owner, sha string, terminal io.Writer) (*Helper, error) {
 		Store: SystemStore(), Root: deploy.Prefix, Owner: owner, SHA256: sha, Executable: exe, Assets: files,
 		Install: deploy.Install, Exec: terminalCommand(terminal), Probe: quietCommand,
 		ConsoleUID: hostguard.ConsoleUID, ToolCheck: hostguard.ToolchainExecutable,
-		Boot: SystemBoot, Now: time.Now, Terminal: terminal, FDAWait: 30 * time.Second,
+		Boot: SystemBoot, Now: time.Now, Terminal: terminal, TerminalCheck: stdoutTerminal, FDAWait: 30 * time.Second,
 	}, nil
 }
 
@@ -78,7 +83,23 @@ func command(ctx context.Context, c Cmd) (*exec.Cmd, context.CancelFunc) {
 	cmd.Env = c.Env
 	cmd.Dir = "/"
 	cmd.WaitDelay = time.Second
+	if c.Credential != nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: c.Credential}
+	}
 	return cmd, cancel
+}
+
+// stdoutTerminal requires the helper's stdout (the owner's terminal, where
+// deploy-install prints the one-time API token) to be a terminal.
+func stdoutTerminal() error {
+	info, err := os.Stdout.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Mode()&fs.ModeCharDevice == 0 {
+		return errors.New("deploy-install prints the one-time API token to this terminal; run macserve setup with its output on the terminal, not into a pipe or file")
+	}
+	return nil
 }
 
 // terminalCommand runs c with output to the terminal and no stdin.
@@ -99,8 +120,9 @@ func quietCommand(ctx context.Context, c Cmd) error {
 }
 
 // Listen creates the helper socket: dir (root:RootGID 0711, refused if it
-// exists otherwise or is a link) under Store.Top, a stale socket removed,
-// the new socket owned by owner with mode 0600.
+// exists otherwise or is a link) under Store.Top, a stale socket removed
+// (callers hold the helper Lock, so no live helper owns it), the new socket
+// owned by owner with mode 0600.
 func (s Store) Listen(dir string, owner uint32) (*net.UnixListener, error) {
 	if err := s.ensureDir(dir, 0o711); err != nil {
 		return nil, err
@@ -171,18 +193,31 @@ func RunRoot(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
-	if err := h.CheckStart(); err != nil {
-		return fail(err)
-	}
-	if err := h.Store.EnsureStaging(); err != nil {
-		return fail(err)
-	}
-	ln, err := h.Store.Listen(SocketDir, owner.UID)
-	if err != nil {
-		return fail(err)
-	}
-	if err := h.Serve(ln, IdleTimeout); err != nil {
+	if err := h.ServeRoot(SocketDir, IdleTimeout); err != nil {
 		return fail(err)
 	}
 	return 0
+}
+
+// ServeRoot takes the exclusive helper lock in dir and holds it until the
+// session ends, so a second helper refuses before it reads the ledger or
+// touches the socket. Then it checks the start conditions, creates the
+// staging directory and the socket, and serves the wizard.
+func (h *Helper) ServeRoot(dir string, idle time.Duration) error {
+	lock, err := h.Store.Lock(dir)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err := h.CheckStart(); err != nil {
+		return err
+	}
+	if err := h.Store.EnsureStaging(); err != nil {
+		return err
+	}
+	ln, err := h.Store.Listen(dir, h.Owner.UID)
+	if err != nil {
+		return err
+	}
+	return h.Serve(ln, idle)
 }

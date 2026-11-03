@@ -31,7 +31,8 @@ var onboardingCommands = []struct {
 }
 
 const setupHelp = `Usage: macserve setup --plan [--repository OWNER/NAME:ID] [--job-real-name NAME]
-       macserve setup [--repository OWNER/NAME:ID] [--job-real-name NAME] [--sha256 HEX]
+       macserve setup [--repository OWNER/NAME:ID] [--job-real-name NAME]
+                      [--sha256sums SHA256SUMS | --sha256 HEX]
 
 First-time setup of this Mac. Run it as yourself, not with sudo: the owner
 evidence that qualification needs is refused under sudo.
@@ -47,9 +48,15 @@ evidence that qualification needs is refused under sudo.
           install.
   --job-real-name NAME
           Display name of the build account (default "macserve build").
+  --sha256sums SHA256SUMS
+          The release's SHA256SUMS file (verify the release first, see
+          docs/install.md); setup takes the macserve-darwin-arm64 digest
+          from it. Required before install, unless --sha256 is given.
   --sha256 HEX
-          Expected SHA-256 of this macserve (from the release's SHA256SUMS);
-          setup refuses to install a binary with another digest.
+          The release digest of this macserve, instead of --sha256sums.
+          Setup refuses to run or install a binary with another digest; it
+          never takes the digest from the binary itself. After install the
+          helper is the installed /Library/macserve/bin/macserve.
 
 Without --plan, setup runs the preflight, asks you to confirm, then asks
 for your password once (sudo) to start its root helper, and continues from

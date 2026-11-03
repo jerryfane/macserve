@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -29,20 +30,23 @@ const testToken = "API_BEARER_TOKEN=tok-0123456789abcdef"
 // fakeHost is a Mac in a temporary directory: the helper's files live
 // under top, root is the test user, and every command is recorded.
 type fakeHost struct {
-	t          *testing.T
-	top        string
-	h          *Helper
-	terminal   bytes.Buffer
-	installs   []deploy.Options
-	installErr error
-	execs      [][]string
-	execEnv    [][]string
-	execErr    error
-	probes     [][]string
-	fda        string // what the transient launchd job prints
-	guiSession bool
-	console    uint32
-	boot       Boot
+	t           *testing.T
+	top         string
+	h           *Helper
+	terminal    bytes.Buffer
+	installs    []deploy.Options
+	installErr  error
+	execs       [][]string
+	execEnv     [][]string
+	execCred    []*syscall.Credential
+	execErr     error
+	probes      [][]string
+	fda         string // what the transient launchd job prints
+	guiSession  bool
+	console     uint32
+	boot        Boot
+	terminalErr error
+	toolChecks  int
 }
 
 func testEnv(owner Owner) string {
@@ -55,7 +59,13 @@ func itoa(u uint32) string { return strconv.FormatUint(uint64(u), 10) }
 
 func newFakeHost(t *testing.T) *fakeHost {
 	t.Helper()
-	top := t.TempDir()
+	// A short directory: a Unix socket path is limited to 104 bytes on
+	// macOS.
+	top, err := os.MkdirTemp("", "ms")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(top) })
 	if err := os.Chmod(top, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +88,7 @@ func newFakeHost(t *testing.T) *fakeHost {
 	f.h = &Helper{
 		Store:      Store{Staging: filepath.Join(top, "private/var/root/.macserve-setup"), Ledger: filepath.Join(top, "Library/macserve/var/setup"), Top: top, RootUID: uid, RootGID: gid},
 		Root:       filepath.Join(top, "Library/macserve"),
-		Owner:      Owner{UID: 501, Name: "jdoe"},
+		Owner:      Owner{UID: 501, GID: 20, Name: "jdoe", Home: "/Users/jdoe"},
 		SHA256:     digestHex([]byte("macserve binary")),
 		Executable: exe,
 		Assets:     files,
@@ -86,14 +96,16 @@ func newFakeHost(t *testing.T) *fakeHost {
 		Exec: func(_ context.Context, c Cmd) error {
 			f.execs = append(f.execs, c.Argv)
 			f.execEnv = append(f.execEnv, c.Env)
+			f.execCred = append(f.execCred, c.Credential)
 			return f.execErr
 		},
-		Probe:      f.probe,
-		ConsoleUID: func() (uint32, error) { return f.console, nil },
-		ToolCheck:  func(string, uint32) error { return nil },
-		Boot:       func() (Boot, error) { return f.boot, nil },
-		Now:        func() time.Time { return time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC) },
-		FDAWait:    2 * time.Second,
+		Probe:         f.probe,
+		ConsoleUID:    func() (uint32, error) { return f.console, nil },
+		ToolCheck:     func(string, uint32) error { f.toolChecks++; return nil },
+		Boot:          func() (Boot, error) { return f.boot, nil },
+		Now:           func() time.Time { return time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC) },
+		FDAWait:       2 * time.Second,
+		TerminalCheck: func() error { return f.terminalErr },
 	}
 	f.h.Terminal = &f.terminal
 	return f
@@ -475,17 +487,32 @@ func TestToolsRunsXcodeSystemSteps(t *testing.T) {
 	if rec := f.ledger().record(StepTools); rec.Status != StatusRunning {
 		t.Errorf("failed tools command: %+v", rec)
 	}
-	f.execErr, f.execs, f.execEnv = nil, nil, nil
+	f.execErr, f.execs, f.execEnv, f.execCred, f.toolChecks = nil, nil, nil, nil, 0
 	f.mustDo(VerbTools, "")
 	xcodebuild := "/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild"
 	want := [][]string{{xcodebuild, "-license", "accept"}, {xcodebuild, "-runFirstLaunch"}, {xcodebuild, "-downloadComponent", "MetalToolchain"}}
 	if !slices.EqualFunc(f.execs, want, slices.Equal) {
 		t.Errorf("ran %q", f.execs)
 	}
-	for _, env := range f.execEnv {
-		if !slices.Equal(env, []string{FixedPath, "DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer", "HOME=/private/var/root", "LANG=C", "LC_ALL=C"}) {
-			t.Errorf("env %q", env)
+	for i, env := range f.execEnv {
+		home := "HOME=/private/var/root"
+		if i == 2 {
+			home = "HOME=/Users/jdoe"
 		}
+		if !slices.Equal(env, []string{FixedPath, "DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer", home, "LANG=C", "LC_ALL=C"}) {
+			t.Errorf("env %d %q", i, env)
+		}
+	}
+	// License and first launch write system locations and run as root;
+	// the Metal toolchain download runs as the owner.
+	for i, cred := range f.execCred {
+		if (i == 2) != (cred != nil) || (cred != nil && (cred.Uid != 501 || cred.Gid != 20 || !slices.Equal(cred.Groups, []uint32{20}))) {
+			t.Errorf("command %d credential %+v", i, cred)
+		}
+	}
+	// The toolchain policy is checked before each command, not once.
+	if f.toolChecks != 1+len(xcodeSystemSteps) {
+		t.Errorf("toolchain checked %d times", f.toolChecks)
 	}
 }
 
@@ -682,25 +709,41 @@ func TestParseRootArgsAndSudoOwner(t *testing.T) {
 			t.Errorf("accepted %q", args)
 		}
 	}
+	// The lookup accepts every uid, so only SudoOwner's own checks refuse.
+	account := user.User{Gid: "20", Username: "jdoe", HomeDir: "/Users/jdoe"}
 	lookup := func(uid string) (*user.User, error) {
-		if uid == "501" {
-			return &user.User{Uid: "501", Username: "jdoe"}, nil
-		}
-		return &user.User{Uid: uid, Username: "Bad Name"}, nil
+		u := account
+		u.Uid = uid
+		return &u, nil
 	}
-	if o, err := SudoOwner("501", lookup); err != nil || o != (Owner{UID: 501, Name: "jdoe"}) {
+	if o, err := SudoOwner("501", lookup); err != nil || o != (Owner{UID: 501, GID: 20, Name: "jdoe", Home: "/Users/jdoe"}) {
 		t.Errorf("valid: %+v %v", o, err)
 	}
-	for _, uid := range []string{"", "0", "0501", "500", "abc", "502", "-1"} {
+	for _, uid := range []string{"", "0", "0501", "500", "abc", "-1", "+501", " 501", "4294967296"} {
 		if _, err := SudoOwner(uid, lookup); err == nil {
 			t.Errorf("accepted SUDO_UID %q", uid)
 		}
+	}
+	for name, u := range map[string]user.User{
+		"name":    {Gid: "20", Username: "Bad Name", HomeDir: "/Users/jdoe"},
+		"gid":     {Gid: "020", Username: "jdoe", HomeDir: "/Users/jdoe"},
+		"home":    {Gid: "20", Username: "jdoe", HomeDir: "Users/jdoe"},
+		"unclean": {Gid: "20", Username: "jdoe", HomeDir: "/Users/../jdoe"},
+		"nogid":   {Username: "jdoe", HomeDir: "/Users/jdoe"},
+	} {
+		account = u
+		if _, err := SudoOwner("501", lookup); err == nil {
+			t.Errorf("accepted account with bad %s", name)
+		}
+	}
+	if _, err := SudoOwner("501", func(string) (*user.User, error) { return nil, errors.New("unknown") }); err == nil {
+		t.Error("accepted an unknown SUDO_UID")
 	}
 }
 
 func TestServeChecksPeerUIDAndAcceptsOneConnection(t *testing.T) {
 	f := newFakeHost(t)
-	dir, sockets := socketStore(t, f)
+	dir, sockets := filepath.Join(f.top, "s"), f.h.Store
 	f.h.Owner.UID = uint32(os.Getuid())
 	ln, err := sockets.Listen(dir, f.h.Owner.UID)
 	if err != nil {
@@ -742,7 +785,7 @@ func TestServeChecksPeerUIDAndAcceptsOneConnection(t *testing.T) {
 
 func TestServeRefusesOtherPeerUID(t *testing.T) {
 	f := newFakeHost(t)
-	dir, sockets := socketStore(t, f)
+	dir, sockets := filepath.Join(f.top, "s"), f.h.Store
 	f.h.Owner.UID = uint32(os.Getuid()) + 1
 	if err := f.h.Store.EnsureStaging(); err != nil {
 		t.Fatal(err)
@@ -771,7 +814,7 @@ func TestServeRefusesOtherPeerUID(t *testing.T) {
 
 func TestDialRefusesUntrustedDirectoryAndPeer(t *testing.T) {
 	f := newFakeHost(t)
-	dir, sockets := socketStore(t, f)
+	dir, sockets := filepath.Join(f.top, "s"), f.h.Store
 	if err := os.Mkdir(dir, 0o777); err != nil {
 		t.Fatal(err)
 	}
@@ -795,18 +838,4 @@ func TestDialRefusesUntrustedDirectoryAndPeer(t *testing.T) {
 	if _, err := Dial(dir, uint32(os.Getuid())+1); err == nil {
 		t.Error("Dial accepted a socket not owned by the expected root uid")
 	}
-}
-
-// socketStore is a Store for the helper socket in a short directory: a
-// Unix socket path is limited to 104 bytes on macOS.
-func socketStore(t *testing.T, f *fakeHost) (string, Store) {
-	t.Helper()
-	top, err := os.MkdirTemp("", "ms")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(top) })
-	s := f.h.Store
-	s.Top = top
-	return filepath.Join(top, "s"), s
 }

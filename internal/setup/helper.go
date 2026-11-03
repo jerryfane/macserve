@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jerryfane/macserve/internal/deploy"
@@ -31,18 +32,22 @@ const (
 const IdleTimeout = 15 * time.Minute
 
 // Owner is the user who ran `macserve setup`: SUDO_UID, also the console
-// user, and the ledger owner.
+// user, and the ledger owner. GID and Home are the account's primary group
+// and home directory, for the one step that runs as the owner.
 type Owner struct {
-	UID  uint32
-	Name string
+	UID, GID uint32
+	Name     string
+	Home     string
 }
 
 // Cmd is one fixed command the helper runs: argv, environment and
 // timeout. Commands run with cwd "/", no stdin and output to the terminal.
+// Credential, if set, is the identity the command runs as instead of root.
 type Cmd struct {
-	Argv    []string
-	Env     []string
-	Timeout time.Duration
+	Argv       []string
+	Env        []string
+	Timeout    time.Duration
+	Credential *syscall.Credential
 }
 
 // FixedPath is the PATH of every command the helper runs.
@@ -78,6 +83,9 @@ type Helper struct {
 	// deploy-install prints the one-time API token here; it never passes
 	// through the wizard, the ledger or the audit log.
 	Terminal io.Writer
+	// TerminalCheck requires Terminal to be a terminal, not a pipe or
+	// file that would keep the token.
+	TerminalCheck func() error
 	// FDAWait bounds the wait for the transient launchd check.
 	FDAWait time.Duration
 }
@@ -113,7 +121,8 @@ func (h *Helper) load() (*Ledger, LedgerLocation, error) {
 }
 
 // CheckStart refuses to start the helper on a Mac whose qualification is
-// approved, whose ledger is someone else's, or (decision D12) whose
+// approved, whose ledger is someone else's, whose running binary is not
+// the one the owner verified (checkExecutable), or (decision D12) whose
 // /Library/macserve exists without a native ledger.
 func (h *Helper) CheckStart() error {
 	if approved, err := h.Approved(); err != nil {
@@ -125,6 +134,9 @@ func (h *Helper) CheckStart() error {
 	if err != nil {
 		return err
 	}
+	if err := h.checkExecutable(l); err != nil {
+		return err
+	}
 	if l == nil {
 		if _, err := os.Lstat(h.Root); err == nil {
 			return fmt.Errorf("%s exists without a native setup ledger; this Mac is managed by other tooling and macserve setup does not change it", h.Root)
@@ -133,6 +145,56 @@ func (h *Helper) CheckStart() error {
 		}
 	}
 	return nil
+}
+
+// checkExecutable re-hashes the helper's own executable and refuses a
+// digest other than SHA256, the digest the owner verified before sudo
+// (from the release's SHA256SUMS or --sha256). Once install is done the
+// helper must be the installed /Library/macserve/bin/macserve and SHA256
+// the digest install recorded, so a resumed setup runs only the binary
+// deploy-install installed.
+func (h *Helper) checkExecutable(l *Ledger) error {
+	if !sha256Hex.MatchString(h.SHA256) {
+		return errors.New("expected macserve digest missing")
+	}
+	got, err := fileSHA256(h.Executable)
+	if err != nil {
+		return err
+	}
+	if got != h.SHA256 {
+		return fmt.Errorf("%s has SHA-256 %s, not the verified %s; nothing was changed", h.Executable, got, h.SHA256)
+	}
+	if l == nil || l.record(StepInstall).Status != StatusDone {
+		return nil
+	}
+	if h.Executable != filepath.Join(h.Root, "bin", "macserve") {
+		return fmt.Errorf("after install the setup helper must be %s/bin/macserve, not %s", h.Root, h.Executable)
+	}
+	if want := l.record(StepInstall).Inputs["macserve"]; h.SHA256 != want {
+		return fmt.Errorf("the installed macserve has SHA-256 %s, not %s, the one install recorded", h.SHA256, want)
+	}
+	return nil
+}
+
+// fileSHA256 hashes a bounded regular file without following a link.
+func fileSHA256(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() || info.Size() == 0 || info.Size() > maxBinary {
+		return "", fmt.Errorf("%s is not a bounded regular file", path)
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxBinary+1))
+	if err != nil {
+		return "", err
+	}
+	return digestHex(data), nil
 }
 
 // Handle serves one request. It never panics the helper: every failure is
