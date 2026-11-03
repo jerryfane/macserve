@@ -6,14 +6,17 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/jerryfane/macserve/internal/setup/plan"
 )
 
 // onboardingCommands are the first-time setup commands. main.go dispatches
 // any name listed here; new onboarding commands are added only in this
-// file. checks/readonly proves that onboardingCommand, runSetup and
-// everything they reach cannot change host state.
+// file. Names starting with "_" are internal (started by setup itself) and
+// not listed in the usage. checks/readonly proves that onboardingCommand,
+// runSetup (outside its apply clause) and everything they reach cannot
+// change host state.
 var onboardingCommands = []struct {
 	name, summary, help string
 	run                 func(args []string, stdout, stderr io.Writer) int
@@ -23,9 +26,12 @@ var onboardingCommands = []struct {
 	{"doctor", "Explain failures with fixed check IDs and fixes (not in this release)", doctorHelp, nil},
 	{"build", "Start a build of a repository and verify its receipt (not in this release)", buildHelp, nil},
 	{"upgrade", "Upgrade behind the stopped gate with verified release bytes (not in this release)", upgradeHelp, nil},
+	{"_setup-root", "", setupRootHelp, runSetupRoot},
+	{"_fda-check", "", fdaCheckHelp, runFDACheck},
 }
 
 const setupHelp = `Usage: macserve setup --plan [--repository OWNER/NAME:ID] [--job-real-name NAME]
+       macserve setup [--repository OWNER/NAME:ID] [--job-real-name NAME] [--sha256 HEX]
 
 First-time setup of this Mac. Run it as yourself, not with sudo: the owner
 evidence that qualification needs is refused under sudo.
@@ -36,13 +42,37 @@ evidence that qualification needs is refused under sudo.
           prints the deploy.env setup would install and the ordered setup
           steps. Nothing is written, created or started.
   --repository OWNER/NAME:ID
-          Repository pin to include in the generated deploy.env. Without it
-          REPOSITORIES is left to the GitHub step.
+          Repository pin for the generated deploy.env (numeric ID:
+          gh api repos/OWNER/NAME --jq .id). Required by setup before
+          install.
   --job-real-name NAME
           Display name of the build account (default "macserve build").
+  --sha256 HEX
+          Expected SHA-256 of this macserve (from the release's SHA256SUMS);
+          setup refuses to install a binary with another digest.
 
-Only --plan is available in this release. Exit status: 0 ready, 1 blocked,
-2 usage.
+Without --plan, setup runs the preflight, asks you to confirm, then asks
+for your password once (sudo) to start its root helper, and continues from
+its ledger: install (deploy-install, services disabled), GitHub (prints
+the commands to run), the Xcode system steps, and the owner actions (Full
+Disk Access, one build-account login), each detected. Run it again to
+resume. This release stops before qualification round 1.
+
+Exit status: 0 ready or stopped at a resumable point, 1 blocked or
+failed, 2 usage.
+`
+
+const setupRootHelp = `Usage: sudo macserve _setup-root --sha256 HEX
+
+The root helper of macserve setup, which starts it; do not run it yourself.
+It serves a fixed set of setup steps to your login only and exits when
+setup disconnects or after 15 idle minutes.
+`
+
+const fdaCheckHelp = `Usage: macserve _fda-check
+
+Run by the transient launchd job macserve setup bootstraps: reports whether
+this binary has Full Disk Access in launchd context.
 `
 
 const doctorHelp = `Usage: macserve doctor [--json]
@@ -94,11 +124,24 @@ func onboardingCommand(name string) (func(args []string, stdout, stderr io.Write
 func writeOnboardingUsage(w io.Writer) {
 	fmt.Fprint(w, "\nFirst-time setup:\n")
 	for _, c := range onboardingCommands {
-		fmt.Fprintf(w, "  %-14s %s\n", c.name, c.summary)
+		if !strings.HasPrefix(c.name, "_") {
+			fmt.Fprintf(w, "  %-14s %s\n", c.name, c.summary)
+		}
 	}
 }
 
+// runSetup runs the read-only plan unless plan.Mode selects apply.
 func runSetup(args []string, stdout, stderr io.Writer) int {
+	return setupDispatch([]string{plan.Mode(args)}, args, stdout, stderr)
+}
+
+// setupDispatch runs the setup mode words[0]. checks/readonly proves it
+// for the mode "plan": everything here except the apply clause.
+func setupDispatch(words, args []string, stdout, stderr io.Writer) int {
+	switch words[0] {
+	case plan.ModeApply:
+		return runSetupApply(args, stdout, stderr)
+	}
 	return runSetupWith(plan.SystemProbe(), args, stdout, stderr)
 }
 
@@ -130,7 +173,7 @@ func runSetupWith(probe plan.Probe, args []string, stdout, stderr io.Writer) int
 		return 2
 	}
 	if !planOnly {
-		fmt.Fprintln(stderr, "macserve setup: only --plan is available in this release; see macserve setup --help")
+		fmt.Fprintln(stderr, "macserve setup: this is the read-only plan and needs --plan; see macserve setup --help")
 		return 2
 	}
 	result := plan.Preflight(context.Background(), probe, choices)

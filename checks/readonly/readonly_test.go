@@ -58,7 +58,7 @@ func TestSetupPlanIsReadOnly(t *testing.T) {
 		mainPkg + ".main", mainPkg + ".run", mainPkg + ".usage",
 		mainPkg + ".onboardingCommand", mainPkg + ".runSetup", mainPkg + ".runSetupWith",
 		planFunc + "SystemProbe", planFunc + "runReadOnly", planFunc + "command", planFunc + "portInUse",
-		planFunc + "lstat", planFunc + "Preflight", planFunc + "RenderEnvironment", planFunc + "WritePlan",
+		planFunc + "lstat", planFunc + "Mode", planFunc + "Preflight", planFunc + "RenderEnvironment", planFunc + "WritePlan",
 		module + "/internal/deploy.ParseEnvironment", module + "/internal/maintenance.ValidateCoexistenceConfig",
 	} {
 		if !slices.Contains(report.Reached, want) {
@@ -66,7 +66,11 @@ func TestSetupPlanIsReadOnly(t *testing.T) {
 		}
 	}
 	// Nothing outside the "setup" clause of the dispatch is reached.
-	for _, never := range []string{mainPkg + ".runDeployInstall", mainPkg + ".runQualify", mainPkg + ".runWait"} {
+	for _, never := range []string{
+		mainPkg + ".runDeployInstall", mainPkg + ".runQualify", mainPkg + ".runWait",
+		mainPkg + ".runSetupApply", mainPkg + ".runSetupRoot", mainPkg + ".runFDACheck",
+		module + "/internal/setup.RunRoot", module + "/internal/setup.FDACheck",
+	} {
 		if slices.Contains(report.Reached, never) {
 			t.Errorf("walk reached %s, outside the setup dispatch", never)
 		}

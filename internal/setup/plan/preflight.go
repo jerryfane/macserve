@@ -335,8 +335,7 @@ func checkOwnerHome(p Probe, owner Account, add func(id, status, detail, fix str
 // checkExisting blocks on any existing /Library/macserve. A host managed by
 // other tooling (decision D12) gets that explanation; a native setup
 // ledger (root:wheel 0600, one link, in root-owned directories without
-// group or other write) is reported as such, but resuming is not part of
-// this release either.
+// group or other write) is reported as such: `macserve setup` resumes it.
 func checkExisting(p Probe, add func(id, status, detail, fix string)) {
 	root, err := p.Lstat(setup.InstallRoot)
 	if err != nil {
@@ -359,7 +358,7 @@ func checkExisting(p Probe, add func(id, status, detail, fix string)) {
 		native = false
 	}
 	if native {
-		add("setup.existing", Fail, "a native setup ledger exists at "+setup.LedgerPath, "Resuming a setup is not available in this release.")
+		add("setup.existing", Fail, "a native setup ledger exists at "+setup.LedgerPath, "Run macserve setup (without --plan) to resume from the ledger.")
 		return
 	}
 	add("setup.existing", Fail, setup.InstallRoot+" exists without a native setup ledger; this Mac is managed by other tooling", "macserve setup does not change an existing installation.")
@@ -391,7 +390,7 @@ func WritePlan(w io.Writer, plan Plan) error {
 		fmt.Fprintf(&b, "  %2d. %-18s %s\n", i+1, s, setup.StepSummaries[s])
 	}
 	if plan.Ready() {
-		b.WriteString("\nResult: ready. This release does not apply the plan yet.\n")
+		b.WriteString("\nResult: ready. macserve setup (without --plan) applies it, up to qualification round 1.\n")
 	} else {
 		n := 0
 		for _, c := range plan.Checks {

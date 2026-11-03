@@ -60,7 +60,7 @@ func at(file, anchor, code string) edit { return edit{file, anchor, anchor + "\n
 func tableHook(hook, decl string) []edit {
 	edits := []edit{cmdOS, {command, tableType, "\trun                 func(args []string, stdout, stderr io.Writer) int\n\tpre                 func()\n}{"}}
 	edits = append(edits, edit{command, setupEntry, strings.Replace(setupEntry, "runSetup}", "runSetup, "+hook+"}", 1)})
-	for _, name := range []string{"connectGitHubHelp, runConnectGitHub}", "doctorHelp, nil}", "buildHelp, nil}", "upgradeHelp, nil}"} {
+	for _, name := range []string{"connectGitHubHelp, runConnectGitHub}", "doctorHelp, nil}", "buildHelp, nil}", "upgradeHelp, nil}", "setupRootHelp, runSetupRoot}", "fdaCheckHelp, runFDACheck}"} {
 		edits = append(edits, edit{command, name, strings.TrimSuffix(name, "}") + ", nil}"})
 	}
 	edits = append(edits, edit{command, "\t\thelp, run := c.help, c.run", "\t\thelp, run := c.help, c.run\n\t\tif c.pre != nil {\n\t\t\tc.pre()\n\t\t}"})
@@ -108,6 +108,13 @@ var mutants = []mutant{
 	{"setenv", []edit{at(system, adminFn, "\tos.Setenv(\"PATH\", \"/tmp\")")}},
 	{"identity read outside SystemProbe", []edit{at(system, adminFn, "\t_ = os.Environ()")}},
 	{"reflect call", []edit{{env, "\tif !reflect.DeepEqual(parsed, want) {", "\treflect.ValueOf(func() {}).Call(nil)\n\tif !reflect.DeepEqual(parsed, want) {"}}},
+	{"apply reached outside its clause", []edit{{command, "\treturn runSetupWith(plan.SystemProbe(), args, stdout, stderr)\n}", "\t_ = runSetupApply(args, stdout, stderr)\n\treturn runSetupWith(plan.SystemProbe(), args, stdout, stderr)\n}"}}},
+	{"apply clause as the default", []edit{{command, "\tcase plan.ModeApply:\n", "\tdefault:\n"}}},
+	{"Mode always plan with apply in its clause", []edit{{command, "\tcase plan.ModeApply:\n", "\tcase \"plan\":\n"}}},
+	{"Mode widened to apply", []edit{{"internal/setup/plan/mode.go", "\t\t\treturn \"plan\"\n", "\t\t\treturn ModeApply\n"}}},
+	{"runSetup passes apply", []edit{{command, "setupDispatch([]string{plan.Mode(args)}", "setupDispatch([]string{plan.ModeApply}"}}},
+	{"setupDispatch called from the plan", []edit{{command, planCall, "	if len(args) > 5 {\n\t\treturn setupDispatch([]string{plan.ModeApply}, args, stdout, stderr)\n\t}\n" + planCall}}},
+	{"words rewritten before the setup dispatch", []edit{{command, "\tswitch words[0] {", "\twords[0] = plan.ModeApply\n\tswitch words[0] {"}}},
 	{"os write in runSetup", []edit{{command, planCall, "\t_ = os.WriteFile(\"/tmp/x\", nil, 0o600)\n" + planCall}, cmdOS}},
 	{"os write in dispatch", []edit{{command, "\t\thelp, run := c.help, c.run", "\t\t_ = os.WriteFile(\"/tmp/x\", nil, 0o600)\n\t\thelp, run := c.help, c.run"}, cmdOS}},
 	{"cmd helper from runSetup", []edit{{command, planCall, "\trunDeployInstall(nil, stdout, stderr)\n" + planCall}}},
@@ -207,7 +214,7 @@ var mutants = []mutant{
 
 // pinOnly are mutants of pinned code that only the pins catch: the
 // general rules cannot know which argv a widened allowlist admits.
-var pinOnly = map[string]bool{"C02 AllowedCommand widened": true, "allowlist literal widened": true, "R13 main rewrites the command word": true, "argv clone removed": true}
+var pinOnly = map[string]bool{"C02 AllowedCommand widened": true, "allowlist literal widened": true, "R13 main rewrites the command word": true, "argv clone removed": true, "Mode widened to apply": true, "runSetup passes apply": true}
 
 func TestMutantsRefused(t *testing.T) {
 	b := testBuild(t)

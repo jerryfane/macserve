@@ -113,9 +113,10 @@ type Policy struct {
 	Switch map[string]string
 	// Table pins the command table the chosen clause dispatches through.
 	Table *Table
-	// Entry is the only function that may reference a Switch root. Pin its
-	// source (Pinned) so the command word it passes is fixed.
-	Entry string
+	// Entry maps each Switch root to the only function that may reference
+	// it. Pin that function's source (Pinned) so the word it passes is
+	// fixed.
+	Entry map[string]string
 	// Imports are the module packages Package may import.
 	Imports []string
 	// Seams are the module functions outside Package and Roots that
@@ -1405,8 +1406,8 @@ func (c *checker) use(obj types.Object, caller string, pos token.Pos, call *ast.
 			iface = types.IsInterface(recv.Type())
 		}
 		if c.module(obj.Pkg()) {
-			if _, dispatch := c.policy.Switch[key]; dispatch && caller != c.policy.Entry {
-				c.problem("%s: %s references %s; only %s may call the dispatch", c.b.fset.PositionFor(pos, false), caller, key, c.policy.Entry)
+			if _, dispatch := c.policy.Switch[key]; dispatch && caller != c.policy.Entry[key] {
+				c.problem("%s: %s references %s; only %s may call the dispatch", c.b.fset.PositionFor(pos, false), caller, key, c.policy.Entry[key])
 				return
 			}
 			if iface {
