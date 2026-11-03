@@ -50,6 +50,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runWorkerReset(args[1:], stdout, stderr)
 	case "worker-persistence":
 		return runWorkerPersistence(args[1:], stdout, stderr)
+	case "worker-quiescent":
+		return runWorkerQuiescent(args[1:], stdout, stderr)
 	case "-h", "--help":
 		if len(args) != 1 {
 			fmt.Fprintln(stderr, "macserve: help does not accept arguments")
@@ -86,6 +88,7 @@ Commands:
   worker      Protected root execution broker via the private controller socket
   worker-reset  Reset job-user persistence and record audited GUI baseline PIDs
   worker-persistence Inspect private registration candidates or accept an exact reviewed digest
+  worker-quiescent Read-only: fail on any job process outside the audited GUI baseline
   wait        Request exact-head GitHub evidence and verify pinned receipts
   maintenance Observe qualified host boundaries and publish fail-closed health
   maintenance-observe Collect live qualification inputs without approving them

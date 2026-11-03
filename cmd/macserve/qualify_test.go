@@ -9,7 +9,7 @@ import (
 )
 
 func TestQualificationSnapshotCommandDeadline(t *testing.T) {
-	for _, command := range []string{"begin", "collect", "approve", "reapprove", "activation-check"} {
+	for _, command := range []string{"begin", "collect", "approve", "reapprove", "carry", "activation-check"} {
 		t.Run(command, func(t *testing.T) {
 			start := time.Now()
 			ctx, cancel := qualificationCommandContext(context.Background(), command)

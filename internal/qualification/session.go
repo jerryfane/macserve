@@ -27,6 +27,10 @@ type BeginOptions struct {
 	Environment, Session, Allow, UDP, OwnerCanary, PrivatePaths, Previous string
 	// Requalify chains to the activation anchor's session instead of Previous.
 	Requalify bool
+	// Carry begins a release-carry sitting: it chains to the anchored session,
+	// accepts a changed bin/macserve only, and rebinds the persistence
+	// attestation build strictly instead of the explicit full scan.
+	Carry bool
 }
 
 func Plan(path string) (any, error) {
@@ -45,13 +49,17 @@ func Plan(path string) (any, error) {
 		Notice      string             `json:"notice"`
 	}{e, targets, categories, "Read-only plan. Network reachability is not enforced in phase 1. No services, PF, health or owner state will be changed."}, nil
 }
-func snapshot(ctx context.Context) (Snapshot, error) {
+
+// snapshot measures the live observation after a full persistence scan. A
+// carry sitting uses the strict build rebind, which refuses any attestation
+// binding difference other than the macserve build.
+func snapshot(ctx context.Context, carry bool) (Snapshot, error) {
 	s := Snapshot{At: time.Now().UTC()}
 	config, e := maintenance.LoadConfig(maintenancePath)
 	if e != nil {
 		return s, e
 	}
-	if e = maintenance.VerifyPersistence(ctx, config); e != nil {
+	if e = persistenceScan(carry)(ctx, config); e != nil {
 		return s, e
 	}
 	s.Observation, e = maintenance.Inspect(ctx, config)
@@ -68,6 +76,15 @@ func snapshot(ctx context.Context) (Snapshot, error) {
 	}
 	return s, e
 }
+
+// persistenceScan is the full scan a sitting runs: the strict build rebind
+// for a carry sitting, the explicit full scan otherwise.
+func persistenceScan(carry bool) func(context.Context, maintenance.Config) error {
+	if carry {
+		return maintenance.RebindPersistenceBuild
+	}
+	return maintenance.VerifyPersistence
+}
 func sessionLock(dir string) (func(), error) {
 	if e := protectedDirectory(dir); e != nil {
 		return nil, e
@@ -78,7 +95,26 @@ func sessionLock(dir string) (func(), error) {
 // Keep the inode after closing: unlinking it would permit two independent locks.
 // The kernel releases this lock even when collection exits without cleanup.
 func lockSessionFile(dir string) (func(), error) {
-	f, err := os.OpenFile(filepath.Join(dir, ".lock"), os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0600)
+	return lockFile(dir, ".lock")
+}
+
+// anchorLockFile, in the protected session parent, serializes every command
+// that reads and then writes the activation anchor (approve, reapprove,
+// carry), whatever session it commits. It cannot live in the config
+// directory, whose every file is an anchor binding.
+const anchorLockFile = ".anchor.lock"
+
+// anchorLock takes the global anchor lock without waiting: a contending
+// commit refuses as busy.
+func anchorLock() (func(), error) {
+	if e := protectedDirectory(sessionParent); e != nil {
+		return nil, e
+	}
+	return lockFile(sessionParent, anchorLockFile)
+}
+
+func lockFile(dir, name string) (func(), error) {
+	f, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0600)
 	if err != nil {
 		return nil, err
 	}
@@ -124,7 +160,7 @@ func Begin(ctx context.Context, o BeginOptions) error {
 	if e != nil {
 		return e
 	}
-	const parent = "/Library/macserve/var/qualification"
+	const parent = sessionParent
 	if filepath.Dir(o.Session) != parent || !cleanPath(o.Session) {
 		return errors.New("session must be a new direct child of /Library/macserve/var/qualification")
 	}
@@ -216,7 +252,7 @@ func Begin(ctx context.Context, o BeginOptions) error {
 		return e
 	}
 	now := time.Now().UTC()
-	c := Challenge{Schema: schema, ID: id, Created: now, Expires: now.Add(lifetime), Environment: env, EnvironmentSHA256: digest(envRaw), TCP: targets, Allow: allow, UDP: udp, OwnerCanary: o.OwnerCanary, PrivatePaths: private, Socket: cc.Socket, Profiles: registry.List(), Templates: registry.Templates(), Requalify: o.Requalify}
+	c := Challenge{Schema: schema, ID: id, Created: now, Expires: now.Add(lifetime), Environment: env, EnvironmentSHA256: digest(envRaw), TCP: targets, Allow: allow, UDP: udp, OwnerCanary: o.OwnerCanary, PrivatePaths: private, Socket: cc.Socket, Profiles: registry.List(), Templates: registry.Templates(), Requalify: o.Requalify, Carry: o.Carry}
 	if c.BootSession, e = bootSession(); e != nil {
 		return e
 	}
@@ -228,7 +264,45 @@ func Begin(ctx context.Context, o BeginOptions) error {
 		}
 	}
 	previousDir := o.Previous
-	if o.Requalify {
+	var carried maintenance.Qualification
+	switch {
+	case o.Carry:
+		if o.Previous != "" || o.Requalify {
+			return errors.New("carry chains to the anchored session; do not pass --previous or --requalify")
+		}
+		a, _, live, err := carryableConfiguration()
+		if err != nil {
+			return err
+		}
+		if c.CarryBinarySHA256, err = installedSelf(); err != nil {
+			return err
+		}
+		if c.CarryBinarySHA256 != live[installedHelper] {
+			return errors.New("installed macserve changed while the carry sitting began")
+		}
+		if err = carryAllowed(a, now); err != nil {
+			return err
+		}
+		approved, _, err := loadApprovedChallenge(a.Session)
+		if err != nil {
+			return err
+		}
+		if approved.OwnerCanary != o.OwnerCanary {
+			return errors.New("carry needs the approved session's owner canary")
+		}
+		// Refuse a reboot or a new baseline before the strict rebind scans.
+		if carried, err = installedQualification(mc); err != nil {
+			return err
+		}
+		observed, err := maintenance.Inspect(ctx, mc)
+		if err != nil {
+			return err
+		}
+		if err = carryQualificationCurrent(carried, observed); err != nil {
+			return err
+		}
+		previousDir = a.Session
+	case o.Requalify:
 		if o.Previous != "" {
 			return errors.New("requalify chains to the anchored session; do not pass --previous")
 		}
@@ -243,7 +317,7 @@ func Begin(ctx context.Context, o BeginOptions) error {
 		if err != nil {
 			return err
 		}
-		if previous.Collected.After(now) || (!o.Requalify && now.Sub(previous.Collected) > 7*24*time.Hour) {
+		if previous.Collected.After(now) || (!o.Requalify && !o.Carry && now.Sub(previous.Collected) > 7*24*time.Hour) {
 			return errors.New("previous sitting must be within seven days")
 		}
 		c.Previous = previousDir
@@ -252,7 +326,10 @@ func Begin(ctx context.Context, o BeginOptions) error {
 	if e = os.Mkdir(o.Session, 0755); e != nil {
 		return e
 	}
-	s, e := snapshot(ctx)
+	s, e := snapshot(ctx, o.Carry)
+	if e == nil && o.Carry {
+		e = carryQualificationCurrent(carried, s.Observation)
+	}
 	if e != nil {
 		_ = saveJSON(filepath.Join(o.Session, "begin-refusal.json"), struct {
 			Snapshot Snapshot
@@ -347,7 +424,7 @@ func Collect(ctx context.Context, dir, ownerPath, receiptPaths string) error {
 		return e
 	}
 	defer unlock()
-	c, raw, e := loadChallenge(dir)
+	c, raw, e := loadApprovableChallenge(dir)
 	if e != nil {
 		return e
 	}
@@ -381,7 +458,7 @@ func Collect(ctx context.Context, dir, ownerPath, receiptPaths string) error {
 	if e = decode(beforeBytes, &before); e != nil {
 		return e
 	}
-	after, e := snapshot(ctx)
+	after, e := snapshot(ctx, false)
 	if e != nil {
 		saveErr := saveJSON(filepath.Join(dir, attempt+"refusal.json"), struct {
 			Snapshot Snapshot

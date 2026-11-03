@@ -71,6 +71,13 @@ type Challenge struct {
 	// Requalify marks an agent-run sitting whose predecessor is the session the
 	// owner last approved (the activation anchor).
 	Requalify bool `json:"requalify,omitempty"`
+	// Carry marks an agent-run release-carry sitting (begin --carry), chained
+	// to the anchored session. Only qualify carry consumes it: collect,
+	// approve and reapprove refuse it.
+	Carry bool `json:"carry,omitempty"`
+	// CarryBinarySHA256 is the installed bin/macserve a carry sitting
+	// measures; begin, tool evidence and the commit all run as that binary.
+	CarryBinarySHA256 string `json:"carry_binary_sha256,omitempty"`
 }
 
 // recipes returns one qualification unit per enabled profile and template, in
@@ -336,10 +343,31 @@ func loadChallenge(dir string) (Challenge, []byte, error) {
 	if e != nil {
 		return c, nil, e
 	}
-	if e = decode(b, &c); e != nil {
-		return c, nil, e
+	c, e = parseChallenge(b, time.Now().UTC())
+	return c, b, e
+}
+func parseChallenge(b []byte, now time.Time) (Challenge, error) {
+	var c Challenge
+	if e := decode(b, &c); e != nil {
+		return c, e
 	}
-	return c, b, fresh(c, time.Now().UTC())
+	return c, fresh(c, now)
+}
+
+// loadApprovableChallenge is loadChallenge for collect, approve and reapprove,
+// which never accept a release-carry sitting.
+func loadApprovableChallenge(dir string) (Challenge, []byte, error) {
+	c, b, e := loadChallenge(dir)
+	if e == nil {
+		e = approvable(c)
+	}
+	return c, b, e
+}
+func approvable(c Challenge) error {
+	if c.Carry {
+		return errors.New("release-carry sitting is never collected or approved; commit it with qualify carry")
+	}
+	return nil
 }
 func randomID() (string, error) {
 	b := make([]byte, 32)

@@ -25,10 +25,14 @@ import (
 // differ on every boot. The baseline executable policy constrains it instead.
 
 const (
-	anchorPath   = "/Library/macserve/config/activation-anchor.json"
-	configDir    = "/Library/macserve/config"
-	binDir       = "/Library/macserve/bin"
-	anchorSchema = 1
+	anchorPath = "/Library/macserve/config/activation-anchor.json"
+	configDir  = "/Library/macserve/config"
+	binDir     = "/Library/macserve/bin"
+	// anchorSchema 2 adds Carries. Schema-1 anchors (written before release
+	// carry existed) still verify; only the owner's approve writes schema 2,
+	// and only a schema-2 anchor can be carried.
+	anchorSchema       = 2
+	legacyAnchorSchema = 1
 )
 
 // mutableConfig are config files that approval or the owner change in normal
@@ -56,6 +60,19 @@ type ActivationAnchor struct {
 	CandidateSHA256 string            `json:"candidate_sha256"`
 	Bindings        map[string]string `json:"bindings"`
 	Parameters      AnchorParameters  `json:"parameters"`
+	// Carries lists, oldest first, every release carry since the owner's
+	// approval (schema 2; empty after approve, absent in schema 1). Each one
+	// rebound only the bin/macserve digest.
+	Carries []AnchorCarry `json:"carries"`
+}
+
+// AnchorCarry is one boundary-preserving release committed by qualify carry.
+type AnchorCarry struct {
+	At               time.Time `json:"at"`
+	Session          string    `json:"session"`
+	FromBinarySHA256 string    `json:"from_binary_sha256"`
+	ToBinarySHA256   string    `json:"to_binary_sha256"`
+	ProofSHA256      string    `json:"proof_sha256"`
 }
 
 func anchorParameters(c Challenge) AnchorParameters {
@@ -119,22 +136,58 @@ func newAnchor(dir string, c Challenge, v Candidate, at time.Time) (ActivationAn
 	if err != nil {
 		return ActivationAnchor{}, err
 	}
-	return ActivationAnchor{Schema: anchorSchema, ApprovedAt: at, Session: dir, CandidateSHA256: digest(cb), Bindings: bindings, Parameters: anchorParameters(c)}, nil
+	return ActivationAnchor{Schema: anchorSchema, ApprovedAt: at, Session: dir, CandidateSHA256: digest(cb), Bindings: bindings, Parameters: anchorParameters(c), Carries: []AnchorCarry{}}, nil
 }
 
 func loadAnchor() (ActivationAnchor, error) {
+	a, _, err := loadAnchorBytes()
+	return a, err
+}
+
+func loadAnchorBytes() (ActivationAnchor, []byte, error) {
 	var a ActivationAnchor
 	b, err := protectedRead(anchorPath)
 	if err != nil {
-		return a, fmt.Errorf("activation anchor unavailable (the owner's approve-and-start writes it): %w", err)
+		return a, nil, fmt.Errorf("activation anchor unavailable (the owner's approve-and-start writes it): %w", err)
 	}
 	if err = decode(b, &a); err != nil {
-		return a, err
+		return a, nil, err
 	}
-	if a.Schema != anchorSchema || a.Session == "" || len(a.Bindings) == 0 {
-		return a, errors.New("unsupported activation anchor")
+	return a, b, validAnchor(a)
+}
+
+// validAnchor accepts a schema-1 anchor without carries, or a schema-2 anchor
+// whose carries chain from one binary digest to the next within the cap and
+// end at the bound bin/macserve digest.
+func validAnchor(a ActivationAnchor) error {
+	if (a.Schema != anchorSchema && a.Schema != legacyAnchorSchema) || a.Session == "" || len(a.Bindings) == 0 {
+		return errors.New("unsupported activation anchor")
 	}
-	return a, nil
+	if a.Schema == legacyAnchorSchema {
+		if a.Carries != nil {
+			return errors.New("unsupported activation anchor: schema 1 has no carries")
+		}
+		return nil
+	}
+	if a.Carries == nil || len(a.Carries) > carryCap {
+		return errors.New("unsupported activation anchor: invalid carries")
+	}
+	previous := a.ApprovedAt
+	seen := map[string]bool{a.Session: true}
+	for i, carry := range a.Carries {
+		if carry.Session == "" || seen[carry.Session] || seen[carry.ProofSHA256] || len(carry.FromBinarySHA256) != 64 || len(carry.ToBinarySHA256) != 64 || len(carry.ProofSHA256) != 64 || carry.FromBinarySHA256 == carry.ToBinarySHA256 || !carry.At.After(previous) {
+			return fmt.Errorf("unsupported activation anchor: invalid or replayed carry %d", i)
+		}
+		if i > 0 && carry.FromBinarySHA256 != a.Carries[i-1].ToBinarySHA256 {
+			return fmt.Errorf("unsupported activation anchor: carry %d does not chain", i)
+		}
+		seen[carry.Session], seen[carry.ProofSHA256] = true, true
+		previous = carry.At
+	}
+	if n := len(a.Carries); n > 0 && a.Bindings[installedHelper] != a.Carries[n-1].ToBinarySHA256 {
+		return errors.New("unsupported activation anchor: binary binding differs from the last carry")
+	}
+	return nil
 }
 
 // anchoredConfiguration returns the anchor when every live binding equals it.

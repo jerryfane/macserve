@@ -27,7 +27,7 @@ plan --env PATH
 begin --session /Library/macserve/var/qualification/NAME
   --env /Library/macserve/config/deploy.env --owner-canary /Users/OWNER/private/canary
   [--allow IP:PORT[,IP:PORT...]] [--udp-canary IP:PORT[,IP:PORT...]]
-  [--private-path PATH[,PATH...]] [--previous PROTECTED_PREVIOUS_SESSION | --requalify]
+  [--private-path PATH[,PATH...]] [--previous PROTECTED_PREVIOUS_SESSION | --requalify | --carry]
   Root creates an immutable two-hour challenge and initial live observations.
   Protected ports on loopback, host and tailnet addresses are observed, not gated.
   Records available main/peer rule digests and configured running service PIDs.
@@ -41,6 +41,12 @@ canary --session DIR --transport udp|tcp|owner-home --out NEW_FILE
   Multiple network listeners write NEW_FILE.1.json, NEW_FILE.2.json, etc.
   --requalify chains to the session the owner last approved (activation anchor)
   and requires the live configuration to equal it.
+  --carry begins a release-carry sitting: it chains to the anchored session,
+  allows only /Library/macserve/bin/macserve to differ from the anchor, needs
+  the installed approval from this boot, the anchor's carry cap and the
+  approved owner canary, and rebinds only the persistence attestation build
+  (any other attestation binding difference refuses). It is never collected,
+  approved or reapproved.
 probe --session DIR --role owner --out NEW_FILE
   Owner account with full memberships; no sudo/su impersonation. Real or
   effective UID 0 refuses before session access or any --out write. The job
@@ -65,6 +71,13 @@ reapprove --session DIR
   Agent requalification commit for a --requalify sitting: as approve, and the
   live configuration must equal the activation anchor, with no earlier approval
   on this boot. Never writes the anchor.
+carry --session DIR --proof PROTECTED_CARRY_PROOF
+  Agent commit of a --carry sitting after its job probe and tool evidence:
+  the proof must bind the anchored and installed binaries and claim only
+  carry classes; probe denials, tool identities, parameters, the cap and
+  live health with the kept approval are rechecked. Rewrites the activation
+  anchor with only the bin/macserve digest rebound plus one carries[] record
+  bound to the proof, then runs activation-check. Once per sitting.
 activation-check
   Read-only: the anchor matches the live configuration and installed approval
   evaluates to valid health now.
@@ -80,7 +93,8 @@ func runQualify(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	session := fs.String("session", "", "protected sitting directory")
 	var env, allow, udp, ownerCanary, private, previous, role, out, listen, transport, owner, receipts *string
-	var requalify *bool
+	var requalify, carry *bool
+	var proof *string
 	var duration *time.Duration
 	switch command {
 	case "plan":
@@ -93,6 +107,7 @@ func runQualify(args []string, stdout, stderr io.Writer) int {
 		private = fs.String("private-path", "", "additional private paths")
 		previous = fs.String("previous", "", "protected previous sitting")
 		requalify = fs.Bool("requalify", false, "chain to the anchored approved session")
+		carry = fs.Bool("carry", false, "release-carry sitting chained to the anchored session")
 	case "probe":
 		role = fs.String("role", "", "job or owner")
 		out = fs.String("out", "", "new report file")
@@ -104,6 +119,8 @@ func runQualify(args []string, stdout, stderr io.Writer) int {
 	case "collect":
 		owner = fs.String("owner", "", "owner report")
 		receipts = fs.String("receipts", "", "owner-home control and optional UDP receiver reports")
+	case "carry":
+		proof = fs.String("proof", "", "root-protected carry-proof.json")
 	case "approve", "reapprove", "activation-check":
 	default:
 		fmt.Fprint(stderr, qualifyUsage)
@@ -124,6 +141,10 @@ func runQualify(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "--session is required")
 		return 2
 	}
+	if command == "carry" && *proof == "" {
+		fmt.Fprintln(stderr, "--proof is required")
+		return 2
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	ctx, cancel := qualificationCommandContext(ctx, command)
@@ -139,7 +160,7 @@ func runQualify(args []string, stdout, stderr io.Writer) int {
 			err = enc.Encode(v)
 		}
 	case "begin":
-		err = qualification.Begin(ctx, qualification.BeginOptions{Environment: *env, Session: *session, Allow: *allow, UDP: *udp, OwnerCanary: *ownerCanary, PrivatePaths: *private, Previous: *previous, Requalify: *requalify})
+		err = qualification.Begin(ctx, qualification.BeginOptions{Environment: *env, Session: *session, Allow: *allow, UDP: *udp, OwnerCanary: *ownerCanary, PrivatePaths: *private, Previous: *previous, Requalify: *requalify, Carry: *carry})
 	case "probe":
 		err = qualification.Probe(ctx, *session, *role, *out)
 	case "canary":
@@ -150,6 +171,8 @@ func runQualify(args []string, stdout, stderr io.Writer) int {
 		err = qualification.Approve(ctx, *session)
 	case "reapprove":
 		err = qualification.Reapprove(ctx, *session)
+	case "carry":
+		err = qualification.Carry(ctx, *session, *proof)
 	case "activation-check":
 		err = qualification.ActivationCheck(ctx)
 	}
@@ -167,7 +190,7 @@ func runQualify(args []string, stdout, stderr io.Writer) int {
 // commands retain their own existing probe/canary bounds and caller deadline.
 func qualificationCommandContext(parent context.Context, command string) (context.Context, context.CancelFunc) {
 	switch command {
-	case "begin", "collect", "approve", "reapprove", "activation-check":
+	case "begin", "collect", "approve", "reapprove", "carry", "activation-check":
 		return context.WithTimeout(parent, worker.PersistenceOperationTimeout)
 	default:
 		return context.WithCancel(parent)

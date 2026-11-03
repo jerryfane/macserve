@@ -261,9 +261,11 @@ sudo /Library/macserve/bin/qualify.sh activation-check
 
 `reapprove` performs every `approve` check and additionally requires the live configuration and challenge parameters to equal the anchor, and no earlier approval on this boot (so no job can have run since boot). It never writes the anchor. Any configuration change (release, manifest, profiles, plists, deploy environment, narrowed endpoints or private paths) refuses until the owner approves again. `activation-check` is read-only. Remove the anchor to revoke carry-forward.
 
+**Anchor schema 2.** `approve` writes schema 2: the schema-1 fields plus `carries`, empty after an owner approval. Each entry (`at`, `session`, `from_binary_sha256`, `to_binary_sha256`, `proof_sha256`) records one release carry (below); entries chain from one binary digest to the next, the last one equals the `/Library/macserve/bin/macserve` binding, and no session or proof appears twice. Schema-1 anchors written by earlier releases still verify for `reapprove` and `activation-check`, but cannot be carried: the owner's next approval writes schema 2. Removing the anchor revokes requalification and release carry alike.
+
 ## Boundary-preserving releases: path classification
 
-Every release still requires the full owner requalification above. This section describes only the source classification that a later, separately reviewed carry path will rely on; nothing on the host reads it yet.
+Every release still requires the full owner requalification above unless it is carried (next section). This section describes the source classification the administrator's carry proof relies on; nothing on the host reads it.
 
 `BOUNDARY.json` at the repository root sorts every tracked file into one class:
 
@@ -288,6 +290,26 @@ Classification is default-deny: an unlisted file is an error. Patterns use `*` w
 `internal/maintenance/maintenance_invariants_test.go` (B) pins what any health-timing change must keep: the published lifetime stays within the controller's 45 s acceptance window, an inconclusive probe never keeps expired or invalid health and a finding never keeps any, and removing any single boundary fact makes `Evaluate` publish invalid health.
 
 Because the workflows, `checks/**`, `BOUNDARY.json` and every test not named for a C/G file are B, a release cannot weaken these checks and still be classified as carry.
+
+## Boundary-preserving releases: release carry
+
+A release whose changed files are all C, T (or G) relative to its predecessor, by the administrator's `carry-proof.json`, can keep the owner's qualification. Only `bin/macserve` is replaced; config, plists, `qualify.sh`, the GUI baseline, the reviewed manifest, `qualification.json`, `boundary-evidence.json` and the job GUI session are kept. The native verbs re-measure the new binary; none of them writes the approval records, `owner.pause`, launchd or PF:
+
+```sh
+# Services booted out, before the swap (predecessor binary):
+sudo /Library/macserve/bin/macserve worker-quiescent --config /Library/macserve/config/worker.json
+# After the swap (new binary):
+sudo /Library/macserve/bin/qualify.sh begin --carry --session "$SESSION" --env /Library/macserve/config/deploy.env --owner-canary "$APPROVED_CANARY"
+sudo /bin/launchctl asuser "$JOB_UID" /Library/macserve/bin/macserve _qualify-job-probe "$(basename "$SESSION")"
+sudo /Library/macserve/bin/macserve _qualify-tool-evidence "$(basename "$SESSION")"
+sudo /Library/macserve/bin/qualify.sh carry --session "$SESSION" --proof /path/to/root-protected/carry-proof.json
+```
+
+- `worker-quiescent` is read-only. It runs the broker admission census against the audited GUI baseline and prints a JSON report. It fails on any job-UID process outside the baseline (after verified relaunches and tolerated launches are filtered out), and also when the worker is quarantined or its admission is inconclusive. It never signals, adopts or quarantines. The maintenance census (`ObserveGUIBaseline`) tolerates active-job processes; this one does not.
+- `begin --carry` refuses with `--previous` or `--requalify`. It must run as the installed `bin/macserve`, whose digest it records in the challenge. It chains to the anchored session and requires a schema-2 anchor whose bindings equal the live ones except exactly `bin/macserve`; fewer than 5 carries and less than 14 days since the owner's approval; the approved session's owner canary; and the installed `qualification.json` from this boot and this GUI baseline. Its full persistence scan is the strict build rebind (see `docs/persistence-policy.md`), not the explicit scan. A carry sitting is never collected, approved or reapproved.
+- `carry` runs once per sitting under the session lock. It and the sitting's tool evidence must run as the binary the sitting began with (tool evidence records its digest). It requires a fresh carry challenge with the installed deployment environment; the same carryable configuration, cap and anchored parameters; a proof (`schema` 1, `kind` `release-carry-proof`, `release_effect` `QualificationCarried`) whose `from.binary_sha256` is the anchored binary and `to.binary_sha256` the installed one, with only C/G/T changes; a launcher-captured job report denying every protected socket, private path and owner-home target; for every enabled profile a successful tool-evidence run with the approved session's Xcode, SDK, OS and runtime identities; and valid health with the kept approval. It then preserves the proof and the intended anchor in the session, rewrites the anchor (only if it is byte-equal to the one checked) with only the `bin/macserve` digest rebound and one appended `carries` entry (`proof_sha256` = sha256 of the proof bytes), runs `activation-check`, and writes `carry.json` (anchor digests before and after, carry index and cap).
+
+`approve`, `reapprove` and `carry` take one global anchor lock, `/Library/macserve/var/qualification/.anchor.lock`, without waiting. A commit that finds it held refuses as busy and changes nothing. `carry` also re-reads the anchor under that lock and writes its evidence and the new anchor only if the bytes still equal the ones it checked. The host does not authenticate the proof: the administrator produces it off-host and verifies the committed anchor against it independently. Every refusal before the anchor rewrite leaves the anchor unchanged. If `activation-check` fails after the rewrite, `carry` reports it and writes no `carry.json`; the session keeps `carry-proof.json` and `carry-intent.json`. In both cases the administrator falls back to the full requalification, which removes the anchor. After a later reboot, `begin --requalify` and `reapprove` still chain to the owner's session.
 
 ## Trust boundary and stop conditions
 
