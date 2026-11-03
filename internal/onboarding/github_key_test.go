@@ -182,15 +182,15 @@ func controllerFixture(t *testing.T, target KeyTarget) ConfigFile {
 	return ConfigFile{Path: path, RootUID: target.RootUID}
 }
 
-func enrollment(target KeyTarget) Enrollment {
-	return Enrollment{AppID: 77, InstallationID: 555, Repository: "jdoe/myapp", RepositoryID: 4242, AuthorIDs: []int64{1001}, BaseBranches: []string{"main"}, Profiles: []string{"myapp-build-v1"}, KeyFile: target.Path()}
+func enrollment() Enrollment {
+	return Enrollment{AppID: 77, InstallationID: 555, Repository: "jdoe/myapp", RepositoryID: 4242, AuthorIDs: []int64{1001}, BaseBranches: []string{"main"}, Profiles: []string{"myapp-build-v1"}}
 }
 
 func TestWriteGitHubProducesLoadableConfig(t *testing.T) {
 	target := installRoot(t)
 	file := controllerFixture(t, target)
 	_, pemBytes := appKey(t)
-	if err := file.WriteGitHub(enrollment(target), func() error { return InstallAppKey(target, pemBytes) }); err != nil {
+	if err := file.WriteGitHub(enrollment(), target, pemBytes); err != nil {
 		t.Fatal(err)
 	}
 	c, err := controller.LoadConfig(file.Path)
@@ -212,7 +212,10 @@ func TestWriteGitHubProducesLoadableConfig(t *testing.T) {
 	if info.Mode() != 0o644 {
 		t.Fatal(info.Mode())
 	}
-	if err := file.WriteGitHub(enrollment(target), func() error { return nil }); !errors.Is(err, ErrGitHubConfigured) {
+	if data, _ := os.ReadFile(target.Path()); !bytes.Equal(data, pemBytes) {
+		t.Fatal("key not installed")
+	}
+	if err := file.WriteGitHub(enrollment(), target, pemBytes); !errors.Is(err, ErrGitHubConfigured) {
 		t.Fatal(err)
 	}
 	if _, err := file.Check(); !errors.Is(err, ErrGitHubConfigured) {
@@ -223,24 +226,86 @@ func TestWriteGitHubProducesLoadableConfig(t *testing.T) {
 func TestWriteGitHubRefusesUnpinnedRepositoryAndKeepsFileOnKeyFailure(t *testing.T) {
 	target := installRoot(t)
 	file := controllerFixture(t, target)
+	_, pemBytes := appKey(t)
 	before, _ := os.ReadFile(file.Path)
-	e := enrollment(target)
+	e := enrollment()
 	e.RepositoryID = 4243
-	called := false
-	if err := file.WriteGitHub(e, func() error { called = true; return nil }); err == nil || called {
+	if err := file.WriteGitHub(e, target, pemBytes); err == nil {
 		t.Fatal("wrote a policy whose ID differs from the receipt pin")
 	}
-	if err := file.WriteGitHub(enrollment(target), func() error { return ErrKeyExists }); !errors.Is(err, ErrKeyExists) {
+	if exists, _ := target.KeyInstalled(); exists {
+		t.Fatal("installed the key for a refused policy")
+	}
+	if err := os.WriteFile(target.Path(), []byte("old key"), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	if err := file.WriteGitHub(enrollment(), target, pemBytes); !errors.Is(err, ErrKeyExists) {
+		t.Fatal(err)
+	}
+	after, _ := os.ReadFile(file.Path)
+	entries, _ := os.ReadDir(filepath.Dir(file.Path))
+	old, _ := os.ReadFile(target.Path())
+	if !bytes.Equal(before, after) || len(entries) != 1 || string(old) != "old key" {
+		t.Fatalf("controller.json or the old key changed, or temp left: %v", entries)
+	}
+}
+
+// TestWriteGitHubRemovesNewKeyWhenConfigReplaceFails: a run that installed
+// its new key but could not replace controller.json leaves neither, so a
+// re-run is not stopped by ErrKeyExists.
+func TestWriteGitHubRemovesNewKeyWhenConfigReplaceFails(t *testing.T) {
+	target := installRoot(t)
+	file := controllerFixture(t, target)
+	_, pemBytes := appKey(t)
+	before, _ := os.ReadFile(file.Path)
+	original := renameConfig
+	t.Cleanup(func() { renameConfig = original })
+	renameConfig = func(oldpath, newpath string) error {
+		if data, err := os.ReadFile(target.Path()); err != nil || !bytes.Equal(data, pemBytes) {
+			t.Errorf("key not installed before the replace: %v", err)
+		}
+		return errors.New("injected rename failure")
+	}
+	err := file.WriteGitHub(enrollment(), target, pemBytes)
+	if err == nil || !strings.Contains(err.Error(), "removed again") || !strings.Contains(err.Error(), "injected rename failure") {
+		t.Fatal(err)
+	}
+	if exists, err := target.KeyInstalled(); exists || err != nil {
+		t.Fatalf("new key left behind: %v %v", exists, err)
 	}
 	after, _ := os.ReadFile(file.Path)
 	entries, _ := os.ReadDir(filepath.Dir(file.Path))
 	if !bytes.Equal(before, after) || len(entries) != 1 {
 		t.Fatalf("controller.json changed or temp left: %v", entries)
 	}
+	renameConfig = original
+	if err := file.WriteGitHub(enrollment(), target, pemBytes); err != nil {
+		t.Fatalf("re-run after the failure: %v", err)
+	}
 }
 
-func TestCheckPolicyProfilesTemporaryUntilO7(t *testing.T) {
+func TestRemoveAppKeyNeverRemovesAnotherFile(t *testing.T) {
+	target := installRoot(t)
+	_, pemBytes := appKey(t)
+	created, err := installAppKey(target, pemBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(target.Path()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target.Path(), []byte("someone else's key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeAppKey(target, created); err == nil {
+		t.Fatal("removed a key this call did not create")
+	}
+	if data, _ := os.ReadFile(target.Path()); string(data) != "someone else's key" {
+		t.Fatal("other key changed")
+	}
+}
+
+func TestPolicyScopeTemporaryUntilO7(t *testing.T) {
 	p := model.Profile{
 		ID: "myapp-build-v1", Version: 1, Repo: "jdoe/myapp", Kind: model.Build,
 		Xcode: model.Xcode{Version: "26.0", Build: "17A100"}, DeveloperDir: "/Applications/Xcode.app/Contents/Developer", WorkDir: ".",
@@ -253,18 +318,19 @@ func TestCheckPolicyProfilesTemporaryUntilO7(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := CheckPolicyProfiles(registry, "jdoe/myapp", []string{"myapp-build-v1"}); err != nil {
-		t.Fatal(err)
+	// A per-repository profile is what requires a selected installation.
+	if scope, err := PolicyScope(registry, "jdoe/myapp", []string{"myapp-build-v1"}); err != nil || !scope.SelectedOnly {
+		t.Fatal(scope, err)
 	}
 	for name, ids := range map[string][]string{
 		"none": nil, "repeated": {"myapp-build-v1", "myapp-build-v1"}, "unknown": {"nope"},
 		"other repository": {"other-build-v1"}, "template": {"jdoe-build-v1"},
 	} {
-		if err := CheckPolicyProfiles(registry, "jdoe/myapp", ids); err == nil {
+		if _, err := PolicyScope(registry, "jdoe/myapp", ids); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	if err := CheckPolicyProfiles(registry, "jdoe/myapp", []string{"jdoe-build-v1"}); !strings.Contains(err.Error(), "O7") {
+	if _, err := PolicyScope(registry, "jdoe/myapp", []string{"jdoe-build-v1"}); !strings.Contains(err.Error(), "O7") {
 		t.Errorf("template refusal does not name O7: %v", err)
 	}
 }

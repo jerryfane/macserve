@@ -142,7 +142,7 @@ func startConnect(t *testing.T, f *fakeGitHub, install func(Confirmed) error) (b
 	t.Cleanup(func() { typed.Close() })
 	go func() {
 		c, _, err := Connect(ctx, ConnectOptions{
-			Account: Account{Login: "jdoe"}, AppName: "macserve-test", Repository: "jdoe/myapp", RepositoryID: 4242, Author: "jdoe",
+			Account: Account{Login: "jdoe"}, AppName: "macserve-test", Repository: "jdoe/myapp", RepositoryID: 4242, Author: "jdoe", Scope: Scope{SelectedOnly: true},
 			Listener: listener, In: in, Out: out, HTTP: f.options(), Install: install,
 		})
 		*result = c

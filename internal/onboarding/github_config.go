@@ -27,43 +27,57 @@ const DefaultPollSeconds = 45
 // ErrGitHubConfigured refuses to replace an existing github section.
 var ErrGitHubConfigured = errors.New("controller.json already has a github section; connect-github does not change an existing App")
 
-// CheckPolicyProfiles checks, before anything is created on GitHub, that
-// the pull-request policy can name profileIDs for repo.
-//
-// Temporary until PR-policy templates (O7): a policy may only name
-// per-repository profiles whose recipe repository is repo, because the
-// poller refuses anything else (internal/githubpull/poller.go). O7 widens
-// policyProfile alone to template ids; this stays the only check.
-func CheckPolicyProfiles(registry *profiles.Registry, repo string, profileIDs []string) error {
+// Scope is what the pull-request policy needs from the App installation.
+type Scope struct {
+	// SelectedOnly requires an installation on "Only select repositories"
+	// that grants exactly the policy repository.
+	SelectedOnly bool
+}
+
+// PolicyScope checks, before anything is created on GitHub, that the
+// pull-request policy can name profileIDs for repo, and returns what the
+// installation must then grant. policyProfile decides both.
+func PolicyScope(registry *profiles.Registry, repo string, profileIDs []string) (Scope, error) {
+	var scope Scope
 	if len(profileIDs) == 0 {
-		return errors.New("at least one --profile is required: GitHub pull-request checks run a profile of this repository (temporary until PR-policy templates, O7)")
+		return scope, errors.New("at least one --profile is required: GitHub pull-request checks run a profile of this repository (temporary until PR-policy templates, O7)")
 	}
 	for i, id := range profileIDs {
 		if slices.Contains(profileIDs[:i], id) {
-			return fmt.Errorf("profile %q is repeated", id)
+			return scope, fmt.Errorf("profile %q is repeated", id)
 		}
-		if err := policyProfile(registry, repo, id); err != nil {
-			return err
+		selectedOnly, err := policyProfile(registry, repo, id)
+		if err != nil {
+			return scope, err
 		}
+		scope.SelectedOnly = scope.SelectedOnly || selectedOnly
 	}
-	return nil
+	return scope, nil
 }
 
-func policyProfile(registry *profiles.Registry, repo, id string) error {
+// policyProfile is the single interim restriction, temporary until
+// PR-policy templates (O7). A policy may only name per-repository profiles
+// whose recipe repository is repo, because the poller refuses anything
+// else (internal/githubpull/poller.go). Such a policy only ever builds that
+// one repository, so the App is installed on it alone (D10, least
+// privilege) and an all-repositories installation is refused. O7 widens
+// this function alone: a template id is accepted and, since a template
+// admits every repository of its owners, needs no selected installation.
+func policyProfile(registry *profiles.Registry, repo, id string) (selectedOnly bool, err error) {
 	for _, profile := range registry.List() {
 		if profile.ID == id {
 			if profile.Repo != repo {
-				return fmt.Errorf("profile %q builds %q, not %q", id, profile.Repo, repo)
+				return false, fmt.Errorf("profile %q builds %q, not %q", id, profile.Repo, repo)
 			}
-			return nil
+			return true, nil
 		}
 	}
 	for _, template := range registry.Templates() {
 		if template.ID == id {
-			return fmt.Errorf("%q is a template; pull-request policies cannot name templates yet (temporary until PR-policy templates, O7)", id)
+			return false, fmt.Errorf("%q is a template; pull-request policies cannot name templates yet (temporary until PR-policy templates, O7)", id)
 		}
 	}
-	return fmt.Errorf("profile %q is not in profiles.json", id)
+	return false, fmt.Errorf("profile %q is not in profiles.json", id)
 }
 
 // Enrollment is everything confirmed with GitHub for the github section.
@@ -75,14 +89,14 @@ type Enrollment struct {
 	AuthorIDs      []int64
 	BaseBranches   []string
 	Profiles       []string
-	KeyFile        string
 }
 
-// Section is the controller github section for e: one policy for the one
-// selected repository, revision 1, polled every DefaultPollSeconds.
-func (e Enrollment) Section() *controller.GitHubConfig {
+// Section is the controller github section for e with the App key at
+// keyFile: one policy for the one repository, revision 1, polled every
+// DefaultPollSeconds.
+func (e Enrollment) Section(keyFile string) *controller.GitHubConfig {
 	return &controller.GitHubConfig{
-		AppID: e.AppID, InstallationID: e.InstallationID, PrivateKeyFile: e.KeyFile,
+		AppID: e.AppID, InstallationID: e.InstallationID, PrivateKeyFile: keyFile,
 		Policies: []githubpull.Policy{{
 			RepositoryID: e.RepositoryID, Repository: e.Repository,
 			AuthorIDs: slices.Clone(e.AuthorIDs), BaseBranches: slices.Clone(e.BaseBranches),
@@ -143,14 +157,19 @@ func (f ConfigFile) Check() (controller.Config, error) {
 	return c, nil
 }
 
-// WriteGitHub adds e's github section to controller.json. The repository
-// must already be pinned in receipt.repositories with the same numeric ID
-// (deploy-install pins it from deploy.env). The new file is written beside
-// the old one and validated by controller.LoadConfig; only then does
-// beforeCommit run (it installs the App key), and only if it succeeds does
-// the new file atomically replace the old one. Every other field keeps its
-// decoded value.
-func (f ConfigFile) WriteGitHub(e Enrollment, beforeCommit func() error) error {
+// renameConfig is os.Rename; tests make the final replace fail.
+var renameConfig = os.Rename
+
+// WriteGitHub installs the App key pem at key and adds e's github section,
+// naming that key, to controller.json. The repository must already be
+// pinned in receipt.repositories with the same numeric ID (deploy-install
+// pins it from deploy.env). The new file is written beside the old one
+// and validated by controller.LoadConfig; only then is the key installed,
+// and only if that succeeds does the new file atomically replace the old
+// one. If the replace fails, the key this call created is removed again,
+// so a failed run leaves neither. Every other field keeps its decoded
+// value.
+func (f ConfigFile) WriteGitHub(e Enrollment, key KeyTarget, pem []byte) error {
 	c, info, err := f.open()
 	if err != nil {
 		return err
@@ -161,7 +180,7 @@ func (f ConfigFile) WriteGitHub(e Enrollment, beforeCommit func() error) error {
 	if id := c.Receipt.Repositories[e.Repository]; id != e.RepositoryID || id <= 0 {
 		return fmt.Errorf("%s is not pinned to repository ID %d in controller.json receipt.repositories", e.Repository, e.RepositoryID)
 	}
-	c.GitHub = e.Section()
+	c.GitHub = e.Section(key.Path())
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
@@ -196,11 +215,15 @@ func (f ConfigFile) WriteGitHub(e Enrollment, beforeCommit func() error) error {
 	if err != nil || !os.SameFile(current, info) || current.ModTime() != info.ModTime() || current.Size() != info.Size() {
 		return errors.New("controller.json changed while the github section was written")
 	}
-	if err := beforeCommit(); err != nil {
+	created, err := installAppKey(key, pem)
+	if err != nil {
 		return err
 	}
-	if err := os.Rename(temp, f.Path); err != nil {
-		return fmt.Errorf("the App key is installed but controller.json was not updated: %w", err)
+	if err := renameConfig(temp, f.Path); err != nil {
+		if rerr := removeAppKey(key, created); rerr != nil {
+			return fmt.Errorf("controller.json was not updated (%v) and the new App key could not be removed (%v); delete %s before running connect-github again", err, rerr, key.Path())
+		}
+		return fmt.Errorf("controller.json was not updated, the new App key was removed again: %w", err)
 	}
 	committed = true
 	d, err := os.Open(dir)

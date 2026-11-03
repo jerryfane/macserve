@@ -107,10 +107,9 @@ func TestInstallationIDConfirmedByJWT(t *testing.T) {
 func TestInstallationForAnotherAccountRefused(t *testing.T) {
 	f := newFakeGitHub(t)
 	f.installations[557] = fakeInstallation{AppID: 77, Account: Owner{Login: "mallory", ID: 666, Type: "User"}, Selection: "selected", Permissions: RequiredPermissions()}
-	f.installations[558] = fakeInstallation{AppID: 77, Account: f.owner, Selection: "all", Permissions: RequiredPermissions()}
 	f.installations[559] = fakeInstallation{AppID: 77, Account: f.owner, Selection: "selected", Permissions: map[string]string{"metadata": "read"}}
 	api := newTestAPI(t, f)
-	for id, want := range map[int64]string{557: `"mallory"`, 558: "all repositories", 559: "permissions"} {
+	for id, want := range map[int64]string{557: `"mallory"`, 559: "permissions"} {
 		if _, err := api.Confirm(context.Background(), f.app(t), Account{Login: "jdoe"}, id); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%d: %v", id, err)
 		}
@@ -120,7 +119,7 @@ func TestInstallationForAnotherAccountRefused(t *testing.T) {
 func TestConfirmInstallationRequiresExactlyThePinnedRepository(t *testing.T) {
 	f := newFakeGitHub(t)
 	api := newTestAPI(t, f)
-	o := ConnectOptions{Account: Account{Login: "jdoe"}, Repository: "jdoe/myapp", RepositoryID: 4242}
+	o := ConnectOptions{Account: Account{Login: "jdoe"}, Repository: "jdoe/myapp", RepositoryID: 4242, Scope: Scope{SelectedOnly: true}}
 	if _, repo, _, err := confirmInstallation(context.Background(), api, f.app(t), o, 555); err != nil || repo.ID != 4242 {
 		t.Fatal(repo, err)
 	}
@@ -135,6 +134,31 @@ func TestConfirmInstallationRequiresExactlyThePinnedRepository(t *testing.T) {
 	f.repos = append(f.repos, Repository{ID: 9, FullName: "jdoe/other", Owner: f.owner, DefaultBranch: "main"})
 	if _, _, _, err := confirmInstallation(context.Background(), api, f.app(t), o, 555); err == nil {
 		t.Fatal("accepted an installation on two repositories")
+	}
+}
+
+// TestAllRepositoriesInstallationFollowsPolicyScope: refusing an
+// all-repositories installation is the per-repository profile's scope
+// (temporary until PR-policy templates, O7), not a property of Confirm.
+func TestAllRepositoriesInstallationFollowsPolicyScope(t *testing.T) {
+	f := newFakeGitHub(t)
+	f.installations[558] = fakeInstallation{AppID: 77, Account: f.owner, Selection: "all", Permissions: RequiredPermissions()}
+	f.repos = append(f.repos, Repository{ID: 9, FullName: "jdoe/other", Owner: f.owner, DefaultBranch: "main"})
+	api := newTestAPI(t, f)
+	if got, err := api.Confirm(context.Background(), f.app(t), Account{Login: "jdoe"}, 558); err != nil || got.Selection != "all" {
+		t.Fatal(got, err)
+	}
+	o := ConnectOptions{Account: Account{Login: "jdoe"}, Repository: "jdoe/myapp", RepositoryID: 4242, Scope: Scope{SelectedOnly: true}}
+	if _, _, _, err := confirmInstallation(context.Background(), api, f.app(t), o, 558); err == nil || !strings.Contains(err.Error(), "O7") {
+		t.Fatalf("per-repository scope: %v", err)
+	}
+	o.Scope = Scope{}
+	if _, repo, _, err := confirmInstallation(context.Background(), api, f.app(t), o, 558); err != nil || repo.ID != 4242 {
+		t.Fatalf("owner-wide scope: %v %v", repo, err)
+	}
+	o.RepositoryID = 4243
+	if _, _, _, err := confirmInstallation(context.Background(), api, f.app(t), o, 558); err == nil {
+		t.Fatal("owner-wide scope accepted a repository with another ID")
 	}
 }
 

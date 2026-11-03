@@ -127,74 +127,118 @@ func (t KeyTarget) KeyInstalled() (bool, error) {
 // no symlink or untrusted ancestor, owner, group, mode and link count
 // verified on the open descriptor, and the bytes read back. A file this
 // call created but could not validate is removed again.
-func InstallAppKey(t KeyTarget, data []byte) (err error) {
+func InstallAppKey(t KeyTarget, data []byte) error {
+	_, err := installAppKey(t, data)
+	return err
+}
+
+// installAppKey is InstallAppKey returning the identity of the file it
+// created, so removeAppKey can undo exactly that file.
+func installAppKey(t KeyTarget, data []byte) (installed fs.FileInfo, err error) {
 	if _, err := ParseAppKey(data); err != nil {
-		return err
+		return nil, err
 	}
 	dirInfo, err := t.checkTarget()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	root, err := os.OpenRoot(t.Dir())
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer root.Close()
 	opened, err := root.Stat(".")
 	if err != nil || !os.SameFile(opened, dirInfo) {
-		return errors.New("the controller secrets directory changed during validation")
+		return nil, errors.New("the controller secrets directory changed during validation")
 	}
 	if _, err := root.Lstat(AppKeyName); err == nil {
-		return ErrKeyExists
+		return nil, ErrKeyExists
 	} else if !errors.Is(err, fs.ErrNotExist) {
-		return err
+		return nil, err
 	}
 	f, err := root.OpenFile(AppKeyName, os.O_WRONLY|os.O_CREATE|os.O_EXCL|nofollow, 0o600)
 	if errors.Is(err, fs.ErrExist) {
-		return ErrKeyExists
+		return nil, ErrKeyExists
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
-	created, statErr := f.Stat()
+	mine, statErr := f.Stat()
 	defer func() {
 		if err != nil && statErr == nil {
-			if current, e := root.Lstat(AppKeyName); e == nil && os.SameFile(current, created) {
-				_ = root.Remove(AppKeyName)
-			}
+			// Still inside the call that created it: the inode is enough.
+			removeCreated(root, mine, false)
+			installed = nil
 		}
 	}()
 	if statErr != nil {
 		f.Close()
-		return statErr
+		return nil, statErr
 	}
 	_, werr := f.Write(data)
 	err = errors.Join(werr, f.Chown(int(t.ControllerUID), int(t.ControllerGID)), f.Chmod(0o600), f.Sync())
 	info, serr := f.Stat()
 	err = errors.Join(err, serr, f.Close())
 	if err != nil {
-		return fmt.Errorf("cannot write the GitHub App key: %w", err)
+		return nil, fmt.Errorf("cannot write the GitHub App key: %w", err)
 	}
 	uid, gid, nlink, ok := owner(info)
 	if !ok || uid != t.ControllerUID || gid != t.ControllerGID || info.Mode() != 0o600 || nlink != 1 || info.Size() != int64(len(data)) {
-		return errors.New("the installed GitHub App key failed owner, mode or link validation")
+		return nil, errors.New("the installed GitHub App key failed owner, mode or link validation")
 	}
 	back, err := root.Open(AppKeyName)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer back.Close()
 	again, err := back.Stat()
 	if err != nil || !os.SameFile(again, info) {
-		return errors.New("the installed GitHub App key changed during validation")
+		return nil, errors.New("the installed GitHub App key changed during validation")
 	}
-	installed, err := io.ReadAll(io.LimitReader(back, int64(len(data))+1))
-	if err != nil || subtle.ConstantTimeCompare(installed, data) != 1 {
-		return errors.New("the installed GitHub App key does not read back")
+	content, err := io.ReadAll(io.LimitReader(back, int64(len(data))+1))
+	if err != nil || subtle.ConstantTimeCompare(content, data) != 1 {
+		return nil, errors.New("the installed GitHub App key does not read back")
 	}
 	dir, err := root.Open(".")
 	if err == nil {
 		err = errors.Join(dir.Sync(), dir.Close())
 	}
-	return err
+	if err != nil {
+		return nil, err
+	}
+	return info, nil
+}
+
+// removeCreated removes the key entry only while it is still the file
+// identified by created, and syncs the directory. With exact, size and
+// modification time must match too, so a different file that reuses the
+// inode after a removal is never deleted.
+func removeCreated(root *os.Root, created fs.FileInfo, exact bool) bool {
+	current, err := root.Lstat(AppKeyName)
+	if err != nil || !os.SameFile(current, created) || exact && (current.Size() != created.Size() || !current.ModTime().Equal(created.ModTime())) {
+		return false
+	}
+	if root.Remove(AppKeyName) != nil {
+		return false
+	}
+	if dir, err := root.Open("."); err == nil {
+		_ = dir.Sync()
+		dir.Close()
+	}
+	return true
+}
+
+// removeAppKey undoes installAppKey: the key is removed only if it is
+// still the file that call created (exclusive create guarantees it was
+// new), never a key that existed before.
+func removeAppKey(t KeyTarget, created fs.FileInfo) error {
+	root, err := os.OpenRoot(t.Dir())
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	if !removeCreated(root, created, true) {
+		return errors.New("the installed GitHub App key could not be removed")
+	}
+	return nil
 }

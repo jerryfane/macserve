@@ -46,8 +46,10 @@ redirected to back into the terminal.
 
   --profile ID
           Profile in profiles.json that pull requests run (repeatable,
-          required). Its recipe must build this repository. Temporary until
-          PR-policy templates (O7): policies cannot name templates yet.
+          required). Its recipe must build this repository, and the App
+          must be installed on only this repository. Temporary until
+          PR-policy templates (O7): policies cannot name templates yet, so
+          an all-repositories installation is refused.
   --repository OWNER/NAME
           Repository pinned in controller.json receipt.repositories
           (default: the only pin).
@@ -108,7 +110,8 @@ func runConnectGitHub(args []string, stdout, stderr io.Writer) int {
 		author = ownerLogin
 	}
 	author = strings.ToLower(author)
-	if err := onboarding.CheckPolicyProfiles(prepared.Profiles, repo, profileIDs); err != nil {
+	scope, err := onboarding.PolicyScope(prepared.Profiles, repo, profileIDs)
+	if err != nil {
 		return fail(err)
 	}
 	listener, err := onboarding.Listen()
@@ -120,15 +123,15 @@ func runConnectGitHub(args []string, stdout, stderr io.Writer) int {
 	hostname, _ := os.Hostname()
 	confirmed, status, err := onboarding.Connect(ctx, onboarding.ConnectOptions{
 		Account: onboarding.Account{Login: ownerLogin, Org: org}, AppName: onboarding.AppName(hostname),
-		Repository: repo, RepositoryID: repoID, Author: author,
+		Repository: repo, RepositoryID: repoID, Author: author, Scope: scope,
 		Listener: listener, In: connectGitHubIn, Out: stdout, HTTP: connectGitHubHTTP,
 		Install: func(c onboarding.Confirmed) error {
 			enrollment := onboarding.Enrollment{
 				AppID: c.App.ID, InstallationID: c.Installation.ID, Repository: repo, RepositoryID: repoID,
 				AuthorIDs: []int64{c.Author.ID}, BaseBranches: []string{c.Repository.DefaultBranch},
-				Profiles: profileIDs, KeyFile: prepared.Key.Path(),
+				Profiles: profileIDs,
 			}
-			return prepared.Config.WriteGitHub(enrollment, func() error { return onboarding.InstallAppKey(prepared.Key, c.App.PEM) })
+			return prepared.Config.WriteGitHub(enrollment, prepared.Key, c.App.PEM)
 		},
 	})
 	if err != nil {

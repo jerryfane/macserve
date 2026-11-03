@@ -189,7 +189,7 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		f.write(w, http.StatusOK, Owner{Login: "jdoe", ID: 1001, Type: "User"})
 	case path == "/repos/jdoe/myapp":
-		f.write(w, http.StatusOK, map[string]any{"id": 4242, "full_name": "jdoe/myapp", "owner": map[string]any{"login": "jdoe", "id": 1001}})
+		f.write(w, http.StatusOK, map[string]any{"id": 4242, "full_name": "jdoe/myapp", "default_branch": "main", "owner": map[string]any{"login": "jdoe", "id": 1001, "type": "User"}})
 	case path == "/repos/jdoe/myapp/branches/main":
 		f.write(w, http.StatusOK, map[string]any{"commit": map[string]any{"sha": fakeCommit, "commit": map[string]any{"tree": map[string]any{"sha": fakeTree}}}})
 	case path == "/repos/jdoe/myapp/contents/.macserve.json":

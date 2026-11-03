@@ -28,6 +28,8 @@ type ConnectOptions struct {
 	RepositoryID int64
 	// Author is the login whose pull requests are trusted.
 	Author string
+	// Scope is what the installation must grant (PolicyScope).
+	Scope Scope
 	// Listener is the loopback listener the flow serves; Connect closes it.
 	Listener net.Listener
 	// In carries pasted redirect addresses and Enter; Out the instructions.
@@ -86,7 +88,11 @@ func Connect(ctx context.Context, o ConnectOptions) (Confirmed, *RepoConfigStatu
 	if err != nil {
 		return Confirmed{}, nil, err
 	}
-	fmt.Fprintf(out, "GitHub App %s created (App ID %d).\n\nInstall it on %s only:\n\n  %s\n\nChoose “Only select repositories”, select %s, and click Install.\n\n", app.Slug, app.ID, o.Repository, app.InstallURL(), o.Repository)
+	if o.Scope.SelectedOnly {
+		fmt.Fprintf(out, "GitHub App %s created (App ID %d).\n\nInstall it on %s only:\n\n  %s\n\nChoose “Only select repositories”, select %s, and click Install.\n\n", app.Slug, app.ID, o.Repository, app.InstallURL(), o.Repository)
+	} else {
+		fmt.Fprintf(out, "GitHub App %s created (App ID %d).\n\nInstall it on %s:\n\n  %s\n\n", app.Slug, app.ID, o.Repository, app.InstallURL())
+	}
 
 	// From here on the App exists on GitHub; every failure says how to
 	// remove it so a re-run starts clean.
@@ -192,23 +198,40 @@ func waitInstallation(ctx context.Context, api *API, app App, o ConnectOptions, 
 	}
 }
 
+// confirmInstallation checks the confirmed installation against o.Scope
+// (PolicyScope): with SelectedOnly it must select exactly the pinned
+// repository; otherwise it must at least grant it, by ID.
 func confirmInstallation(ctx context.Context, api *API, app App, o ConnectOptions, candidate int64) (Installation, Repository, string, error) {
 	installation, err := api.Confirm(ctx, app, o.Account, candidate)
 	if err != nil {
 		return Installation{}, Repository{}, "", err
 	}
+	if o.Scope.SelectedOnly && installation.Selection != "selected" {
+		return Installation{}, Repository{}, "", errors.New("the App was installed on all repositories; a per-repository profile needs it on “Only select repositories” with just this repository (temporary until PR-policy templates, O7)")
+	}
 	token, err := api.readToken(ctx, app, installation)
 	if err != nil {
 		return Installation{}, Repository{}, "", err
 	}
-	repos, err := api.repositories(ctx, token)
-	if err != nil {
+	var repo Repository
+	if o.Scope.SelectedOnly {
+		repos, err := api.repositories(ctx, token)
+		if err != nil {
+			return Installation{}, Repository{}, "", err
+		}
+		if len(repos) != 1 {
+			return Installation{}, Repository{}, "", fmt.Errorf("the installation must select exactly %s (repository ID %d)", o.Repository, o.RepositoryID)
+		}
+		repo = repos[0]
+	} else if repo, err = api.repository(ctx, token, o.Repository); status(err) == http.StatusNotFound {
+		return Installation{}, Repository{}, "", fmt.Errorf("the installation does not grant %s", o.Repository)
+	} else if err != nil {
 		return Installation{}, Repository{}, "", err
 	}
-	if len(repos) != 1 || repos[0].ID != o.RepositoryID || !strings.EqualFold(repos[0].FullName, o.Repository) {
-		return Installation{}, Repository{}, "", fmt.Errorf("the installation must select exactly %s (repository ID %d)", o.Repository, o.RepositoryID)
+	if repo.ID != o.RepositoryID || !strings.EqualFold(repo.FullName, o.Repository) {
+		return Installation{}, Repository{}, "", fmt.Errorf("the installation must grant %s with repository ID %d", o.Repository, o.RepositoryID)
 	}
-	return installation, repos[0], token, nil
+	return installation, repo, token, nil
 }
 
 func repoConfigLoop(ctx context.Context, api *API, token string, repo Repository, lines <-chan string, out io.Writer) *RepoConfigStatus {

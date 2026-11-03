@@ -297,9 +297,11 @@ func (a *API) jwt(app App) (string, error) {
 }
 
 // Installation is an installation confirmed with the App's own JWT.
+// Selection is GitHub's repository_selection: "selected" or "all".
 type Installation struct {
-	ID      int64
-	Account Owner
+	ID        int64
+	Account   Owner
+	Selection string
 }
 
 // ErrNotInstallation is a setup_url installation_id this App does not own.
@@ -307,8 +309,8 @@ var ErrNotInstallation = errors.New("the installation in the GitHub redirect is 
 
 // Confirm authenticates as the App and reads GET /app/installations/{id}.
 // The installation_id from the setup redirect is never trusted: it must be
-// this App's, on account, on selected repositories, with exactly
-// RequiredPermissions, no events and not suspended.
+// this App's, on account, with exactly RequiredPermissions, no events and
+// not suspended. Which repositories it must grant is the policy's Scope.
 func (a *API) Confirm(ctx context.Context, app App, account Account, candidate int64) (Installation, error) {
 	if candidate <= 0 {
 		return Installation{}, ErrNotInstallation
@@ -338,14 +340,14 @@ func (a *API) Confirm(ctx context.Context, app App, account Account, candidate i
 		return Installation{}, ErrNotInstallation
 	case !reply.Account.matches(account):
 		return Installation{}, fmt.Errorf("the App was installed on %q, not %q; uninstall it there and install it on your repository", reply.Account.Login, account.Login)
-	case reply.Selection != "selected":
-		return Installation{}, errors.New("the App was installed on all repositories; change the installation to “Only select repositories” and choose one")
+	case reply.Selection != "selected" && reply.Selection != "all":
+		return Installation{}, errors.New("invalid installation repository selection")
 	case !EqualPermissions(reply.Permissions) || len(reply.Events) != 0:
 		return Installation{}, errors.New("the installation's permissions differ from the App manifest")
 	case reply.SuspendedAt != nil:
 		return Installation{}, errors.New("the App installation is suspended")
 	}
-	return Installation{ID: reply.ID, Account: reply.Account}, nil
+	return Installation{ID: reply.ID, Account: reply.Account, Selection: reply.Selection}, nil
 }
 
 // readToken mints a short-lived installation token limited to metadata and
@@ -397,6 +399,19 @@ func (a *API) repositories(ctx context.Context, token string) ([]Repository, err
 		}
 	}
 	return reply.Repositories, nil
+}
+
+// repository reads one repository the installation token can see
+// (GET /repos/{owner}/{name}).
+func (a *API) repository(ctx context.Context, token, fullName string) (Repository, error) {
+	var reply Repository
+	if err := a.do(ctx, http.MethodGet, repoPath(fullName), token, nil, &reply); err != nil {
+		return Repository{}, err
+	}
+	if reply.ID <= 0 || reply.DefaultBranch == "" || strings.ContainsAny(reply.DefaultBranch, "\x00\r\n") {
+		return Repository{}, errors.New("invalid GitHub repository reply")
+	}
+	return reply, nil
 }
 
 // user resolves the numeric ID of a user login (GET /users/{login}).
