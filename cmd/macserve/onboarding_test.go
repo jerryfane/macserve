@@ -72,6 +72,26 @@ func TestUsageListsOnboardingCommands(t *testing.T) {
 	}
 }
 
+// TestInactiveShellsHaveNoRunFunction: checks/readonly does not follow the
+// command table, so the inactive shells must stay without code.
+func TestInactiveShellsHaveNoRunFunction(t *testing.T) {
+	inactive := map[string]bool{"connect-github": true, "doctor": true, "build": true, "upgrade": true}
+	seen := 0
+	for _, c := range onboardingCommands {
+		if inactive[c.name] {
+			seen++
+			if c.run != nil {
+				t.Errorf("%s has a run function; prove it read-only or list it as active", c.name)
+			}
+		} else if c.name != "setup" {
+			t.Errorf("unexpected onboarding command %s", c.name)
+		}
+	}
+	if seen != len(inactive) {
+		t.Errorf("found %d inactive shells, want %d", seen, len(inactive))
+	}
+}
+
 // TestSetupDispatchesToRunSetup: checks/readonly proves runSetup read-only
 // and lets onboardingCommand reach the table only on that basis.
 func TestSetupDispatchesToRunSetup(t *testing.T) {
