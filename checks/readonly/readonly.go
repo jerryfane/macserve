@@ -103,6 +103,9 @@ type Policy struct {
 	Switch map[string]string
 	// Table pins the command table the chosen clause dispatches through.
 	Table *Table
+	// Entry is the only function that may reference a Switch root. Pin its
+	// source (Pinned) so the command word it passes is fixed.
+	Entry string
 	// Imports are the module packages Package may import.
 	Imports []string
 	// Seams are the module functions outside Package and Roots that
@@ -127,7 +130,7 @@ type Policy struct {
 	// Fields maps a std struct field ("os/exec.Cmd.Env") to the only
 	// function allowed to set it.
 	Fields map[string]string
-	// Pinned maps a declaration of Package ("pkgpath.Name" or
+	// Pinned maps a module declaration ("pkgpath.Name" or
 	// "(*pkgpath.T).m") to the sha256 of its printed source.
 	Pinned map[string]string
 	// Refs maps a package variable of Package to the only functions that
@@ -500,25 +503,36 @@ func (c *checker) checkFile(f *ast.File) {
 	}
 }
 
-// checkPins compares every pinned declaration of the read-only package.
-func (c *checker) checkPins(root *source) {
+// checkPins compares every pinned declaration.
+func (c *checker) checkPins(_ *source) {
 	found := map[string]ast.Node{}
-	for _, f := range root.files {
-		for _, decl := range f.Decls {
-			switch d := decl.(type) {
-			case *ast.FuncDecl:
-				if fn, ok := root.info.Defs[d.Name].(*types.Func); ok {
-					cp := *d
-					cp.Doc = nil
-					found[fn.FullName()] = &cp
-				}
-			case *ast.GenDecl:
-				for _, spec := range d.Specs {
-					if vs, ok := spec.(*ast.ValueSpec); ok {
-						cp := *vs
-						cp.Doc, cp.Comment = nil, nil
-						for _, n := range vs.Names {
-							found[c.policy.Package+"."+n.Name] = &cp
+	pkgs := map[string]bool{}
+	for key := range c.policy.Pinned {
+		pkgs[funcPackage(key)] = true
+	}
+	for path := range pkgs {
+		src, err := c.load(path)
+		if err != nil {
+			c.problem("pinned declarations in %s: %v", path, err)
+			continue
+		}
+		for _, f := range src.files {
+			for _, decl := range f.Decls {
+				switch d := decl.(type) {
+				case *ast.FuncDecl:
+					if fn, ok := src.info.Defs[d.Name].(*types.Func); ok {
+						cp := *d
+						cp.Doc = nil
+						found[fn.FullName()] = &cp
+					}
+				case *ast.GenDecl:
+					for _, spec := range d.Specs {
+						if vs, ok := spec.(*ast.ValueSpec); ok {
+							cp := *vs
+							cp.Doc, cp.Comment = nil, nil
+							for _, n := range vs.Names {
+								found[path+"."+n.Name] = &cp
+							}
 						}
 					}
 				}
@@ -537,8 +551,7 @@ func (c *checker) checkPins(root *source) {
 			continue
 		}
 		sum := sha256.Sum256(buf.Bytes())
-		got := hex.EncodeToString(sum[:])
-		if got != want {
+		if got := hex.EncodeToString(sum[:]); got != want {
 			c.problem("pinned declaration %s changed (sha256 %s); review it and update the policy", key, got)
 		}
 	}
@@ -560,6 +573,7 @@ func (c *checker) walkDispatch(decl *ast.FuncDecl, src *source, caller, word str
 		return
 	}
 	args := sig.Params().At(0)
+	w.argsReadOnly(decl.Body, args)
 	dispatched := false
 	for _, stmt := range decl.Body.List {
 		sw, ok := stmt.(*ast.SwitchStmt)
@@ -614,6 +628,67 @@ func isArgsZero(e ast.Expr, src *source, args *types.Var) bool {
 	}
 	v := src.info.Types[ix.Index].Value
 	return v != nil && v.ExactString() == "0"
+}
+
+// argsReadOnly allows args in a dispatch root only as len(args), a read
+// of args[k] or a read of args[k:] with constant k >= 1, so neither the
+// root nor anything it calls can change args[0], the command word.
+func (w *walker) argsReadOnly(body *ast.BlockStmt, args *types.Var) {
+	var stack []ast.Node
+	ast.Inspect(body, func(n ast.Node) bool {
+		if n == nil {
+			stack = stack[:len(stack)-1]
+			return true
+		}
+		stack = append(stack, n)
+		id, ok := n.(*ast.Ident)
+		if !ok || w.src.info.Uses[id] != args {
+			return true
+		}
+		parent, grand := ast.Node(nil), ast.Node(nil)
+		if len(stack) >= 2 {
+			parent = stack[len(stack)-2]
+		}
+		if len(stack) >= 3 {
+			grand = stack[len(stack)-3]
+		}
+		ok = false
+		switch p := parent.(type) {
+		case *ast.CallExpr:
+			if fn, isIdent := ast.Unparen(p.Fun).(*ast.Ident); isIdent && len(p.Args) == 1 {
+				b, builtin := w.src.info.Uses[fn].(*types.Builtin)
+				ok = builtin && b.Name() == "len"
+			}
+		case *ast.IndexExpr:
+			ok = p.X == id && w.src.info.Types[p.Index].Value != nil && !written(grand, p)
+		case *ast.SliceExpr:
+			if p.X == id && p.Low != nil && p.High == nil && p.Max == nil && !written(grand, p) {
+				if v := w.src.info.Types[p.Low].Value; v != nil && v.ExactString() != "0" {
+					ok = true
+				}
+			}
+		}
+		if !ok {
+			w.c.problem("%s: %s uses %s other than len(%[3]s), %[3]s[k] or %[3]s[k:] (k >= 1) as a value", w.pos(id.Pos()), w.caller, args.Name())
+		}
+		return true
+	})
+}
+
+// written reports that parent uses child as an assignment target or takes
+// its address.
+func written(parent, child ast.Node) bool {
+	switch p := parent.(type) {
+	case *ast.AssignStmt:
+		return slices.Contains(p.Lhs, child.(ast.Expr))
+	case *ast.IncDecStmt:
+		return p.X == child
+	case *ast.UnaryExpr:
+		return p.Op == token.AND
+	case *ast.RangeStmt:
+		return p.Key == child || p.Value == child
+	}
+	return false
 }
 
 // argsOnlyLen refuses any use of args in stmt other than len(args).
@@ -814,6 +889,12 @@ func (w *walker) inspect(node ast.Node) {
 func (w *walker) node(n ast.Node) {
 	info := w.src.info
 	switch n := n.(type) {
+	case *ast.LabeledStmt:
+		w.c.problem("%s: %s has label %s; labels and goto are refused in walked code", w.pos(n.Pos()), w.caller, n.Label.Name)
+	case *ast.BranchStmt:
+		if n.Tok == token.GOTO || n.Label != nil {
+			w.c.problem("%s: %s uses %s with a label; labels and goto are refused in walked code", w.pos(n.Pos()), w.caller, n.Tok)
+		}
 	case *ast.FuncDecl:
 		if obj, ok := info.Defs[n.Name].(*types.Func); ok {
 			w.sigs = append(w.sigs, obj.Type().(*types.Signature))
@@ -1187,6 +1268,10 @@ func (c *checker) use(obj types.Object, caller string, pos token.Pos, call *ast.
 			iface = types.IsInterface(recv.Type())
 		}
 		if c.module(obj.Pkg()) {
+			if _, dispatch := c.policy.Switch[key]; dispatch && caller != c.policy.Entry {
+				c.problem("%s: %s references %s; only %s may call the dispatch", c.b.fset.Position(pos), caller, key, c.policy.Entry)
+				return
+			}
 			if iface {
 				c.problem("%s: %s calls module interface method %s", c.b.fset.Position(pos), caller, key)
 				return

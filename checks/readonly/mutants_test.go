@@ -43,6 +43,7 @@ const (
 	stepDoc    = "// Step is one ordered setup step."
 	parseFn    = "func ParseEnvironment("
 	sw0        = "\tswitch args[0] {"
+	unknownCmd = "\t\tfmt.Fprintf(stderr, \"macserve: unknown command %q\\n\", args[0])\n"
 	setupEntry = "\t{\"setup\", \"First-time setup of this Mac (--plan: read-only preflight)\", setupHelp, runSetup},"
 	tableType  = "\trun                 func(args []string, stdout, stderr io.Writer) int\n}{"
 )
@@ -163,11 +164,26 @@ var mutants = []mutant{
 	{"second setup entry", []edit{{command, setupEntry, setupEntry + "\n" + setupEntry}}},
 	{"table written in init", []edit{{command, setupFn, "func init() {\n\tonboardingCommands[0].help = \"x\"\n}\n\n" + setupFn}}},
 	{"table written in dispatch", []edit{{command, "\t\thelp, run := c.help, c.run", "\t\tonboardingCommands[0].run = nil\n\t\thelp, run := c.help, c.run"}}},
+
+	// Deimos's survivors at d8fe620 (PR #68 round 4): re-entering the dispatch.
+	{"R01 re-enter run with another word", []edit{{mainGo, unknownCmd, "\t\tif len(args) > 1 {\n\t\t\treturn run([]string{\"worker-reset\"}, stdout, stderr)\n\t\t}\n" + unknownCmd}}},
+	{"R02 re-enter run into a new case", []edit{{mainGo, unknownCmd, "\t\tif len(args) > 1 {\n\t\t\treturn run([]string{\"zz\"}, stdout, stderr)\n\t\t}\n" + unknownCmd}, {mainGo, "\tcase \"wait\":", "\tcase \"zz\":\n\t\t_ = os.WriteFile(\"/tmp/x\", nil, 0o600)\n\t\treturn 0\n\tcase \"wait\":"}}},
+	{"R03 goto back with args rewritten", []edit{{mainGo, sw0, "again:\n" + sw0}, {mainGo, unknownCmd, "\t\tif len(args) > 1 {\n\t\t\targs[0] = \"worker-reset\"\n\t\t\tgoto again\n\t\t}\n" + unknownCmd}}},
+	{"R04 goto back without a write", []edit{{mainGo, sw0, "\tn := 0\nagain:\n" + sw0}, {mainGo, unknownCmd, "\t\tif n == 0 && len(args) > 1 {\n\t\t\tn++\n\t\t\tgoto again\n\t\t}\n" + unknownCmd}}},
+	{"R05 args element written", []edit{{mainGo, unknownCmd, "\t\targs[0] = \"worker-reset\"\n" + unknownCmd}}},
+	{"R06 args aliased and written", []edit{{mainGo, unknownCmd, "\t\ta := args\n\t\ta[0] = \"worker-reset\"\n" + unknownCmd}}},
+	{"R07 args passed whole", []edit{{mainGo, unknownCmd, "\t\tslices.Reverse(args)\n" + unknownCmd}, {mainGo, "\t\"os\"\n", "\t\"os\"\n\t\"slices\"\n"}}},
+	{"R08 args written in a range", []edit{{mainGo, unknownCmd, "\t\tfor i := range args {\n\t\t\targs[i] = \"x\"\n\t\t}\n" + unknownCmd}}},
+	{"R09 run as a method value", []edit{{mainGo, unknownCmd, "\t\tif f := run; len(args) > 1 {\n\t\t\treturn f([]string{\"worker-reset\"}, stdout, stderr)\n\t\t}\n" + unknownCmd}}},
+	{"R10 run through a variable set in init", []edit{{mainGo, "func run(", "var reenter func([]string, io.Writer, io.Writer) int\n\nfunc init() { reenter = run }\n\nfunc run("}, {mainGo, unknownCmd, "\t\tif len(args) > 1 {\n\t\t\treturn reenter([]string{\"worker-reset\"}, stdout, stderr)\n\t\t}\n" + unknownCmd}}},
+	{"R11 run re-entered from the setup command", []edit{{mainGo, "func run(", "var reenter func([]string, io.Writer, io.Writer) int\n\nfunc init() { reenter = run }\n\nfunc run("}, {command, planCall, "\tif len(args) > 3 {\n\t\treturn reenter([]string{\"worker-reset\"}, stdout, stderr)\n\t}\n" + planCall}}},
+	{"R12 labelled break in walked code", []edit{{command, planCall, "out:\n\tfor {\n\t\tbreak out\n\t}\n" + planCall}}},
+	{"R13 main rewrites the command word", []edit{{mainGo, "\tos.Exit(run(os.Args[1:], os.Stdout, os.Stderr))", "\ta := os.Args[1:]\n\tif len(a) > 0 && a[0] == \"setup\" {\n\t\ta[0] = \"worker-reset\"\n\t}\n\tos.Exit(run(a, os.Stdout, os.Stderr))"}}},
 }
 
 // pinOnly are mutants of pinned code that only the pins catch: the
 // general rules cannot know which argv a widened allowlist admits.
-var pinOnly = map[string]bool{"C02 AllowedCommand widened": true, "allowlist literal widened": true}
+var pinOnly = map[string]bool{"C02 AllowedCommand widened": true, "allowlist literal widened": true, "R13 main rewrites the command word": true}
 
 func TestMutantsRefused(t *testing.T) {
 	b := testBuild(t)

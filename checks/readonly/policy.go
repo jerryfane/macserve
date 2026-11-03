@@ -21,6 +21,9 @@ var SetupPlan = Policy{
 		mainPkg + ".runSetupWith",
 	},
 	Switch: map[string]string{mainPkg + ".run": "setup"},
+	// main is the only caller of run; its source is pinned below, so it
+	// passes exactly os.Args[1:].
+	Entry: mainPkg + ".main",
 	Table: &Table{
 		Var: mainPkg + ".onboardingCommands", Name: "name", Run: "run", Key: "setup", Root: mainPkg + ".runSetup",
 		Fields: []string{"name", "summary", "help", "run"},
@@ -97,6 +100,7 @@ var SetupPlan = Policy{
 	// The command allowlist and everything that runs or dials. A change
 	// here is a change to what `setup --plan` may do and needs review.
 	Pinned: map[string]string{
+		mainPkg + ".main":              "c767d323c81947d5109aa672fcdb9fd4d11dc9e8bfc5ed77c2f29de7108fff97",
 		planFunc + "readOnlyCommands":  "b3d4af8c1c840fbf1093c306e5443d68109943751351953423bb3edb22f35f5f",
 		planFunc + "commandEnv":        "ca060e11532bf08953461902a0f3cefe849b90dc09ad9d043c11a3fdefeaacef",
 		planFunc + "xcodebuildSuffix":  "eb025439af1f96f08c68725e789a9f9e7576cdc0fa19b96fb70e69f39cc0a6a9",
