@@ -47,7 +47,7 @@ var SetupPlan = Policy{
 		"path/filepath.IsAbs":       {},
 		"path/filepath.Clean":       {},
 		"path/filepath.Base":        {},
-		"reflect.DeepEqual":         {Caller: planFunc + "RenderEnvironment", Max: 1},
+		"reflect.DeepEqual":         {Caller: planFunc + "exactEnvironment", Max: 1},
 		"flag.NewFlagSet":           {Caller: mainPkg + ".runSetupWith", Max: 1},
 		"flag.ErrHelp":              {Caller: mainPkg + ".runSetupWith", Max: 1},
 		"(*flag.FlagSet).SetOutput": {Caller: mainPkg + ".runSetupWith", Max: 1},

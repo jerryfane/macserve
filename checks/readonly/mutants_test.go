@@ -26,7 +26,7 @@ const (
 	probeDoc = "// SystemProbe reads the running host."
 	runCall  = "	if err := cmd.Run(); err != nil {"
 	cmdDir   = "	cmd.Dir = \"/\""
-	parse    = "	parsed, err := deploy.ParseEnvironment(check)"
+	parse    = "	parsed, err := deploy.ParseEnvironment(data)"
 	planCall = "	result := plan.Preflight(context.Background(), probe, choices)"
 	writeOut = "	_, err := w.Write(b.Bytes())"
 	osImport = "\t\"os\"\n"

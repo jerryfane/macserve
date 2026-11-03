@@ -232,12 +232,12 @@ type EnvironmentFacts struct {
 
 type envEntry struct{ key, value string }
 
-// RenderEnvironment generates deploy.env. The result has exactly the
-// intended keys in a fixed order, one line each, and deploy.ParseEnvironment
-// (the deploy-install parser) must return exactly the intended values: no
-// extra key such as COEXISTING_* and no changed value. Without a
-// repository (before the GitHub step) REPOSITORIES is omitted from the
-// result and a stand-in pin is used for the parser check.
+// RenderEnvironment generates deploy.env: the intended keys in a fixed
+// order, one line each. deploy.ParseEnvironment (the deploy-install parser)
+// must read it as exactly the intended values, so a value that adds a line,
+// comment or key (such as COEXISTING_*) changes its own parsed value and is
+// refused. Without a repository (before the GitHub step) REPOSITORIES is
+// omitted from the result and a stand-in pin is used for the parser check.
 func RenderEnvironment(f EnvironmentFacts, c Choices, ids IDs) ([]byte, error) {
 	if err := c.Validate(); err != nil {
 		return nil, err
@@ -269,22 +269,9 @@ func RenderEnvironment(f EnvironmentFacts, c Choices, ids IDs) ([]byte, error) {
 	for _, e := range entries {
 		out.WriteString(e.key + "=" + e.value + "\n")
 	}
-	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
-	if len(lines) != len(entries) {
-		return nil, errors.New("generated deploy.env has extra lines")
-	}
-	for i, line := range lines {
-		if line != entries[i].key+"="+entries[i].value || !printable(line) || strings.Count(line, "=") != 1 {
-			return nil, fmt.Errorf("generated deploy.env line %d is not exactly %s", i+1, entries[i].key)
-		}
-	}
 	check := out.Bytes()
 	if c.Repository == "" {
 		check = append(bytes.Clone(check), "REPOSITORIES="+pendingRepositoryName+":"+strconv.FormatInt(pendingRepositoryID, 10)+"\n"...)
-	}
-	parsed, err := deploy.ParseEnvironment(check)
-	if err != nil {
-		return nil, fmt.Errorf("generated deploy.env is invalid: %w", err)
 	}
 	want := deploy.Environment{
 		ControllerUser: c.ControllerUser, ControllerUID: ids.ControllerUID, ControllerGID: ids.ControllerGID,
@@ -294,8 +281,21 @@ func RenderEnvironment(f EnvironmentFacts, c Choices, ids IDs) ([]byte, error) {
 		HostAddresses: f.HostAddresses, DeveloperDir: f.DeveloperDir,
 		Repositories: map[string]int64{repoName: repoID},
 	}
-	if !reflect.DeepEqual(parsed, want) {
-		return nil, errors.New("deploy-install would read the generated deploy.env differently than intended")
+	if err := exactEnvironment(check, want); err != nil {
+		return nil, err
 	}
 	return out.Bytes(), nil
+}
+
+// exactEnvironment requires the deploy-install parser to read data as
+// exactly want: no other key (such as COEXISTING_*) and no changed value.
+func exactEnvironment(data []byte, want deploy.Environment) error {
+	parsed, err := deploy.ParseEnvironment(data)
+	if err != nil {
+		return fmt.Errorf("generated deploy.env is invalid: %w", err)
+	}
+	if !reflect.DeepEqual(parsed, want) {
+		return errors.New("deploy-install would read the generated deploy.env differently than intended")
+	}
+	return nil
 }

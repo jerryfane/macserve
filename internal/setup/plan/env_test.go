@@ -1,6 +1,7 @@
 package plan
 
 import (
+	"bytes"
 	"net/netip"
 	"strings"
 	"testing"
@@ -122,6 +123,38 @@ func TestRenderEnvironmentRefusesInjection(t *testing.T) {
 		mutate(&f)
 		if data, err := RenderEnvironment(f, DefaultChoices(), testIDs); err == nil {
 			t.Errorf("%s: rendered\n%s", name, data)
+		}
+	}
+}
+
+// TestExactEnvironmentRefusesExtraKeys: lines the deploy parser accepts but
+// that were not intended (coexistence exceptions, a changed value) are
+// refused even if a grammar let them through.
+func TestExactEnvironmentRefusesExtraKeys(t *testing.T) {
+	c := DefaultChoices()
+	c.Repository = "jdoe/myapp:987654321"
+	data, err := RenderEnvironment(testFacts(), c, testIDs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := deploy.ParseEnvironment(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := exactEnvironment(data, want); err != nil {
+		t.Fatal(err)
+	}
+	for name, extra := range map[string]string{
+		"coexisting service": "COEXISTING_SERVICES=com.example.agent\n",
+		"coexisting anchor":  "COEXISTING_ANCHORS=com.apple/250.ApplicationFirewall\n",
+		"other real name":    "JOB_REAL_NAME=other\n",
+	} {
+		bad := bytes.Replace(data, []byte("JOB_REAL_NAME=macserve build\n"), []byte(extra), 1)
+		if name != "other real name" {
+			bad = append(bytes.Clone(data), extra...)
+		}
+		if err := exactEnvironment(bad, want); err == nil {
+			t.Errorf("%s: accepted", name)
 		}
 	}
 }
