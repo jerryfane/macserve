@@ -57,6 +57,11 @@ type listedPackage struct {
 // CheckSources applies the C/G source rules to every C/G Go file of the
 // module at root, type-checked for the darwin/arm64 release build.
 func CheckSources(root string, m *Manifest, classes map[string]string) ([]string, error) {
+	// go list reports resolved directories (macOS: /var -> /private/var).
+	root, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return nil, err
+	}
 	module, err := modulePath(root)
 	if err != nil {
 		return nil, err
