@@ -383,7 +383,7 @@ func WritePlan(w io.Writer, plan Plan) error {
 			}
 		}
 		if !plan.HasRepository {
-			b.WriteString("  # REPOSITORIES is added in step 2 (connect-github), or pass --repository OWNER/NAME:ID\n")
+			b.WriteString("  # REPOSITORIES is missing: setup needs --repository OWNER/NAME:ID before install\n")
 		}
 	}
 	b.WriteString("\nSetup steps (each recorded in " + setup.LedgerPath + "; a failed step blocks later ones)\n")

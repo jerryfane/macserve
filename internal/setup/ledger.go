@@ -37,19 +37,22 @@ const (
 	StepFirstBuild      Step = "first-build"
 )
 
-// Steps is the fixed order. GitHub precedes install and round 1 because
-// the App, repository pin and template are bound into the install-time
-// environment, the activation anchor and the round-1 tool evidence.
+// Steps is the fixed order. install precedes github: deploy-install refuses
+// an existing /Library/macserve, and connect-github writes the github
+// section into the controller.json that install creates. The repository
+// pin (REPOSITORIES, an install-time key) is chosen at preflight. github
+// still precedes tools and round 1 because the App and the repository are
+// bound into the activation anchor and the round-1 tool evidence.
 var Steps = []Step{
-	StepPreflight, StepGitHub, StepInstall, StepTools, StepOwnerActions,
+	StepPreflight, StepInstall, StepGitHub, StepTools, StepOwnerActions,
 	StepRound1, StepReboot, StepRound2, StepApproveAndStart, StepFirstBuild,
 }
 
 // StepSummaries describe each step for the plan.
 var StepSummaries = map[Step]string{
-	StepPreflight:       "check this Mac and choose accounts, IDs, address and port (no root)",
-	StepGitHub:          "create the GitHub App from a manifest and install it on one repository (no root)",
+	StepPreflight:       "check this Mac and choose accounts, IDs, address, port and repository (no root)",
 	StepInstall:         "one sudo prompt: create accounts and /Library/macserve with deploy-install, services disabled",
+	StepGitHub:          "add a build profile and run sudo macserve connect-github (temporary until O5/O7; detected)",
 	StepTools:           "accept the Xcode license, run first launch and install the Metal toolchain system-wide",
 	StepOwnerActions:    "you grant Full Disk Access and log in to the build account once (detected)",
 	StepRound1:          "qualification round 1, unattended",
@@ -57,6 +60,20 @@ var StepSummaries = map[Step]string{
 	StepRound2:          "qualification round 2 on the new boot, unattended",
 	StepApproveAndStart: "you type approve; services start only after that",
 	StepFirstBuild:      "first build of your repository and receipt check",
+}
+
+// Retryable reports a step that may begin again after it was interrupted
+// or returned an error while running: it only checks host state or runs
+// commands that converge (preflight, github detection, the Xcode system
+// steps, owner-action detection). Every other interrupted step stays
+// blocked; install in particular must never be rerun (deploy-install
+// "do not rerun").
+func Retryable(s Step) bool {
+	switch s {
+	case StepPreflight, StepGitHub, StepTools, StepOwnerActions:
+		return true
+	}
+	return false
 }
 
 // Status of one step record.
@@ -181,8 +198,9 @@ func (l *Ledger) Next() (Record, bool, error) {
 }
 
 // Begin starts step s in boot. Only the next pending step may begin; an
-// interrupted (still running) step is not restarted implicitly. Round 2
-// requires a boot different from round 1's.
+// interrupted (still running) step is restarted only if it is Retryable,
+// and then records the new start. Round 2 requires a boot different from
+// round 1's.
 func (l *Ledger) Begin(s Step, boot Boot, now time.Time) error {
 	next, done, err := l.Next()
 	if err != nil {
@@ -194,7 +212,7 @@ func (l *Ledger) Begin(s Step, boot Boot, now time.Time) error {
 	if next.Step != s {
 		return fmt.Errorf("setup step %s cannot begin before %s is done", s, next.Step)
 	}
-	if next.Status == StatusRunning {
+	if next.Status == StatusRunning && !Retryable(s) {
 		return fmt.Errorf("setup step %s was interrupted; it is not restarted automatically", s)
 	}
 	if !boot.valid() {

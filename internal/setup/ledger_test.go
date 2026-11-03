@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -58,27 +59,108 @@ func ledgerAt(t *testing.T, s Step) *Ledger {
 	return l
 }
 
-func TestGitHubPrecedesInstallAndRound1(t *testing.T) {
-	index := map[Step]int{}
-	for i, s := range Steps {
-		index[s] = i
-	}
-	if index[StepPreflight] != 0 || index[StepGitHub] != 1 || index[StepGitHub] > index[StepInstall] || index[StepInstall] > index[StepRound1] ||
-		index[StepRound1] > index[StepReboot] || index[StepReboot] > index[StepRound2] || index[StepRound2] > index[StepApproveAndStart] ||
-		index[StepApproveAndStart] > index[StepFirstBuild] || len(Steps) != 10 {
-		t.Fatalf("step order %v", Steps)
+// TestInstallPrecedesGitHubAndGitHubPrecedesRound1: deploy-install refuses
+// an existing /Library/macserve and connect-github needs its
+// controller.json, so install comes before github; the App must still
+// exist before tools and round 1.
+func TestInstallPrecedesGitHubAndGitHubPrecedesRound1(t *testing.T) {
+	want := []Step{StepPreflight, StepInstall, StepGitHub, StepTools, StepOwnerActions, StepRound1, StepReboot, StepRound2, StepApproveAndStart, StepFirstBuild}
+	if !slices.Equal(Steps, want) {
+		t.Fatalf("step order %v, want %v", Steps, want)
 	}
 	for _, s := range Steps {
 		if StepSummaries[s] == "" {
 			t.Errorf("step %s has no summary", s)
 		}
 	}
-	l := ledgerAt(t, StepGitHub)
-	for _, s := range []Step{StepInstall, StepRound1} {
+	l := ledgerAt(t, StepInstall)
+	for _, s := range []Step{StepGitHub, StepTools, StepRound1} {
+		if err := l.Begin(s, boot1, t0); err == nil {
+			t.Errorf("%s began before install", s)
+		}
+	}
+	l = ledgerAt(t, StepGitHub)
+	for _, s := range []Step{StepTools, StepOwnerActions, StepRound1} {
 		if err := l.Begin(s, boot1, t0); err == nil {
 			t.Errorf("%s began before github", s)
 		}
 	}
+}
+
+// TestOldStepOrderRefusedOnDecode: a ledger written with the earlier order
+// (github before install) does not decode.
+func TestOldStepOrderRefusedOnDecode(t *testing.T) {
+	good, err := ledgerAt(t, StepTools).Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(good)
+	i, g := strings.Index(s, `"step": "install"`), strings.Index(s, `"step": "github"`)
+	if i < 0 || g < i {
+		t.Fatalf("unexpected encoding:\n%s", s)
+	}
+	old := strings.NewReplacer(`"step": "install"`, `"step": "github"`, `"step": "github"`, `"step": "install"`).Replace(s)
+	if _, err := DecodeLedger([]byte(old)); err == nil || !strings.Contains(err.Error(), `want "install"`) {
+		t.Fatalf("old order: %v", err)
+	}
+}
+
+// TestRetryableStepsRestartAndInstallDoesNot: an interrupted detection or
+// converging step begins again (recording the new boot); an interrupted
+// install, reboot or round stays blocked.
+func TestRetryableStepsRestartAndInstallDoesNot(t *testing.T) {
+	for _, s := range Steps {
+		want := s == StepPreflight || s == StepGitHub || s == StepTools || s == StepOwnerActions
+		if Retryable(s) != want {
+			t.Errorf("Retryable(%s) = %v", s, !want)
+		}
+	}
+	l := ledgerAt(t, StepTools)
+	if err := l.Begin(StepTools, boot1, t0); err != nil {
+		t.Fatal(err)
+	}
+	later := t0.Add(time.Hour)
+	if err := l.Begin(StepTools, boot2, later); err != nil {
+		t.Fatalf("retryable step not restarted: %v", err)
+	}
+	if r := l.record(StepTools); *r.Boot != boot2 || !r.Started.Equal(later) {
+		t.Fatalf("restart not recorded: %+v", r)
+	}
+	if err := l.Complete(StepTools, boot1, nil, t0); err == nil {
+		t.Fatal("restarted step completed in its old boot")
+	}
+	if _, err := DecodeLedger(mustEncode(t, l)); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []Step{StepInstall, StepRound1} {
+		l := ledgerAt(t, s)
+		if err := l.Begin(s, boot1, t0); err != nil {
+			t.Fatal(err)
+		}
+		if err := l.Begin(s, boot1, t0); err == nil || !strings.Contains(err.Error(), "interrupted") {
+			t.Errorf("interrupted %s restarted: %v", s, err)
+		}
+	}
+	// A retryable step that failed still blocks: Fail is final.
+	l = ledgerAt(t, StepTools)
+	if err := l.Begin(StepTools, boot1, t0); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Fail(StepTools, "stop", t0); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Begin(StepTools, boot1, t0); err == nil {
+		t.Error("failed retryable step began again")
+	}
+}
+
+func mustEncode(t *testing.T, l *Ledger) []byte {
+	t.Helper()
+	data, err := l.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 func TestFailedStepBlocksLaterSteps(t *testing.T) {

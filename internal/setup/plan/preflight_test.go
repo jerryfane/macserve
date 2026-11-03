@@ -137,7 +137,7 @@ func TestPreflightHealthyHostGeneratesEnvironment(t *testing.T) {
 	if err := WritePlan(&out, plan); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"read-only. Nothing was written", "JOB_UID=6202", "# REPOSITORIES is added in step 2", " 2. github", "10. first-build", "Result: ready"} {
+	for _, want := range []string{"read-only. Nothing was written", "JOB_UID=6202", "# REPOSITORIES is missing: setup needs --repository", " 2. install", " 3. github", "10. first-build", "Result: ready"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("plan output lacks %q:\n%s", want, out.String())
 		}
