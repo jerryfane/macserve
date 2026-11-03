@@ -2,10 +2,13 @@ package qualification
 
 import (
 	"encoding/json"
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"maps"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -372,6 +375,156 @@ func TestCarryBinaryBindsTheSitting(t *testing.T) {
 	c.CarryBinarySHA256 = newBinary
 	if _, err := carryBinary(c); err == nil {
 		t.Fatal("carry step accepted from a binary other than the installed one")
+	}
+}
+
+// The carry sitting's probe targets are its own challenge's; only the anchored
+// parameters tie them to what the owner approved.
+func TestCarrySittingBindsAnchoredParameters(t *testing.T) {
+	approved := carryChallengeFixture()
+	approved.Carry = false
+	approved.Allow = []string{"192.0.2.1:443"}
+	approved.PrivatePaths = []string{"/Library/macserve/var/broker", "/Library/macserve/var/controller"}
+	a := carryAnchorFixture()
+	a.Parameters = anchorParameters(approved)
+	sitting := func() Challenge {
+		c := approved
+		c.Carry, c.Previous = true, a.Session
+		c.Allow = slices.Clone(approved.Allow)
+		c.PrivatePaths = slices.Clone(approved.PrivatePaths)
+		return c
+	}
+	if err := checkCarrySitting(sitting(), a); err != nil {
+		t.Fatalf("anchored sitting refused: %v", err)
+	}
+	for name, mutate := range map[string]func(*Challenge){
+		"one fewer private path": func(c *Challenge) { c.PrivatePaths = c.PrivatePaths[:1] },
+		"other socket":           func(c *Challenge) { c.Socket = "/tmp/other.sock" },
+		"widened allowance":      func(c *Challenge) { c.Allow = append(c.Allow, "192.0.2.2:443") },
+		"dropped allowance":      func(c *Challenge) { c.Allow = nil },
+		"other job UID":          func(c *Challenge) { c.Environment.JobUID++ },
+		"other profiles":         func(c *Challenge) { c.Observation.Profiles = map[string]string{"ios": "other"} },
+		"other predecessor":      func(c *Challenge) { c.Previous = "/Library/macserve/var/qualification/other" },
+		"no predecessor":         func(c *Challenge) { c.Previous = "" },
+		"not a carry sitting":    func(c *Challenge) { c.Carry = false },
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := sitting()
+			mutate(&c)
+			if checkCarrySitting(c, a) == nil {
+				t.Fatal("carry sitting differing from the anchored approval accepted")
+			}
+		})
+	}
+}
+
+func TestCommitAnchorCompareAndSwap(t *testing.T) {
+	expected, next := []byte(`{"schema":2}`), []byte(`{"schema":2,"carries":[1]}`)
+	var calls []string
+	run := func(current []byte, readErr, prepareErr error) error {
+		calls = nil
+		return commitAnchor(expected, next, func() ([]byte, error) { calls = append(calls, "read"); return current, readErr },
+			func() error { calls = append(calls, "prepare"); return prepareErr },
+			func(b []byte) error { calls = append(calls, "write:"+string(b)); return nil })
+	}
+	if err := run(expected, nil, nil); err != nil || !slices.Equal(calls, []string{"read", "prepare", "write:" + string(next)}) {
+		t.Fatalf("unchanged anchor not swapped: %v %v", calls, err)
+	}
+	for name, current := range map[string][]byte{"changed anchor": []byte(`{"schema":2,"carries":[0]}`), "removed anchor": nil} {
+		t.Run(name, func(t *testing.T) {
+			if err := run(current, nil, nil); err == nil || !slices.Equal(calls, []string{"read"}) {
+				t.Fatalf("changed anchor overwritten or evidence written: %v %v", calls, err)
+			}
+		})
+	}
+	if err := run(nil, errors.New("unreadable"), nil); err == nil || !slices.Equal(calls, []string{"read"}) {
+		t.Fatalf("unreadable anchor overwritten: %v %v", calls, err)
+	}
+	if err := run(expected, nil, errors.New("already attempted")); err == nil || !slices.Equal(calls, []string{"read", "prepare"}) {
+		t.Fatalf("anchor written after evidence preservation failed: %v %v", calls, err)
+	}
+	if err := commitAnchor(nil, next, func() ([]byte, error) { return nil, nil }, func() error { return nil }, func([]byte) error { t.Fatal("empty expectation swapped"); return nil }); err == nil {
+		t.Fatal("empty expected anchor accepted")
+	}
+}
+
+// Two sessions, each holding its own session lock, contend for the one anchor
+// lock; approve, reapprove and carry all take it.
+func TestAnchorLockIsGlobal(t *testing.T) {
+	parent := t.TempDir()
+	first, second := filepath.Join(parent, "first"), filepath.Join(parent, "second")
+	for _, dir := range []string{first, second} {
+		if err := os.Mkdir(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		unlock, err := lockSessionFile(dir)
+		if err != nil {
+			t.Fatalf("independent session locks contend: %v", err)
+		}
+		defer unlock()
+	}
+	unlock, err := lockFile(parent, anchorLockFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again, err := lockFile(parent, anchorLockFile); err == nil {
+		again()
+		t.Fatal("second session took the anchor lock while the first held it")
+	}
+	unlock()
+	again, err := lockFile(parent, anchorLockFile)
+	if err != nil {
+		t.Fatalf("anchor lock not released: %v", err)
+	}
+	again()
+	fset := token.NewFileSet()
+	for file, fns := range map[string][]string{"approve.go": {"approve"}, "carry.go": {"Carry"}} {
+		f, err := parser.ParseFile(fset, file, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || !slices.Contains(fns, fn.Name.Name) {
+				continue
+			}
+			found := false
+			ast.Inspect(fn, func(n ast.Node) bool {
+				if call, ok := n.(*ast.CallExpr); ok {
+					if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "anchorLock" {
+						found = true
+					}
+				}
+				return true
+			})
+			if !found {
+				t.Fatalf("%s writes the anchor without the global anchor lock", fn.Name.Name)
+			}
+		}
+	}
+	// A lock file in the config directory would itself become an anchor binding.
+	if sessionParent == configDir || filepath.Dir(anchorPath) != configDir {
+		t.Fatal("anchor lock must live outside the bound config directory")
+	}
+}
+
+func TestCarryToolEvidenceBindsExecutable(t *testing.T) {
+	c := carryChallengeFixture()
+	c.Profiles = []model.Profile{{ID: "ios"}}
+	runs := []ToolRun{{Profile: "ios", Result: worker.Result{State: model.Succeeded}}}
+	approved := ToolEvidence{Runs: runs}
+	if err := checkCarryToolEvidence(c, ToolEvidence{Runs: runs, ExecutableSHA256: newBinary}, approved, newBinary); err != nil {
+		t.Fatalf("carried binary's evidence refused: %v", err)
+	}
+	for name, executable := range map[string]string{"predecessor binary": oldBinary, "unrecorded": ""} {
+		t.Run(name, func(t *testing.T) {
+			if checkCarryToolEvidence(c, ToolEvidence{Runs: runs, ExecutableSHA256: executable}, approved, newBinary) == nil {
+				t.Fatal("tool evidence from another binary accepted")
+			}
+		})
+	}
+	if checkCarryToolEvidence(c, ToolEvidence{Runs: runs}, approved, "") == nil {
+		t.Fatal("empty carried binary accepted")
 	}
 }
 

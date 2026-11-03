@@ -95,7 +95,26 @@ func sessionLock(dir string) (func(), error) {
 // Keep the inode after closing: unlinking it would permit two independent locks.
 // The kernel releases this lock even when collection exits without cleanup.
 func lockSessionFile(dir string) (func(), error) {
-	f, err := os.OpenFile(filepath.Join(dir, ".lock"), os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0600)
+	return lockFile(dir, ".lock")
+}
+
+// anchorLockFile, in the protected session parent, serializes every command
+// that reads and then writes the activation anchor (approve, reapprove,
+// carry), whatever session it commits. It cannot live in the config
+// directory, whose every file is an anchor binding.
+const anchorLockFile = ".anchor.lock"
+
+// anchorLock takes the global anchor lock without waiting: a contending
+// commit refuses as busy.
+func anchorLock() (func(), error) {
+	if e := protectedDirectory(sessionParent); e != nil {
+		return nil, e
+	}
+	return lockFile(sessionParent, anchorLockFile)
+}
+
+func lockFile(dir, name string) (func(), error) {
+	f, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0600)
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +160,7 @@ func Begin(ctx context.Context, o BeginOptions) error {
 	if e != nil {
 		return e
 	}
-	const parent = "/Library/macserve/var/qualification"
+	const parent = sessionParent
 	if filepath.Dir(o.Session) != parent || !cleanPath(o.Session) {
 		return errors.New("session must be a new direct child of /Library/macserve/var/qualification")
 	}

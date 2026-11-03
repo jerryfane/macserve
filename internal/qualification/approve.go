@@ -133,6 +133,11 @@ func approve(ctx context.Context, dir string, requalify bool) error {
 		return e
 	}
 	defer unlock()
+	unlockAnchor, e := anchorLock()
+	if e != nil {
+		return fmt.Errorf("activation anchor busy: %w", e)
+	}
+	defer unlockAnchor()
 	c, raw, e := loadApprovableChallenge(dir)
 	if e != nil {
 		return e

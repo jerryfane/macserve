@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -77,24 +78,33 @@ func TestWorkerQuiescentFailsOnChangedPersistence(t *testing.T) {
 	}
 }
 
-func TestWorkerQuiescentFailsOnQuarantineOrInconclusive(t *testing.T) {
-	for name, record := range map[string]string{quarantineRecord: `{"quarantined":true}`, admissionInconclusiveRecord: ""} {
-		t.Run(name, func(t *testing.T) {
-			options, _ := quiescentFixture(t, "")
-			data := []byte(record)
-			if record == "" {
-				var err error
-				if data, err = json.Marshal(AdmissionInconclusive{Reason: "unsettled", Since: time.Now().Add(-time.Minute), CheckedAt: time.Now()}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if err := os.WriteFile(filepath.Join(options.Root, name), data, 0600); err != nil {
-				t.Fatal(err)
-			}
-			report, err := workerQuiescent(context.Background(), options, quiescentScope([]processSample{sample(100, "10:0")}))
-			if err == nil || report.Quiescent {
-				t.Fatalf("%s worker passed: %+v", name, report)
-			}
-		})
+func writeWorkerRecord(t *testing.T, options Options, name string, v any) {
+	t.Helper()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(options.Root, name), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Without the record the same fixture is quiescent, so each refusal below is
+// the record check itself.
+func TestWorkerQuiescentFailsOnQuarantine(t *testing.T) {
+	options, _ := quiescentFixture(t, "")
+	writeWorkerRecord(t, options, quarantineRecord, QuarantineRecord{Quarantined: true, Reason: "contamination", RecordedAt: time.Now()})
+	report, err := workerQuiescent(context.Background(), options, quiescentScope([]processSample{sample(100, "10:0")}))
+	if !errors.Is(err, ErrRecovery) || !strings.Contains(err.Error(), "quarantined") || report.Quiescent || report.BaselineProcesses != 0 {
+		t.Fatalf("quarantined worker passed or refused for another reason: %+v %v", report, err)
+	}
+}
+
+func TestWorkerQuiescentFailsOnInconclusiveAdmission(t *testing.T) {
+	options, _ := quiescentFixture(t, "")
+	writeWorkerRecord(t, options, admissionInconclusiveRecord, AdmissionInconclusive{Reason: "unsettled", Since: time.Now().Add(-time.Minute), CheckedAt: time.Now()})
+	report, err := workerQuiescent(context.Background(), options, quiescentScope([]processSample{sample(100, "10:0")}))
+	if err == nil || !strings.Contains(err.Error(), "admission inconclusive") || report.Quiescent || report.BaselineProcesses != 0 {
+		t.Fatalf("inconclusive worker passed or refused for another reason: %+v %v", report, err)
 	}
 }

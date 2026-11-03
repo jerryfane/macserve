@@ -329,6 +329,49 @@ func approvedToolEvidence(dir string, v Candidate) (ToolEvidence, error) {
 	return t, decode(b, &t)
 }
 
+// checkCarrySitting requires the carry sitting to chain to the anchored
+// session with the anchored parameters: the socket, private paths, endpoints,
+// UIDs and profiles its job probe denied are exactly the approved ones.
+func checkCarrySitting(c Challenge, a ActivationAnchor) error {
+	if !c.Carry {
+		return errors.New("qualify carry needs a carry sitting (begin --carry)")
+	}
+	if c.Previous == "" || c.Previous != a.Session {
+		return errors.New("carry sitting is not chained to the anchored session")
+	}
+	if !sameParameters(anchorParameters(c), a.Parameters) {
+		return errors.New("challenge parameters differ from the anchored approval")
+	}
+	return nil
+}
+
+// checkCarryToolEvidence requires the carry sitting's tool evidence to be run
+// by the carried binary with the approved session's tool identities.
+func checkCarryToolEvidence(c Challenge, carried, approved ToolEvidence, binary string) error {
+	if len(binary) != 64 || carried.ExecutableSHA256 != binary {
+		return errors.New("carry tool evidence was not run by the carried binary")
+	}
+	return checkCarryToolIdentity(c, carried, approved)
+}
+
+// commitAnchor is the anchor compare-and-swap, run under the global anchor
+// lock: the anchor must still be the bytes every carry check was made
+// against, else nothing is written. prepare preserves the commit's evidence
+// before write replaces the anchor.
+func commitAnchor(expected, next []byte, read func() ([]byte, error), prepare func() error, write func([]byte) error) error {
+	current, err := read()
+	if err != nil {
+		return err
+	}
+	if len(expected) == 0 || digest(current) != digest(expected) {
+		return errors.New("activation anchor changed during the carry commit")
+	}
+	if err = prepare(); err != nil {
+		return err
+	}
+	return write(next)
+}
+
 // carriedAnchor is a with only the bin/macserve binding rebound and one carry
 // appended. It must still be a valid anchor (cap, chain, no replay).
 func carriedAnchor(a ActivationAnchor, record AnchorCarry) (ActivationAnchor, error) {
@@ -365,6 +408,11 @@ func Carry(ctx context.Context, dir, proofPath string) error {
 		return err
 	}
 	defer unlock()
+	unlockAnchor, err := anchorLock()
+	if err != nil {
+		return fmt.Errorf("activation anchor busy: %w", err)
+	}
+	defer unlockAnchor()
 	c, raw, err := loadChallenge(dir)
 	if err != nil {
 		return err
@@ -394,11 +442,8 @@ func Carry(ctx context.Context, dir, proofPath string) error {
 	if err = carryAllowed(a, now); err != nil {
 		return err
 	}
-	if c.Previous != a.Session {
-		return errors.New("carry sitting is not chained to the anchored session")
-	}
-	if !sameParameters(anchorParameters(c), a.Parameters) {
-		return errors.New("challenge parameters differ from the anchored approval")
+	if err = checkCarrySitting(c, a); err != nil {
+		return err
 	}
 	approved, approvedCandidate, err := loadApprovedChallenge(a.Session)
 	if err != nil {
@@ -431,14 +476,11 @@ func Carry(ctx context.Context, dir, proofPath string) error {
 		if err = decode(tb, &carried); err != nil {
 			return err
 		}
-		if carried.ExecutableSHA256 != binary {
-			return errors.New("carry tool evidence was not run by the carried binary")
-		}
 		prior, err := approvedToolEvidence(a.Session, approvedCandidate)
 		if err != nil {
 			return err
 		}
-		if err = checkCarryToolIdentity(c, carried, prior); err != nil {
+		if err = checkCarryToolEvidence(c, carried, prior, binary); err != nil {
 			return err
 		}
 	}
@@ -468,20 +510,16 @@ func Carry(ctx context.Context, dir, proofPath string) error {
 	if err = fresh(c, time.Now().UTC()); err != nil {
 		return err
 	}
-	// One commit per sitting: the proof and the intended anchor are preserved
-	// before the anchor changes, and a second attempt cannot create them.
-	if err = saveNew(filepath.Join(dir, carryProofFile), proofRaw, 0600); err != nil {
-		return fmt.Errorf("carry already attempted for this sitting: %w", err)
-	}
-	if err = saveNew(filepath.Join(dir, carryIntentFile), nextRaw, 0600); err != nil {
-		return err
-	}
-	// Compare and swap: the anchor must still be the one every check above
-	// was made against.
-	if current, err := protectedRead(anchorPath); err != nil || digest(current) != digest(anchorRaw) {
-		return errors.Join(err, errors.New("activation anchor changed during the carry commit"))
-	}
-	if err = replace(anchorPath, nextRaw); err != nil {
+	err = commitAnchor(anchorRaw, nextRaw, func() ([]byte, error) { return protectedRead(anchorPath) }, func() error {
+		// One commit per sitting: the proof and the intended anchor are
+		// preserved before the anchor changes, and a second attempt cannot
+		// create them.
+		if err := saveNew(filepath.Join(dir, carryProofFile), proofRaw, 0600); err != nil {
+			return fmt.Errorf("carry already attempted for this sitting: %w", err)
+		}
+		return saveNew(filepath.Join(dir, carryIntentFile), nextRaw, 0600)
+	}, func(b []byte) error { return replace(anchorPath, b) })
+	if err != nil {
 		return err
 	}
 	if err = ActivationCheck(ctx); err != nil {

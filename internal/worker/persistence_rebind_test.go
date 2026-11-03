@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func storedAttestation(t *testing.T, options Options) []byte {
@@ -173,5 +174,42 @@ func TestRebindBuildScanMismatchRevokes(t *testing.T) {
 	status, err := PersistenceAttestationStatus(options)
 	if err != nil || status.Valid || !status.NeedsReview || status.Reason != "mismatch" {
 		t.Fatalf("mismatched rebind not revoked: %+v %v", status, err)
+	}
+}
+
+// The rebind's own validity guard, independent of the scan's earlier refusal
+// of durably revoked records.
+func TestBuildOnlyRebindRequiresValidUnrevokedRecord(t *testing.T) {
+	live := persistenceAttestationBinding{Version: 1, Build: "new", ManifestSHA256: "m", Boot: "b", JobUID: 1, JobGID: 1, OwnerUID: 2, ControllerUID: 3, HelperPath: "/h"}
+	valid := persistenceAttestation{PersistenceAttestationMetadata: PersistenceAttestationMetadata{Valid: true, LastVerified: time.Now()}, Binding: live}
+	valid.Binding.Build = "old"
+	if err := buildOnlyRebind(valid, true, live, true); err != nil {
+		t.Fatalf("valid build-only record refused: %v", err)
+	}
+	for name, mutate := range map[string]func(*persistenceAttestation){
+		"invalid":      func(r *persistenceAttestation) { r.Valid = false },
+		"needs review": func(r *persistenceAttestation) { r.NeedsReview = true },
+		"revoked":      func(r *persistenceAttestation) { r.RevokedAt = time.Now() },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := valid
+			mutate(&r)
+			for _, manifestKnown := range []bool{false, true} {
+				if err := buildOnlyRebind(r, true, live, manifestKnown); !errors.Is(err, errPersistenceRebindRefused) {
+					t.Fatalf("%s record rebound (manifest known %t): %v", name, manifestKnown, err)
+				}
+			}
+		})
+	}
+	if err := buildOnlyRebind(valid, false, live, true); !errors.Is(err, errPersistenceRebindRefused) {
+		t.Fatalf("absent record rebound: %v", err)
+	}
+	other := live
+	other.ManifestSHA256 = "other"
+	if err := buildOnlyRebind(valid, true, other, false); err != nil {
+		t.Fatalf("manifest compared before it was read: %v", err)
+	}
+	if err := buildOnlyRebind(valid, true, other, true); !errors.Is(err, errPersistenceRebindRefused) {
+		t.Fatalf("manifest difference rebound: %v", err)
 	}
 }
