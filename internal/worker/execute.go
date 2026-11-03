@@ -406,6 +406,48 @@ func (x *execution) capture(ctx context.Context, executable string, args ...stri
 	return output.Bytes(), errors.Join(err, output.err)
 }
 
+// observationProbe runs one fixed observation command as the job, bounded by
+// timeout, with its output also streamed to the job log. Contamination,
+// unconfirmed process cleanup and cancellation of the job itself are
+// returned as err and fail the job; any other failure is returned as failure
+// text, for the observation to record.
+func (x *execution) observationProbe(ctx context.Context, timeout time.Duration, executable string, args ...string) (output []byte, failure string, err error) {
+	probe, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	buffer := &boundedBuffer{max: evidence.MaxTestsBytes}
+	result, err := x.invoke(probe, x.command(executable, args), io.MultiWriter(buffer, x.stdout), x.stderr)
+	err = errors.Join(err, buffer.err)
+	if err != nil && (!result.CleanupOK || errors.Is(err, ErrContamination) || errors.Is(err, ErrRecovery) || ctx.Err() != nil) {
+		return nil, "", err
+	}
+	if err != nil {
+		failure = err.Error()
+	}
+	return buffer.Bytes(), failure, nil
+}
+
+// observe records the toolchain observation (job_observation.go, class C).
+// The observation code gets only the profile's toolchain pins and the job
+// command seams, and returns values; only this method writes them into the
+// result, including what was observed before a failure.
+func (x *execution) observe(ctx context.Context) error {
+	pins := toolchainPins{Xcode: x.job.Profile.Xcode}
+	if simulator := x.job.Profile.Simulator; simulator != nil {
+		pins.Simulator, pins.SimulatorRuntime = true, simulator.Runtime
+	}
+	observed, err := observeToolchain(ctx, pins, x.observationProbe, x.capture)
+	o := &x.result.Observation
+	o.MetalToolchain = observed.MetalToolchain
+	o.Xcode = observed.Xcode
+	o.SDKVersion = observed.SDKVersion
+	o.SDKBuild = observed.SDKBuild
+	o.SwiftVersion = observed.SwiftVersion
+	o.OSVersion = observed.OSVersion
+	o.OSBuild = observed.OSBuild
+	o.Architecture = observed.Architecture
+	return err
+}
+
 func (x *execution) recipe(ctx context.Context, recipe model.Command) error {
 	replacement := strings.NewReplacer("${CHECKOUT}", filepath.Join(x.workspace, "checkout"), "${WORKSPACE}", x.workspace, "${DERIVED_DATA}", filepath.Join(x.workspace, "derived-data"), "${RESULT_BUNDLE}", filepath.Join(x.workspace, "results.xcresult"), "${SIMULATOR_ID}", x.manifest.DeviceUDID, "${JOB_ID}", x.job.ID, "${DEVELOPER_DIR}", x.job.Profile.DeveloperDir)
 	args := make([]string, len(recipe.Args))

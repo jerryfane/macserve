@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "classes": {
+    "B": [
+      ".gitattributes",
+      ".github/**",
+      ".gitignore",
+      "BOUNDARY.json",
+      "PUBLIC-SOURCE-ALLOWLIST.txt",
+      "PUBLIC-SOURCE-MANIFEST.json",
+      "assets/**",
+      "checks/**",
+      "cmd/macserve/**",
+      "go.mod",
+      "go.sum",
+      "internal/api/**",
+      "internal/controller/**",
+      "internal/deploy/**",
+      "internal/evidence/**",
+      "internal/githubapi/**",
+      "internal/githubpull/**",
+      "internal/hostguard/**",
+      "internal/launchctlprint/**",
+      "internal/maintenance/**",
+      "internal/model/**",
+      "internal/peercred/**",
+      "internal/pfctl/**",
+      "internal/profiles/**",
+      "internal/protocol/**",
+      "internal/qualification/**",
+      "internal/receipt/**",
+      "internal/source/**",
+      "internal/store/**",
+      "internal/waiter/**",
+      "internal/worker/**",
+      "internal/workerclient/**"
+    ],
+    "G": [],
+    "C": [
+      "internal/evidence/junit.go",
+      "internal/evidence/types.go",
+      "internal/worker/job_observation.go",
+      "internal/worker/report_types.go"
+    ],
+    "T": [
+      "LICENSE",
+      "PUBLIC-PLAN.md",
+      "PUBLIC-PR.md",
+      "README.md",
+      "docs/**",
+      "fixes-*.md",
+      "internal/evidence/junit_test.go",
+      "internal/evidence/junit_*_test.go",
+      "internal/evidence/types_test.go",
+      "internal/evidence/types_*_test.go",
+      "internal/worker/job_observation_test.go",
+      "internal/worker/job_observation_*_test.go",
+      "internal/worker/report_types_test.go",
+      "internal/worker/report_types_*_test.go"
+    ]
+  },
+  "seams": {
+    "internal/evidence": [
+      "finiteDuration"
+    ],
+    "internal/worker": [
+      "clip"
+    ]
+  },
+  "g_calls": {}
+}
