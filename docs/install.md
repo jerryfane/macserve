@@ -25,7 +25,19 @@ gh release download "$RELEASE_TAG" --repo jerryfane/macserve \
 cat SHA256SUMS
 ```
 
-The tag workflow builds Darwin arm64 with CGO disabled and `-trimpath`, then publishes `macserve-darwin-arm64` and `SHA256SUMS` using only `GITHUB_TOKEN`. Review the tag/source/publisher and expected binary digest. A checksum downloaded beside a binary detects corruption, not an independently compromised release. Set `EXPECTED_SHA256` to the reviewed 64-character lowercase digest; do not substitute an unreviewed local hash.
+The tag workflow builds Darwin arm64 with `checks/release-build.sh` (CGO disabled, `-trimpath`, `-buildvcs=true`, Go exactly as pinned in `go.mod`), rebuilds the tag on a second runner (macOS, different checkout path) and publishes only if both binaries are byte-identical. It then records a GitHub build provenance attestation for `macserve-darwin-arm64` and publishes it with `SHA256SUMS` using only `GITHUB_TOKEN`. Review the tag/source/publisher and expected binary digest. A checksum downloaded beside a binary detects corruption, not an independently compromised release. Set `EXPECTED_SHA256` to the reviewed 64-character lowercase digest; do not substitute an unreviewed local hash.
+
+For releases that contain `checks/release-build.sh`, you can check the digest independently of the release workflow. Rebuild from a separate clean clone of the tag (the tag must be present: Go stamps the module version from it, and any untracked file marks the build modified) with the Go version pinned in `go.mod`, then confirm the attestation names this repository's release workflow at that tag:
+
+```sh
+git clone --depth 1 --branch "$RELEASE_TAG" https://github.com/jerryfane/macserve.git macserve-rebuild
+macserve-rebuild/checks/release-build.sh "$PWD/macserve-rebuild-out"   # prints the sha256
+gh attestation verify macserve-deploy-kit/macserve-darwin-arm64 --repo jerryfane/macserve \
+  --signer-workflow jerryfane/macserve/.github/workflows/release.yml \
+  --source-ref "refs/tags/$RELEASE_TAG" --deny-self-hosted-runners
+```
+
+The rebuilt sha256 must equal `EXPECTED_SHA256` and the downloaded binary's digest.
 
 Create and review `deploy.env`. **Every value below is illustrative**, not a claim that an identity, address, port, Xcode or repository ID is suitable or available. Include current non-link-local host aliases in `HOST_ADDRESSES`, choose the protected ports to include in informational reachability reports, and pin real repository IDs out of band:
 
