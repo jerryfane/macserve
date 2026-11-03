@@ -40,7 +40,7 @@ have=$(go env GOVERSION)
 [[ $have == "$want" ]] || die "go.mod pins $want but the local toolchain is $have"
 
 rm -f "$bin"
-nice -n 10 go build -p 2 -buildvcs=true -o "$bin" ./cmd/macserve
+nice -n 10 go build -p 2 -trimpath -buildvcs=true -o "$bin" ./cmd/macserve
 
 # The binary must carry the stamps an off-host rebuild relies on. Go finds
 # the repository only through a .git directory, so a git worktree or an
@@ -51,7 +51,7 @@ has vcs=git || die "binary has no git stamps; build from a git clone, not a work
 revision=$(git rev-parse HEAD)
 has "vcs.revision=$revision" || die "binary is not stamped with HEAD $revision"
 has vcs.modified=false || die "checkout has modified or untracked files"
-for setting in CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 GOARM64=v8.0; do
+for setting in -trimpath=true CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 GOARM64=v8.0; do
 	has "$setting" || die "binary lacks build setting $setting"
 done
 grep -E $'^\t(mod|build\tvcs)' <<<"$info" >&2
