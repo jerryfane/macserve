@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"maps"
 	"os"
 	"os/signal"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -151,6 +153,55 @@ func runWorkerReset(args []string, stdout, stderr io.Writer) int {
 	}
 	for _, p := range result.Adopted {
 		fmt.Fprintf(stdout, "adopted pid=%d start=%q service=%s/%s executable=%q: unselected system LaunchAgent started by launchd during reset\n", p.PID, p.Start, p.Service.Domain, p.Service.Label, p.Service.Executable)
+	}
+	return 0
+}
+
+// runWorkerQuiescent is the read-only residual census for a release carry:
+// it prints a JSON report and fails on any job-UID process outside the audited
+// GUI baseline. It never signals, adopts, quarantines or writes state.
+func runWorkerQuiescent(args []string, stdout, stderr io.Writer) int {
+	const name = "worker-quiescent"
+	const usage = "Usage: macserve worker-quiescent --config /absolute/worker.json\n"
+	flags := flag.NewFlagSet(name, flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	configPath := flags.String("config", "", "root-owned broker configuration")
+	flags.Usage = func() { fmt.Fprint(stderr, usage) }
+	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
+		fmt.Fprint(stdout, usage)
+		return 0
+	}
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if *configPath == "" || flags.NArg() != 0 {
+		flags.Usage()
+		return 2
+	}
+	if runtime.GOOS != "darwin" || os.Getuid() != 0 || os.Geteuid() != 0 {
+		fmt.Fprintln(stderr, "macserve worker-quiescent: requires actual macOS root")
+		return 1
+	}
+	if err := hostguard.Worker(*configPath); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	config, err := workerclient.LoadConfig(*configPath)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	report, err := worker.WorkerQuiescent(ctx, config.EngineOptions())
+	enc := json.NewEncoder(stdout)
+	enc.SetIndent("", "  ")
+	if encErr := enc.Encode(report); encErr != nil && err == nil {
+		err = encErr
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "macserve worker-quiescent: %v\n", err)
+		return 1
 	}
 	return 0
 }

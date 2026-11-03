@@ -133,7 +133,7 @@ func approve(ctx context.Context, dir string, requalify bool) error {
 		return e
 	}
 	defer unlock()
-	c, raw, e := loadChallenge(dir)
+	c, raw, e := loadApprovableChallenge(dir)
 	if e != nil {
 		return e
 	}
@@ -162,7 +162,7 @@ func approve(ctx context.Context, dir string, requalify bool) error {
 			return e
 		}
 	}
-	current, e := snapshot(ctx)
+	current, e := snapshot(ctx, false)
 	if e != nil {
 		return e
 	}

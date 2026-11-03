@@ -7,11 +7,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"strings"
 	"syscall"
 	"time"
 
@@ -31,6 +33,11 @@ const persistenceAttestationFile = "persistence-attestation.json"
 const persistenceAttestationLockTimeout = time.Second
 
 var errPersistenceAttestationRevoked = errors.New("persistence attestation unavailable or revoked; reviewed acceptance and reset required")
+
+// errPersistenceRebindRefused marks a stored attestation that a strict build
+// rebind does not accept. The refusal is decided before any collection and
+// leaves the stored record exactly as it was.
+var errPersistenceRebindRefused = errors.New("persistence attestation build rebind refused")
 
 // Build identity is immutable process metadata, not a filesystem trust cache.
 var persistenceAttestationBuild = func() string {
@@ -378,6 +385,64 @@ func VerifyPersistenceAttestation(ctx context.Context, options Options) error {
 }
 
 func verifyPersistenceAttestation(ctx context.Context, options Options, reset bool, collect func(context.Context, Options) (PersistenceManifest, error)) error {
+	return scanAndPublish(ctx, options, reset, collect, nil)
+}
+
+// RebindPersistenceBuild is VerifyPersistenceAttestation for a release that
+// replaced only the macserve binary. The durable record must be a valid,
+// unrevoked attestation whose binding equals the live binding in every field
+// except Build; then the same full scan runs and, on success, publishes the
+// live binding with the new Build. Any other difference (version, manifest,
+// boot, UIDs, helper path) refuses without scanning and leaves the record
+// untouched. Unlike the explicit full scan, it never rebinds a boot or
+// identity change, and it never clears a revocation.
+func RebindPersistenceBuild(ctx context.Context, options Options) error {
+	return rebindPersistenceBuild(ctx, options, collectPersistence)
+}
+
+func rebindPersistenceBuild(ctx context.Context, options Options, collect func(context.Context, Options) (PersistenceManifest, error)) error {
+	return scanAndPublish(ctx, options, false, collect, buildOnlyRebind)
+}
+
+// buildOnlyRebind accepts a present, valid, unrevoked stored attestation that
+// differs from the live binding at most in Build.
+func buildOnlyRebind(stored persistenceAttestation, present bool, live persistenceAttestationBinding) error {
+	if !present || !stored.Valid || stored.NeedsReview || !stored.RevokedAt.IsZero() {
+		return fmt.Errorf("%w: no valid unrevoked attestation to rebind", errPersistenceRebindRefused)
+	}
+	if changed := bindingDifferences(stored.Binding, live); len(changed) != 0 {
+		return fmt.Errorf("%w: binding differs beyond build: %s", errPersistenceRebindRefused, strings.Join(changed, ", "))
+	}
+	return nil
+}
+
+// bindingDifferences names every binding field other than Build that differs.
+func bindingDifferences(stored, live persistenceAttestationBinding) []string {
+	var changed []string
+	for _, f := range []struct {
+		name string
+		same bool
+	}{
+		{"version", stored.Version == live.Version},
+		{"manifest_sha256", stored.ManifestSHA256 == live.ManifestSHA256},
+		{"boot", stored.Boot == live.Boot},
+		{"job_uid", stored.JobUID == live.JobUID},
+		{"job_gid", stored.JobGID == live.JobGID},
+		{"owner_uid", stored.OwnerUID == live.OwnerUID},
+		{"controller_uid", stored.ControllerUID == live.ControllerUID},
+		{"helper_path", stored.HelperPath == live.HelperPath},
+	} {
+		if !f.same {
+			changed = append(changed, f.name)
+		}
+	}
+	return changed
+}
+
+// scanAndPublish is the full scan shared by verification and the strict build
+// rebind. accept, when set, decides on the stored record and the live binding
+// before collection; its refusal never revokes.
+func scanAndPublish(ctx context.Context, options Options, reset bool, collect func(context.Context, Options) (PersistenceManifest, error), accept func(persistenceAttestation, bool, persistenceAttestationBinding) error) error {
 	ctx, cancel := context.WithTimeout(ctx, PersistenceOperationTimeout)
 	defer cancel()
 	// A contending invocation does not inspect or revoke anything. Its bounded
@@ -389,7 +454,7 @@ func verifyPersistenceAttestation(ctx context.Context, options Options, reset bo
 		var revision string
 		var checked bool
 		defer func() {
-			if result != nil && checked && !errors.Is(result, errPersistenceAttestationRevoked) {
+			if result != nil && checked && !errors.Is(result, errPersistenceAttestationRevoked) && !errors.Is(result, errPersistenceRebindRefused) {
 				// Preserve full-scan failure evidence even after its deadline,
 				// without allowing cleanup to block behind a stuck publisher.
 				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(scanCtx), persistenceAttestationLockTimeout)
@@ -401,7 +466,7 @@ func verifyPersistenceAttestation(ctx context.Context, options Options, reset bo
 		var expected PersistenceManifest
 		var binding persistenceAttestationBinding
 		err := withAttestationLockContext(scanCtx, options, func(_ *os.Root) error {
-			record, _, err := readAttestationContext(scanCtx, options)
+			record, data, err := readAttestationContext(scanCtx, options)
 			if err != nil {
 				return err
 			}
@@ -414,6 +479,9 @@ func verifyPersistenceAttestation(ctx context.Context, options Options, reset bo
 				return err
 			}
 			binding, err = attestationBinding(options, accepted)
+			if err == nil && accept != nil {
+				err = accept(record, len(data) != 0, binding)
+			}
 			return err
 		})
 		if err != nil {

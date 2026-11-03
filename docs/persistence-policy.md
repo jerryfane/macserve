@@ -77,7 +77,14 @@ review and accept the current registrations, reset the GUI baseline, then requal
 `reset_required`; only a successful explicit reset completes that recovery. Reset does not implicitly erase
 an unrelated admission quarantine. Explicit inspection, acceptance, reset, and qualification retain
 full verification; qualification `begin`, `collect`, `approve` and `reapprove` run it before the cheap
-observation, under a 540-second outer command deadline. Maintenance launchd shutdown allows 600 seconds
+observation, under a 540-second outer command deadline.
+
+The explicit full scan publishes the live binding whenever the stored record is not durably revoked: it
+also rebinds a changed boot, UID or helper path. A release-carry sitting (`qualify begin --carry`) runs the
+strict build rebind instead: the stored record must be valid and unrevoked and equal the live binding in
+every field except the macserve `build`; only then does the same full scan run and publish the new build.
+A version, manifest, boot, UID, GID or helper-path difference, or a missing or revoked record, refuses
+before collection and leaves the record unchanged; a scan failure after acceptance revokes as usual. Maintenance launchd shutdown allows 600 seconds
 for cancellation and protected revocation publication.
 The periodic operation also has a 540-second outer deadline, leaving publication/revocation headroom
 outside the worker's 480-second collector deadline.

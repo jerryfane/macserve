@@ -27,6 +27,17 @@ func persistenceOptions(c Config) (worker.Options, error) {
 // VerifyPersistence performs the explicit full qualification scan, separately
 // from Inspect's eight-second live observation. It never clears a revocation.
 func VerifyPersistence(ctx context.Context, c Config) error {
+	return scanPersistence(ctx, c, worker.VerifyPersistenceAttestation)
+}
+
+// RebindPersistenceBuild is VerifyPersistence for a carried release: it
+// refuses unless the stored attestation differs from the live binding only in
+// the macserve build (see worker.RebindPersistenceBuild).
+func RebindPersistenceBuild(ctx context.Context, c Config) error {
+	return scanPersistence(ctx, c, worker.RebindPersistenceBuild)
+}
+
+func scanPersistence(ctx context.Context, c Config, scan func(context.Context, worker.Options) error) error {
 	current, err := LoadConfig(c.path)
 	if err != nil {
 		return err
@@ -35,7 +46,7 @@ func VerifyPersistence(ctx context.Context, c Config) error {
 	if err != nil {
 		return err
 	}
-	return worker.VerifyPersistenceAttestation(ctx, opts)
+	return scan(ctx, opts)
 }
 
 // A monitor owns at most one scan. No worker lock is held: the worker publishes
