@@ -203,10 +203,12 @@ func List(root string, patterns ...string) (*Build, error) {
 }
 
 type source struct {
-	pkg   *types.Package
-	info  *types.Info
-	files []*ast.File
-	decls map[string]*ast.FuncDecl
+	// problems found while loading; repeated on every cache hit.
+	problems []string
+	pkg      *types.Package
+	info     *types.Info
+	files    []*ast.File
+	decls    map[string]*ast.FuncDecl
 }
 
 type checker struct {
@@ -377,10 +379,12 @@ func (c *checker) load(path string) (*source, error) {
 	}
 	if s, ok := c.b.cache[path]; ok && !overlaid {
 		c.sources[path] = s
+		c.problems = append(c.problems, s.problems...)
 		return s, nil
 	}
+	var problems []string
 	if len(p.CgoFiles) > 0 {
-		c.problem("%s: cgo files", path)
+		problems = append(problems, path+": cgo files")
 	}
 	// Candidates: the listed files, the files the build ignores and new
 	// overlay files; the darwin/arm64 build context decides.
@@ -417,7 +421,7 @@ func (c *checker) load(path string) (*source, error) {
 		}
 		if !match {
 			if path == c.policy.Package {
-				c.problem("%s: file excluded from the darwin/arm64 release build; the read-only package must not have build-constrained files", name)
+				problems = append(problems, name+": file excluded from the darwin/arm64 release build; the read-only package must not have build-constrained files")
 			}
 			continue
 		}
@@ -437,7 +441,8 @@ func (c *checker) load(path string) (*source, error) {
 	if err != nil {
 		return nil, fmt.Errorf("type-check %s: %w", path, err)
 	}
-	s := &source{pkg: pkg, info: info, files: files, decls: map[string]*ast.FuncDecl{}}
+	c.problems = append(c.problems, problems...)
+	s := &source{problems: problems, pkg: pkg, info: info, files: files, decls: map[string]*ast.FuncDecl{}}
 	for _, f := range files {
 		for _, decl := range f.Decls {
 			if d, ok := decl.(*ast.FuncDecl); ok {
