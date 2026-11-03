@@ -31,7 +31,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y shellcheck
-          shellcheck --shell=bash assets/*.sh
+          shellcheck --shell=bash assets/*.sh checks/release-build.sh
       - name: Public CI failure redaction tests
         run: python3 -m unittest discover -s checks/native-history-fixture -p 'test_ci.py' -v
       - name: Vet
@@ -49,3 +49,52 @@ jobs:
           nice -n 10 "${{ runner.temp }}/macserve" maintenance --help
           nice -n 10 "${{ runner.temp }}/macserve" deploy-install --help
           nice -n 10 "${{ runner.temp }}/macserve" qualify --help
+
+  # The release build must not depend on the host, OS or checkout path. These
+  # two jobs mirror release.yml: a macOS rebuild in a nested path and a Linux
+  # build in the default workspace, both through checks/release-build.sh, must
+  # produce the same bytes.
+  reproducible-rebuild:
+    name: Reproducible release build (macOS rebuild)
+    runs-on: macos-latest
+    env:
+      GOMAXPROCS: "2"
+    outputs:
+      sha256: ${{ steps.build.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          path: rebuild/macserve
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: rebuild/macserve/go.mod
+          cache: false
+      - name: Rebuild Darwin arm64 release
+        id: build
+        run: |
+          line=$(rebuild/macserve/checks/release-build.sh "$RUNNER_TEMP/rebuild")
+          echo "$line"
+          echo "sha256=${line%% *}" >> "$GITHUB_OUTPUT"
+
+  reproducible:
+    name: Reproducible release build (Linux build matches macOS rebuild)
+    needs: reproducible-rebuild
+    runs-on: ubuntu-latest
+    env:
+      GOMAXPROCS: "2"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build Darwin arm64 release
+        run: checks/release-build.sh "$RUNNER_TEMP/dist"
+      - name: Require a byte-identical rebuild
+        working-directory: ${{ runner.temp }}/dist
+        env:
+          REBUILT_SHA256: ${{ needs.reproducible-rebuild.outputs.sha256 }}
+        run: echo "$REBUILT_SHA256  macserve-darwin-arm64" | sha256sum --check --strict
