@@ -107,6 +107,9 @@ var SetupPlan = Policy{
 		"internal/worker/login_darwin.go",
 		"internal/worker/respawn_darwin.go",
 	},
+	// The deploy assets setup stages for deploy-install; internal/setup
+	// (apply only) reads them.
+	EmbedFiles: []string{"assets/embed.go"},
 	Refs: map[string][]string{
 		planFunc + "readOnlyCommands": {planFunc + "AllowedCommand"},
 		planFunc + "commandEnv":       {planFunc + "command"},

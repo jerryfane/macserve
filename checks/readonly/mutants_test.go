@@ -27,6 +27,8 @@ const (
 	runCall    = "	if err := cmd.Run(); err != nil {"
 	cmdDir     = "	cmd.Dir = \"/\""
 	parse      = "	parsed, err := deploy.ParseEnvironment(data)"
+	embedGo    = "assets/embed.go"
+	embedLine  = "//go:embed create-users.sh"
 	planCall   = "	result := plan.Preflight(context.Background(), probe, choices)"
 	writeOut   = "	_, err := w.Write(b.Bytes())"
 	osImport   = "\t\"os\"\n"
@@ -210,6 +212,12 @@ var mutants = []mutant{
 	{"block /*line*/ directive", []edit{{command, setupFn, "/*line onboarding.go:1*/\n" + setupFn}}},
 	{"argv clone removed", []edit{{runner, "\targv = slices.Clone(argv)\n", ""}}},
 	{"goroutine in walked code", []edit{{command, elevated, "\tgo func() {}()\n" + elevated}}},
+
+	{"E01 go:embed outside the listed files", []edit{{"assets/zz_embed.go", "", "package assets\n\nimport _ \"embed\"\n\n//go:embed qualify.sh\nvar extra []byte\n"}}},
+	{"E02 listed embed file also linknames", []edit{{embedGo, embedLine, "//go:linkname extra runtime.x\n" + embedLine}}},
+	{"E03 embed pattern leaves the package", []edit{{embedGo, embedLine, "//go:embed ../go.mod\n" + embedLine}}},
+	{"E04 embed glob", []edit{{embedGo, embedLine, "//go:embed launchd/*\n" + embedLine}}},
+	{"E05 listed embed file's package imports plan", []edit{{embedGo, "import \"embed\"\n", "import (\n\t\"embed\"\n\n\t_ \"github.com/jerryfane/macserve/internal/setup/plan\"\n)\n"}}},
 }
 
 // pinOnly are mutants of pinned code that only the pins catch: the
