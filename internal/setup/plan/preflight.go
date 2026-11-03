@@ -64,7 +64,9 @@ type Probe struct {
 // environment. Setup refuses all of them: the owner probe refuses
 // evidence gathered under sudo.
 func (p Probe) Elevated() bool {
-	if p.UID == 0 || p.EUID == 0 || p.GID == 0 || p.EGID == 0 || p.UID != p.EUID || p.GID != p.EGID {
+	// Real IDs equal effective ones, so checking the effective IDs for 0
+	// covers the real ones.
+	if p.UID != p.EUID || p.GID != p.EGID || p.EUID == 0 || p.EGID == 0 {
 		return true
 	}
 	return slices.ContainsFunc(p.Environ, func(kv string) bool { return strings.HasPrefix(kv, "SUDO_") })

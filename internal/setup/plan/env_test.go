@@ -181,6 +181,10 @@ func TestPicksFreeIDsAndRefusesDirectoryConflicts(t *testing.T) {
 	if _, err := PickIDs(base, c, testOwner); err == nil {
 		t.Error("job account named like the owner accepted")
 	}
+	// Also when the directory listing does not show the owner.
+	if _, err := PickIDs(Directory{}, c, testOwner); err == nil {
+		t.Error("job account named like the owner accepted with an empty directory")
+	}
 
 	full := base
 	for id := int64(firstID); id < lastID; id++ {
@@ -200,7 +204,7 @@ func TestParseDirectoryListFailsClosed(t *testing.T) {
 	if err != nil || len(records) != 3 || records[1] != (DirectoryRecord{"jdoe", 501}) || records[2].ID != -2 {
 		t.Fatalf("%+v %v", records, err)
 	}
-	for _, bad := range []string{"two words 5\n", "name\n", "name x\n", "name 1.5\n"} {
+	for _, bad := range []string{"two words 5\n", "name 5 6\n", "name\n", "name x\n", "name 1.5\n"} {
 		if _, err := ParseDirectoryList(bad); err == nil {
 			t.Errorf("%q accepted", bad)
 		}
@@ -216,10 +220,12 @@ func TestRefusesNonTailnetAddress(t *testing.T) {
 		return out
 	}
 	for name, list := range map[string][]netip.Addr{
-		"no tailnet":       addrs("127.0.0.1", "192.168.1.20", "fe80::1%en0", "10.0.0.2"),
-		"two IPv4 tailnet": addrs("100.64.0.1", "100.101.102.103"),
-		"two IPv6 tailnet": addrs("fd7a:115c:a1e0::1", "fd7a:115c:a1e0::2"),
-		"outside range":    addrs("100.128.0.1", "fd7a:115c:a1e1::1"),
+		"no tailnet":             addrs("127.0.0.1", "192.168.1.20", "fe80::1%en0", "10.0.0.2"),
+		"two IPv4 tailnet":       addrs("100.64.0.1", "100.101.102.103"),
+		"two IPv4 with one IPv6": addrs("100.64.0.1", "100.101.102.103", "fd7a:115c:a1e0::1"),
+		"empty":                  nil,
+		"two IPv6 tailnet":       addrs("fd7a:115c:a1e0::1", "fd7a:115c:a1e0::2"),
+		"outside range":          addrs("100.128.0.1", "fd7a:115c:a1e1::1"),
 	} {
 		if _, _, err := SelectAddresses(list); err == nil {
 			t.Errorf("%s: accepted", name)

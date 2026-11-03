@@ -165,16 +165,23 @@ func TestRound2RequiresDifferentBoot(t *testing.T) {
 	}
 }
 
-// forged builds a ledger through every step with all boots set to boot,
-// bypassing Begin/Complete, and encodes it without validation.
-func forged(t *testing.T, boot Boot, edit func(*Ledger)) []byte {
+// forged builds a completed, consistent ledger without Begin/Complete
+// (steps 1-6 in boot1, the reboot from boot1 to boot2, the rest in boot2),
+// applies edit and encodes it without validation.
+func forged(t *testing.T, edit func(*Ledger)) []byte {
 	t.Helper()
 	l := NewLedger("jdoe", 501, t0)
 	for i := range l.Records {
-		b, f, at := boot, boot, t0
+		b, f, at := boot2, boot2, t0
+		if i <= 6 {
+			b = boot1
+		}
+		if i < 6 {
+			f = boot1
+		}
 		l.Records[i] = Record{Step: Steps[i], Status: StatusDone, Started: &at, Finished: &at, Boot: &b, FinishBoot: &f}
 	}
-	l.Approval = &Approval{At: t0, SummarySHA256: digest, Boot: boot}
+	l.Approval = &Approval{At: t0, SummarySHA256: digest, Boot: boot2}
 	edit(l)
 	data, err := l.encode()
 	if err != nil {
@@ -184,47 +191,31 @@ func forged(t *testing.T, boot Boot, edit func(*Ledger)) []byte {
 }
 
 func TestDecodeLedgerRechecksBootRules(t *testing.T) {
-	valid := forged(t, boot2, func(l *Ledger) {
-		for i := range 6 {
-			l.Records[i].Boot, l.Records[i].FinishBoot = &boot1, &boot1
-		}
-		l.Records[6].Boot = &boot1
-	})
-	if _, err := DecodeLedger(valid); err != nil {
+	if _, err := DecodeLedger(forged(t, func(*Ledger) {})); err != nil {
 		t.Fatalf("consistent forged ledger refused: %v", err)
 	}
 	for name, data := range map[string][]byte{
-		"same boot throughout": forged(t, boot1, func(*Ledger) {}),
-		"round 2 in round 1 boot": forged(t, boot2, func(l *Ledger) {
-			l.Records[5].Boot, l.Records[5].FinishBoot = &boot2, &boot2
-			l.Records[6].Boot = &boot1
-		}),
-		"step finished in another boot": forged(t, boot2, func(l *Ledger) {
-			l.Records[6].Boot = &boot1
-			for i := range 6 {
+		"same boot throughout": forged(t, func(l *Ledger) {
+			for i := range l.Records {
 				l.Records[i].Boot, l.Records[i].FinishBoot = &boot1, &boot1
 			}
-			l.Records[9].Boot = &boot1
-		}),
-		"approval from another boot": forged(t, boot2, func(l *Ledger) {
-			for i := range 6 {
-				l.Records[i].Boot, l.Records[i].FinishBoot = &boot1, &boot1
-			}
-			l.Records[6].Boot = &boot1
 			l.Approval.Boot = boot1
 		}),
-		"done without approval": forged(t, boot2, func(l *Ledger) {
-			for i := range 6 {
-				l.Records[i].Boot, l.Records[i].FinishBoot = &boot1, &boot1
-			}
-			l.Records[6].Boot = &boot1
-			l.Approval = nil
+		"round 2 in round 1 boot": forged(t, func(l *Ledger) {
+			l.Records[5].Boot, l.Records[5].FinishBoot = &boot2, &boot2
 		}),
-		"owner with control character": forged(t, boot2, func(l *Ledger) { l.Owner = "jdoe\n" }),
-		"system owner uid":             forged(t, boot2, func(l *Ledger) { l.OwnerUID = 0 }),
-		"boot with control character": forged(t, boot2, func(l *Ledger) {
+		"reboot without new boot": forged(t, func(l *Ledger) { l.Records[6].FinishBoot = &boot1 }),
+		"step finished in another boot": forged(t, func(l *Ledger) {
+			l.Records[9].Boot = &boot1
+		}),
+		"approval from another boot":   forged(t, func(l *Ledger) { l.Approval.Boot = boot1 }),
+		"done without approval":        forged(t, func(l *Ledger) { l.Approval = nil }),
+		"owner with control character": forged(t, func(l *Ledger) { l.Owner = "jdoe\n" }),
+		"system owner uid":             forged(t, func(l *Ledger) { l.OwnerUID = 0 }),
+		"low owner uid":                forged(t, func(l *Ledger) { l.OwnerUID = 500 }),
+		"boot with control character": forged(t, func(l *Ledger) {
 			bad := Boot{Time: "1\x1b[2J", SessionUUID: "x"}
-			l.Records[0].Boot = &bad
+			l.Records[0].Boot, l.Records[0].FinishBoot = &bad, &bad
 		}),
 	} {
 		if _, err := DecodeLedger(data); err == nil {
@@ -354,20 +345,12 @@ func TestMethodsRecheckInvariantsInMemory(t *testing.T) {
 }
 
 func TestDecodeLedgerRejectsForgedRecords(t *testing.T) {
-	consistent := func(l *Ledger) {
-		for i := range 6 {
-			l.Records[i].Boot, l.Records[i].FinishBoot = &boot1, &boot1
-		}
-		l.Records[6].Boot = &boot1
-	}
 	at := t0
 	for name, data := range map[string][]byte{
-		"done after running": forged(t, boot2, func(l *Ledger) {
-			consistent(l)
+		"done after running": forged(t, func(l *Ledger) {
 			l.Records[3].Status, l.Records[3].Finished, l.Records[3].FinishBoot = StatusRunning, nil, nil
 		}),
-		"two running": forged(t, boot2, func(l *Ledger) {
-			consistent(l)
+		"two running": forged(t, func(l *Ledger) {
 			for _, i := range []int{3, 4} {
 				l.Records[i].Status, l.Records[i].Finished, l.Records[i].FinishBoot = StatusRunning, nil, nil
 			}
@@ -376,20 +359,17 @@ func TestDecodeLedgerRejectsForgedRecords(t *testing.T) {
 			}
 			l.Approval = nil
 		}),
-		"pending with state": forged(t, boot2, func(l *Ledger) {
-			consistent(l)
+		"pending with state": forged(t, func(l *Ledger) {
 			for i := 3; i < 10; i++ {
 				l.Records[i] = Record{Step: Steps[i], Status: StatusPending}
 			}
 			l.Records[9].Started = &at
 			l.Approval = nil
 		}),
-		"bad input digest": forged(t, boot2, func(l *Ledger) {
-			consistent(l)
+		"bad input digest": forged(t, func(l *Ledger) {
 			l.Records[0].Inputs = map[string]string{"deploy.env": "abc"}
 		}),
-		"approval before approve-and-start": forged(t, boot2, func(l *Ledger) {
-			consistent(l)
+		"approval before approve-and-start": forged(t, func(l *Ledger) {
 			l.Records[8], l.Records[9] = Record{Step: Steps[8], Status: StatusPending}, Record{Step: Steps[9], Status: StatusPending}
 		}),
 	} {
