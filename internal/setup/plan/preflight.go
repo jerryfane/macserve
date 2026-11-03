@@ -1,31 +1,24 @@
-// Package setup implements the native first-time setup of macserve: the
-// read-only preflight and plan, generated configuration and the ordered
-// setup ledger.
+// Package plan is the read-only part of `macserve setup`: the preflight
+// checks of this Mac, the generated deploy.env and the printed plan.
 //
-// The preflight only reads. It runs a fixed list of read-only system
-// commands (see AllowedCommand), lists interface addresses, stats paths and
-// dials one local TCP port; it writes, creates and starts nothing.
-package setup
+// The package only reads. Through Probe it runs a fixed list of read-only
+// commands (runner.go), lists interface addresses, lstats paths, looks up
+// the invoking account and dials at most a few TCP ports on its own
+// Tailscale address to find a free API port. checks/readonly enforces this
+// over every file of the package and everything it calls.
+package plan
 
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
-	"net"
 	"net/netip"
-	"os"
-	"os/exec"
-	"os/user"
-	"path/filepath"
-	"runtime"
 	"slices"
-	"strconv"
 	"strings"
-	"syscall"
-	"time"
+
+	"github.com/jerryfane/macserve/internal/setup"
 )
 
 // Account is the invoking owner.
@@ -42,20 +35,22 @@ type FileInfo struct {
 	Mode   fs.FileMode
 	UID    uint32
 	GID    uint32
+	Nlink  uint64
 }
 
 // Probe is every host read the preflight performs. SystemProbe reads the
-// real host; tests substitute fakes. No field can change host state.
+// real host; tests substitute fakes.
 type Probe struct {
-	GOOS      string
-	UID, EUID int
-	Environ   []string
+	GOOS                 string
+	UID, EUID, GID, EGID int
+	Environ              []string
 	// Run executes one command for which AllowedCommand holds and returns
 	// its standard output.
 	Run func(ctx context.Context, argv []string) (string, error)
 	// Addrs lists interface addresses.
 	Addrs func() ([]netip.Addr, error)
-	// Lstat stats a path without following a final symlink.
+	// Lstat stats a path without following a final symlink. A missing path
+	// is FileInfo{} without error.
 	Lstat func(path string) (FileInfo, error)
 	// Owner resolves the invoking user (real UID).
 	Owner func() (Account, error)
@@ -65,165 +60,14 @@ type Probe struct {
 	PortInUse func(ctx context.Context, ap netip.AddrPort) bool
 }
 
-// Fixed read-only commands. xcodebuild -version is the only other command;
-// its path is derived from the selected developer directory.
-var readOnlyCommands = [][]string{
-	{"/usr/bin/sw_vers", "-productVersion"},
-	{"/usr/bin/sw_vers", "-buildVersion"},
-	{"/usr/sbin/sysctl", "-n", "hw.optional.arm64"},
-	{"/usr/bin/csrutil", "status"},
-	{"/usr/bin/fdesetup", "status"},
-	{"/usr/bin/fdesetup", "supportsauthrestart"},
-	{"/usr/bin/xcode-select", "-p"},
-	{"/usr/bin/dscl", "/Search", "-list", "/Users", "UniqueID"},
-	{"/usr/bin/dscl", ".", "-list", "/Users", "UniqueID"},
-	{"/usr/bin/dscl", "/Search", "-list", "/Groups", "PrimaryGroupID"},
-	{"/usr/bin/dscl", ".", "-list", "/Groups", "PrimaryGroupID"},
-	{"/usr/bin/dscl", "/Search", "-list", "/Users", "PrimaryGroupID"},
-	{"/usr/bin/dscl", ".", "-list", "/Users", "PrimaryGroupID"},
-}
-
-// AllowedCommand reports whether argv is one of the preflight's read-only
-// commands. The system runner refuses anything else before executing.
-func AllowedCommand(argv []string) bool {
-	for _, c := range readOnlyCommands {
-		if slices.Equal(c, argv) {
-			return true
-		}
+// Elevated reports root, a root or set-id credential, or a sudo
+// environment. Setup refuses all of them: the owner probe refuses
+// evidence gathered under sudo.
+func (p Probe) Elevated() bool {
+	if p.UID == 0 || p.EUID == 0 || p.GID == 0 || p.EGID == 0 || p.UID != p.EUID || p.GID != p.EGID {
+		return true
 	}
-	if len(argv) == 2 && argv[1] == "-version" && strings.HasSuffix(argv[0], "/usr/bin/xcodebuild") {
-		return validDeveloperDir(strings.TrimSuffix(argv[0], "/usr/bin/xcodebuild"))
-	}
-	return false
-}
-
-// validDeveloperDir accepts a clean absolute Xcode app developer directory,
-// not the Command Line Tools.
-func validDeveloperDir(dir string) bool {
-	return filepath.IsAbs(dir) && filepath.Clean(dir) == dir && strings.HasSuffix(dir, ".app/Contents/Developer") &&
-		!strings.ContainsAny(dir, "\x00\n\t\"'`$\\{};<>!")
-}
-
-const maxCommandOutput = 4 << 20
-
-type boundedBuffer struct {
-	bytes.Buffer
-	over bool
-}
-
-func (b *boundedBuffer) Write(p []byte) (int, error) {
-	if b.Len()+len(p) > maxCommandOutput {
-		b.over = true
-		return 0, errors.New("command output too large")
-	}
-	return b.Buffer.Write(p)
-}
-
-// SystemProbe reads the running host.
-func SystemProbe() Probe {
-	return Probe{
-		GOOS:    runtime.GOOS,
-		UID:     os.Getuid(),
-		EUID:    os.Geteuid(),
-		Environ: os.Environ(),
-		Run:     runReadOnly,
-		Addrs: func() ([]netip.Addr, error) {
-			list, err := net.InterfaceAddrs()
-			if err != nil {
-				return nil, err
-			}
-			var out []netip.Addr
-			for _, a := range list {
-				if n, ok := a.(*net.IPNet); ok {
-					if ip, ok := netip.AddrFromSlice(n.IP); ok {
-						out = append(out, ip.Unmap())
-					}
-				}
-			}
-			return out, nil
-		},
-		Lstat: func(path string) (FileInfo, error) {
-			info, err := os.Lstat(path)
-			if errors.Is(err, fs.ErrNotExist) {
-				return FileInfo{}, nil
-			}
-			if err != nil {
-				return FileInfo{}, err
-			}
-			st, ok := info.Sys().(*syscall.Stat_t)
-			if !ok {
-				return FileInfo{}, fmt.Errorf("%s: no ownership information", path)
-			}
-			return FileInfo{Exists: true, Mode: info.Mode(), UID: st.Uid, GID: st.Gid}, nil
-		},
-		Owner: func() (Account, error) {
-			u, err := user.LookupId(strconv.Itoa(os.Getuid()))
-			if err != nil {
-				return Account{}, err
-			}
-			uid, err := strconv.ParseUint(u.Uid, 10, 32)
-			if err != nil {
-				return Account{}, err
-			}
-			a := Account{Name: u.Username, UID: uint32(uid), Home: u.HomeDir}
-			gids, err := u.GroupIds()
-			if err != nil {
-				return Account{}, err
-			}
-			for _, g := range gids {
-				n, err := strconv.ParseInt(g, 10, 64)
-				if err != nil {
-					return Account{}, fmt.Errorf("group id %q: %w", g, err)
-				}
-				if n >= 0 && n <= 1<<32-1 {
-					a.GIDs = append(a.GIDs, uint32(n))
-				}
-			}
-			return a, nil
-		},
-		AdminGID: func() (uint32, error) {
-			g, err := user.LookupGroup("admin")
-			if err != nil {
-				return 0, err
-			}
-			n, err := strconv.ParseUint(g.Gid, 10, 32)
-			return uint32(n), err
-		},
-		PortInUse: func(ctx context.Context, ap netip.AddrPort) bool {
-			d := net.Dialer{Timeout: time.Second}
-			conn, err := d.DialContext(ctx, "tcp", ap.String())
-			if err == nil {
-				conn.Close()
-				return true
-			}
-			// Only a refused connection proves the port is free.
-			return !errors.Is(err, syscall.ECONNREFUSED)
-		},
-	}
-}
-
-// runReadOnly runs one allowed command with a fixed environment and cwd.
-func runReadOnly(ctx context.Context, argv []string) (string, error) {
-	if !AllowedCommand(argv) {
-		return "", fmt.Errorf("refused: %q is not a read-only preflight command", argv)
-	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-	cmd.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LANG=C", "LC_ALL=C"}
-	if strings.HasSuffix(argv[0], "/usr/bin/xcodebuild") {
-		cmd.Env = append(cmd.Env, "DEVELOPER_DIR="+strings.TrimSuffix(argv[0], "/usr/bin/xcodebuild"))
-	}
-	cmd.Dir = "/"
-	var stdout, stderr boundedBuffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("%s: %v", filepath.Base(argv[0]), err)
-	}
-	if stdout.over {
-		return "", fmt.Errorf("%s: output too large", filepath.Base(argv[0]))
-	}
-	return stdout.String(), nil
+	return slices.ContainsFunc(p.Environ, func(kv string) bool { return strings.HasPrefix(kv, "SUDO_") })
 }
 
 // Check statuses.
@@ -253,18 +97,15 @@ type Plan struct {
 	IDs           IDs
 	Environment   []byte // generated deploy.env; nil if it could not be generated
 	HasRepository bool
-	ExistingSetup bool // a native setup ledger exists
 }
 
 // Ready reports that no check failed and the environment was generated.
 func (p Plan) Ready() bool {
-	for _, c := range p.Checks {
-		if c.Status == Fail {
-			return false
-		}
-	}
-	return p.Environment != nil
+	return p.Environment != nil && !slices.ContainsFunc(p.Checks, func(c Check) bool { return c.Status == Fail })
 }
+
+// portCandidates is how many ports from DefaultPort the preflight tries.
+const portCandidates = 16
 
 // Preflight checks this Mac and generates the configuration setup would
 // install. It only reads host state.
@@ -278,8 +119,13 @@ func Preflight(ctx context.Context, p Probe, c Choices) Plan {
 		return plan
 	}
 	if p.Elevated() {
-		add("host.user", Fail, "running as root or under sudo", "Run macserve setup as yourself, without sudo; it asks for your password once when needed.")
+		add("host.user", Fail, "running as root, set-id or under sudo", "Run macserve setup as yourself, without sudo; it asks for your password once when needed.")
 		return plan
+	}
+	choicesOK := true
+	if err := c.Validate(); err != nil {
+		choicesOK = false
+		add("config.choices", Fail, err.Error(), "")
 	}
 	run := func(argv ...string) (string, error) { return p.Run(ctx, argv) }
 
@@ -314,7 +160,7 @@ func Preflight(ctx context.Context, p Probe, c Choices) Plan {
 	} else {
 		add("host.arch", Fail, "not Apple silicon", "macserve needs an Apple-silicon Mac.")
 	}
-	if out, err := run("/usr/bin/csrutil", "status"); err == nil && strings.HasPrefix(strings.TrimSpace(out), "System Integrity Protection status: enabled.") {
+	if out, err := run("/usr/bin/csrutil", "status"); err == nil && strings.TrimSpace(out) == "System Integrity Protection status: enabled." {
 		add("host.sip", OK, "System Integrity Protection enabled", "")
 	} else {
 		add("host.sip", Fail, "System Integrity Protection is not fully enabled", "Turn SIP on from macOS Recovery (csrutil enable).")
@@ -343,11 +189,11 @@ func Preflight(ctx context.Context, p Probe, c Choices) Plan {
 	if out, err := run("/usr/bin/xcode-select", "-p"); err != nil {
 		add("xcode.developer_dir", Fail, "no developer directory selected", "Install Xcode, then run: sudo xcode-select -s /Applications/Xcode.app")
 	} else if dir := strings.TrimSpace(out); !validDeveloperDir(dir) {
-		add("xcode.developer_dir", Fail, "selected developer directory is not an Xcode app: "+dir, "Install Xcode, then run: sudo xcode-select -s /Applications/Xcode.app")
+		add("xcode.developer_dir", Fail, "selected developer directory is not an Xcode app", "Install Xcode, then run: sudo xcode-select -s /Applications/Xcode.app")
 	} else {
 		plan.DeveloperDir = dir
 		add("xcode.developer_dir", OK, dir, "")
-		version, err := run(dir+"/usr/bin/xcodebuild", "-version")
+		version, err := run(dir+xcodebuildSuffix, "-version")
 		name, build, ok := parseXcodeVersion(version)
 		if err != nil || !ok {
 			add("xcode.version", Warn, "Xcode did not report its version", "Open Xcode once and accept its license; setup step 4 also does this.")
@@ -411,7 +257,7 @@ func Preflight(ctx context.Context, p Probe, c Choices) Plan {
 		}
 	}
 	idsOK := false
-	if dirOK && ownerOK {
+	if dirOK && ownerOK && choicesOK {
 		ids, err := PickIDs(dir, c, owner)
 		if err != nil {
 			add("ids.accounts", Fail, err.Error(), "Choose other account names.")
@@ -424,10 +270,10 @@ func Preflight(ctx context.Context, p Probe, c Choices) Plan {
 	if ownerOK {
 		checkOwnerHome(p, owner, add)
 	}
-	plan.ExistingSetup = checkExisting(p, add)
+	checkExisting(p, add)
 
-	if ownerOK && idsOK && tailnet.IsValid() && port != 0 && plan.DeveloperDir != "" {
-		env, _, err := RenderEnvironment(EnvironmentFacts{Owner: owner, TailnetIP: tailnet, HostAddresses: hosts, Port: port, DeveloperDir: plan.DeveloperDir}, c, plan.IDs)
+	if choicesOK && ownerOK && idsOK && tailnet.IsValid() && port != 0 && plan.DeveloperDir != "" {
+		env, err := RenderEnvironment(EnvironmentFacts{Owner: owner, TailnetIP: tailnet, HostAddresses: hosts, Port: port, DeveloperDir: plan.DeveloperDir}, c, plan.IDs)
 		if err != nil {
 			add("config.environment", Fail, err.Error(), "")
 		} else {
@@ -438,27 +284,23 @@ func Preflight(ctx context.Context, p Probe, c Choices) Plan {
 	return plan
 }
 
-// Elevated reports root or a sudo environment. Setup refuses both: the
-// owner probe refuses evidence gathered under sudo.
-func (p Probe) Elevated() bool {
-	if p.UID == 0 || p.EUID == 0 {
-		return true
-	}
-	for _, kv := range p.Environ {
-		if strings.HasPrefix(kv, "SUDO_") {
-			return true
-		}
-	}
-	return false
-}
-
 func parseXcodeVersion(out string) (string, string, bool) {
 	first, rest, ok := strings.Cut(out, "\n")
 	build, _, _ := strings.Cut(strings.TrimPrefix(rest, "Build version "), "\n")
-	if !ok || !strings.HasPrefix(first, "Xcode ") || !strings.HasPrefix(rest, "Build version ") || build == "" {
+	if !ok || !strings.HasPrefix(first, "Xcode ") || !strings.HasPrefix(rest, "Build version ") || build == "" || !printable(first) || !printable(build) {
 		return "", "", false
 	}
 	return first, build, true
+}
+
+// printable reports printable ASCII text without control characters.
+func printable(s string) bool {
+	for i := range len(s) {
+		if s[i] < 0x20 || s[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 // Groups every local account on macOS belongs to, so also the build
@@ -488,25 +330,37 @@ func checkOwnerHome(p Probe, owner Account, add func(id, status, detail, fix str
 	}
 }
 
-// checkExisting refuses a /Library/macserve that has no native setup
-// ledger: such a host is managed by other tooling (decision D12).
-func checkExisting(p Probe, add func(id, status, detail, fix string)) bool {
-	root, err := p.Lstat(InstallRoot)
+// checkExisting blocks on any existing /Library/macserve. A host managed by
+// other tooling (decision D12) gets that explanation; a native setup
+// ledger (root:wheel 0600, one link, in root-owned directories without
+// group or other write) is reported as such, but resuming is not part of
+// this release either.
+func checkExisting(p Probe, add func(id, status, detail, fix string)) {
+	root, err := p.Lstat(setup.InstallRoot)
 	if err != nil {
-		add("setup.existing", Fail, "cannot inspect "+InstallRoot+": "+err.Error(), "")
-		return false
+		add("setup.existing", Fail, "cannot inspect "+setup.InstallRoot+": "+err.Error(), "")
+		return
 	}
 	if !root.Exists {
-		add("setup.existing", OK, InstallRoot+" does not exist yet", "")
-		return false
+		add("setup.existing", OK, setup.InstallRoot+" does not exist yet", "")
+		return
 	}
-	ledger, err := p.Lstat(LedgerPath)
-	if err == nil && root.Mode.IsDir() && ledger.Exists && ledger.Mode.IsRegular() && ledger.UID == 0 {
-		add("setup.existing", Warn, "a native setup ledger exists at "+LedgerPath+"; the values below are for a fresh install", "Resuming a setup is not available in this release.")
-		return true
+	native := true
+	for _, dir := range []string{setup.InstallRoot, setup.InstallRoot + "/var", setup.LedgerDir} {
+		info, err := p.Lstat(dir)
+		if err != nil || !info.Exists || !info.Mode.IsDir() || info.UID != 0 || info.Mode.Perm()&0o022 != 0 {
+			native = false
+		}
 	}
-	add("setup.existing", Fail, InstallRoot+" exists without a native setup ledger; this Mac is managed by other tooling", "macserve setup does not change an existing installation.")
-	return false
+	ledger, err := p.Lstat(setup.LedgerPath)
+	if err != nil || !ledger.Exists || !ledger.Mode.IsRegular() || ledger.Mode.Perm() != 0o600 || ledger.UID != 0 || ledger.GID != 0 || ledger.Nlink != 1 {
+		native = false
+	}
+	if native {
+		add("setup.existing", Fail, "a native setup ledger exists at "+setup.LedgerPath, "Resuming a setup is not available in this release.")
+		return
+	}
+	add("setup.existing", Fail, setup.InstallRoot+" exists without a native setup ledger; this Mac is managed by other tooling", "macserve setup does not change an existing installation.")
 }
 
 // WritePlan prints the plan. It returns an error only if w fails.
@@ -530,9 +384,9 @@ func WritePlan(w io.Writer, plan Plan) error {
 			b.WriteString("  # REPOSITORIES is added in step 2 (connect-github), or pass --repository OWNER/NAME:ID\n")
 		}
 	}
-	b.WriteString("\nSetup steps (each recorded in " + LedgerPath + "; a failed step blocks later ones)\n")
-	for i, s := range Steps {
-		fmt.Fprintf(&b, "  %2d. %-18s %s\n", i+1, s, StepSummaries[s])
+	b.WriteString("\nSetup steps (each recorded in " + setup.LedgerPath + "; a failed step blocks later ones)\n")
+	for i, s := range setup.Steps {
+		fmt.Fprintf(&b, "  %2d. %-18s %s\n", i+1, s, setup.StepSummaries[s])
 	}
 	if plan.Ready() {
 		b.WriteString("\nResult: ready. This release does not apply the plan yet.\n")

@@ -6,14 +6,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"strings"
 
-	"github.com/jerryfane/macserve/internal/setup"
+	"github.com/jerryfane/macserve/internal/setup/plan"
 )
 
 // onboardingCommands are the first-time setup commands. main.go dispatches
 // any name listed here; new onboarding commands are added only in this
-// file.
+// file. checks/readonly proves that onboardingCommand, runSetup and
+// everything they reach cannot change host state.
 var onboardingCommands = []struct {
 	name, summary, help string
 	run                 func(args []string, stdout, stderr io.Writer) int
@@ -24,9 +24,6 @@ var onboardingCommands = []struct {
 	{"build", "Start a build of a repository and verify its receipt (not in this release)", buildHelp, nil},
 	{"upgrade", "Upgrade behind the stopped gate with verified release bytes (not in this release)", upgradeHelp, nil},
 }
-
-// setupProbe reads the host for setup --plan; tests replace it.
-var setupProbe = setup.SystemProbe
 
 const setupHelp = `Usage: macserve setup --plan [--repository OWNER/NAME:ID] [--job-real-name NAME]
 
@@ -112,11 +109,18 @@ func writeOnboardingUsage(w io.Writer) {
 }
 
 func runSetup(args []string, stdout, stderr io.Writer) int {
+	return runSetupWith(plan.SystemProbe(), args, stdout, stderr)
+}
+
+// runSetupWith runs setup against probe; tests pass a fake host. Invalid
+// --repository or --job-real-name values are reported by the plan as the
+// failed check config.choices (exit 1).
+func runSetupWith(probe plan.Probe, args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("setup", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	choices := setup.DefaultChoices()
-	var plan bool
-	flags.BoolVar(&plan, "plan", false, "")
+	choices := plan.DefaultChoices()
+	var planOnly bool
+	flags.BoolVar(&planOnly, "plan", false, "")
 	flags.StringVar(&choices.Repository, "repository", "", "")
 	flags.StringVar(&choices.JobRealName, "job-real-name", choices.JobRealName, "")
 	if err := flags.Parse(args); err != nil {
@@ -131,21 +135,16 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "macserve setup: unexpected arguments; see macserve setup --help")
 		return 2
 	}
-	probe := setupProbe()
 	if probe.Elevated() {
 		fmt.Fprintln(stderr, "macserve setup: run it as yourself, not with sudo; qualification refuses owner evidence gathered under sudo, and setup asks for your password once when it needs it.")
 		return 2
 	}
-	if !plan {
+	if !planOnly {
 		fmt.Fprintln(stderr, "macserve setup: only --plan is available in this release; see macserve setup --help")
 		return 2
 	}
-	if strings.TrimSpace(choices.JobRealName) == "" {
-		fmt.Fprintln(stderr, "macserve setup: --job-real-name must not be empty")
-		return 2
-	}
-	result := setup.Preflight(context.Background(), probe, choices)
-	if err := setup.WritePlan(stdout, result); err != nil {
+	result := plan.Preflight(context.Background(), probe, choices)
+	if err := plan.WritePlan(stdout, result); err != nil {
 		fmt.Fprintln(stderr, "macserve setup:", err)
 		return 1
 	}

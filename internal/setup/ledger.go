@@ -1,3 +1,5 @@
+// Package setup holds the native first-time setup state: the ordered setup
+// ledger. The read-only preflight and plan are in internal/setup/plan.
 package setup
 
 import (
@@ -10,9 +12,8 @@ import (
 	"time"
 )
 
-// LedgerPath is the root-owned native setup ledger. The unprivileged
-// preflight only stats it: a /Library/macserve whose ledger it cannot see
-// as a root-owned regular file is treated as managed by other tooling.
+// InstallRoot and the root-owned native setup ledger. The unprivileged
+// preflight only lstats the ledger; it cannot read it.
 const (
 	InstallRoot = "/Library/macserve"
 	LedgerDir   = InstallRoot + "/var/setup"
@@ -75,21 +76,38 @@ type Boot struct {
 	SessionUUID string `json:"session_uuid"`
 }
 
-func (b Boot) valid() bool { return b.Time != "" && b.SessionUUID != "" }
+func (b Boot) valid() bool {
+	return text(b.Time, 128) && text(b.SessionUUID, 128)
+}
 
 // differs reports a new boot: both identifiers changed.
 func (b Boot) differs(o Boot) bool { return b.Time != o.Time && b.SessionUUID != o.SessionUUID }
 
-// Record is one step's state. Inputs maps an input name to the sha256 of
-// the bytes the step consumed.
+// text accepts 1..max bytes of printable ASCII.
+func text(s string, max int) bool {
+	if s == "" || len(s) > max {
+		return false
+	}
+	for i := range len(s) {
+		if s[i] < 0x20 || s[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+// Record is one step's state. Boot is the boot the step began in,
+// FinishBoot the one it finished in. Inputs maps an input name to the
+// sha256 of the bytes the step consumed.
 type Record struct {
-	Step     Step              `json:"step"`
-	Status   Status            `json:"status"`
-	Started  *time.Time        `json:"started,omitempty"`
-	Finished *time.Time        `json:"finished,omitempty"`
-	Boot     *Boot             `json:"boot,omitempty"`
-	Inputs   map[string]string `json:"inputs,omitempty"`
-	Error    string            `json:"error,omitempty"`
+	Step       Step              `json:"step"`
+	Status     Status            `json:"status"`
+	Started    *time.Time        `json:"started,omitempty"`
+	Finished   *time.Time        `json:"finished,omitempty"`
+	Boot       *Boot             `json:"boot,omitempty"`
+	FinishBoot *Boot             `json:"finish_boot,omitempty"`
+	Inputs     map[string]string `json:"inputs,omitempty"`
+	Error      string            `json:"error,omitempty"`
 }
 
 // Approval is the owner's typed approval: the digest of the summary they
@@ -114,8 +132,11 @@ type Ledger struct {
 
 const ledgerSchema = 1
 
-var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
-var inputName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+var (
+	sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	inputName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+	ownerName = regexp.MustCompile(`^[a-z][a-z0-9_]{0,30}$`)
+)
 
 // NewLedger returns a ledger with every step pending.
 func NewLedger(owner string, ownerUID uint32, now time.Time) *Ledger {
@@ -126,13 +147,13 @@ func NewLedger(owner string, ownerUID uint32, now time.Time) *Ledger {
 	return l
 }
 
-func (l *Ledger) record(s Step) (*Record, int, error) {
+func (l *Ledger) record(s Step) *Record {
 	for i := range l.Records {
 		if l.Records[i].Step == s {
-			return &l.Records[i], i, nil
+			return &l.Records[i]
 		}
 	}
-	return nil, -1, fmt.Errorf("unknown setup step %q", s)
+	return nil
 }
 
 // Failed returns the failed step, if any.
@@ -179,13 +200,10 @@ func (l *Ledger) Begin(s Step, boot Boot, now time.Time) error {
 	if !boot.valid() {
 		return errors.New("boot identity required")
 	}
-	if s == StepRound2 {
-		round1, _, _ := l.record(StepRound1)
-		if round1.Boot == nil || !boot.differs(*round1.Boot) {
-			return errors.New("round 2 requires a new boot after round 1")
-		}
+	if s == StepRound2 && !boot.differs(*l.record(StepRound1).FinishBoot) {
+		return errors.New("round 2 requires a new boot after round 1")
 	}
-	r, _, _ := l.record(s)
+	r := l.record(s)
 	t := now.UTC()
 	b := boot
 	r.Status, r.Started, r.Boot = StatusRunning, &t, &b
@@ -198,9 +216,9 @@ func (l *Ledger) Complete(s Step, boot Boot, inputs map[string]string, now time.
 	if _, failed := l.Failed(); failed {
 		return errors.New("a failed setup step blocks later steps")
 	}
-	r, _, err := l.record(s)
-	if err != nil {
-		return err
+	r := l.record(s)
+	if r == nil {
+		return fmt.Errorf("unknown setup step %q", s)
 	}
 	if r.Status != StatusRunning {
 		return fmt.Errorf("setup step %s is %s, not running", s, r.Status)
@@ -216,15 +234,15 @@ func (l *Ledger) Complete(s Step, boot Boot, inputs map[string]string, now time.
 	if s == StepReboot && !boot.differs(*r.Boot) {
 		return errors.New("reboot step completes only after the host restarted")
 	}
+	if s != StepReboot && boot != *r.Boot {
+		return fmt.Errorf("setup step %s began in another boot; it cannot complete", s)
+	}
 	if s == StepApproveAndStart && (l.Approval == nil || l.Approval.Boot != boot) {
 		return errors.New("approve-and-start completes only after approval in this boot")
 	}
 	t := now.UTC()
-	r.Status, r.Finished = StatusDone, &t
-	if s == StepReboot {
-		b := boot
-		r.Boot = &b
-	}
+	b := boot
+	r.Status, r.Finished, r.FinishBoot = StatusDone, &t, &b
 	if len(inputs) > 0 {
 		r.Inputs = make(map[string]string, len(inputs))
 		for k, v := range inputs {
@@ -236,15 +254,15 @@ func (l *Ledger) Complete(s Step, boot Boot, inputs map[string]string, now time.
 
 // Fail marks the running step s failed. Nothing later can begin.
 func (l *Ledger) Fail(s Step, reason string, now time.Time) error {
-	r, _, err := l.record(s)
-	if err != nil {
-		return err
+	r := l.record(s)
+	if r == nil {
+		return fmt.Errorf("unknown setup step %q", s)
 	}
 	if r.Status != StatusRunning {
 		return fmt.Errorf("setup step %s is %s, not running", s, r.Status)
 	}
-	if reason == "" {
-		reason = "unspecified failure"
+	if !text(reason, 512) {
+		return errors.New("failure reason must be 1-512 printable ASCII characters")
 	}
 	t := now.UTC()
 	r.Status, r.Finished, r.Error = StatusFailed, &t, reason
@@ -252,7 +270,8 @@ func (l *Ledger) Fail(s Step, reason string, now time.Time) error {
 }
 
 // Approve records the owner's typed approval of the summary digest. It is
-// accepted only while approve-and-start runs, after round 2 is done.
+// accepted only while approve-and-start runs, after round 2 is done, in
+// the boot approve-and-start began in.
 func (l *Ledger) Approve(summarySHA256 string, boot Boot, now time.Time) error {
 	if _, failed := l.Failed(); failed {
 		return errors.New("a failed setup step blocks approval")
@@ -260,10 +279,12 @@ func (l *Ledger) Approve(summarySHA256 string, boot Boot, now time.Time) error {
 	if !sha256Hex.MatchString(summarySHA256) || !boot.valid() {
 		return errors.New("approval needs the summary sha256 and boot identity")
 	}
-	round2, _, _ := l.record(StepRound2)
-	step, _, _ := l.record(StepApproveAndStart)
-	if round2.Status != StatusDone || step.Status != StatusRunning {
+	step := l.record(StepApproveAndStart)
+	if l.record(StepRound2).Status != StatusDone || step.Status != StatusRunning {
 		return errors.New("approval is accepted only after round 2, during approve-and-start")
+	}
+	if boot != *step.Boot {
+		return errors.New("approval must be given in the boot approve-and-start began in")
 	}
 	l.Approval = &Approval{At: now.UTC(), SummarySHA256: summarySHA256, Boot: boot}
 	return nil
@@ -275,8 +296,7 @@ func (l *Ledger) AuthorizeStart(boot Boot) error {
 	if _, failed := l.Failed(); failed {
 		return errors.New("a failed setup step blocks service start")
 	}
-	step, _, _ := l.record(StepApproveAndStart)
-	if step.Status != StatusRunning {
+	if l.record(StepApproveAndStart).Status != StatusRunning {
 		return errors.New("services start only during approve-and-start")
 	}
 	if l.Approval == nil {
@@ -293,6 +313,10 @@ func (l *Ledger) Encode() ([]byte, error) {
 	if err := l.validate(); err != nil {
 		return nil, err
 	}
+	return l.encode()
+}
+
+func (l *Ledger) encode() ([]byte, error) {
 	data, err := json.MarshalIndent(l, "", "  ")
 	if err != nil {
 		return nil, err
@@ -300,8 +324,10 @@ func (l *Ledger) Encode() ([]byte, error) {
 	return append(data, '\n'), nil
 }
 
-// DecodeLedger parses a ledger strictly and checks its invariants, so a
-// resumed setup continues from exactly the recorded state.
+// DecodeLedger parses a ledger and checks its invariants, so a resumed
+// setup continues from exactly the recorded state. Only the canonical
+// encoding is accepted: duplicate or case-variant keys, reordered fields
+// and any other spelling of the same state are refused.
 func DecodeLedger(data []byte) (*Ledger, error) {
 	if len(data) == 0 || len(data) > MaxLedger {
 		return nil, errors.New("setup ledger: empty or oversized")
@@ -318,6 +344,13 @@ func DecodeLedger(data []byte) (*Ledger, error) {
 	if err := l.validate(); err != nil {
 		return nil, err
 	}
+	canonical, err := l.encode()
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(canonical, data) {
+		return nil, errors.New("setup ledger: not in canonical form")
+	}
 	return &l, nil
 }
 
@@ -325,7 +358,7 @@ func (l *Ledger) validate() error {
 	if l.Schema != ledgerSchema {
 		return fmt.Errorf("setup ledger: unsupported schema %d", l.Schema)
 	}
-	if l.Owner == "" || l.OwnerUID == 0 || l.Created.IsZero() {
+	if !ownerName.MatchString(l.Owner) || l.OwnerUID < 501 || l.Created.IsZero() {
 		return errors.New("setup ledger: owner and creation time required")
 	}
 	if len(l.Records) != len(Steps) {
@@ -338,18 +371,22 @@ func (l *Ledger) validate() error {
 		if r.Step != Steps[i] {
 			return fmt.Errorf("setup ledger: step %d is %q, want %q", i, r.Step, Steps[i])
 		}
+		started := phase == 0 && r.Started != nil && r.Boot != nil && r.Boot.valid()
 		switch r.Status {
 		case StatusDone:
-			if phase != 0 || r.Started == nil || r.Finished == nil || r.Boot == nil || !r.Boot.valid() {
+			if !started || r.Finished == nil || r.FinishBoot == nil || !r.FinishBoot.valid() || r.Error != "" {
 				return fmt.Errorf("setup ledger: step %s done out of order or incomplete", r.Step)
 			}
+			if (r.Step == StepReboot) != r.Boot.differs(*r.FinishBoot) || (r.Step != StepReboot && *r.Boot != *r.FinishBoot) {
+				return fmt.Errorf("setup ledger: step %s has inconsistent boots", r.Step)
+			}
 		case StatusRunning, StatusFailed:
-			if phase != 0 || r.Started == nil || r.Boot == nil || !r.Boot.valid() || (r.Status == StatusFailed) != (r.Error != "") {
+			if !started || r.FinishBoot != nil || (r.Status == StatusFailed) != (r.Finished != nil) || (r.Status == StatusFailed) != text(r.Error, 512) || (r.Status == StatusRunning && r.Error != "") {
 				return fmt.Errorf("setup ledger: step %s %s out of order or incomplete", r.Step, r.Status)
 			}
 			phase = 1
 		case StatusPending:
-			if r.Started != nil || r.Finished != nil || r.Boot != nil || r.Inputs != nil || r.Error != "" {
+			if r.Started != nil || r.Finished != nil || r.Boot != nil || r.FinishBoot != nil || r.Inputs != nil || r.Error != "" {
 				return fmt.Errorf("setup ledger: pending step %s has state", r.Step)
 			}
 			phase = 1
@@ -362,11 +399,17 @@ func (l *Ledger) validate() error {
 			}
 		}
 	}
+	round1, round2 := l.record(StepRound1), l.record(StepRound2)
+	if round2.Status != StatusPending && !round2.Boot.differs(*round1.FinishBoot) {
+		return errors.New("setup ledger: round 2 began in round 1's boot")
+	}
+	step := l.record(StepApproveAndStart)
 	if l.Approval != nil {
-		step := l.Records[len(l.Records)-2]
-		if step.Step != StepApproveAndStart || (step.Status != StatusRunning && step.Status != StatusDone && step.Status != StatusFailed) || !sha256Hex.MatchString(l.Approval.SummarySHA256) || !l.Approval.Boot.valid() {
+		if step.Status == StatusPending || !sha256Hex.MatchString(l.Approval.SummarySHA256) || l.Approval.At.IsZero() || l.Approval.Boot != *step.Boot {
 			return errors.New("setup ledger: approval recorded outside approve-and-start")
 		}
+	} else if step.Status == StatusDone {
+		return errors.New("setup ledger: approve-and-start done without approval")
 	}
 	return nil
 }

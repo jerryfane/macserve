@@ -150,9 +150,6 @@ func TestResumeAfterRestart(t *testing.T) {
 
 func TestRound2RequiresDifferentBoot(t *testing.T) {
 	l := ledgerAt(t, StepRound2)
-	// A ledger whose reboot record was forged into the round-1 boot is
-	// still refused: round 2 compares against round 1's own boot.
-	l.Records[6].Boot = &boot1
 	if err := l.Begin(StepRound2, boot1, t0); err == nil {
 		t.Fatal("round 2 began in round 1's boot")
 	}
@@ -162,6 +159,111 @@ func TestRound2RequiresDifferentBoot(t *testing.T) {
 	}
 	if err := l.Begin(StepRound2, boot2, t0); err != nil {
 		t.Fatal(err)
+	}
+	if err := l.Complete(StepRound2, boot1, nil, t0); err == nil {
+		t.Fatal("round 2 completed in another boot than it began in")
+	}
+}
+
+// forged builds a ledger through every step with all boots set to boot,
+// bypassing Begin/Complete, and encodes it without validation.
+func forged(t *testing.T, boot Boot, edit func(*Ledger)) []byte {
+	t.Helper()
+	l := NewLedger("jdoe", 501, t0)
+	for i := range l.Records {
+		b, f, at := boot, boot, t0
+		l.Records[i] = Record{Step: Steps[i], Status: StatusDone, Started: &at, Finished: &at, Boot: &b, FinishBoot: &f}
+	}
+	l.Approval = &Approval{At: t0, SummarySHA256: digest, Boot: boot}
+	edit(l)
+	data, err := l.encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func TestDecodeLedgerRechecksBootRules(t *testing.T) {
+	valid := forged(t, boot2, func(l *Ledger) {
+		for i := range 6 {
+			l.Records[i].Boot, l.Records[i].FinishBoot = &boot1, &boot1
+		}
+		l.Records[6].Boot = &boot1
+	})
+	if _, err := DecodeLedger(valid); err != nil {
+		t.Fatalf("consistent forged ledger refused: %v", err)
+	}
+	for name, data := range map[string][]byte{
+		"same boot throughout": forged(t, boot1, func(*Ledger) {}),
+		"round 2 in round 1 boot": forged(t, boot2, func(l *Ledger) {
+			l.Records[5].Boot, l.Records[5].FinishBoot = &boot2, &boot2
+			l.Records[6].Boot = &boot1
+		}),
+		"step finished in another boot": forged(t, boot2, func(l *Ledger) {
+			l.Records[6].Boot = &boot1
+			for i := range 6 {
+				l.Records[i].Boot, l.Records[i].FinishBoot = &boot1, &boot1
+			}
+			l.Records[9].Boot = &boot1
+		}),
+		"approval from another boot": forged(t, boot2, func(l *Ledger) {
+			for i := range 6 {
+				l.Records[i].Boot, l.Records[i].FinishBoot = &boot1, &boot1
+			}
+			l.Records[6].Boot = &boot1
+			l.Approval.Boot = boot1
+		}),
+		"done without approval": forged(t, boot2, func(l *Ledger) {
+			for i := range 6 {
+				l.Records[i].Boot, l.Records[i].FinishBoot = &boot1, &boot1
+			}
+			l.Records[6].Boot = &boot1
+			l.Approval = nil
+		}),
+		"owner with control character": forged(t, boot2, func(l *Ledger) { l.Owner = "jdoe\n" }),
+		"system owner uid":             forged(t, boot2, func(l *Ledger) { l.OwnerUID = 0 }),
+		"boot with control character": forged(t, boot2, func(l *Ledger) {
+			bad := Boot{Time: "1\x1b[2J", SessionUUID: "x"}
+			l.Records[0].Boot = &bad
+		}),
+	} {
+		if _, err := DecodeLedger(data); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+func TestDecodeLedgerRequiresCanonicalForm(t *testing.T) {
+	good, err := ledgerAt(t, StepTools).Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, edit := range map[string]func(string) string{
+		"duplicate key": func(s string) string {
+			return strings.Replace(s, `"owner": "jdoe",`, `"owner": "mallory", "owner": "jdoe",`, 1)
+		},
+		"case variant": func(s string) string { return strings.Replace(s, `"owner": "jdoe"`, `"OWNER": "jdoe"`, 1) },
+		"reordered": func(s string) string {
+			return strings.Replace(s, `"schema": 1,`+"\n  \"owner\": \"jdoe\",", `"owner": "jdoe",`+"\n  \"schema\": 1,", 1)
+		},
+		"compact":        func(s string) string { return strings.ReplaceAll(s, "\n  ", "\n ") },
+		"no final line":  func(s string) string { return strings.TrimSuffix(s, "\n") },
+		"escaped letter": func(s string) string { return strings.Replace(s, `"owner": "jdoe"`, `"owner": "j\u0064oe"`, 1) },
+	} {
+		bad := edit(string(good))
+		if bad == string(good) {
+			t.Fatalf("%s: edit did not apply", name)
+		}
+		if _, err := DecodeLedger([]byte(bad)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	l := ledgerAt(t, StepTools)
+	if err := l.Begin(StepTools, boot1, t0); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Fail(StepTools, "xcodebuild failed\n\x1b[2J", t0); err == nil {
+		t.Fatal("failure reason with control characters accepted")
 	}
 }
 
@@ -174,6 +276,9 @@ func TestStartRefusedBeforeApprove(t *testing.T) {
 		t.Fatal("approval accepted before round 2")
 	}
 	mustStep(t, l, StepRound2, boot2)
+	if err := l.Approve(digest, boot2, t0); err == nil {
+		t.Fatal("approval accepted before approve-and-start began")
+	}
 	if err := l.Begin(StepApproveAndStart, boot2, t0); err != nil {
 		t.Fatal(err)
 	}
@@ -185,6 +290,9 @@ func TestStartRefusedBeforeApprove(t *testing.T) {
 	}
 	if err := l.Approve("not-a-digest", boot2, t0); err == nil {
 		t.Fatal("malformed approval accepted")
+	}
+	if err := l.Approve(digest, boot1, t0); err == nil {
+		t.Fatal("approval accepted from another boot")
 	}
 	if err := l.Approve(digest, boot2, t0); err != nil {
 		t.Fatal(err)
@@ -200,6 +308,97 @@ func TestStartRefusedBeforeApprove(t *testing.T) {
 	}
 	if err := l.AuthorizeStart(boot2); err == nil {
 		t.Fatal("start authorized after approve-and-start finished")
+	}
+}
+
+// TestMethodsRecheckInvariantsInMemory: the mutating methods do not rely
+// on DecodeLedger having validated the ledger.
+func TestMethodsRecheckInvariantsInMemory(t *testing.T) {
+	// A failed step and a running later step: Complete must refuse.
+	l := ledgerAt(t, StepTools)
+	if err := l.Begin(StepTools, boot1, t0); err != nil {
+		t.Fatal(err)
+	}
+	at := t0
+	l.Records[2].Status, l.Records[2].Error, l.Records[2].FinishBoot = StatusFailed, "forged", nil
+	if err := l.Complete(StepTools, boot1, nil, t0); err == nil {
+		t.Error("step completed while an earlier step failed")
+	}
+	if err := l.Fail(StepTools, "x", t0); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Fail(StepTools, "again", t0); err == nil {
+		t.Error("Fail on a failed step accepted")
+	}
+	if err := NewLedger("jdoe", 501, t0).Fail(StepPreflight, "x", t0); err == nil {
+		t.Error("Fail on a pending step accepted")
+	}
+
+	// approve-and-start running while round 2 is still pending.
+	l = ledgerAt(t, StepRound2)
+	b := boot2
+	l.Records[8] = Record{Step: StepApproveAndStart, Status: StatusRunning, Started: &at, Boot: &b}
+	if err := l.Approve(digest, boot2, t0); err == nil {
+		t.Error("approval accepted while round 2 is pending")
+	}
+
+	// An approval from another boot cannot complete approve-and-start.
+	l = ledgerAt(t, StepApproveAndStart)
+	if err := l.Begin(StepApproveAndStart, boot2, t0); err != nil {
+		t.Fatal(err)
+	}
+	l.Approval = &Approval{At: t0, SummarySHA256: digest, Boot: boot1}
+	if err := l.Complete(StepApproveAndStart, boot2, nil, t0); err == nil {
+		t.Error("approve-and-start completed with an approval from another boot")
+	}
+}
+
+func TestDecodeLedgerRejectsForgedRecords(t *testing.T) {
+	consistent := func(l *Ledger) {
+		for i := range 6 {
+			l.Records[i].Boot, l.Records[i].FinishBoot = &boot1, &boot1
+		}
+		l.Records[6].Boot = &boot1
+	}
+	at := t0
+	for name, data := range map[string][]byte{
+		"done after running": forged(t, boot2, func(l *Ledger) {
+			consistent(l)
+			l.Records[3].Status, l.Records[3].Finished, l.Records[3].FinishBoot = StatusRunning, nil, nil
+		}),
+		"two running": forged(t, boot2, func(l *Ledger) {
+			consistent(l)
+			for _, i := range []int{3, 4} {
+				l.Records[i].Status, l.Records[i].Finished, l.Records[i].FinishBoot = StatusRunning, nil, nil
+			}
+			for i := 5; i < 10; i++ {
+				l.Records[i] = Record{Step: Steps[i], Status: StatusPending}
+			}
+			l.Approval = nil
+		}),
+		"pending with state": forged(t, boot2, func(l *Ledger) {
+			consistent(l)
+			for i := 3; i < 10; i++ {
+				l.Records[i] = Record{Step: Steps[i], Status: StatusPending}
+			}
+			l.Records[9].Started = &at
+			l.Approval = nil
+		}),
+		"bad input digest": forged(t, boot2, func(l *Ledger) {
+			consistent(l)
+			l.Records[0].Inputs = map[string]string{"deploy.env": "abc"}
+		}),
+		"approval before approve-and-start": forged(t, boot2, func(l *Ledger) {
+			consistent(l)
+			l.Records[8], l.Records[9] = Record{Step: Steps[8], Status: StatusPending}, Record{Step: Steps[9], Status: StatusPending}
+		}),
+	} {
+		if _, err := DecodeLedger(data); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	if _, err := DecodeLedger(make([]byte, MaxLedger+1)); err == nil || !strings.Contains(err.Error(), "oversized") {
+		t.Errorf("oversized ledger: %v", err)
 	}
 }
 
