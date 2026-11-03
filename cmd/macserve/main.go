@@ -74,6 +74,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "wait":
 		return runWait(args[1:], stdout, stderr)
 	default:
+		// Onboarding commands are listed in onboarding.go only, so adding
+		// or changing one never edits this dispatch again.
+		if command, ok := onboardingCommand(args[0]); ok {
+			return command(args[1:], stdout, stderr)
+		}
 		fmt.Fprintf(stderr, "macserve: unknown command %q\n", args[0])
 		usage(stderr)
 		return 2
@@ -94,7 +99,9 @@ Commands:
   maintenance-observe Collect live qualification inputs without approving them
   deploy-install Plan or install reviewed disabled deployment assets
   qualify     Collect, inspect and explicitly approve boundary evidence
-
+`)
+	writeOnboardingUsage(w)
+	fmt.Fprint(w, `
 Use macserve <command> --help for command help.
 `)
 }
