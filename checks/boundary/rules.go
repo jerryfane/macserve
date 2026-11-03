@@ -246,7 +246,7 @@ func (c *checker) checkPackage(dir, absDir, importPath string, goFiles []string)
 		files = append(files, f)
 		names = append(names, path.Join(dir, name))
 	}
-	info := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}, Defs: map[*ast.Ident]types.Object{}, Uses: map[*ast.Ident]types.Object{}}
+	info := &types.Info{Types: map[ast.Expr]types.TypeAndValue{}, Defs: map[*ast.Ident]types.Object{}, Uses: map[*ast.Ident]types.Object{}, Selections: map[*ast.SelectorExpr]*types.Selection{}}
 	conf := types.Config{Importer: c.imp, Sizes: types.SizesFor("gc", "arm64")}
 	pkg, err := conf.Check(importPath, c.fset, files, info)
 	if err != nil {
@@ -332,9 +332,14 @@ func (f *fileCheck) run() {
 			}
 		}
 	}
-	f.assignments()
+	f.writes()
+	f.signatures()
+	f.packageVarUses()
+	f.typeAssertions()
 	if slices.Contains(rootPackages, f.dir) {
 		f.rootUses()
+	} else {
+		f.moduleCalls()
 	}
 	if f.class == ClassG {
 		f.gCalls()
@@ -384,6 +389,10 @@ func (f *fileCheck) directives() {
 	}
 }
 
+// funcDecl rejects init and every method. A method on a C/G type could
+// satisfy an interface boundary code asserts or calls implicitly
+// (json.Marshaler, fmt.Stringer, error, ...); a method on a B type could
+// satisfy a boundary interface assertion.
 func (f *fileCheck) funcDecl(d *ast.FuncDecl) {
 	if d.Recv == nil {
 		if d.Name.Name == "init" {
@@ -391,18 +400,11 @@ func (f *fileCheck) funcDecl(d *ast.FuncDecl) {
 		}
 		return
 	}
-	fn, ok := f.info.Defs[d.Name].(*types.Func)
-	if !ok {
-		return
+	recv := "?"
+	if fn, ok := f.info.Defs[d.Name].(*types.Func); ok {
+		recv = types.TypeString(fn.Type().(*types.Signature).Recv().Type(), types.RelativeTo(f.pkg))
 	}
-	recv := fn.Type().(*types.Signature).Recv().Type()
-	if ptr, ok := recv.(*types.Pointer); ok {
-		recv = ptr.Elem()
-	}
-	named, ok := recv.(*types.Named)
-	if !ok || !f.carryAt(named.Obj().Pos()) {
-		f.problem(f.file, "method %s declared on %s, which is not declared in a C/G file", d.Name.Name, recv)
-	}
+	f.problem(f.file, "method %s declared on %s: C/G files declare no methods", d.Name.Name, recv)
 }
 
 func (f *fileCheck) packageVars(d *ast.GenDecl) {
@@ -479,72 +481,6 @@ func (f *fileCheck) calledFunc(fun ast.Expr) *types.Func {
 		return fn
 	}
 	return nil
-}
-
-// assignments rejects writes to, and addresses of, package-level variables
-// that are not declared in a C/G file.
-func (f *fileCheck) assignments() {
-	check := func(e ast.Expr, what string) {
-		v := f.rootVar(e)
-		if v != nil && v.Pkg() != nil && v.Parent() == v.Pkg().Scope() && !f.carryAt(v.Pos()) {
-			f.problem(f.file, "%s package-level variable %s.%s, which is not declared in a C/G file", what, v.Pkg().Name(), v.Name())
-		}
-	}
-	ast.Inspect(f.ast, func(n ast.Node) bool {
-		switch n := n.(type) {
-		case *ast.AssignStmt:
-			if n.Tok != token.DEFINE {
-				for _, lhs := range n.Lhs {
-					check(lhs, "assigns")
-				}
-			}
-		case *ast.IncDecStmt:
-			check(n.X, "assigns")
-		case *ast.RangeStmt:
-			if n.Tok == token.ASSIGN {
-				for _, e := range []ast.Expr{n.Key, n.Value} {
-					if e != nil {
-						check(e, "assigns")
-					}
-				}
-			}
-		case *ast.UnaryExpr:
-			if n.Op == token.AND {
-				check(n.X, "takes the address of")
-			}
-		}
-		return true
-	})
-}
-
-func (f *fileCheck) rootVar(e ast.Expr) *types.Var {
-	for {
-		switch x := e.(type) {
-		case *ast.ParenExpr:
-			e = x.X
-		case *ast.StarExpr:
-			e = x.X
-		case *ast.IndexExpr:
-			e = x.X
-		case *ast.IndexListExpr:
-			e = x.X
-		case *ast.SliceExpr:
-			e = x.X
-		case *ast.SelectorExpr:
-			if id, ok := x.X.(*ast.Ident); ok {
-				if _, qualified := f.info.Uses[id].(*types.PkgName); qualified {
-					v, _ := f.info.Uses[x.Sel].(*types.Var)
-					return v
-				}
-			}
-			e = x.X
-		case *ast.Ident:
-			v, _ := f.info.Uses[x].(*types.Var)
-			return v
-		default:
-			return nil
-		}
-	}
 }
 
 // rootUses restricts every function and method a root-package C/G file

@@ -60,12 +60,11 @@
     ]
   },
   "seams": {
+    "internal/evidence": [
+      "finiteDuration"
+    ],
     "internal/worker": [
-      "(*execution).invoke",
-      "(*execution).command",
-      "(*execution).capture",
-      "clip",
-      "boundedBuffer"
+      "clip"
     ]
   },
   "g_calls": {}

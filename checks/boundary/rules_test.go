@@ -11,9 +11,9 @@ import (
 )
 
 // The fixture module mirrors the shapes the rules protect: a root package
-// (internal/worker) with B execution internals and a C observation file, a
-// G file in internal/maintenance, a non-root C package and a banned B
-// package.
+// (internal/worker) with B execution internals and a C observation file that
+// gets only values and capabilities, a G file in internal/maintenance, a
+// non-root C package and a banned B package.
 const fixtureModule = "example.com/fx"
 
 var fixtureBase = map[string]string{
@@ -25,11 +25,37 @@ import (
 	"os"
 )
 
-type execution struct{ ran []string }
+type Profile struct {
+	Executable   string
+	DeveloperDir string
+	Args         []string
+}
+
+type Xcode struct{ Version, Build string }
+
+type Result struct {
+	State       string
+	Observation Observation
+}
+
+type execution struct {
+	ran     []string
+	profile Profile
+	result  Result
+	done    chan string
+}
 
 type Runner interface{ Run() error }
 
+type stateError struct{ state string }
+
+func (e *stateError) Error() string { return e.state }
+
 var Hook = "boundary"
+
+var Registry = map[string]string{}
+
+var ErrBoundary error = &stateError{"boundary"}
 
 func (x *execution) invoke(ctx context.Context, name string) error {
 	x.ran = append(x.ran, name)
@@ -37,6 +63,18 @@ func (x *execution) invoke(ctx context.Context, name string) error {
 }
 
 func (x *execution) quarantine() error { return os.Remove("/nonexistent") }
+
+func (x *execution) capture(ctx context.Context, name string) ([]byte, error) {
+	return []byte(name), x.invoke(ctx, name)
+}
+
+// observe is the B side: it hands the C code values and a capability and
+// writes what comes back.
+func (x *execution) observe(ctx context.Context) error {
+	o, err := observeToolchain(ctx, Xcode{Version: "26"}, x.capture)
+	x.result.Observation = o
+	return err
+}
 
 func clip(s string, n int) string {
 	if len(s) > n {
@@ -57,16 +95,25 @@ import (
 
 var errEmpty = errors.New("empty")
 
-type report struct{ Lines []string }
+type Observation struct {
+	Xcode Xcode
+	Lines []string
+}
 
-func (r *report) add(s string) { r.Lines = append(r.Lines, strings.TrimSpace(s)) }
+func addLine(lines []string, s string) []string { return append(lines, strings.TrimSpace(s)) }
 
-func observe(ctx context.Context, x *execution, r *report) error {
-	if x == nil {
-		return errEmpty
+func observeToolchain(ctx context.Context, pins Xcode, capture func(context.Context, string) ([]byte, error)) (Observation, error) {
+	var o Observation
+	out, err := capture(ctx, "/usr/bin/xcodebuild")
+	if err != nil {
+		return o, err
 	}
-	r.add(clip("Xcode 26", 64))
-	return x.invoke(ctx, "/usr/bin/xcodebuild")
+	if len(out) == 0 {
+		return o, errEmpty
+	}
+	o.Xcode = pins
+	o.Lines = addLine(o.Lines, clip(string(out), 64))
+	return o, nil
 }
 `,
 	"internal/maintenance/run.go": `package maintenance
@@ -82,13 +129,19 @@ import "os"
 
 func Save(path string) error { return os.WriteFile(path, nil, 0o600) }
 `,
+	"internal/store/state.go": `package store
+
+var Limits = []int{1, 2}
+
+func limit() int { return 3 }
+`,
 }
 
 func fixtureManifest() map[string]any {
 	return map[string]any{
 		"schema": 1,
 		"classes": map[string][]string{
-			"B": {"go.mod", "BOUNDARY.json", "internal/**"},
+			"B": {"go.mod", "BOUNDARY.json", "internal/**", "internal/store/state.go"},
 			"G": {"internal/maintenance/run.go"},
 			"C": {"internal/worker/observe.go", "internal/store/**"},
 			"T": {"docs/**"},
@@ -190,36 +243,73 @@ func TestCarryFileRules(t *testing.T) {
 	withObserve := func(extra string) map[string]string {
 		return map[string]string{observe: fixtureBase[observe] + "\n" + extra + "\n"}
 	}
+	store := func(extra string) map[string]string {
+		return map[string]string{"internal/store/store.go": fixtureBase["internal/store/store.go"] + "\n" + extra + "\n"}
+	}
 	cases := []struct {
 		name      string
 		overrides map[string]string
+		extra     string // a second C file in internal/worker
 		manifest  func(map[string]any)
 		want      string
 	}{
 		{name: "init function", overrides: withObserve("func init() {}"), want: "init function"},
-		{name: "method on B type", overrides: withObserve("func (x *execution) helper() {}"), want: "method helper declared on"},
-		{name: "method on B type via alias", overrides: withObserve("type alias = execution\n\nfunc (a *alias) helper() {}"), want: "method helper declared on"},
-		{name: "syscall import", overrides: map[string]string{observe: header + "import \"syscall\"\n\nfunc pid(context.Context) int { return syscall.Getpid() }\n"}, want: "imports syscall"},
-		{name: "unsafe import", overrides: map[string]string{observe: header + "import \"unsafe\"\n\nfunc size(context.Context) uintptr { return unsafe.Sizeof(0) }\n"}, want: "imports unsafe"},
-		{name: "os/exec import", overrides: map[string]string{observe: header + "import \"os/exec\"\n\nfunc run(ctx context.Context) error { return exec.CommandContext(ctx, \"true\").Run() }\n"}, want: "imports os/exec"},
-		{name: "banned internal import", overrides: map[string]string{observe: header + "import \"" + fixtureModule + "/internal/hostguard\"\n\nfunc check(context.Context) error { return hostguard.Check() }\n"}, want: "imports " + fixtureModule + "/internal/hostguard"},
-		{name: "linkname directive", overrides: map[string]string{observe: header + "import _ \"unsafe\"\n\n//go:linkname now time.now\nfunc now() (int64, int32, int64)\n\nfunc use(context.Context) { now() }\n"}, want: "compiler directive \"//go:linkname\""},
+		{name: "method on B type", overrides: withObserve("func (x *execution) helper() {}"), want: "method helper declared on *execution"},
+		{name: "method on B type via alias", overrides: withObserve("type alias = execution\n\nfunc (a *alias) helper() {}"), want: "method helper declared on *alias"},
+		// Review F2 mutant C: a value-receiver method on a C report type
+		// silently changes how boundary code encodes the result.
+		{name: "MarshalJSON on C type", overrides: withObserve("func (o Observation) MarshalJSON() ([]byte, error) { return []byte(`{\"state\":\"succeeded\"}`), nil }"), want: "method MarshalJSON declared on Observation"},
+		{name: "String on C type", overrides: withObserve("func (o Observation) String() string { return \"\" }"), want: "method String declared on Observation"},
+		{name: "Error on C type", overrides: withObserve("type obsError struct{}\n\nfunc (obsError) Error() string { return \"\" }"), want: "method Error declared on obsError"},
+		// Review F2 mutant A: the observation rewrites what the boundary
+		// executes after the toolchain guard.
+		{name: "mutant A: rewrite the profile", overrides: withObserve("func tamper(x *execution) {\n\tx.profile.Executable = \"/bin/sh\"\n\tx.profile.DeveloperDir = \"/tmp\"\n}"), want: "assigns x.profile.Executable, which is rooted in x.profile of boundary type Profile"},
+		{name: "mutant A: B pointer parameter", overrides: withObserve("func tamper(x *execution) {}"), want: "func tamper parameter x has type *execution, which can reference boundary state"},
+		// Review F2 mutant B: the observation marks the job succeeded.
+		{name: "mutant B: rewrite the result state", overrides: withObserve("func finish(r *Result) { r.State = \"succeeded\" }"), want: "assigns r.State, which is rooted in r of boundary type Result"},
+		{name: "B value with references as parameter", overrides: withObserve("func args(p Profile) { a := p.Args; a[0] = \"rm\" }"), want: "parameter p has type Profile, which can reference boundary state"},
+		{name: "B map parameter", overrides: withObserve("func runs(m map[string]*execution) {}"), want: "parameter m has type map[string]*execution"},
+		{name: "B slice parameter", overrides: withObserve("func runs(s []Result) {}"), want: "parameter s has type []Result"},
+		{name: "B interface parameter", overrides: withObserve("func runs(r Runner) {}"), want: "parameter r has type Runner"},
+		{name: "func with B parameter", overrides: withObserve("func runs(f func(*execution) error) {}"), want: "parameter f has type func(*execution) error"},
+		{name: "empty interface parameter", overrides: withObserve("func runs(v any) {}"), want: "parameter v has type any"},
+		{name: "B pointer result", overrides: withObserve("func next() *execution { return nil }"), want: "result _ has type *execution"},
+		{name: "C struct holding a B pointer", overrides: withObserve("type holder struct{ x *execution }\n\nfunc use(h holder) {}"), want: "parameter h has type holder"},
+		{name: "closure capture", overrides: withObserve("func later(x *execution) func() { return func() { x.ran = nil } }"), want: "assigns x.ran, which is rooted in x of boundary type execution"},
+		{name: "func literal with B parameter", overrides: withObserve("func later() { _ = func(x *execution) { x.ran = nil } }"), want: "func literal parameter x has type *execution"},
+		{name: "write to C-local B value", overrides: withObserve("func local() { var p Profile; p.Args = nil }"), want: "assigns p.Args, which is rooted in p of boundary type Profile"},
+		{name: "append to B-rooted slice", overrides: withObserve("func local() []string { var p Profile; return append(p.Args, \"x\") }"), want: "append writes p.Args, which is rooted in p of boundary type Profile"},
+		{name: "copy into B-rooted slice", overrides: withObserve("func local() { var p Profile; copy(p.Args, []string{\"x\"}) }"), want: "copy writes p.Args, which is rooted in p of boundary type Profile"},
+		{name: "send on B-rooted channel", overrides: withObserve("func local() { var x execution; x.done <- \"ok\" }"), want: "sends on x.done, which is rooted in x of boundary type execution"},
+		{name: "pointer method call on B value", overrides: withObserve("func local(ctx context.Context) error { var x execution; return x.invoke(ctx, \"a\") }"), want: "calls pointer method invoke on x, which is rooted in x of boundary type execution"},
+		{name: "pointer method value on B value", overrides: withObserve("func local() { var x execution; f := x.invoke; _ = f }"), want: "calls pointer method invoke on x"},
+		{name: "address of B-rooted field", overrides: withObserve("func local() *string { var p Profile; return &p.Executable }"), want: "takes the address of p.Executable, which is rooted in p of boundary type Profile"},
+		{name: "map alias of B package variable", overrides: withObserve("func alias() { r := Registry; r[\"k\"] = \"v\" }"), want: "uses package-level variable worker.Registry"},
+		{name: "type assertion to B type", overrides: withObserve("func recover2(err error) { if e, ok := err.(*stateError); ok { _ = e } }"), want: "asserts to *stateError"},
+		{name: "type switch to B type", overrides: withObserve("func recover2(err error) {\n\tswitch err.(type) {\n\tcase *stateError:\n\t}\n}"), want: "asserts to *stateError"},
+		{name: "syscall import", extra: header + "import \"syscall\"\n\nfunc pid(context.Context) int { return syscall.Getpid() }\n", want: "imports syscall"},
+		{name: "unsafe import", extra: header + "import \"unsafe\"\n\nfunc size(context.Context) uintptr { return unsafe.Sizeof(0) }\n", want: "imports unsafe"},
+		{name: "os/exec import", extra: header + "import \"os/exec\"\n\nfunc run(ctx context.Context) error { return exec.CommandContext(ctx, \"true\").Run() }\n", want: "imports os/exec"},
+		{name: "banned internal import", extra: header + "import \"" + fixtureModule + "/internal/hostguard\"\n\nfunc check(context.Context) error { return hostguard.Check() }\n", want: "imports " + fixtureModule + "/internal/hostguard"},
+		{name: "linkname directive", extra: header + "import _ \"unsafe\"\n\n//go:linkname now time.now\nfunc now() (int64, int32, int64)\n\nfunc use(context.Context) { now() }\n", want: "compiler directive \"//go:linkname\""},
 		{name: "generate directive", overrides: withObserve("//go:generate echo hi"), want: "compiler directive \"//go:generate\""},
-		{name: "call to non-seam B method", overrides: withObserve("func q(x *execution) error { return x.quarantine() }"), want: "quarantine, which is not C/G"},
-		{name: "method value of non-seam", overrides: withObserve("func q(x *execution) func() error { return x.quarantine }"), want: "quarantine, which is not C/G"},
+		{name: "call to non-seam B method", overrides: withObserve("func q() func() error { var x execution; return x.quarantine }"), want: "quarantine, which is not C/G"},
+		{name: "method expression of non-seam", overrides: withObserve("var q = (*execution).quarantine"), want: "quarantine, which is not C/G"},
 		{name: "call to B function", overrides: withObserve("func r() error { return Root() }"), want: "worker.Root, which is not C/G"},
-		{name: "call to B interface method", overrides: withObserve("func r(run Runner) error { return run.Run() }"), want: "Run, which is not C/G"},
 		{name: "call to non-allowlisted std", overrides: map[string]string{observe: strings.Replace(fixtureBase[observe], "\"strings\"", "\"os\"\n\t\"strings\"", 1) + "\nfunc pid() int { return os.Getpid() }\n"}, want: "uses os.Getpid"},
 		{name: "package var initializer", overrides: withObserve("var computed = len(clip(\"a\", 1))"), want: "package-level var initializer"},
 		{name: "assignment to B variable", overrides: withObserve("func set() { Hook = \"carry\" }"), want: "assigns package-level variable worker.Hook"},
 		{name: "address of B variable", overrides: withObserve("func ref() *string { return &Hook }"), want: "takes the address of package-level variable worker.Hook"},
-		{name: "assignment to std variable", overrides: map[string]string{"internal/store/store.go": fixtureBase["internal/store/store.go"] + "\nfunc reset() { os.Args = nil }\n"}, want: "assigns package-level variable os.Args"},
+		{name: "assignment to std variable", overrides: store("func reset() { os.Args = nil }"), want: "assigns package-level variable os.Args"},
+		{name: "std reference variable", overrides: store("func args() []string { return os.Args }"), want: "uses package-level variable os.Args"},
+		{name: "non-root C calls B function", overrides: store("func l() int { return limit() }"), want: "store.limit, which is boundary code"},
+		{name: "non-root C aliases B variable", overrides: store("func l() { Limits[0] = 9 }"), want: "uses package-level variable store.Limits"},
 		{name: "call through B function variable", overrides: map[string]string{
 			"internal/worker/exec.go": fixtureBase["internal/worker/exec.go"] + "\nvar hook = func() {}\n",
 			observe:                   fixtureBase[observe] + "\nfunc h() { hook() }\n",
 		}, want: "calls function value hook"},
-		{name: "cgo file", overrides: map[string]string{observe: header + "// #include <stdio.h>\nimport \"C\"\n\nfunc f(context.Context) {}\n"}, want: "not part of the darwin/arm64 build"},
-		{name: "excluded by build tag", overrides: map[string]string{observe: "//go:build linux\n\n" + fixtureBase[observe]}, want: "not part of the darwin/arm64 build"},
+		{name: "cgo file", extra: header + "// #include <stdio.h>\nimport \"C\"\n\nfunc f(context.Context) {}\n", want: "not part of the darwin/arm64 build"},
+		{name: "excluded by build tag", extra: "//go:build linux\n\npackage worker\n\nfunc tagged() {}\n", want: "not part of the darwin/arm64 build"},
 		{name: "G syscall not in g_calls", overrides: map[string]string{"internal/maintenance/run.go": "package maintenance\n\nimport \"syscall\"\n\nfunc pid() int { return syscall.Getpid() }\n"}, want: "uses syscall.Getpid, which is not listed in g_calls"},
 		{name: "unknown seam", manifest: func(m map[string]any) {
 			m["seams"] = map[string][]string{"internal/worker": {"(*execution).invoke", "clip", "(*execution).missing"}}
@@ -234,7 +324,14 @@ func TestCarryFileRules(t *testing.T) {
 			if tc.manifest != nil {
 				tc.manifest(manifest)
 			}
-			problems := runFixture(t, tc.overrides, manifest)
+			overrides := tc.overrides
+			if tc.extra != "" {
+				const extra = "internal/worker/observe_extra.go"
+				overrides = map[string]string{extra: tc.extra}
+				classes := manifest["classes"].(map[string][]string)
+				classes["C"] = append(classes["C"], extra)
+			}
+			problems := runFixture(t, overrides, manifest)
 			if !slices.ContainsFunc(problems, func(p string) bool { return strings.Contains(p, tc.want) }) {
 				t.Fatalf("want a problem containing %q, got:\n%s", tc.want, strings.Join(problems, "\n"))
 			}
