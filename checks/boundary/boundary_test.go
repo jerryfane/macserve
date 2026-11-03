@@ -73,6 +73,21 @@ func TestBoundaryManifestPinsAssets(t *testing.T) {
 		"internal/evidence/artifacts.go", "internal/evidence/new.go",
 		"internal/maintenance/maintenance_invariants_test.go", "internal/maintenance/maintenance_test.go",
 	}
+	// The root worker trusts the controller's job snapshot: validateJob only
+	// re-derives it from itself (profiles.ForSnapshot). Every path that
+	// chooses, persists or returns which repository, commit, profile or
+	// recipe a job runs with is therefore B, as is everything that signs or
+	// verifies receipts, the controller-side source tree export the worker
+	// reads .macserve.json from, and the root-side parser of job-produced
+	// test output.
+	pinned = append(pinned,
+		"internal/store/store.go", "internal/store/queue.go", "internal/store/github.go", "internal/store/runtime.go", "internal/store/new.go",
+		"internal/githubpull/poller.go", "internal/githubpull/publication.go", "internal/githubpull/new.go",
+		"internal/githubapi/client.go", "internal/githubapi/endpoints.go", "internal/githubapi/new.go",
+		"internal/receipt/signer.go", "internal/receipt/validate.go", "internal/receipt/canonical.go", "internal/receipt/new.go",
+		"internal/controller/types.go", "internal/controller/runtime.go", "internal/controller/completion.go",
+		"internal/api/jobs.go", "internal/evidence/tests.go", "internal/source/git.go", "internal/source/source.go", "internal/source/tree.go",
+	)
 	for _, file := range pinned {
 		if class, err := m.Classify(file); err != nil || class != ClassB {
 			t.Errorf("%s: class %q (%v), want B", file, class, err)
@@ -83,7 +98,7 @@ func TestBoundaryManifestPinsAssets(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, f := range files {
-		for _, prefix := range []string{"assets/", ".github/", "checks/", "cmd/macserve/", "internal/qualification/", "internal/hostguard/"} {
+		for _, prefix := range []string{"assets/", ".github/", "checks/", "cmd/macserve/", "internal/qualification/", "internal/hostguard/", "internal/store/", "internal/githubpull/", "internal/githubapi/", "internal/receipt/", "internal/controller/", "internal/api/", "internal/profiles/", "internal/model/", "internal/source/"} {
 			if strings.HasPrefix(f.Path, prefix) {
 				if class, _ := m.Classify(f.Path); class != ClassB {
 					t.Errorf("%s: class %q, want B", f.Path, class)

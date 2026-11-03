@@ -98,9 +98,9 @@ func fixtureManifest() map[string]any {
 	}
 }
 
-// runFixture writes the base fixture with overrides (an empty value deletes
-// a file), then runs the full check.
-func runFixture(t *testing.T, overrides map[string]string, manifest map[string]any) []string {
+// writeFixture writes the base fixture with overrides (an empty value
+// deletes a file) and returns its root and tracked files.
+func writeFixture(t *testing.T, overrides map[string]string, manifest map[string]any) (string, []File) {
 	t.Helper()
 	root := t.TempDir()
 	files := maps.Clone(fixtureBase)
@@ -127,6 +127,13 @@ func runFixture(t *testing.T, overrides map[string]string, manifest map[string]a
 		}
 		tracked = append(tracked, File{Path: name, Mode: "100644"})
 	}
+	return root, tracked
+}
+
+// runFixture writes the fixture and runs the full check on its absolute root.
+func runFixture(t *testing.T, overrides map[string]string, manifest map[string]any) []string {
+	t.Helper()
+	root, tracked := writeFixture(t, overrides, manifest)
 	_, problems, err := Check(root, tracked)
 	if err != nil {
 		t.Fatal(err)
@@ -137,6 +144,41 @@ func runFixture(t *testing.T, overrides map[string]string, manifest map[string]a
 func TestCarryFileRulesAcceptCleanFixture(t *testing.T) {
 	if problems := runFixture(t, nil, fixtureManifest()); len(problems) > 0 {
 		t.Fatalf("clean fixture rejected:\n%s", strings.Join(problems, "\n"))
+	}
+}
+
+// TestCheckRelativeRoot runs the check as `Check(".")` and through a
+// relative path from a subdirectory: the clean fixture passes and a seeded
+// violation is still reported.
+func TestCheckRelativeRoot(t *testing.T) {
+	const observe = "internal/worker/observe.go"
+	for name, tc := range map[string]struct {
+		overrides map[string]string
+		want      string
+	}{
+		"clean":     {nil, ""},
+		"violation": {map[string]string{observe: fixtureBase[observe] + "\nfunc init() {}\n"}, "init function"},
+	} {
+		for _, dir := range []string{".", "internal/worker"} {
+			t.Run(name+" from "+dir, func(t *testing.T) {
+				root, tracked := writeFixture(t, tc.overrides, fixtureManifest())
+				t.Chdir(filepath.Join(root, filepath.FromSlash(dir)))
+				rel, err := filepath.Rel(filepath.Join(root, filepath.FromSlash(dir)), root)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, problems, err := Check(rel, tracked)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tc.want == "" && len(problems) > 0 {
+					t.Fatalf("Check(%q) rejected the clean fixture:\n%s", rel, strings.Join(problems, "\n"))
+				}
+				if tc.want != "" && !slices.ContainsFunc(problems, func(p string) bool { return strings.Contains(p, tc.want) }) {
+					t.Fatalf("Check(%q): want %q, got %v", rel, tc.want, problems)
+				}
+			})
+		}
 	}
 }
 

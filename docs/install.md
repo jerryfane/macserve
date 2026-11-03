@@ -259,7 +259,7 @@ Every release still requires the full owner requalification above. This section 
 |---|---|
 | **B** (boundary) | Creates, enforces, measures or qualifies the isolation boundary, runs as root with job-influenced input, or builds and guards this classification (`assets/**`, `go.mod`, `go.sum`, `.github/**`, `checks/**`, `BOUNDARY.json`, `cmd/macserve/**`, `internal/worker/**`, `internal/maintenance/**`, `internal/qualification/**`, principal authorization, …). A change needs full requalification. |
 | **G** (gate tuning) | Health-loop cadence and resource accounting. Empty: enabling it is itself a B change in a fully requalified release. |
-| **C** (carry) | Controller-side code and job observation that reach root processes only through reviewed seams (for example `internal/worker/job_observation.go`, `internal/worker/report_types.go`, `internal/store/**` except `auth.go`). |
+| **C** (carry) | Code that reaches root processes only through reviewed seams and cannot choose what a job runs: `internal/worker/job_observation.go`, `internal/worker/report_types.go`, `internal/evidence/{junit,types}.go`. The store, GitHub polling and publication, receipts, source export and the controller stay B because the root worker trusts the job snapshot (repository, commit, source tree, profile, recipe) they produce. |
 | **T** (text/tests) | Documentation, licence and tests named for a C/G file. |
 
 Classification is default-deny: an unlisted file is an error. Patterns use `*` within one path segment and `**` for whole segments; an exact path beats a pattern without `**`, which beats one with `**`, and more literal characters win within a tier. Two classes matching at the same specificity is an error.
