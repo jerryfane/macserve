@@ -93,6 +93,11 @@ func CheckSources(root string, m *Manifest, classes map[string]string) ([]string
 		if p.Standard || p.Module == nil || p.Module.Path != module {
 			continue
 		}
+		// go list may report a directory through a symlinked $PWD; compare
+		// and parse in the resolved form, like root.
+		if p.Dir, err = filepath.EvalSymlinks(p.Dir); err != nil {
+			return nil, err
+		}
 		dir, err := c.rel(p.Dir)
 		if err != nil {
 			return nil, err
@@ -153,7 +158,9 @@ func goTool() string {
 func goList(root string) ([]listedPackage, error) {
 	cmd := exec.Command(goTool(), "list", "-e", "-export", "-deps", "-json=ImportPath,Dir,Export,Standard,GoFiles,CgoFiles,Module,Error", "./...")
 	cmd.Dir = root
-	cmd.Env = append(os.Environ(), buildEnv...)
+	// PWD must name root itself: the go command trusts an inherited $PWD
+	// that resolves to the same directory and reports paths through it.
+	cmd.Env = slices.Concat(os.Environ(), buildEnv, []string{"PWD=" + root})
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
