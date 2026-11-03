@@ -2,7 +2,9 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -21,6 +23,7 @@ func quiescentFixture(t *testing.T, persistence string) (Options, GUIBaseline) {
 		}
 	}
 	options.BaselinePath = filepath.Join(filepath.Dir(options.PersistencePath), "baseline.json")
+	options.Root = privateRootFixture(t)
 	baseline := GUIBaseline{JobUID: options.JobUID, Boot: boot, PersistenceSHA256: persistence, Processes: []ProcessIdentity{{PID: 100, Start: "10:0"}, {PID: 101, Start: "10:1"}}, Launchd: &LaunchdEnvironment{GUI: map[string]string{}, User: map[string]string{}}}
 	if err := saveBaseline(options.BaselinePath, baseline); err != nil {
 		t.Fatal(err)
@@ -71,5 +74,27 @@ func TestWorkerQuiescentFailsOnChangedPersistence(t *testing.T) {
 	report, err := workerQuiescent(context.Background(), options, quiescentScope([]processSample{sample(100, "10:0")}))
 	if err == nil || report.Quiescent {
 		t.Fatalf("changed reviewed persistence passed: %+v", report)
+	}
+}
+
+func TestWorkerQuiescentFailsOnQuarantineOrInconclusive(t *testing.T) {
+	for name, record := range map[string]string{quarantineRecord: `{"quarantined":true}`, admissionInconclusiveRecord: ""} {
+		t.Run(name, func(t *testing.T) {
+			options, _ := quiescentFixture(t, "")
+			data := []byte(record)
+			if record == "" {
+				var err error
+				if data, err = json.Marshal(AdmissionInconclusive{Reason: "unsettled", Since: time.Now().Add(-time.Minute), CheckedAt: time.Now()}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(options.Root, name), data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			report, err := workerQuiescent(context.Background(), options, quiescentScope([]processSample{sample(100, "10:0")}))
+			if err == nil || report.Quiescent {
+				t.Fatalf("%s worker passed: %+v", name, report)
+			}
+		})
 	}
 }

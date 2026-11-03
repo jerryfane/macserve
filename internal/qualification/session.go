@@ -251,9 +251,15 @@ func Begin(ctx context.Context, o BeginOptions) error {
 		if o.Previous != "" || o.Requalify {
 			return errors.New("carry chains to the anchored session; do not pass --previous or --requalify")
 		}
-		a, err := carryableConfiguration()
+		a, _, live, err := carryableConfiguration()
 		if err != nil {
 			return err
+		}
+		if c.CarryBinarySHA256, err = installedSelf(); err != nil {
+			return err
+		}
+		if c.CarryBinarySHA256 != live[installedHelper] {
+			return errors.New("installed macserve changed while the carry sitting began")
 		}
 		if err = carryAllowed(a, now); err != nil {
 			return err
@@ -269,11 +275,11 @@ func Begin(ctx context.Context, o BeginOptions) error {
 		if carried, err = installedQualification(mc); err != nil {
 			return err
 		}
-		live, err := maintenance.Inspect(ctx, mc)
+		observed, err := maintenance.Inspect(ctx, mc)
 		if err != nil {
 			return err
 		}
-		if err = carryQualificationCurrent(carried, live); err != nil {
+		if err = carryQualificationCurrent(carried, observed); err != nil {
 			return err
 		}
 		previousDir = a.Session

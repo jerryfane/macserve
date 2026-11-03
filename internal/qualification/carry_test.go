@@ -47,8 +47,8 @@ func carryRecord(from, to, session string, at time.Time) AnchorCarry {
 // (requalify, activation-check) refuses even that.
 func TestCarryAnchorAllowsOnlyBinaryDigest(t *testing.T) {
 	anchored := carryBindings(oldBinary)
-	if err := carryChanges(anchored, carryBindings(oldBinary)); err != nil {
-		t.Fatalf("unchanged configuration refused: %v", err)
+	if err := carryChanges(anchored, carryBindings(oldBinary)); err == nil {
+		t.Fatal("unchanged binary carried")
 	}
 	if err := carryChanges(anchored, carryBindings(newBinary)); err != nil {
 		t.Fatalf("binary-only change refused: %v", err)
@@ -363,6 +363,18 @@ func TestCarryRequiresJobProbeDenials(t *testing.T) {
 	}
 }
 
+func TestCarryBinaryBindsTheSitting(t *testing.T) {
+	// Tests do not run as /Library/macserve/bin/macserve.
+	if _, err := installedSelf(); err == nil {
+		t.Fatal("test binary accepted as the installed macserve")
+	}
+	c := carryChallengeFixture()
+	c.CarryBinarySHA256 = newBinary
+	if _, err := carryBinary(c); err == nil {
+		t.Fatal("carry step accepted from a binary other than the installed one")
+	}
+}
+
 func TestCarryRequiresToolEvidenceIdentity(t *testing.T) {
 	xcode := model.Xcode{Version: "26.0", Build: "17A"}
 	c := carryChallengeFixture()
@@ -453,9 +465,36 @@ func TestCarrySessionNotApprovable(t *testing.T) {
 	if reflect.ValueOf(persistenceScan(true)).Pointer() != reflect.ValueOf(maintenance.RebindPersistenceBuild).Pointer() || reflect.ValueOf(persistenceScan(false)).Pointer() != reflect.ValueOf(maintenance.VerifyPersistence).Pointer() || !calls["snapshot"]["persistenceScan"] {
 		t.Fatal("carry snapshot does not select the strict build rebind")
 	}
-	for _, gate := range []string{"carryableConfiguration", "carryAllowed", "carryQualificationCurrent", "loadApprovedChallenge"} {
+	for _, gate := range []string{"carryableConfiguration", "installedSelf", "carryAllowed", "carryQualificationCurrent", "loadApprovedChallenge"} {
 		if !calls["Begin"][gate] {
 			t.Fatalf("begin --carry skips %s", gate)
+		}
+	}
+	// Tool evidence and the commit run as the binary the sitting began with,
+	// and the commit swaps the anchor only if it is unchanged.
+	toolrun, err := parser.ParseFile(fset, "toolrun.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, decl := range toolrun.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == "RunToolEvidence" {
+			found := false
+			ast.Inspect(fn, func(n ast.Node) bool {
+				if call, ok := n.(*ast.CallExpr); ok {
+					if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "carryBinary" {
+						found = true
+					}
+				}
+				return true
+			})
+			if !found {
+				t.Fatal("carry tool evidence does not bind the carried binary")
+			}
+		}
+	}
+	for _, gate := range []string{"carryBinary", "carryableConfiguration", "protectedRead"} {
+		if !calls["Carry"][gate] {
+			t.Fatalf("qualify carry skips %s", gate)
 		}
 	}
 }

@@ -81,9 +81,8 @@ func TestRebindBuildRefusesEveryOtherBindingDifference(t *testing.T) {
 		"version":         func(r *persistenceAttestation) { r.Binding.Version++ },
 		"manifest_sha256": func(r *persistenceAttestation) { r.Binding.ManifestSHA256 = strings.Repeat("0", 64) },
 	}
-	// The reviewed manifest itself belongs to the job account, so a changed job
-	// UID already fails reading it; it is checked separately below.
 	live := map[string]func(*Options){
+		"job_uid":        func(o *Options) { o.JobUID++ },
 		"job_gid":        func(o *Options) { o.JobGID++ },
 		"owner_uid":      func(o *Options) { o.OwnerUID++ },
 		"controller_uid": func(o *Options) { o.ControllerUID++ },
@@ -119,18 +118,6 @@ func TestRebindBuildRefusesEveryOtherBindingDifference(t *testing.T) {
 			check(t, field, changed, storedAttestation(t, options), options)
 		})
 	}
-	t.Run("job_uid", func(t *testing.T) {
-		options, expected := attestationFixture(t)
-		attestFixture(t, options, expected, false)
-		changed := options
-		changed.JobUID++
-		if err := rebindPersistenceBuild(context.Background(), changed, noScan(t)); err == nil {
-			t.Fatal("job UID difference accepted")
-		}
-		if record, _, err := readAttestation(options); err != nil || record.Valid {
-			t.Fatalf("job UID difference left a valid attestation: %+v %v", record, err)
-		}
-	})
 	t.Run("explicit full scan rebinds boot silently", func(t *testing.T) {
 		options, expected := attestationFixture(t)
 		attestFixture(t, options, expected, false)

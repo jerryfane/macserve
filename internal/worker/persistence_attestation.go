@@ -405,18 +405,26 @@ func rebindPersistenceBuild(ctx context.Context, options Options, collect func(c
 }
 
 // buildOnlyRebind accepts a present, valid, unrevoked stored attestation that
-// differs from the live binding at most in Build.
-func buildOnlyRebind(stored persistenceAttestation, present bool, live persistenceAttestationBinding) error {
+// differs from the live binding at most in Build. Before the reviewed
+// manifest is read (manifestKnown false) it compares every other field, so an
+// identity or boot difference refuses before anything could revoke.
+func buildOnlyRebind(stored persistenceAttestation, present bool, live persistenceAttestationBinding, manifestKnown bool) error {
 	if !present || !stored.Valid || stored.NeedsReview || !stored.RevokedAt.IsZero() {
 		return fmt.Errorf("%w: no valid unrevoked attestation to rebind", errPersistenceRebindRefused)
 	}
-	if changed := bindingDifferences(stored.Binding, live); len(changed) != 0 {
-		return fmt.Errorf("%w: binding differs beyond build: %s", errPersistenceRebindRefused, strings.Join(changed, ", "))
+	normalized := stored.Binding
+	normalized.Build = live.Build
+	if !manifestKnown {
+		normalized.ManifestSHA256 = live.ManifestSHA256
+	}
+	if normalized != live {
+		return fmt.Errorf("%w: binding differs beyond build: %s", errPersistenceRebindRefused, strings.Join(bindingDifferences(normalized, live), ", "))
 	}
 	return nil
 }
 
-// bindingDifferences names every binding field other than Build that differs.
+// bindingDifferences names, for the refusal message, every binding field
+// other than Build that differs.
 func bindingDifferences(stored, live persistenceAttestationBinding) []string {
 	var changed []string
 	for _, f := range []struct {
@@ -441,8 +449,9 @@ func bindingDifferences(stored, live persistenceAttestationBinding) []string {
 
 // scanAndPublish is the full scan shared by verification and the strict build
 // rebind. accept, when set, decides on the stored record and the live binding
-// before collection; its refusal never revokes.
-func scanAndPublish(ctx context.Context, options Options, reset bool, collect func(context.Context, Options) (PersistenceManifest, error), accept func(persistenceAttestation, bool, persistenceAttestationBinding) error) error {
+// before collection: first without the manifest digest, before anything can
+// revoke, then with it. Its refusal never revokes.
+func scanAndPublish(ctx context.Context, options Options, reset bool, collect func(context.Context, Options) (PersistenceManifest, error), accept func(stored persistenceAttestation, present bool, live persistenceAttestationBinding, manifestKnown bool) error) error {
 	ctx, cancel := context.WithTimeout(ctx, PersistenceOperationTimeout)
 	defer cancel()
 	// A contending invocation does not inspect or revoke anything. Its bounded
@@ -473,6 +482,15 @@ func scanAndPublish(ctx context.Context, options Options, reset bool, collect fu
 			if record.NeedsReview && !(reset && record.Reason == "reset_required") {
 				return errPersistenceAttestationRevoked
 			}
+			if accept != nil {
+				identity, err := attestationBinding(options, nil)
+				if err != nil {
+					return err
+				}
+				if err = accept(record, len(data) != 0, identity, false); err != nil {
+					return err
+				}
+			}
 			revision, checked = record.Revision, true
 			expected, accepted, err = readPersistenceContext(scanCtx, options.PersistencePath, options.JobUID)
 			if err != nil {
@@ -480,7 +498,7 @@ func scanAndPublish(ctx context.Context, options Options, reset bool, collect fu
 			}
 			binding, err = attestationBinding(options, accepted)
 			if err == nil && accept != nil {
-				err = accept(record, len(data) != 0, binding)
+				err = accept(record, len(data) != 0, binding, true)
 			}
 			return err
 		})

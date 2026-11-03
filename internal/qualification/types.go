@@ -75,6 +75,9 @@ type Challenge struct {
 	// to the anchored session. Only qualify carry consumes it: collect,
 	// approve and reapprove refuse it.
 	Carry bool `json:"carry,omitempty"`
+	// CarryBinarySHA256 is the installed bin/macserve a carry sitting
+	// measures; begin, tool evidence and the commit all run as that binary.
+	CarryBinarySHA256 string `json:"carry_binary_sha256,omitempty"`
 }
 
 // recipes returns one qualification unit per enabled profile and template, in

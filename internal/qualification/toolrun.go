@@ -147,6 +147,9 @@ type ToolEvidence struct {
 	Started         time.Time `json:"started"`
 	Finished        time.Time `json:"finished"`
 	Runs            []ToolRun `json:"runs"`
+	// ExecutableSHA256 is the running bin/macserve, recorded for carry
+	// sittings only (see Challenge.CarryBinarySHA256).
+	ExecutableSHA256 string `json:"executable_sha256,omitempty"`
 }
 
 // loadSourcePins reads the protected pins and requires one pin per profile or
@@ -266,6 +269,12 @@ func RunToolEvidence(ctx context.Context, id string) error {
 		return err
 	}
 	evidence := ToolEvidence{Schema: schema, Session: id, ChallengeSHA256: digest(raw), SourcesSHA256: pinsDigest, Started: time.Now().UTC()}
+	if c.Carry {
+		// A carry re-measures recipes with the carried binary only.
+		if evidence.ExecutableSHA256, err = carryBinary(c); err != nil {
+			return err
+		}
+	}
 	if err = saveJSON(filepath.Join(dir, "tool-evidence-attempt.json"), evidence, 0600); err != nil {
 		return fmt.Errorf("one tool evidence run per session; begin a new session: %w", err)
 	}

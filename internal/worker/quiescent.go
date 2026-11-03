@@ -3,6 +3,9 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -21,8 +24,9 @@ type QuiescentReport struct {
 // ObserveGUIBaseline, which tolerates active-job processes, it fails on any
 // job-UID process outside the audited baseline once verified relaunches and
 // tolerated launches are filtered: the broker's admission census
-// (observeQuiet), including its wait for children of tolerated launches. It
-// never signals, adopts, quarantines or writes state.
+// (observeQuiet), including its wait for children of tolerated launches. A
+// quarantined or admission-inconclusive worker also fails. It never signals,
+// adopts, quarantines or writes state.
 func WorkerQuiescent(ctx context.Context, options Options) (QuiescentReport, error) {
 	scope := &processScope{uid: int(options.JobUID), sample: identityProcesses, agents: nativeAgents{}, interval: 50 * time.Millisecond, childWait: toleratedChildWait}
 	return workerQuiescent(ctx, options, scope)
@@ -31,6 +35,18 @@ func WorkerQuiescent(ctx context.Context, options Options) (QuiescentReport, err
 func workerQuiescent(parent context.Context, options Options, scope *processScope) (QuiescentReport, error) {
 	report := QuiescentReport{JobUID: options.JobUID}
 	err := func() error {
+		// A durable quarantine is contamination evidence and an inconclusive
+		// admission is an unsettled worker; neither is quiescent.
+		if _, err := os.Lstat(filepath.Join(options.Root, quarantineRecord)); err == nil {
+			return fmt.Errorf("%w: worker quarantined; administrator reset required", ErrRecovery)
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		if inconclusive, err := ReadAdmissionInconclusive(options.Root); err != nil {
+			return err
+		} else if inconclusive != nil {
+			return fmt.Errorf("worker admission inconclusive since %s: %s", inconclusive.Since.Format(time.RFC3339), inconclusive.Reason)
+		}
 		baseline, err := loadBaseline(options.BaselinePath, options.JobUID)
 		if err != nil {
 			return err
