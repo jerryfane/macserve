@@ -281,7 +281,9 @@ func ParseRedirect(text, host string) (code, state string, installation int64, e
 	return "", "", 0, ErrRedirect
 }
 
-var startPage = template.Must(template.New("start").Parse(`<!doctype html>
+// startPageSource is parsed when a Handler is built, not at package init:
+// checks/readonly walks every package initialiser in the binary.
+const startPageSource = `<!doctype html>
 <html><head><meta charset="utf-8"><title>macserve: create GitHub App</title></head>
 <body>
 <p>Sending the macserve GitHub App manifest to GitHub…</p>
@@ -291,7 +293,7 @@ var startPage = template.Must(template.New("start").Parse(`<!doctype html>
 </form>
 <script>document.getElementById("manifest-form").submit()</script>
 </body></html>
-`))
+`
 
 const donePage = `<!doctype html><html><head><meta charset="utf-8"><title>macserve</title></head><body><p>%s</p></body></html>`
 
@@ -299,6 +301,7 @@ const donePage = `<!doctype html><html><head><meta charset="utf-8"><title>macser
 // redirect. Requests for any other Host are refused, so a page that
 // rebinds its own name to 127.0.0.1 cannot read the state.
 func (f *Flow) Handler() http.Handler {
+	startPage := template.Must(template.New("start").Parse(startPageSource))
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()

@@ -15,12 +15,14 @@ import (
 	"github.com/jerryfane/macserve/internal/onboarding"
 )
 
-// connectGitHubHost and connectGitHubIn are test seams.
+// connectGitHubHost, connectGitHubIn and connectGitHubHTTP are test seams.
+// They are function literals or zero values: checks/readonly walks every
+// package initialiser, so none reads process state at init.
 var (
 	connectGitHubHost = func() onboarding.Host {
 		return onboarding.Host{Root: deploy.Prefix, EUID: os.Geteuid(), SudoUID: os.Getenv("SUDO_UID"), ConsoleUID: onboarding.SystemConsoleUID}
 	}
-	connectGitHubIn   io.Reader = os.Stdin
+	connectGitHubIn   = func() io.Reader { return os.Stdin }
 	connectGitHubHTTP githubapi.HTTPOptions
 )
 
@@ -124,7 +126,7 @@ func runConnectGitHub(args []string, stdout, stderr io.Writer) int {
 	confirmed, status, err := onboarding.Connect(ctx, onboarding.ConnectOptions{
 		Account: onboarding.Account{Login: ownerLogin, Org: org}, AppName: onboarding.AppName(hostname),
 		Repository: repo, RepositoryID: repoID, Author: author, Scope: scope,
-		Listener: listener, In: connectGitHubIn, Out: stdout, HTTP: connectGitHubHTTP,
+		Listener: listener, In: connectGitHubIn(), Out: stdout, HTTP: connectGitHubHTTP,
 		Install: func(c onboarding.Confirmed) error {
 			enrollment := onboarding.Enrollment{
 				AppID: c.App.ID, InstallationID: c.Installation.ID, Repository: repo, RepositoryID: repoID,
