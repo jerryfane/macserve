@@ -111,3 +111,7 @@ func observe(ctx context.Context, x *execution) error {
 	x.result.Observation.Architecture = runtime.GOARCH
 	return nil
 }
+
+// TEMPORARY red demonstration (to be reverted): a carry file declares a
+// method on a boundary type.
+func (x *execution) observeHook() {}
