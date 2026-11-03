@@ -78,8 +78,11 @@ func (b *boundedBuffer) Write(p []byte) (int, error) {
 
 // command builds the process for one allowed argv: the absolute path as
 // given (never looked up), the fixed environment, cwd "/", no stdin and
-// bounded output. It is the package's only exec.Cmd construction.
+// bounded output. It is the package's only exec.Cmd construction. It checks
+// and uses its own copy of argv, so a caller changing its slice
+// concurrently cannot run something other than what was checked.
 func command(ctx context.Context, argv []string) (*exec.Cmd, *boundedBuffer, error) {
+	argv = slices.Clone(argv)
 	if !AllowedCommand(argv) {
 		return nil, nil, fmt.Errorf("refused: %q is not a read-only preflight command", argv)
 	}
@@ -102,11 +105,12 @@ func runReadOnly(ctx context.Context, argv []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	name := filepath.Base(cmd.Path)
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("%s: %v", filepath.Base(argv[0]), err)
+		return "", fmt.Errorf("%s: %v", name, err)
 	}
 	if out.over {
-		return "", fmt.Errorf("%s: output too large", filepath.Base(argv[0]))
+		return "", fmt.Errorf("%s: output too large", name)
 	}
 	return out.buf.String(), nil
 }

@@ -1,6 +1,16 @@
 // Package readonly proves that `macserve setup --plan` cannot change host
 // state.
 //
+// Scope: this is a release-build tripwire for reviewed code, not a sandbox
+// and not a proof against a malicious committer. It checks the darwin/arm64
+// CGO_ENABLED=0 release build only. Accepted residuals (PR #68 review,
+// https://github.com/jerryfane/macserve/pull/68#issuecomment-6617297395):
+// build-constrained files outside the read-only package (for example
+// darwin && cgo, which a developer CGO=1 build would link), unsafe
+// operations inside the files listed in Policy.UnsafeFiles, and the
+// start-up code of third-party dependencies (purego). File identity always
+// comes from unadjusted positions, and //line directives are refused.
+//
 // It type-checks the darwin/arm64 release build (CGO disabled) from source
 // and walks, as code that runs:
 //   - every declaration of the read-only package (every file, so a new file
@@ -507,7 +517,7 @@ func (c *checker) checkLinkage(path string, src *source) {
 		}
 	}
 	for _, f := range src.files {
-		name := c.b.fset.Position(f.Pos()).Filename
+		name := c.b.fset.PositionFor(f.Pos(), false).Filename
 		rel, err := c.rel(name)
 		if err != nil {
 			c.problem("%s: %v", name, err)
@@ -525,15 +535,18 @@ func (c *checker) checkLinkage(path string, src *source) {
 		for _, group := range f.Comments {
 			for _, comment := range group.List {
 				text := comment.Text
+				if strings.HasPrefix(text, "//line ") || strings.HasPrefix(text, "/*line ") {
+					c.problem("%s: //line directive in linked module code", c.b.fset.PositionFor(comment.Pos(), false))
+				}
 				if strings.HasPrefix(text, "//export ") {
-					c.problem("%s: //export directive", c.b.fset.Position(comment.Pos()))
+					c.problem("%s: //export directive", c.b.fset.PositionFor(comment.Pos(), false))
 				}
 				if !strings.HasPrefix(text, "//go:") {
 					continue
 				}
 				directive := strings.Fields(text)[0]
 				if !slices.Contains(allowedDirectives, directive) {
-					c.problem("%s: %s directive in linked module code", c.b.fset.Position(comment.Pos()), directive)
+					c.problem("%s: %s directive in linked module code", c.b.fset.PositionFor(comment.Pos(), false), directive)
 				}
 			}
 		}
@@ -565,7 +578,7 @@ func (c *checker) checkUnsafeFiles() {
 		}
 		uses := false
 		for _, f := range src.files {
-			if r, err := c.rel(c.b.fset.Position(f.Pos()).Filename); err == nil && r == rel {
+			if r, err := c.rel(c.b.fset.PositionFor(f.Pos(), false).Filename); err == nil && r == rel {
 				for _, spec := range f.Imports {
 					uses = uses || spec.Path.Value == `"unsafe"`
 				}
@@ -609,7 +622,7 @@ func (c *checker) rel(abs string) (string, error) {
 
 // checkFile applies the import rules to a file of the read-only package.
 func (c *checker) checkFile(f *ast.File) {
-	name := c.b.fset.Position(f.Pos()).Filename
+	name := c.b.fset.PositionFor(f.Pos(), false).Filename
 	for _, spec := range f.Imports {
 		path, _ := strconv.Unquote(spec.Path.Value)
 		switch {
@@ -902,7 +915,7 @@ func (c *checker) checkTable() {
 	for _, e := range lit.Elts {
 		entry, ok := ast.Unparen(e).(*ast.CompositeLit)
 		if !ok {
-			c.problem("%s: command table entry is not a literal", c.b.fset.Position(e.Pos()))
+			c.problem("%s: command table entry is not a literal", c.b.fset.PositionFor(e.Pos(), false))
 			continue
 		}
 		values := map[string]ast.Expr{}
@@ -915,7 +928,7 @@ func (c *checker) checkTable() {
 		}
 		nv := src.info.Types[values[t.Name]].Value
 		if values[t.Name] == nil || nv == nil {
-			c.problem("%s: command table entry without a constant %s", c.b.fset.Position(e.Pos()), t.Name)
+			c.problem("%s: command table entry without a constant %s", c.b.fset.PositionFor(e.Pos(), false), t.Name)
 			continue
 		}
 		if nv.ExactString() != strconv.Quote(t.Key) {
@@ -925,7 +938,7 @@ func (c *checker) checkTable() {
 		id, _ := ast.Unparen(values[t.Run]).(*ast.Ident)
 		fn, _ := src.info.Uses[id].(*types.Func)
 		if id == nil || fn == nil || fn.FullName() != t.Root {
-			c.problem("%s: command table entry %q must run %s", c.b.fset.Position(e.Pos()), t.Key, t.Root)
+			c.problem("%s: command table entry %q must run %s", c.b.fset.PositionFor(e.Pos(), false), t.Key, t.Root)
 		}
 	}
 	if found != 1 {
@@ -984,7 +997,7 @@ type walker struct {
 	calls  map[*ast.Ident]*ast.CallExpr
 }
 
-func (w *walker) pos(p token.Pos) token.Position { return w.c.b.fset.Position(p) }
+func (w *walker) pos(p token.Pos) token.Position { return w.c.b.fset.PositionFor(p, false) }
 
 func (w *walker) inspect(node ast.Node) {
 	if w.calls == nil {
@@ -1011,6 +1024,8 @@ func (w *walker) inspect(node ast.Node) {
 func (w *walker) node(n ast.Node) {
 	info := w.src.info
 	switch n := n.(type) {
+	case *ast.GoStmt:
+		w.c.problem("%s: %s starts a goroutine; go statements are refused in walked code", w.pos(n.Pos()), w.caller)
 	case *ast.LabeledStmt:
 		w.c.problem("%s: %s has label %s; labels and goto are refused in walked code", w.pos(n.Pos()), w.caller, n.Label.Name)
 	case *ast.BranchStmt:
@@ -1391,15 +1406,15 @@ func (c *checker) use(obj types.Object, caller string, pos token.Pos, call *ast.
 		}
 		if c.module(obj.Pkg()) {
 			if _, dispatch := c.policy.Switch[key]; dispatch && caller != c.policy.Entry {
-				c.problem("%s: %s references %s; only %s may call the dispatch", c.b.fset.Position(pos), caller, key, c.policy.Entry)
+				c.problem("%s: %s references %s; only %s may call the dispatch", c.b.fset.PositionFor(pos, false), caller, key, c.policy.Entry)
 				return
 			}
 			if iface {
-				c.problem("%s: %s calls module interface method %s", c.b.fset.Position(pos), caller, key)
+				c.problem("%s: %s calls module interface method %s", c.b.fset.PositionFor(pos, false), caller, key)
 				return
 			}
 			if c.rootCode(caller) && obj.Pkg().Path() != c.policy.Package && !slices.Contains(c.policy.Roots, key) && !slices.Contains(c.policy.Seams, key) {
-				c.problem("%s: %s calls %s, which is not a listed seam", c.b.fset.Position(pos), caller, key)
+				c.problem("%s: %s calls %s, which is not a listed seam", c.b.fset.PositionFor(pos, false), caller, key)
 				return
 			}
 			c.enqueue(key)
@@ -1413,10 +1428,10 @@ func (c *checker) use(obj types.Object, caller string, pos token.Pos, call *ast.
 		key := obj.Pkg().Path() + "." + obj.Name()
 		if c.module(obj.Pkg()) {
 			if allowed, ok := c.policy.Refs[key]; ok && !slices.Contains(allowed, caller) {
-				c.problem("%s: %s references %s, allowed only in %v", c.b.fset.Position(pos), caller, key, allowed)
+				c.problem("%s: %s references %s, allowed only in %v", c.b.fset.PositionFor(pos, false), caller, key, allowed)
 			}
 			if obj.Pkg().Path() != c.policy.Package && holdsCode(obj.Type(), 3) && !slices.Contains(c.policy.Dispatch[key], caller) {
-				c.problem("%s: %s reads %s, a module variable that holds functions or interfaces", c.b.fset.Position(pos), caller, key)
+				c.problem("%s: %s reads %s, a module variable that holds functions or interfaces", c.b.fset.PositionFor(pos, false), caller, key)
 			}
 			return
 		}
@@ -1430,17 +1445,17 @@ func (c *checker) external(key, pkg, caller string, pos token.Pos, call *ast.Cal
 	}
 	use, ok := c.policy.Uses[key]
 	if !ok {
-		c.problem("%s: %s references %s, which is not allowed", c.b.fset.Position(pos), caller, key)
+		c.problem("%s: %s references %s, which is not allowed", c.b.fset.PositionFor(pos, false), caller, key)
 		return
 	}
 	if use.Caller != "" && use.Caller != caller {
-		c.problem("%s: %s references %s, allowed only in %s", c.b.fset.Position(pos), caller, key, use.Caller)
+		c.problem("%s: %s references %s, allowed only in %s", c.b.fset.PositionFor(pos, false), caller, key, use.Caller)
 	}
 	if use.Args != nil {
 		if call == nil {
-			c.problem("%s: %s references %s without calling it", c.b.fset.Position(pos), caller, key)
+			c.problem("%s: %s references %s without calling it", c.b.fset.PositionFor(pos, false), caller, key)
 		} else if got := callArgs(call); !slices.Equal(got, use.Args) {
-			c.problem("%s: %s calls %s with %q, want %q", c.b.fset.Position(pos), caller, key, got, use.Args)
+			c.problem("%s: %s calls %s with %q, want %q", c.b.fset.PositionFor(pos, false), caller, key, got, use.Args)
 		}
 	}
 	c.counts[key]++

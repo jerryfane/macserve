@@ -196,11 +196,18 @@ var mutants = []mutant{
 	{"L09 export directive", []edit{{command, setupFn, "//export runSetupExported\n" + setupFn}}},
 	{"L10 assembly file in the plan package", []edit{{"internal/setup/plan/zz_amd.s", "", "#include \"textflag.h\"\n"}}},
 	{"L11 listed unsafe file's package imports plan", []edit{{"internal/qualification/host_darwin.go", "\t\"unsafe\"\n", "\t\"unsafe\"\n\n\t_ \"github.com/jerryfane/macserve/internal/setup/plan\"\n"}}},
+
+	// Deimos's round 6 at 25eaf12.
+	{"P2-2 //line spoofs a listed unsafe file", []edit{{"cmd/macserve/zz_spoof.go", "", "//line /root/macserve-o1/internal/worker/login_darwin.go:1\npackage main\n\nimport \"unsafe\"\n\nvar _ = unsafe.Sizeof(0)\n"}}},
+	{"//line spoofs a relative listed path", []edit{{"cmd/macserve/zz_spoof.go", "", "//line internal/worker/login_darwin.go:1\npackage main\n\nimport \"unsafe\"\n\nvar _ = unsafe.Sizeof(0)\n"}}},
+	{"block /*line*/ directive", []edit{{command, setupFn, "/*line onboarding.go:1*/\n" + setupFn}}},
+	{"argv clone removed", []edit{{runner, "\targv = slices.Clone(argv)\n", ""}}},
+	{"goroutine in walked code", []edit{{command, elevated, "\tgo func() {}()\n" + elevated}}},
 }
 
 // pinOnly are mutants of pinned code that only the pins catch: the
 // general rules cannot know which argv a widened allowlist admits.
-var pinOnly = map[string]bool{"C02 AllowedCommand widened": true, "allowlist literal widened": true, "R13 main rewrites the command word": true}
+var pinOnly = map[string]bool{"C02 AllowedCommand widened": true, "allowlist literal widened": true, "R13 main rewrites the command word": true, "argv clone removed": true}
 
 func TestMutantsRefused(t *testing.T) {
 	b := testBuild(t)
