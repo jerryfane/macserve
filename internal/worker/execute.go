@@ -365,7 +365,7 @@ func (x *execution) prepare(ctx context.Context) error {
 	if err := x.engine.workspacePass(ctx, x.job.ID, true, false); err != nil {
 		return err
 	}
-	if err := x.observe(ctx); err != nil {
+	if err := observe(ctx, x); err != nil {
 		return err
 	}
 	if err := x.simulator(ctx); err != nil {
