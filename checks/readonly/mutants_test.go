@@ -43,6 +43,7 @@ const (
 	stepDoc    = "// Step is one ordered setup step."
 	parseFn    = "func ParseEnvironment("
 	sw0        = "\tswitch args[0] {"
+	lnCommands = "//go:linkname planCommands github.com/jerryfane/macserve/internal/setup/plan.readOnlyCommands\nvar planCommands [][]string\n\n"
 	unknownCmd = "\t\tfmt.Fprintf(stderr, \"macserve: unknown command %q\\n\", args[0])\n"
 	setupEntry = "\t{\"setup\", \"First-time setup of this Mac (--plan: read-only preflight)\", setupHelp, runSetup},"
 	tableType  = "\trun                 func(args []string, stdout, stderr io.Writer) int\n}{"
@@ -179,6 +180,22 @@ var mutants = []mutant{
 	{"R11 run re-entered from the setup command", []edit{{mainGo, "func run(", "var reenter func([]string, io.Writer, io.Writer) int\n\nfunc init() { reenter = run }\n\nfunc run("}, {command, planCall, "\tif len(args) > 3 {\n\t\treturn reenter([]string{\"worker-reset\"}, stdout, stderr)\n\t}\n" + planCall}}},
 	{"R12 labelled break in walked code", []edit{{command, planCall, "out:\n\tfor {\n\t\tbreak out\n\t}\n" + planCall}}},
 	{"R13 main rewrites the command word", []edit{{mainGo, "\tos.Exit(run(os.Args[1:], os.Stdout, os.Stderr))", "\ta := os.Args[1:]\n\tif len(a) > 0 && a[0] == \"setup\" {\n\t\ta[0] = \"worker-reset\"\n\t}\n\tos.Exit(run(a, os.Stdout, os.Stderr))"}}},
+
+	// Deimos's survivor at cdc8ff2 (PR #68 round 5): linkname from outside
+	// the plan package.
+	{"L01 cmd linknames the allowlist and runs touch", []edit{{command, ioImport, ioImport + "\t_ \"unsafe\"\n"}, {command, setupFn, lnCommands + setupFn}, {command, elevated, "\tif len(args) > 4 {\n\t\tplanCommands = append(planCommands, []string{\"/usr/bin/touch\", \"/tmp/x\"})\n\t\t_, _ = probe.Run(context.Background(), []string{\"/usr/bin/touch\", \"/tmp/x\"})\n\t}\n" + elevated}}},
+	{"L01b cmd linknames the allowlist only", []edit{{command, ioImport, ioImport + "\t_ \"unsafe\"\n"}, {command, setupFn, lnCommands + setupFn}, {command, elevated, "\tif len(args) > 4 {\n\t\tplanCommands = append(planCommands, []string{\"/usr/bin/touch\", \"/tmp/x\"})\n\t}\n" + elevated}}},
+	{"L02 cmd linknames commandEnv", []edit{{command, ioImport, ioImport + "\t_ \"unsafe\"\n"}, {command, setupFn, "//go:linkname planEnv github.com/jerryfane/macserve/internal/setup/plan.commandEnv\nvar planEnv []string\n\n" + setupFn}, {command, elevated, "\tif len(args) > 4 {\n\t\tplanEnv = append(planEnv, \"DYLD_INSERT_LIBRARIES=/tmp/x.dylib\")\n\t}\n" + elevated}}},
+	{"L03 internal/setup linknames the allowlist", []edit{{ledger, ioImport, ioImport + "\t_ \"unsafe\"\n"}, {ledger, stepDoc, strings.Replace(lnCommands, "planCommands", "planCommands2", 2) + stepDoc}}},
+	{"L04 the deploy seam widens a linknamed allowlist", []edit{{deployEnv, "\t\"strings\"\n", "\t\"strings\"\n\t_ \"unsafe\"\n"}, {deployEnv, parseFn, lnCommands + parseFn}, {deployEnv, "\tvar e Environment\n", "\tvar e Environment\n\tplanCommands = append(planCommands, []string{\"/usr/bin/touch\", \"/tmp/x\"})\n"}}},
+	{"L04b unsafe.Add rewrites args[0] from runSetup", []edit{{command, ioImport, ioImport + "\t\"unsafe\"\n"}, {command, "\treturn runSetupWith(plan.SystemProbe(), args, stdout, stderr)", "\tif len(args) > 0 {\n\t\tp := (*string)(unsafe.Add(unsafe.Pointer(unsafe.SliceData(args)), -int(unsafe.Sizeof(\"\"))))\n\t\t*p = \"zq\"\n\t}\n\treturn runSetupWith(plan.SystemProbe(), args, stdout, stderr)"}}},
+	{"L05 linkname in a new file of an unrelated package", []edit{{"internal/store/zz_link.go", "", "package store\n\nimport _ \"unsafe\"\n\n" + lnCommands}}},
+	{"L06 unsafe in an unlisted file", []edit{{"internal/store/zz_unsafe.go", "", "package store\n\nimport \"unsafe\"\n\nvar _ = unsafe.Sizeof(0)\n"}}},
+	{"L07 other directive in cmd", []edit{{command, setupFn, "//go:noinline\n" + setupFn}}},
+	{"L08 cgo_import_dynamic in a linked package", []edit{{"internal/store/zz_dyn.go", "", "package store\n\n//go:cgo_import_dynamic libc_unlink unlink \"/usr/lib/libSystem.B.dylib\"\n"}}},
+	{"L09 export directive", []edit{{command, setupFn, "//export runSetupExported\n" + setupFn}}},
+	{"L10 assembly file in the plan package", []edit{{"internal/setup/plan/zz_amd.s", "", "#include \"textflag.h\"\n"}}},
+	{"L11 listed unsafe file's package imports plan", []edit{{"internal/qualification/host_darwin.go", "\t\"unsafe\"\n", "\t\"unsafe\"\n\n\t_ \"github.com/jerryfane/macserve/internal/setup/plan\"\n"}}},
 }
 
 // pinOnly are mutants of pinned code that only the pins catch: the
@@ -233,4 +250,11 @@ func TestMutantsRefused(t *testing.T) {
 		t.Logf("mutant %q refused: %s", m.name, report.Problems[0])
 	}
 	t.Logf("%d of %d mutants refused", refused, len(mutants))
+
+	// Test files are not linked into the binary, so a linkname there is not
+	// refused.
+	test := map[string][]byte{filepath.Join(root, "cmd/macserve/zz_link_test.go"): []byte("package main\n\nimport _ \"unsafe\"\n\n" + lnCommands)}
+	if report, err := b.Check(SetupPlan, test); err != nil || len(report.Problems) != 0 {
+		t.Errorf("linkname in a test file: %v %v", err, report.Problems)
+	}
 }

@@ -133,6 +133,10 @@ type Policy struct {
 	// Pinned maps a module declaration ("pkgpath.Name" or
 	// "(*pkgpath.T).m") to the sha256 of its printed source.
 	Pinned map[string]string
+	// UnsafeFiles are the module-relative files of linked module packages
+	// that may import unsafe. Their packages must not depend on Package,
+	// so they cannot name its memory; //go:linkname is refused everywhere.
+	UnsafeFiles []string
 	// Refs maps a package variable of Package to the only functions that
 	// may reference it.
 	Refs map[string][]string
@@ -146,8 +150,10 @@ type listedPackage struct {
 	GoFiles        []string
 	CgoFiles       []string
 	IgnoredGoFiles []string
-	Module         *struct{ Path string }
-	Error          *struct{ Err string }
+	// Non-Go sources (assembly, C, objects) can define or replace symbols.
+	SFiles, CFiles, CXXFiles, HFiles, MFiles, FFiles, SysoFiles, SwigFiles, SwigCXXFiles []string
+	Module                                                                               *struct{ Path string }
+	Error                                                                                *struct{ Err string }
 }
 
 // Build is a listed darwin/arm64 build of a module.
@@ -183,7 +189,7 @@ func List(root string, patterns ...string) (*Build, error) {
 	if _, err := os.Stat(tool); err != nil {
 		tool = "go"
 	}
-	args := append([]string{"list", "-e", "-export", "-deps", "-json=ImportPath,Dir,Export,Standard,GoFiles,CgoFiles,IgnoredGoFiles,Module,Error"}, patterns...)
+	args := append([]string{"list", "-e", "-export", "-deps", "-json=ImportPath,Dir,Export,Standard,GoFiles,CgoFiles,IgnoredGoFiles,SFiles,CFiles,CXXFiles,HFiles,MFiles,FFiles,SysoFiles,SwigFiles,SwigCXXFiles,Module,Error"}, patterns...)
 	cmd := exec.Command(tool, args...)
 	cmd.Dir = root
 	cmd.Env = slices.Concat(os.Environ(), buildEnv, []string{"PWD=" + root})
@@ -261,6 +267,7 @@ func (b *Build) Check(policy Policy, overlay map[string][]byte) (Report, error) 
 	if len(root.files) == 0 {
 		return Report{}, fmt.Errorf("%s has no files", policy.Package)
 	}
+	c.checkLinkage(policy.Package, root)
 	for _, f := range root.files {
 		c.checkFile(f)
 		for _, decl := range f.Decls {
@@ -286,6 +293,7 @@ func (b *Build) Check(policy Policy, overlay map[string][]byte) (Report, error) 
 		if err != nil {
 			return Report{}, err
 		}
+		c.checkLinkage(path, src)
 		for _, f := range src.files {
 			for _, decl := range f.Decls {
 				switch d := decl.(type) {
@@ -321,6 +329,7 @@ func (b *Build) Check(policy Policy, overlay map[string][]byte) (Report, error) 
 		}
 	}
 	c.checkPins(root)
+	c.checkUnsafeFiles()
 	c.checkTable()
 	sort.Strings(c.problems)
 	return Report{Problems: slices.Compact(c.problems), Reached: slices.Sorted(maps.Keys(c.visited)), Uses: c.counts}, nil
@@ -478,13 +487,133 @@ func (c *checker) load(path string) (*source, error) {
 	return s, nil
 }
 
+// allowedDirectives are the only //go: directives linked module code may
+// carry; every other one (linkname, cgo_*, noescape, uintptrescapes, ...)
+// can change linkage or the compiler's assumptions.
+var allowedDirectives = []string{"//go:build"}
+
+// checkLinkage applies the linkage rules to every linked file of a module
+// package: no cgo or non-Go sources, no "C" import, unsafe only in
+// Policy.UnsafeFiles, no //go: directive outside allowedDirectives and no
+// //export.
+func (c *checker) checkLinkage(path string, src *source) {
+	p := c.b.pkgs[path]
+	if nonGo := slices.Concat(p.CgoFiles, p.SFiles, p.CFiles, p.CXXFiles, p.HFiles, p.MFiles, p.FFiles, p.SysoFiles, p.SwigFiles, p.SwigCXXFiles); len(nonGo) > 0 {
+		c.problem("%s: non-Go or cgo sources %v are linked", path, nonGo)
+	}
+	for file, data := range c.overlay {
+		if filepath.Dir(file) == p.Dir && data != nil && !strings.HasSuffix(file, ".go") {
+			c.problem("%s: non-Go source in a linked module package", file)
+		}
+	}
+	for _, f := range src.files {
+		name := c.b.fset.Position(f.Pos()).Filename
+		rel, err := c.rel(name)
+		if err != nil {
+			c.problem("%s: %v", name, err)
+			continue
+		}
+		for _, spec := range f.Imports {
+			imp, _ := strconv.Unquote(spec.Path.Value)
+			switch {
+			case imp == "C":
+				c.problem("%s: imports C", rel)
+			case imp == "unsafe" && !slices.Contains(c.policy.UnsafeFiles, rel):
+				c.problem("%s: imports unsafe outside the listed files", rel)
+			}
+		}
+		for _, group := range f.Comments {
+			for _, comment := range group.List {
+				text := comment.Text
+				if strings.HasPrefix(text, "//export ") {
+					c.problem("%s: //export directive", c.b.fset.Position(comment.Pos()))
+				}
+				if !strings.HasPrefix(text, "//go:") {
+					continue
+				}
+				directive := strings.Fields(text)[0]
+				if !slices.Contains(allowedDirectives, directive) {
+					c.problem("%s: %s directive in linked module code", c.b.fset.Position(comment.Pos()), directive)
+				}
+			}
+		}
+	}
+}
+
+// checkUnsafeFiles requires every listed unsafe file to exist, import
+// unsafe and belong to a linked package that does not depend on Package.
+func (c *checker) checkUnsafeFiles() {
+	for _, rel := range c.policy.UnsafeFiles {
+		dir := filepath.Join(c.b.root, filepath.Dir(rel))
+		var pkg *listedPackage
+		for _, p := range c.b.pkgs {
+			if p.Dir == dir && !p.Standard {
+				pkg = &p
+			}
+		}
+		if pkg == nil || !slices.Contains(pkg.GoFiles, filepath.Base(rel)) {
+			c.problem("unsafe file %s is not part of a linked module package", rel)
+			continue
+		}
+		if c.dependsOn(pkg.ImportPath, c.policy.Package, map[string]bool{}) {
+			c.problem("unsafe file %s is in a package that depends on %s", rel, c.policy.Package)
+		}
+		src, err := c.load(pkg.ImportPath)
+		if err != nil {
+			c.problem("unsafe file %s: %v", rel, err)
+			continue
+		}
+		uses := false
+		for _, f := range src.files {
+			if r, err := c.rel(c.b.fset.Position(f.Pos()).Filename); err == nil && r == rel {
+				for _, spec := range f.Imports {
+					uses = uses || spec.Path.Value == `"unsafe"`
+				}
+			}
+		}
+		if !uses {
+			c.problem("unsafe file %s does not import unsafe; remove it from the policy", rel)
+		}
+	}
+}
+
+// dependsOn reports that module package path is target or imports it,
+// following module imports from source (with the overlay).
+func (c *checker) dependsOn(path, target string, seen map[string]bool) bool {
+	if path == target {
+		return true
+	}
+	if seen[path] {
+		return false
+	}
+	seen[path] = true
+	src, err := c.load(path)
+	if err != nil {
+		return true
+	}
+	for _, imp := range src.pkg.Imports() {
+		if c.module(imp) && c.dependsOn(imp.Path(), target, seen) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *checker) rel(abs string) (string, error) {
+	r, err := filepath.Rel(c.b.root, abs)
+	if err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("%s is outside the module root", abs)
+	}
+	return filepath.ToSlash(r), nil
+}
+
 // checkFile applies the import rules to a file of the read-only package.
 func (c *checker) checkFile(f *ast.File) {
 	name := c.b.fset.Position(f.Pos()).Filename
 	for _, spec := range f.Imports {
 		path, _ := strconv.Unquote(spec.Path.Value)
 		switch {
-		case path == "C" || path == "unsafe":
+		case path == "unsafe":
 			c.problem("%s: imports %s", name, path)
 		case strings.HasPrefix(path, c.b.module+"/") || path == c.b.module:
 			if !slices.Contains(c.policy.Imports, path) {
@@ -492,13 +621,6 @@ func (c *checker) checkFile(f *ast.File) {
 			}
 		case !c.b.pkgs[path].Standard:
 			c.problem("%s: imports non-std package %s", name, path)
-		}
-	}
-	for _, group := range f.Comments {
-		for _, comment := range group.List {
-			if strings.HasPrefix(comment.Text, "//go:linkname") || strings.HasPrefix(comment.Text, "//go:cgo") {
-				c.problem("%s: %s directive", name, strings.Fields(comment.Text)[0])
-			}
 		}
 	}
 }

@@ -93,6 +93,13 @@ var SetupPlan = Policy{
 		"os/exec.Cmd.Stderr": planFunc + "command",
 		"net.Dialer.Timeout": planFunc + "portInUse",
 	},
+	// Raw system calls that pass pointers to local structs; none of these
+	// packages imports internal/setup/plan.
+	UnsafeFiles: []string{
+		"internal/qualification/host_darwin.go",
+		"internal/worker/login_darwin.go",
+		"internal/worker/respawn_darwin.go",
+	},
 	Refs: map[string][]string{
 		planFunc + "readOnlyCommands": {planFunc + "AllowedCommand"},
 		planFunc + "commandEnv":       {planFunc + "command"},
