@@ -249,6 +249,32 @@ sudo /Library/macserve/bin/qualify.sh activation-check
 
 `reapprove` performs every `approve` check and additionally requires the live configuration and challenge parameters to equal the anchor, and no earlier approval on this boot (so no job can have run since boot). It never writes the anchor. Any configuration change (release, manifest, profiles, plists, deploy environment, narrowed endpoints or private paths) refuses until the owner approves again. `activation-check` is read-only. Remove the anchor to revoke carry-forward.
 
+## Boundary-preserving releases: path classification
+
+Every release still requires the full owner requalification above. This section describes only the source classification that a later, separately reviewed carry path will rely on; nothing on the host reads it yet.
+
+`BOUNDARY.json` at the repository root sorts every tracked file into one class:
+
+| Class | Meaning |
+|---|---|
+| **B** (boundary) | Creates, enforces, measures or qualifies the isolation boundary, runs as root with job-influenced input, or builds and guards this classification (`assets/**`, `go.mod`, `go.sum`, `.github/**`, `checks/**`, `BOUNDARY.json`, `cmd/macserve/**`, `internal/worker/**`, `internal/maintenance/**`, `internal/qualification/**`, principal authorization, …). A change needs full requalification. |
+| **G** (gate tuning) | Health-loop cadence and resource accounting. Empty: enabling it is itself a B change in a fully requalified release. |
+| **C** (carry) | Controller-side code and job observation that reach root processes only through reviewed seams (for example `internal/worker/job_observation.go`, `internal/worker/report_types.go`, `internal/store/**` except `auth.go`). |
+| **T** (text/tests) | Documentation, licence and tests named for a C/G file. |
+
+Classification is default-deny: an unlisted file is an error. Patterns use `*` within one path segment and `**` for whole segments; an exact path beats a pattern without `**`, which beats one with `**`, and more literal characters win within a tier. Two classes matching at the same specificity is an error.
+
+`go test ./checks/boundary` (a named CI step) enforces it on the darwin/arm64 build:
+
+- every tracked file is a regular file with exactly one class; symlinks and submodules are refused; C and G hold only non-test Go source; a T test file is named for a C or G file beside it;
+- C and G files import none of `unsafe`, `syscall`, `golang.org/x/sys/...`, `os/exec`, `os/user`, `plugin`, `runtime/debug`, `github.com/ebitengine/purego` or the hostguard, peercred, pfctl, deploy, qualification and launchctlprint packages (G files may use only the `syscall`/`x/sys` identifiers listed in `g_calls`), and use no cgo or compiler directives (`//go:linkname`, `//go:embed`, `//go:generate`, …);
+- C and G files declare no `init` function, no method on a type declared outside C/G (including through an alias), and no package-level initializer other than constants, literals, conversions, `errors.New` and `regexp.MustCompile`; they never assign to or take the address of a package-level variable declared outside C/G;
+- in the root packages (`internal/worker`, `internal/maintenance`), C and G files call only C/G declarations, the `seams` listed for that package, and the std packages `bytes`, `context`, `encoding/json`, `errors`, `fmt`, `io`, `maps`, `regexp`, `slices`, `sort`, `strconv`, `strings` and `time`; calls through function values not declared in C/G are refused.
+
+`internal/maintenance/maintenance_invariants_test.go` (B) pins what any health-timing change must keep: the published lifetime stays within the controller's 45 s acceptance window, an inconclusive probe never keeps expired or invalid health and a finding never keeps any, and removing any single boundary fact makes `Evaluate` publish invalid health.
+
+Because the workflows, `checks/**`, `BOUNDARY.json` and every test not named for a C/G file are B, a release cannot weaken these checks and still be classified as carry.
+
 ## Trust boundary and stop conditions
 
 Use only trusted repositories and trusted repository writers. A root broker handles protected leases, exports and cleanup, then executes tools as a separate non-admin GUI user; the credential-bearing controller is a different non-login user. A broker defect is a root risk. This is shared-kernel native execution, not a VM, disposable reset or hostile-code sandbox. Same-UID delayed persistence can run after a clean census and affect a later job. The owner must accept that residual risk explicitly; signatures attest observations, not host integrity or honest tests.
