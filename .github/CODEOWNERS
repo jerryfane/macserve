@@ -1,0 +1,9 @@
+# The read-only proof of `macserve setup --plan` (checks/readonly), the code
+# whose source it pins by sha256, and the command dispatch it narrows need
+# the owner's review.
+/.github/CODEOWNERS @jerryfane
+/checks/readonly/ @jerryfane
+/internal/setup/plan/runner.go @jerryfane
+/internal/setup/plan/system.go @jerryfane
+/cmd/macserve/main.go @jerryfane
+/cmd/macserve/onboarding.go @jerryfane

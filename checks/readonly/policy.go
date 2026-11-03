@@ -20,15 +20,18 @@ var SetupPlan = Policy{
 		mainPkg + ".runSetup",
 		mainPkg + ".runSetupWith",
 	},
-	Switch:  map[string]string{mainPkg + ".run": "setup"},
+	Switch: map[string]string{mainPkg + ".run": "setup"},
+	Table: &Table{
+		Var: mainPkg + ".onboardingCommands", Name: "name", Run: "run", Key: "setup", Root: mainPkg + ".runSetup",
+		Fields: []string{"name", "summary", "help", "run"},
+	},
 	Imports: []string{module + "/internal/deploy", module + "/internal/setup"},
 	Seams: []string{
 		module + "/internal/deploy.ParseEnvironment",
 		mainPkg + ".usage",
 	},
-	// The command table. Its "setup" entry is runSetup, a root
-	// (TestSetupDispatchesToRunSetup); the inactive entries have no run
-	// function (TestInactiveShellsHaveNoRunFunction).
+	// The command table (see Table): its "setup" entry runs runSetup, a
+	// root; other entries are not reached for "setup".
 	Dispatch: map[string][]string{mainPkg + ".onboardingCommands": {mainPkg + ".onboardingCommand", mainPkg + ".writeOnboardingUsage"}},
 	PureStd: []string{
 		"bytes", "cmp", "context", "errors", "fmt", "io", "io/fs", "iter", "maps", "math", "net/netip",

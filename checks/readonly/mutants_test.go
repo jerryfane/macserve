@@ -15,33 +15,36 @@ type mutant struct {
 }
 
 const (
-	system    = "internal/setup/plan/system.go"
-	runner    = "internal/setup/plan/runner.go"
-	env       = "internal/setup/plan/env.go"
-	pre       = "internal/setup/plan/preflight.go"
-	newFile   = "internal/setup/plan/zz_new.go"
-	command   = "cmd/macserve/onboarding.go"
-	lstatFn   = "func lstat(path string) (FileInfo, error) {"
-	adminFn   = "func adminGID() (uint32, error) {"
-	probeDoc  = "// SystemProbe reads the running host."
-	runCall   = "	if err := cmd.Run(); err != nil {"
-	cmdDir    = "	cmd.Dir = \"/\""
-	parse     = "	parsed, err := deploy.ParseEnvironment(data)"
-	planCall  = "	result := plan.Preflight(context.Background(), probe, choices)"
-	writeOut  = "	_, err := w.Write(b.Bytes())"
-	osImport  = "\t\"os\"\n"
-	ioImport  = "\t\"io\"\n"
-	fsImport  = "\t\"io/fs\"\n"
-	ledger    = "internal/setup/ledger.go"
-	deployEnv = "internal/deploy/environment.go"
-	maint     = "internal/maintenance/maintenance.go"
-	mainGo    = "cmd/macserve/main.go"
-	dialCall  = "\tconn, err := d.DialContext(ctx, \"tcp\", ap.String())"
-	connClose = "\tif err == nil {\n\t\tconn.Close()"
-	elevated  = "\tif probe.Elevated() {"
-	setupFn   = "func runSetup("
-	stepDoc   = "// Step is one ordered setup step."
-	parseFn   = "func ParseEnvironment("
+	system     = "internal/setup/plan/system.go"
+	runner     = "internal/setup/plan/runner.go"
+	env        = "internal/setup/plan/env.go"
+	pre        = "internal/setup/plan/preflight.go"
+	newFile    = "internal/setup/plan/zz_new.go"
+	command    = "cmd/macserve/onboarding.go"
+	lstatFn    = "func lstat(path string) (FileInfo, error) {"
+	adminFn    = "func adminGID() (uint32, error) {"
+	probeDoc   = "// SystemProbe reads the running host."
+	runCall    = "	if err := cmd.Run(); err != nil {"
+	cmdDir     = "	cmd.Dir = \"/\""
+	parse      = "	parsed, err := deploy.ParseEnvironment(data)"
+	planCall   = "	result := plan.Preflight(context.Background(), probe, choices)"
+	writeOut   = "	_, err := w.Write(b.Bytes())"
+	osImport   = "\t\"os\"\n"
+	ioImport   = "\t\"io\"\n"
+	fsImport   = "\t\"io/fs\"\n"
+	ledger     = "internal/setup/ledger.go"
+	deployEnv  = "internal/deploy/environment.go"
+	maint      = "internal/maintenance/maintenance.go"
+	mainGo     = "cmd/macserve/main.go"
+	dialCall   = "\tconn, err := d.DialContext(ctx, \"tcp\", ap.String())"
+	connClose  = "\tif err == nil {\n\t\tconn.Close()"
+	elevated   = "\tif probe.Elevated() {"
+	setupFn    = "func runSetup("
+	stepDoc    = "// Step is one ordered setup step."
+	parseFn    = "func ParseEnvironment("
+	sw0        = "\tswitch args[0] {"
+	setupEntry = "\t{\"setup\", \"First-time setup of this Mac (--plan: read-only preflight)\", setupHelp, runSetup},"
+	tableType  = "\trun                 func(args []string, stdout, stderr io.Writer) int\n}{"
 )
 
 // imp adds an import to system.go.
@@ -49,6 +52,21 @@ func imp(spec string) edit { return edit{system, osImport, osImport + "\t" + spe
 
 // at inserts code after the line anchor in file.
 func at(file, anchor, code string) edit { return edit{file, anchor, anchor + "\n" + code} }
+
+// tableHook adds a func field to the command table, sets it for "setup"
+// to hook (other entries nil) and calls it in onboardingCommand.
+func tableHook(hook, decl string) []edit {
+	edits := []edit{cmdOS, {command, tableType, "\trun                 func(args []string, stdout, stderr io.Writer) int\n\tpre                 func()\n}{"}}
+	edits = append(edits, edit{command, setupEntry, strings.Replace(setupEntry, "runSetup}", "runSetup, "+hook+"}", 1)})
+	for _, name := range []string{"connectGitHubHelp, nil}", "doctorHelp, nil}", "buildHelp, nil}", "upgradeHelp, nil}"} {
+		edits = append(edits, edit{command, name, strings.TrimSuffix(name, "}") + ", nil}"})
+	}
+	edits = append(edits, edit{command, "\t\thelp, run := c.help, c.run", "\t\thelp, run := c.help, c.run\n\t\tif c.pre != nil {\n\t\t\tc.pre()\n\t\t}"})
+	if decl != "" {
+		edits = append(edits, edit{command, setupFn, decl + setupFn})
+	}
+	return edits
+}
 
 // cmdOS adds the os import to onboarding.go.
 var cmdOS = edit{command, ioImport, ioImport + osImport}
@@ -128,6 +146,23 @@ var mutants = []mutant{
 	{"C02 AllowedCommand widened", []edit{{runner, "\treturn false\n}\n\n// validDeveloperDir", "\treturn len(argv) == 3 && argv[0] == \"/usr/bin/defaults\"\n}\n\n// validDeveloperDir"}, {pre, "\t\tdetail := \"FileVault state unknown\"\n", "\t\tdetail := \"FileVault state unknown\"\n\t\t_, _ = run(\"/usr/bin/defaults\", \"delete\", \"com.apple.dock\")\n"}}},
 	{"allowlist appended at runtime", []edit{{pre, "\tvar plan Plan\n", "\tvar plan Plan\n\treadOnlyCommands = append(readOnlyCommands, []string{\"/usr/bin/touch\", \"/tmp/x\"})\n"}}},
 	{"allowlist literal widened", []edit{{runner, "\t{\"/usr/bin/csrutil\", \"status\"},\n", "\t{\"/usr/bin/csrutil\", \"status\"},\n\t{\"/usr/bin/defaults\", \"delete\", \"com.apple.dock\"},\n"}}},
+
+	// Deimos's survivors at b84a802 (PR #68 round 3).
+	{"N01 constant switch on len(args)", []edit{{mainGo, sw0, "\tswitch len(args) {\n\tcase 2:\n\t\t_ = os.WriteFile(\"/tmp/x\", nil, 0o600)\n\t}\n" + sw0}}},
+	{"N01b switch on len(args[0])", []edit{{mainGo, sw0, "\tswitch len(args[0]) {\n\tcase len(\"setup\"):\n\t\t_ = os.WriteFile(\"/tmp/x\", nil, 0o600)\n\t}\n" + sw0}}},
+	{"N01d switch on args[0][:3]", []edit{{mainGo, sw0, "\tswitch args[0][:3] {\n\tcase \"set\":\n\t\t_ = os.WriteFile(\"/tmp/x\", nil, 0o600)\n\t}\n" + sw0}}},
+	{"N02 table hook field (func literal)", tableHook("func() { _ = os.WriteFile(\"/tmp/x\", nil, 0o600) }", "")},
+	{"N03 table hook field (named func)", tableHook("setupHook", "func setupHook() { _ = os.WriteFile(\"/tmp/x\", nil, 0o600) }\n\n")},
+	// Variants: changing which clause runs, and the table itself.
+	{"args reversed before dispatch", []edit{{mainGo, sw0, "\tslices.Reverse(args)\n" + sw0}, {mainGo, "\t\"os\"\n", "\t\"os\"\n\t\"slices\"\n"}}},
+	{"args[0] rewritten before dispatch", []edit{{mainGo, sw0, "\targs[0] = \"deploy-install\"\n" + sw0}}},
+	{"args reassigned before dispatch", []edit{{mainGo, sw0, "\targs = []string{\"deploy-install\"}\n" + sw0}}},
+	{"non-constant dispatch case", []edit{{mainGo, "\tcase \"wait\":", "\tcase strings.ToLower(\"SETUP\"):\n\t\t_ = os.WriteFile(\"/tmp/x\", nil, 0o600)\n\t\treturn 0\n\tcase \"wait\":"}, {mainGo, "\t\"os\"\n", "\t\"os\"\n\t\"strings\"\n"}}},
+	{"dispatch switch removed", []edit{{mainGo, sw0, "\tswitch x := args[0]; x {"}}},
+	{"setup entry runs another function", []edit{{command, setupEntry, strings.Replace(setupEntry, "runSetup}", "runEvil}", 1) + "\n"}, {command, setupFn, "func runEvil(args []string, stdout, stderr io.Writer) int {\n\t_ = os.WriteFile(\"/tmp/x\", nil, 0o600)\n\treturn 0\n}\n\n" + setupFn}, cmdOS}},
+	{"second setup entry", []edit{{command, setupEntry, setupEntry + "\n" + setupEntry}}},
+	{"table written in init", []edit{{command, setupFn, "func init() {\n\tonboardingCommands[0].help = \"x\"\n}\n\n" + setupFn}}},
+	{"table written in dispatch", []edit{{command, "\t\thelp, run := c.help, c.run", "\t\tonboardingCommands[0].run = nil\n\t\thelp, run := c.help, c.run"}}},
 }
 
 // pinOnly are mutants of pinned code that only the pins catch: the

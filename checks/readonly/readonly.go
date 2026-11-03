@@ -70,6 +70,16 @@ type Use struct {
 	Args   []string
 }
 
+// Table describes a command table: a package variable holding a slice of
+// structs with exactly Fields, of which only Run is a function. Exactly one
+// entry has the constant name Key in field Name, and its Run field is the
+// function Root. Only Policy.Dispatch readers may read the table, and no
+// walked code may write it.
+type Table struct {
+	Var, Name, Run, Key, Root string
+	Fields                    []string
+}
+
 // Box allows Caller to convert a value of the std type From to the
 // interface To ("*os.File" to "io.Writer").
 type Box struct {
@@ -83,11 +93,16 @@ type Policy struct {
 	// Roots are further root functions outside Package, by types.Func
 	// FullName.
 	Roots []string
-	// Switch maps a root to the command word it is proven for. In that
-	// root's body a top-level switch whose cases are all constants runs
-	// only the clause the word selects (default when none does), so only
-	// that clause is walked.
+	// Switch maps a root to the command word it is proven for. The root's
+	// first parameter is the argument list and its dispatch switch is a
+	// top-level `switch args[0]` with constant cases: only the clause the
+	// word selects (default when none does) is walked, every other
+	// statement is walked in full. Outside the chosen clause the argument
+	// list may appear only as len(args), so nothing can change which
+	// clause runs.
 	Switch map[string]string
+	// Table pins the command table the chosen clause dispatches through.
+	Table *Table
 	// Imports are the module packages Package may import.
 	Imports []string
 	// Seams are the module functions outside Package and Roots that
@@ -303,6 +318,7 @@ func (b *Build) Check(policy Policy, overlay map[string][]byte) (Report, error) 
 		}
 	}
 	c.checkPins(root)
+	c.checkTable()
 	sort.Strings(c.problems)
 	return Report{Problems: slices.Compact(c.problems), Reached: slices.Sorted(maps.Keys(c.visited)), Uses: c.counts}, nil
 }
@@ -532,18 +548,27 @@ func (c *checker) rootCode(caller string) bool {
 	return funcPackage(caller) == c.policy.Package || slices.Contains(c.policy.Roots, caller)
 }
 
-// walkDispatch walks a Switch root: every statement, except that in a
-// top-level switch with constant cases only the clause word selects runs.
+// walkDispatch walks a Switch root: every statement, except that in the
+// dispatch switch (`switch args[0]`, args the first parameter) only the
+// clause word selects runs.
 func (c *checker) walkDispatch(decl *ast.FuncDecl, src *source, caller, word string) {
 	w := &walker{c: c, src: src, caller: caller}
-	w.sigs = append(w.sigs, src.info.Defs[decl.Name].Type().(*types.Signature))
+	sig := src.info.Defs[decl.Name].Type().(*types.Signature)
+	w.sigs = append(w.sigs, sig)
+	if sig.Params().Len() == 0 {
+		c.problem("%s: dispatch root without an argument list", caller)
+		return
+	}
+	args := sig.Params().At(0)
+	dispatched := false
 	for _, stmt := range decl.Body.List {
 		sw, ok := stmt.(*ast.SwitchStmt)
-		if !ok || sw.Init != nil || sw.Tag == nil || !w.constantCases(sw) {
+		if !ok || sw.Init != nil || !isArgsZero(sw.Tag, src, args) {
+			w.argsOnlyLen(stmt, args)
 			w.inspect(stmt)
 			continue
 		}
-		w.inspect(sw.Tag)
+		dispatched = true
 		var chosen, fallback *ast.CaseClause
 		for _, s := range sw.Body.List {
 			cc := s.(*ast.CaseClause)
@@ -551,7 +576,12 @@ func (c *checker) walkDispatch(decl *ast.FuncDecl, src *source, caller, word str
 				fallback = cc
 			}
 			for _, e := range cc.List {
-				if v := src.info.Types[e].Value; v != nil && v.ExactString() == strconv.Quote(word) && chosen == nil {
+				v := src.info.Types[e].Value
+				if v == nil {
+					c.problem("%s: non-constant case in the dispatch switch", w.pos(e.Pos()))
+					continue
+				}
+				if v.ExactString() == strconv.Quote(word) && chosen == nil {
 					chosen = cc
 				}
 			}
@@ -568,17 +598,142 @@ func (c *checker) walkDispatch(decl *ast.FuncDecl, src *source, caller, word str
 			}
 		}
 	}
+	if !dispatched {
+		c.problem("%s: no dispatch switch on %s[0]", caller, args.Name())
+	}
 }
 
-func (w *walker) constantCases(sw *ast.SwitchStmt) bool {
-	for _, s := range sw.Body.List {
-		for _, e := range s.(*ast.CaseClause).List {
-			if w.src.info.Types[e].Value == nil {
-				return false
+func isArgsZero(e ast.Expr, src *source, args *types.Var) bool {
+	ix, ok := ast.Unparen(e).(*ast.IndexExpr)
+	if !ok {
+		return false
+	}
+	id, ok := ast.Unparen(ix.X).(*ast.Ident)
+	if !ok || src.info.Uses[id] != args {
+		return false
+	}
+	v := src.info.Types[ix.Index].Value
+	return v != nil && v.ExactString() == "0"
+}
+
+// argsOnlyLen refuses any use of args in stmt other than len(args).
+func (w *walker) argsOnlyLen(stmt ast.Stmt, args *types.Var) {
+	lens := map[*ast.Ident]bool{}
+	ast.Inspect(stmt, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok && len(call.Args) == 1 {
+			if fn, ok := ast.Unparen(call.Fun).(*ast.Ident); ok {
+				if b, ok := w.src.info.Uses[fn].(*types.Builtin); ok && b.Name() == "len" {
+					if id, ok := ast.Unparen(call.Args[0]).(*ast.Ident); ok {
+						lens[id] = true
+					}
+				}
+			}
+		}
+		if id, ok := n.(*ast.Ident); ok && w.src.info.Uses[id] == args && !lens[id] {
+			w.c.problem("%s: %s uses %s outside the dispatch switch other than len(%s)", w.pos(id.Pos()), w.caller, args.Name(), args.Name())
+		}
+		return true
+	})
+}
+
+// checkTable verifies the command table of Policy.Table.
+func (c *checker) checkTable() {
+	t := c.policy.Table
+	if t == nil {
+		return
+	}
+	src, err := c.load(funcPackage(t.Var))
+	if err != nil {
+		c.problem("command table %s: %v", t.Var, err)
+		return
+	}
+	name := t.Var[strings.LastIndex(t.Var, ".")+1:]
+	v, ok := src.pkg.Scope().Lookup(name).(*types.Var)
+	if !ok {
+		c.problem("command table %s not found", t.Var)
+		return
+	}
+	slice, ok := v.Type().Underlying().(*types.Slice)
+	var st *types.Struct
+	if ok {
+		st, ok = slice.Elem().Underlying().(*types.Struct)
+	}
+	if !ok {
+		c.problem("command table %s is not a slice of structs", t.Var)
+		return
+	}
+	var fields []string
+	for f := range st.Fields() {
+		fields = append(fields, f.Name())
+		_, isFunc := f.Type().Underlying().(*types.Signature)
+		switch {
+		case f.Name() == t.Run && !isFunc:
+			c.problem("command table %s: field %s is not a function", t.Var, f.Name())
+		case f.Name() != t.Run && !types.Identical(f.Type(), types.Typ[types.String]):
+			c.problem("command table %s: field %s must be a string", t.Var, f.Name())
+		}
+	}
+	if !slices.Equal(fields, t.Fields) {
+		c.problem("command table %s has fields %v, want exactly %v", t.Var, fields, t.Fields)
+		return
+	}
+	var lit *ast.CompositeLit
+	for _, f := range src.files {
+		for _, decl := range f.Decls {
+			gd, ok := decl.(*ast.GenDecl)
+			if !ok {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for i, n := range vs.Names {
+					if src.info.Defs[n] == v && i < len(vs.Values) {
+						lit, _ = ast.Unparen(vs.Values[i]).(*ast.CompositeLit)
+					}
+				}
 			}
 		}
 	}
-	return true
+	if lit == nil {
+		c.problem("command table %s is not initialised by a composite literal", t.Var)
+		return
+	}
+	found := 0
+	for _, e := range lit.Elts {
+		entry, ok := ast.Unparen(e).(*ast.CompositeLit)
+		if !ok {
+			c.problem("%s: command table entry is not a literal", c.b.fset.Position(e.Pos()))
+			continue
+		}
+		values := map[string]ast.Expr{}
+		for i, el := range entry.Elts {
+			if kv, ok := el.(*ast.KeyValueExpr); ok {
+				values[kv.Key.(*ast.Ident).Name] = kv.Value
+			} else if i < len(t.Fields) {
+				values[t.Fields[i]] = el
+			}
+		}
+		nv := src.info.Types[values[t.Name]].Value
+		if values[t.Name] == nil || nv == nil {
+			c.problem("%s: command table entry without a constant %s", c.b.fset.Position(e.Pos()), t.Name)
+			continue
+		}
+		if nv.ExactString() != strconv.Quote(t.Key) {
+			continue
+		}
+		found++
+		id, _ := ast.Unparen(values[t.Run]).(*ast.Ident)
+		fn, _ := src.info.Uses[id].(*types.Func)
+		if id == nil || fn == nil || fn.FullName() != t.Root {
+			c.problem("%s: command table entry %q must run %s", c.b.fset.Position(e.Pos()), t.Key, t.Root)
+		}
+	}
+	if found != 1 {
+		c.problem("command table %s has %d entries named %q, want 1", t.Var, found, t.Key)
+	}
 }
 
 // walk checks node as code of caller that runs.
@@ -897,6 +1052,15 @@ func (c *checker) moduleType(t types.Type) bool {
 func (w *walker) write(lhs ast.Expr) {
 	for e := lhs; e != nil; {
 		switch x := ast.Unparen(e).(type) {
+		case *ast.Ident:
+			if v, ok := w.src.info.Uses[x].(*types.Var); ok && v.Pkg() != nil && !v.IsField() && v.Parent() == v.Pkg().Scope() {
+				if _, table := w.c.policy.Dispatch[v.Pkg().Path()+"."+v.Name()]; table {
+					w.c.problem("%s: %s writes the command table %s", w.pos(x.Pos()), w.caller, v.Name())
+				}
+			}
+			e = nil
+		case *ast.SliceExpr:
+			e = x.X
 		case *ast.SelectorExpr:
 			if sel := w.src.info.Selections[x]; sel != nil && sel.Kind() == types.FieldVal {
 				w.field(sel.Recv(), x.Sel.Name, x.Pos())
