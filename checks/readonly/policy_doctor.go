@@ -100,6 +100,8 @@ var Doctor = Policy{
 	Refs: map[string][]string{
 		doctorFunc + "launchctlCommands": {doctorFunc + "AllowedCommand"},
 		doctorFunc + "doctorEnv":         {doctorFunc + "command"},
+		doctorFunc + "launchctlGUI":      {doctorFunc + "AllowedCommand"},
+		planFunc + "readOnlyCommands":    {planFunc + "AllowedCommand"},
 	},
 	Pinned: map[string]string{
 		mainPkg + ".main":                SetupPlan.Pinned[mainPkg+".main"],
@@ -112,7 +114,7 @@ var Doctor = Policy{
 		doctorFunc + "readFile":          "626f19424d5ed5b56da12cedb1b75e698cd6142e510873a478cd0ec151e326ab",
 		doctorFunc + "portInUse":         "3651950197abf1e1ebbef7fecb8be49d308ee8ca665d149d87de5070a432f9dc",
 		doctorFunc + "lstat":             "cfe02ee0e3f487ced55e72b8fb96c08d5ea213120dc79f81caf562a654466044",
-		doctorFunc + "Mode":              "8244f68a64b4abe824796f1519c16fa65f1d74387cdd024c7f79a99aa6345d67",
+		doctorFunc + "Mode":              "19da2835e7d8d18cbe8785b1c6f522219bb722b09629004080d134feeee53cff",
 		mainPkg + ".runDoctor":           "e6b70ea486e4ea292e66a5a4149eebad3989f77606451b5bd65eb29d50f9d4a3",
 		mainPkg + ".doctorDispatch":      "026a9fa720d9101e68860647b58fc0744655e452fd07b1f7b28e70a51094bbef",
 		"github.com/jerryfane/macserve/internal/setup/plan.AllowedCommand":   SetupPlan.Pinned[planFunc+"AllowedCommand"],

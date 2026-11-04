@@ -5,20 +5,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"strings"
 )
 
-// ModeLive is the word Mode returns when an argument names --live, the only
-// doctor mode with effects (a transient launchd job and GitHub calls).
+// ModeLive is the word Mode returns for --live, the only doctor mode with
+// effects (a transient launchd job and GitHub calls).
 const ModeLive = "live"
 
-// Mode returns ModeLive when any argument could be the --live flag in any
-// spelling the flag package accepts, and "check" otherwise, so that
-// read-only doctor never reaches the live checks.
+// Mode returns ModeLive only when an argument is exactly --live or -live,
+// and "check" otherwise. runDoctorWith refuses any other spelling that the
+// flag package would read as live (--live=true), and a live probe without
+// a parsed --live (a "-live" that is another flag's value), so the
+// read-only clause never runs live and --live=false is read-only.
 func Mode(args []string) string {
 	for _, a := range args {
-		name, _, _ := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(a, "-"), "-"), "=")
-		if strings.HasPrefix(a, "-") && name == "live" {
+		if a == "--live" || a == "-live" {
 			return ModeLive
 		}
 	}

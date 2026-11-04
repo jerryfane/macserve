@@ -126,6 +126,9 @@ func (a *API) do(ctx context.Context, method, path, token string, input, output 
 	if err != nil || len(data) > maxAPIResponse {
 		return errors.New("cannot read GitHub response")
 	}
+	if output == nil {
+		return nil
+	}
 	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) || json.Unmarshal(data, output) != nil {
 		return errors.New("invalid GitHub JSON response")
 	}
@@ -354,6 +357,11 @@ func (a *API) Confirm(ctx context.Context, app App, account Account, candidate i
 // contents read, enough to list the selected repositories and read
 // .macserve.json. It is never stored or printed.
 func (a *API) readToken(ctx context.Context, app App, installation Installation) (string, error) {
+	return a.mintToken(ctx, app, installation, map[string]string{"metadata": "read", "contents": "read"})
+}
+
+// mintToken mints an installation token limited to permissions.
+func (a *API) mintToken(ctx context.Context, app App, installation Installation, permissions map[string]string) (string, error) {
 	jwt, err := a.jwt(app)
 	if err != nil {
 		return "", err
@@ -362,7 +370,7 @@ func (a *API) readToken(ctx context.Context, app App, installation Installation)
 		Token   string    `json:"token"`
 		Expires time.Time `json:"expires_at"`
 	}
-	input := map[string]any{"permissions": map[string]string{"metadata": "read", "contents": "read"}}
+	input := map[string]any{"permissions": permissions}
 	if err := a.do(ctx, http.MethodPost, "/app/installations/"+strconv.FormatInt(installation.ID, 10)+"/access_tokens", jwt, input, &reply); err != nil {
 		return "", err
 	}

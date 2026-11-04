@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"sort"
 	"strings"
@@ -13,7 +14,7 @@ import (
 // App's JWT is accepted, and each installation (by owner login) lists the
 // repositories configured for that owner. Tokens are minted read-only and
 // are never returned or printed; errors name only repositories and
-// installation IDs.
+// installation IDs. Each token is metadata-only and revoked after use.
 func (a *API) CheckInstallations(ctx context.Context, app App, installations map[string]int64, repositories []string) (string, error) {
 	if len(installations) == 0 {
 		return "", errors.New("no GitHub App installation is configured")
@@ -26,11 +27,14 @@ func (a *API) CheckInstallations(ctx context.Context, app App, installations map
 	listed := 0
 	for _, owner := range owners {
 		id := installations[owner]
-		token, err := a.readToken(ctx, app, Installation{ID: id})
+		token, err := a.mintToken(ctx, app, Installation{ID: id}, map[string]string{"metadata": "read"})
 		if err != nil {
 			return "", fmt.Errorf("the App cannot use installation %d (%s)", id, owner)
 		}
 		repos, err := a.repositories(ctx, token)
+		// The token served only this listing; revoke it (best effort, it
+		// expires within the hour anyway).
+		_ = a.do(ctx, http.MethodDelete, "/installation/token", token, nil, nil)
 		if err != nil {
 			return "", fmt.Errorf("cannot list the repositories of installation %d (%s)", id, owner)
 		}

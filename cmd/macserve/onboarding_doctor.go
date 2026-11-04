@@ -56,6 +56,10 @@ func runDoctorWith(probe doctor.Probe, args []string, stdout, stderr io.Writer) 
 		fmt.Fprintln(stderr, "macserve doctor: unexpected arguments; see macserve doctor --help")
 		return 2
 	}
+	if live != (probe.FDA != nil) {
+		fmt.Fprintln(stderr, "macserve doctor: spell the live mode exactly --live, as its own argument")
+		return 2
+	}
 	if o.ReleaseSHA256 != "" && !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(o.ReleaseSHA256) {
 		fmt.Fprintln(stderr, "macserve doctor: --sha256 needs 64 lowercase hexadecimal characters")
 		return 2

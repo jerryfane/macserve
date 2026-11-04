@@ -37,6 +37,32 @@ func TestDoctorCommandExitCodes(t *testing.T) {
 	}
 }
 
+// TestDoctorLiveSpelling: only a literal --live selects the live clause;
+// --live=false stays read-only, and live spellings Mode does not select, or
+// a "-live" that is a flag value, are usage errors before anything runs.
+func TestDoctorLiveSpelling(t *testing.T) {
+	probe := doctor.Probe{GOOS: "linux"}
+	var stdout, stderr bytes.Buffer
+	if got := runDoctorWith(probe, []string{"--live=false"}, &stdout, &stderr); got != 1 {
+		t.Errorf("--live=false: exit %d %q", got, stderr.String())
+	}
+	for _, args := range [][]string{{"--live=true"}, {"-live=1"}} {
+		stdout.Reset()
+		if doctor.Mode(args) == doctor.ModeLive {
+			t.Errorf("%q selects live", args)
+		}
+		if got := runDoctorWith(probe, args, &stdout, &stderr); got != 2 || stdout.Len() != 0 {
+			t.Errorf("%q: exit %d", args, got)
+		}
+	}
+	live := probe
+	live.FDA = func() (bool, string, error) { t.Error("FDA probe ran"); return false, "", nil }
+	stdout.Reset()
+	if got := runDoctorWith(live, []string{"--sha256sums", "-live"}, &stdout, &stderr); got != 2 || stdout.Len() != 0 {
+		t.Errorf("flag value -live: exit %d", got)
+	}
+}
+
 // TestDoctorLiveNeedsRoot: --live is refused without sudo (tests do not
 // run as root).
 func TestDoctorLiveNeedsRoot(t *testing.T) {

@@ -357,7 +357,7 @@ func TestJSONGolden(t *testing.T) {
 }
 
 func TestMode(t *testing.T) {
-	for args, want := range map[string]string{"--live": ModeLive, "-live=false": ModeLive, "--json": "check", "": "check", "live": "check"} {
+	for args, want := range map[string]string{"--live": ModeLive, "-live": ModeLive, "--json --live": ModeLive, "-live=false": "check", "--live=false": "check", "--live=true": "check", "--json": "check", "": "check", "live": "check", "---live": "check"} {
 		if got := Mode(strings.Fields(args)); got != want {
 			t.Errorf("Mode(%q) = %q", args, got)
 		}

@@ -80,3 +80,29 @@ func TestDoctorMutantsRefused(t *testing.T) {
 		}
 	}
 }
+
+// TestDoctorRefsGuardAllowlists: a module init that widens either command
+// allowlist is refused under the Doctor policy itself.
+func TestDoctorRefsGuardAllowlists(t *testing.T) {
+	b := testBuild(t)
+	root := repoRoot(t)
+	// Each mutant appends an init to an existing file of the package.
+	for _, m := range []struct{ name, file, code string }{
+		{"plan allowlist appended", "internal/setup/plan/runner.go", "\nfunc init() { readOnlyCommands = append(readOnlyCommands, []string{\"/bin/launchctl\", \"bootout\", \"system/x\"}) }\n"},
+		{"launchctl gui pattern replaced", "internal/doctor/system.go", "\nfunc init() { launchctlGUI = regexp.MustCompile(`.*`) }\n"},
+	} {
+		path := filepath.Join(root, m.file)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := b.Check(Doctor, map[string][]byte{path: append(data, m.code...)})
+		if err != nil {
+			t.Errorf("%s: %v", m.name, err)
+			continue
+		}
+		if len(r.Problems) == 0 {
+			t.Errorf("mutant %q survived", m.name)
+		}
+	}
+}

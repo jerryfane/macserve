@@ -2,6 +2,7 @@ package onboarding
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/jerryfane/macserve/internal/model"
+	"github.com/jerryfane/macserve/internal/receipt"
 )
 
 const (
@@ -31,6 +33,7 @@ type fakeAPI struct {
 	mu       sync.Mutex
 	caps     string
 	states   []model.State // successive GET /v1/jobs/ID states
+	statusID string        // the id GET /v1/jobs/job1 answers ("" = job1)
 	polls    int
 	submits  []*http.Request
 	bodies   []model.Request
@@ -67,7 +70,9 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if f.states[i] == model.Failed {
 			exit = `,"exit_code":65`
 		}
-		io.WriteString(w, `{"id":"job1","state":"`+string(f.states[i])+`","repo":"jdoe/app","sha":"`+testSHA+`"`+exit+`}`)
+		id := cmp.Or(f.statusID, "job1")
+		requested, _ := json.Marshal(sentRequest)
+		io.WriteString(w, `{"id":"`+id+`","state":"`+string(f.states[i])+`","repo":"jdoe/app","sha":"`+testSHA+`"`+exit+`,"requested":`+string(requested)+`}`)
 	case r.Method == "GET" && r.URL.Path == "/v1/jobs/job1/logs":
 		f.logPolls++
 		terminal := f.polls > 0 && f.states[min(f.polls-1, len(f.states)-1)].Terminal()
@@ -81,6 +86,11 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		json.NewEncoder(w).Encode(map[string]any{"records": []model.LogRecord{}, "next_cursor": "c1", "eof": terminal})
 	case r.Method == "GET" && r.URL.Path == "/v1/jobs/job1/receipt":
+		if f.receipt == nil {
+			w.WriteHeader(409)
+			io.WriteString(w, `{"error":{"code":"not_ready"}}`)
+			return
+		}
 		w.Write(f.receipt)
 	default:
 		w.WriteHeader(404)
@@ -107,12 +117,12 @@ func newTestBuild(t *testing.T, f *fakeAPI) (*Build, *bytes.Buffer) {
 func TestSubmitRequestShape(t *testing.T) {
 	f := &fakeAPI{caps: templateCaps}
 	b, out := newTestBuild(t, f)
-	id, err := b.Submit(context.Background(), BuildRequest{Repo: "jdoe/app", SHA: testSHA, RepoConfig: []byte(`{"version":1,"work_dir":".","project":"App.xcodeproj","scheme":"App"}`)})
+	id, sent, err := b.Submit(context.Background(), BuildRequest{Repo: "jdoe/app", SHA: testSHA, RepoConfig: []byte(`{"version":1,"work_dir":".","project":"App.xcodeproj","scheme":"App"}`)})
 	if err != nil || id != "job1" {
 		t.Fatalf("submit %q %v", id, err)
 	}
-	want := model.Request{Repo: "jdoe/app", SHA: testSHA, Kind: "build", Profile: "org-ios-sim-build-v1", Xcode: model.Xcode{Version: "16.2", Build: "16C5032a"}}
-	if len(f.bodies) != 1 || f.bodies[0] != want {
+	want := sentRequest
+	if len(f.bodies) != 1 || f.bodies[0] != want || sent != want {
 		t.Errorf("bodies %+v", f.bodies)
 	}
 	if keys := f.submits[0].Header.Values("Idempotency-Key"); len(keys) != 1 || keys[0] != "key-1" {
@@ -130,16 +140,16 @@ func TestSubmitChoosesProfile(t *testing.T) {
 	caps := `{"profiles":[{"id":"app-build","repo":"jdoe/app","kind":"build","xcode":{"version":"16.2","build":"16C5032a"}}],"templates":[{"id":"org","owners":["jdoe"],"kind":"build","xcode":{"version":"16.2","build":"16C5032a"}}]}`
 	f := &fakeAPI{caps: caps}
 	b, _ := newTestBuild(t, f)
-	if _, err := b.Submit(context.Background(), BuildRequest{Repo: "jdoe/app", SHA: testSHA}); err == nil || !strings.Contains(err.Error(), "--profile") {
+	if _, _, err := b.Submit(context.Background(), BuildRequest{Repo: "jdoe/app", SHA: testSHA}); err == nil || !strings.Contains(err.Error(), "--profile") {
 		t.Errorf("ambiguous: %v", err)
 	}
-	if _, err := b.Submit(context.Background(), BuildRequest{Repo: "jdoe/app", SHA: testSHA, Profile: "app-build"}); err != nil {
+	if _, _, err := b.Submit(context.Background(), BuildRequest{Repo: "jdoe/app", SHA: testSHA, Profile: "app-build"}); err != nil {
 		t.Fatal(err)
 	}
 	if f.bodies[0].Profile != "app-build" {
 		t.Errorf("profile %q", f.bodies[0].Profile)
 	}
-	if _, err := b.Submit(context.Background(), BuildRequest{Repo: "other/app", SHA: testSHA}); err == nil {
+	if _, _, err := b.Submit(context.Background(), BuildRequest{Repo: "other/app", SHA: testSHA}); err == nil {
 		t.Error("unadmitted repo submitted")
 	}
 }
@@ -152,7 +162,7 @@ func TestSubmitRejectsBadInput(t *testing.T) {
 		{Repo: "jdoe/app", SHA: "HEAD"},
 		{Repo: "jdoe/app", SHA: testSHA, RepoConfig: []byte(`{"version":1,"scheme":"App","run":"rm -rf /"}`)},
 	} {
-		if _, err := b.Submit(context.Background(), r); err == nil {
+		if _, _, err := b.Submit(context.Background(), r); err == nil {
 			t.Errorf("accepted %+v", r)
 		}
 	}
@@ -166,13 +176,13 @@ func TestTokenNeverPrinted(t *testing.T) {
 	f := &fakeAPI{caps: templateCaps}
 	b, out := newTestBuild(t, f)
 	b.Token = func(context.Context) (string, error) { return "wrong " + testToken, nil }
-	_, err := b.Submit(context.Background(), BuildRequest{Repo: "jdoe/app", SHA: testSHA})
+	_, _, err := b.Submit(context.Background(), BuildRequest{Repo: "jdoe/app", SHA: testSHA})
 	if err == nil || strings.Contains(err.Error(), testToken) || strings.Contains(out.String(), testToken) {
 		t.Errorf("err %v out %q", err, out.String())
 	}
 	b, out = newTestBuild(t, &fakeAPI{caps: templateCaps})
 	b.Token = func(context.Context) (string, error) { return "", errors.New("security: " + testToken) }
-	_, err = b.Submit(context.Background(), BuildRequest{Repo: "jdoe/app", SHA: testSHA})
+	_, _, err = b.Submit(context.Background(), BuildRequest{Repo: "jdoe/app", SHA: testSHA})
 	if err == nil || strings.Contains(err.Error(), testToken) || strings.Contains(out.String(), testToken) {
 		t.Errorf("keychain err %v", err)
 	}
@@ -187,10 +197,14 @@ func TestAPIErrorHasOnlyCode(t *testing.T) {
 	}
 }
 
-func signedReceipt(t *testing.T, jobID string) ([]byte, Pins) {
+func signedReceipt(t *testing.T, jobID string, edit ...func(*receipt.Payload)) ([]byte, Pins) {
 	t.Helper()
 	pub, priv, _ := ed25519.GenerateKey(nil)
-	raw := receiptFixture(t, priv, jobID)
+	var e func(*receipt.Payload)
+	if len(edit) > 0 {
+		e = edit[0]
+	}
+	raw := receiptFixture(t, priv, jobID, e)
 	return raw, Pins{ReceiptKeyID: "k1", ReceiptPublicKey: base64.StdEncoding.EncodeToString(pub)}
 }
 
@@ -213,8 +227,8 @@ func TestFollowTerminalStates(t *testing.T) {
 		if tc.receipt {
 			f.receipt, b.Pins = signedReceipt(t, "job1")
 		}
-		res, err := b.Follow(context.Background(), "job1")
-		if err != nil || res.State != tc.want || res.Receipt != tc.receipt {
+		res, err := b.Follow(context.Background(), "job1", &sentRequest)
+		if err != nil || res.State != tc.want || res.Receipt != tc.receipt || res.Succeeded() != tc.receipt {
 			t.Errorf("%v: %+v %v", tc.states, res, err)
 		}
 		if !strings.Contains(out.String(), "** BUILD SUCCEEDED **") || strings.Count(out.String(), "Compiling App") != 1 {
@@ -226,18 +240,95 @@ func TestFollowTerminalStates(t *testing.T) {
 	}
 }
 
-func TestFollowRejectsForeignReceipt(t *testing.T) {
+// TestFollowBindsReceipt: success needs a verified receipt of the job
+// this command submitted, for the request it sent, that is itself a
+// complete success with exit code 0.
+func TestFollowBindsReceipt(t *testing.T) {
+	failed := func(p *receipt.Payload) {
+		p.State, p.ExitCode, p.Complete = model.Failed, ptr(65), false
+	}
+	for _, tc := range []struct {
+		name     string
+		status   model.State
+		statusID string
+		jobID    string
+		edit     func(*receipt.Payload)
+		otherKey bool
+		want     error
+		state    model.State
+	}{
+		// (a) the unsigned status says succeeded; the signed receipt says failed.
+		{name: "failed receipt under succeeded status", status: model.Succeeded, jobID: "job1", edit: failed, state: model.Failed},
+		{name: "incomplete receipt", status: model.Succeeded, jobID: "job1", edit: func(p *receipt.Payload) { p.Complete = false }, state: model.Succeeded},
+		{name: "nonzero exit", status: model.Succeeded, jobID: "job1", edit: func(p *receipt.Payload) { p.ExitCode = ptr(1) }, state: model.Succeeded},
+		{name: "failed job with failed receipt", status: model.Failed, jobID: "job1", edit: failed, state: model.Failed},
+		// (b) replay: the API answers for an older job with its valid receipt.
+		{name: "status for another job", status: model.Succeeded, statusID: "oldjob", jobID: "oldjob", want: errors.New("another job")},
+		{name: "receipt of another job", status: model.Succeeded, jobID: "oldjob", want: ErrReceiptMismatch},
+		{name: "receipt of another kind", status: model.Succeeded, jobID: "job1", edit: func(p *receipt.Payload) { p.Request.Kind = "test" }, want: ErrReceiptMismatch},
+		{name: "receipt of another profile", status: model.Succeeded, jobID: "job1", edit: func(p *receipt.Payload) { p.Request.Profile = "other" }, want: ErrReceiptMismatch},
+		{name: "receipt of other Xcode", status: model.Succeeded, jobID: "job1", edit: func(p *receipt.Payload) { p.Request.Xcode.Build = "16C1" }, want: ErrReceiptMismatch},
+		{name: "receipt of another commit", status: model.Succeeded, jobID: "job1", edit: func(p *receipt.Payload) { p.Request.SHA = strings.Repeat("9", 40) }, want: ErrReceiptMismatch},
+		{name: "receipt under another key", status: model.Succeeded, jobID: "job1", otherKey: true, want: errors.New("does not verify")},
+	} {
+		f := &fakeAPI{caps: templateCaps, states: []model.State{tc.status}, statusID: tc.statusID}
+		b, _ := newTestBuild(t, f)
+		f.receipt, b.Pins = signedReceipt(t, tc.jobID, tc.edit)
+		if tc.otherKey {
+			_, b.Pins = signedReceipt(t, tc.jobID)
+		}
+		res, err := b.Follow(context.Background(), "job1", &sentRequest)
+		switch {
+		case tc.want != nil:
+			if err == nil || !errors.Is(err, tc.want) && !strings.Contains(err.Error(), tc.want.Error()) {
+				t.Errorf("%s: err %v, want %v", tc.name, err, tc.want)
+			}
+		case err != nil:
+			t.Errorf("%s: %v", tc.name, err)
+		case res.Succeeded() || !res.Receipt || res.State != tc.state:
+			t.Errorf("%s: %+v", tc.name, res)
+		}
+	}
+	// A succeeded status without a receipt is not a success.
 	f := &fakeAPI{caps: templateCaps, states: []model.State{model.Succeeded}}
 	b, _ := newTestBuild(t, f)
-	f.receipt, b.Pins = signedReceipt(t, "job2")
-	if _, err := b.Follow(context.Background(), "job1"); err == nil {
-		t.Error("receipt of another job accepted")
+	if _, err := b.Follow(context.Background(), "job1", &sentRequest); err == nil {
+		t.Error("succeeded without receipt accepted")
 	}
-	_, other := signedReceipt(t, "job1")
-	f.receipt, _ = signedReceipt(t, "job1")
-	b.Pins = other
-	if _, err := b.Follow(context.Background(), "job1"); err == nil {
-		t.Error("receipt under another key accepted")
+	// A failed job without a receipt reports the status, not an error.
+	f = &fakeAPI{caps: templateCaps, states: []model.State{model.Cancelled}}
+	b, _ = newTestBuild(t, f)
+	if res, err := b.Follow(context.Background(), "job1", &sentRequest); err != nil || res.State != model.Cancelled || res.Succeeded() {
+		t.Errorf("cancelled: %+v %v", res, err)
+	}
+	// --follow: the receipt must match the request the API reports.
+	f = &fakeAPI{caps: templateCaps, states: []model.State{model.Succeeded}}
+	b, _ = newTestBuild(t, f)
+	f.receipt, b.Pins = signedReceipt(t, "job1")
+	if res, err := b.Follow(context.Background(), "job1", nil); err != nil || !res.Succeeded() {
+		t.Errorf("--follow: %+v %v", res, err)
+	}
+}
+
+func ptr(n int) *int { return &n }
+
+func TestPinMismatchReported(t *testing.T) {
+	srv := httptest.NewTLSServer(http.NotFoundHandler())
+	t.Cleanup(srv.Close)
+	c, err := PinnedClient(strings.Repeat("0", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &Build{Endpoint: srv.URL, HTTP: c, Out: io.Discard, Token: func(context.Context) (string, error) { return testToken, nil }}
+	if err := b.do(context.Background(), "GET", "/v1/capabilities", nil, nil, nil); !errors.Is(err, ErrPinMismatch) {
+		t.Errorf("err %v", err)
+	}
+}
+
+func TestKeychainServiceLiteral(t *testing.T) {
+	// setup's saveKeychainToken (PR #73) adds exactly this service name.
+	if KeychainService != "macserve API token" {
+		t.Errorf("KeychainService %q", KeychainService)
 	}
 }
 
@@ -254,7 +345,7 @@ func TestFollowCancellation(t *testing.T) {
 		}
 		return ctx.Err()
 	}
-	if _, err := b.Follow(ctx, "job1"); !errors.Is(err, ErrInterrupted) {
+	if _, err := b.Follow(ctx, "job1", &sentRequest); !errors.Is(err, ErrInterrupted) {
 		t.Fatalf("err %v", err)
 	}
 	if f.polls != 3 {

@@ -36,18 +36,25 @@ func canonicalJSON(t *testing.T, v any) []byte {
 	return bytes.TrimSuffix(b.Bytes(), []byte("\n"))
 }
 
-// receiptFixture is a signed receipt envelope for jobID of jdoe/app at
-// testSHA, signed by priv under key ID "k1".
-func receiptFixture(t *testing.T, priv ed25519.PrivateKey, jobID string) []byte {
+// sentRequest is what TestSubmitRequestShape's Submit sends.
+var sentRequest = model.Request{Repo: "jdoe/app", SHA: testSHA, Kind: "build", Profile: "org-ios-sim-build-v1", Xcode: model.Xcode{Version: "16.2", Build: "16C5032a"}}
+
+// receiptFixture is a signed, complete, successful receipt envelope for
+// jobID and sentRequest, signed by priv under key ID "k1"; edit changes the
+// payload before signing.
+func receiptFixture(t *testing.T, priv ed25519.PrivateKey, jobID string, edit func(*receipt.Payload)) []byte {
 	t.Helper()
 	at := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
 	p := receipt.Payload{
 		Schema: 1, JobID: jobID, AttemptID: "attempt-1", InputDigest: strings.Repeat("a", 64),
-		Approval:  receipt.Approval{AttemptID: "attempt-1"},
-		Request:   model.Request{Repo: "jdoe/app", SHA: testSHA, Kind: "build", Profile: "org-ios-sim-build-v1"},
-		State:     model.Succeeded,
+		Approval: receipt.Approval{AttemptID: "attempt-1"},
+		Request:  sentRequest,
+		State:    model.Succeeded, ExitCode: new(int), Complete: true,
 		CreatedAt: at, StartedAt: at, FinishedAt: at, SealedAt: at,
 		Details: &receipt.Details{},
+	}
+	if edit != nil {
+		edit(&p)
 	}
 	payload := canonicalJSON(t, p)
 	sig := ed25519.Sign(priv, payload)

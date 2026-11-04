@@ -91,6 +91,10 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("macserve API: %d", e.Status)
 }
 
+// ErrPinMismatch means the API answered with a certificate other than the
+// installed controller's: possibly someone in the middle.
+var ErrPinMismatch = errors.New("the API's TLS certificate is not this Mac's installed controller certificate (deployment-pins.json); possibly an interception, nothing was sent")
+
 // PinnedClient trusts exactly the controller certificate whose DER sha256
 // is fingerprint, over TLS 1.3.
 func PinnedClient(fingerprint string) (*http.Client, error) {
@@ -104,7 +108,7 @@ func PinnedClient(fingerprint string) (*http.Client, error) {
 		}
 		got := sha256.Sum256(cs.PeerCertificates[0].Raw)
 		if subtle.ConstantTimeCompare(got[:], want) != 1 {
-			return errors.New("the controller certificate is not the installed one")
+			return ErrPinMismatch
 		}
 		return nil
 	}
@@ -169,6 +173,9 @@ func (b *Build) do(ctx context.Context, method, path string, header map[string]s
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if errors.Is(err, ErrPinMismatch) {
+			return ErrPinMismatch
 		}
 		return errors.New("cannot reach the macserve API at " + b.Endpoint)
 	}
@@ -257,26 +264,27 @@ func randomKey() (string, error) {
 }
 
 // Submit validates r, reads the capabilities and submits one job with a
-// fresh Idempotency-Key. It returns the job ID.
-func (b *Build) Submit(ctx context.Context, r BuildRequest) (string, error) {
+// fresh Idempotency-Key. It returns the job ID and the exact request sent,
+// which Follow binds the receipt to.
+func (b *Build) Submit(ctx context.Context, r BuildRequest) (string, model.Request, error) {
 	if !repoName.MatchString(r.Repo) {
-		return "", errors.New("--repo needs OWNER/NAME")
+		return "", model.Request{}, errors.New("--repo needs OWNER/NAME")
 	}
 	if !shaHex.MatchString(r.SHA) {
-		return "", errors.New("--sha needs a full 40-character lowercase commit SHA")
+		return "", model.Request{}, errors.New("--sha needs a full 40-character lowercase commit SHA")
 	}
 	if r.RepoConfig != nil {
 		if _, err := profiles.ParseRepoConfig(r.RepoConfig); err != nil {
-			return "", fmt.Errorf("%s is invalid: %v", profiles.RepoConfigFile, err)
+			return "", model.Request{}, fmt.Errorf("%s is invalid: %v", profiles.RepoConfigFile, err)
 		}
 	}
 	var caps capabilities
 	if err := b.do(ctx, http.MethodGet, "/v1/capabilities", nil, nil, &caps); err != nil {
-		return "", err
+		return "", model.Request{}, err
 	}
 	chosen, err := choose(caps, r)
 	if err != nil {
-		return "", err
+		return "", model.Request{}, err
 	}
 	if len(caps.BlockedBy) > 0 {
 		b.say("macserve is not admitting jobs now (%s); the job waits in the queue.", strings.Join(caps.BlockedBy, ", "))
@@ -287,7 +295,7 @@ func (b *Build) Submit(ctx context.Context, r BuildRequest) (string, error) {
 	}
 	key, err := newKey()
 	if err != nil {
-		return "", err
+		return "", model.Request{}, err
 	}
 	request := model.Request{Repo: r.Repo, SHA: r.SHA, Kind: chosen.Kind, Profile: chosen.ID, Xcode: chosen.Xcode}
 	var job struct {
@@ -295,29 +303,39 @@ func (b *Build) Submit(ctx context.Context, r BuildRequest) (string, error) {
 		State model.State `json:"state"`
 	}
 	if err := b.do(ctx, http.MethodPost, "/v1/jobs", map[string]string{"Idempotency-Key": key}, request, &job); err != nil {
-		return "", err
+		return "", model.Request{}, err
 	}
 	if !jobID.MatchString(job.ID) {
-		return "", errors.New("invalid macserve API reply")
+		return "", model.Request{}, errors.New("invalid macserve API reply")
 	}
 	b.say("Submitted %s %s at %s with %s (Xcode %s): job %s.", request.Kind, r.Repo, r.SHA[:12], chosen.ID, chosen.Xcode.Version, job.ID)
-	return job.ID, nil
+	return job.ID, request, nil
 }
 
-// Result is a finished job.
+// Result is a finished job. State, Complete and ExitCode come from the
+// verified receipt when Receipt is set, and from the unsigned status
+// otherwise.
 type Result struct {
 	ID       string
 	State    model.State
-	Receipt  bool // a receipt was verified
+	Receipt  bool // a receipt verified and matched the job
+	Complete bool
 	ExitCode *int
 }
 
+// Succeeded reports a verified, complete, successful receipt with exit
+// code 0: the only result `macserve build` exits 0 for.
+func (r Result) Succeeded() bool {
+	return r.Receipt && r.State == model.Succeeded && r.Complete && r.ExitCode != nil && *r.ExitCode == 0
+}
+
 type jobStatus struct {
-	ID       string      `json:"id"`
-	State    model.State `json:"state"`
-	Repo     string      `json:"repo"`
-	SHA      string      `json:"sha"`
-	ExitCode *int        `json:"exit_code"`
+	ID        string         `json:"id"`
+	State     model.State    `json:"state"`
+	Repo      string         `json:"repo"`
+	SHA       string         `json:"sha"`
+	ExitCode  *int           `json:"exit_code"`
+	Requested *model.Request `json:"requested"`
 }
 
 type logPage struct {
@@ -340,10 +358,16 @@ func (b *Build) sleep(ctx context.Context) error {
 	}
 }
 
+// ErrReceiptMismatch means a signed receipt is not the receipt of the job
+// this command submitted or follows (another job's, or another request's).
+var ErrReceiptMismatch = errors.New("receipt does not match the submitted job")
+
 // Follow prints the job's logs until it is terminal and its logs reach eof,
-// then verifies the receipt of a successful job. A cancelled ctx returns
-// ErrInterrupted; the job is not cancelled.
-func (b *Build) Follow(ctx context.Context, id string) (Result, error) {
+// then verifies the receipt and binds it to job id and to the request
+// Submit sent (want). With want nil (--follow of an earlier job) the
+// receipt must match the request the API reports for id. A cancelled ctx
+// returns ErrInterrupted; the job is not cancelled.
+func (b *Build) Follow(ctx context.Context, id string, want *model.Request) (Result, error) {
 	if !jobID.MatchString(id) {
 		return Result{}, errors.New("invalid job ID")
 	}
@@ -354,6 +378,9 @@ func (b *Build) Follow(ctx context.Context, id string) (Result, error) {
 		var status jobStatus
 		if err := b.do(ctx, http.MethodGet, base, nil, nil, &status); err != nil {
 			return Result{ID: id}, interrupted(ctx, err)
+		}
+		if status.ID != id {
+			return Result{ID: id}, errors.New("the macserve API answered for another job")
 		}
 		if status.State != last {
 			b.say("job %s: %s", id, status.State)
@@ -378,7 +405,13 @@ func (b *Build) Follow(ctx context.Context, id string) (Result, error) {
 			}
 		}
 		if status.State.Terminal() && eof {
-			return b.finish(ctx, base, status)
+			if want == nil {
+				if status.Requested == nil {
+					return Result{ID: id}, errors.New("the macserve API did not report the job's request")
+				}
+				want = status.Requested
+			}
+			return b.finish(ctx, base, id, *want, status)
 		}
 		if err := b.sleep(ctx); err != nil {
 			return Result{ID: id}, interrupted(ctx, err)
@@ -393,13 +426,17 @@ func interrupted(ctx context.Context, err error) error {
 	return err
 }
 
-func (b *Build) finish(ctx context.Context, base string, status jobStatus) (Result, error) {
-	res := Result{ID: status.ID, State: status.State, ExitCode: status.ExitCode}
-	if status.State != model.Succeeded {
-		return res, nil
-	}
+// finish verifies the terminal job's receipt. A job the status reports as
+// succeeded must have one; any other terminal job's receipt is checked if
+// the API has one, and its absence leaves the unsigned status.
+func (b *Build) finish(ctx context.Context, base, id string, want model.Request, status jobStatus) (Result, error) {
+	res := Result{ID: id, State: status.State, ExitCode: status.ExitCode}
 	var raw []byte
 	if err := b.do(ctx, http.MethodGet, base+"/receipt", nil, nil, &raw); err != nil {
+		var api *APIError
+		if status.State != model.Succeeded && errors.As(err, &api) {
+			return res, nil
+		}
 		return res, interrupted(ctx, err)
 	}
 	key, err := base64.StdEncoding.Strict().DecodeString(b.Pins.ReceiptPublicKey)
@@ -410,11 +447,17 @@ func (b *Build) finish(ctx context.Context, base string, status jobStatus) (Resu
 	if err != nil {
 		return res, errors.New("the job's receipt does not verify against deployment-pins.json")
 	}
-	if p.JobID != status.ID || !strings.EqualFold(p.Request.Repo, status.Repo) || p.Request.SHA != status.SHA {
-		return res, errors.New("the receipt is for another job")
+	if p.JobID != id || !sameRequest(p.Request, want) {
+		return res, ErrReceiptMismatch
 	}
-	res.Receipt = true
-	return res, nil
+	return Result{ID: id, State: p.State, Receipt: true, Complete: p.Complete, ExitCode: p.ExitCode}, nil
+}
+
+// sameRequest compares the receipt's request with the one sent: repository
+// (GitHub names are case-insensitive), commit, kind, profile or template
+// and Xcode pins.
+func sameRequest(got, want model.Request) bool {
+	return strings.EqualFold(got.Repo, want.Repo) && got.SHA == want.SHA && got.Kind == want.Kind && got.Profile == want.Profile && got.Xcode == want.Xcode
 }
 
 // LocalRepo reads the repository at dir without running git or anything in

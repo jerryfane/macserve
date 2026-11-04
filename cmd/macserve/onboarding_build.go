@@ -12,6 +12,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"os/user"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -78,6 +80,7 @@ func runBuildWith(ctx context.Context, host buildHost, args []string, stdout, st
 		return fail(err)
 	}
 	id := follow
+	var sent *model.Request
 	if id == "" {
 		if r.Repo == "" || r.SHA == "" {
 			dir, err := host.cwd()
@@ -100,15 +103,17 @@ func runBuildWith(ctx context.Context, host buildHost, args []string, stdout, st
 		if r.Repo == "" {
 			return fail(errors.New("cannot tell the GitHub repository from remote \"origin\"; pass --repo OWNER/NAME"))
 		}
-		if id, err = b.Submit(ctx, r); err != nil {
+		var request model.Request
+		if id, request, err = b.Submit(ctx, r); err != nil {
 			return fail(err)
 		}
+		sent = &request
 		if noFollow {
 			fmt.Fprintf(stdout, "Follow it with: macserve build --follow %s\n", id)
 			return 0
 		}
 	}
-	res, err := b.Follow(ctx, id)
+	res, err := b.Follow(ctx, id, sent)
 	if errors.Is(err, onboarding.ErrInterrupted) {
 		fmt.Fprintf(stderr, "macserve build: %v; follow it again with: macserve build --follow %s\n", err, id)
 		return buildInterrupted
@@ -117,9 +122,11 @@ func runBuildWith(ctx context.Context, host buildHost, args []string, stdout, st
 		return fail(err)
 	}
 	switch {
-	case res.State == model.Succeeded && res.Receipt:
-		fmt.Fprintf(stdout, "✓ job %s succeeded; its signed receipt verifies against this Mac's deployment pins.\n", res.ID)
+	case res.Succeeded():
+		fmt.Fprintf(stdout, "✓ job %s succeeded; its signed receipt verifies against this Mac's deployment pins and matches the submitted job.\n", res.ID)
 		return 0
+	case res.Receipt && res.State == model.Succeeded:
+		fmt.Fprintf(stdout, "✗ job %s: its signed receipt is not a complete success (exit code %s).\n", res.ID, exitText(res.ExitCode))
 	case res.ExitCode != nil:
 		fmt.Fprintf(stdout, "✗ job %s %s (exit code %d).\n", res.ID, res.State, *res.ExitCode)
 	default:
@@ -164,13 +171,30 @@ func newBuildClient(host buildHost, stdout io.Writer) (*onboarding.Build, error)
 	return b, nil
 }
 
+func exitText(code *int) string {
+	if code == nil {
+		return "none"
+	}
+	return strconv.Itoa(*code)
+}
+
+// keychainArgs finds the item setup's saveKeychainToken adds (PR #73):
+// service onboarding.KeychainService, account the owner's username.
+func keychainArgs(account string) []string {
+	return []string{"find-generic-password", "-a", account, "-s", onboarding.KeychainService, "-w"}
+}
+
 // keychainToken reads the API token from the invoking user's login
 // keychain with security(1). Its output is the token only; stderr is
 // discarded so nothing about the item is shown.
 func keychainToken(ctx context.Context) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "/usr/bin/security", "find-generic-password", "-s", onboarding.KeychainService, "-w")
+	u, err := user.Current()
+	if err != nil {
+		return "", err
+	}
+	cmd := exec.CommandContext(ctx, "/usr/bin/security", keychainArgs(u.Username)...)
 	cmd.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin"}
 	cmd.Dir = "/"
 	var out bytes.Buffer

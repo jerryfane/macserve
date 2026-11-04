@@ -94,7 +94,7 @@ read root-only files report unknown; sudo runs them.
   --sha256sums SHA256SUMS, --sha256 HEX
                 Compare the installed binary with this release digest
                 instead of the one setup recorded (release.bytes).
-  --live        With sudo, also run the two checks that act: Full Disk
+  --live        (exactly this spelling) With sudo, also run the two checks that act: Full Disk
                 Access from a transient launchd job (tcc.fda), and the
                 GitHub App's installations (github.app). Without --live
                 doctor writes, starts and contacts nothing.
@@ -111,13 +111,15 @@ const buildHelp = `Usage: macserve build [--repo OWNER/NAME] [--sha SHA] [--prof
 
 Submits a build of a commit to this Mac's macserve through its private API,
 prints the job's logs until it finishes and verifies its signed receipt
-against /Library/macserve/config/deployment-pins.json. Run it from your
+against /Library/macserve/config/deployment-pins.json: the receipt must be
+this job's, for the exact request sent, and a complete success with exit
+code 0. Run it from your
 repository's root: --repo defaults to the GitHub remote "origin" and --sha
 to HEAD (push it first; macserve fetches the commit from GitHub). Nothing
 in the repository is run on this side; .macserve.json is only checked.
 
 The API token comes from your login keychain item "macserve API token"
-that setup saved; it is never printed.
+(account: your user name) that setup saved; it is never printed.
 
   --profile ID  The profile or template to use, when more than one admits
                 the repository.
