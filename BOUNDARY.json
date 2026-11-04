@@ -29,6 +29,7 @@
       "internal/protocol/**",
       "internal/qualification/**",
       "internal/receipt/**",
+      "internal/setup/**",
       "internal/source/**",
       "internal/store/**",
       "internal/waiter/**",

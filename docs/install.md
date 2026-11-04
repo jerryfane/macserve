@@ -39,6 +39,8 @@ gh attestation verify macserve-deploy-kit/macserve-darwin-arm64 --repo jerryfane
 
 The rebuilt sha256 must equal `EXPECTED_SHA256` and the downloaded binary's digest.
 
+`macserve setup --plan --repository OWNER/NAME:ID`, run as yourself (not with `sudo`), can propose the `deploy.env` below from detected values. It is read-only: it checks the Mac (administrator, macOS, Apple silicon, SIP, FileVault, Xcode, Tailscale address, free port and account IDs, owner-home mode, existing `/Library/macserve`), prints a `deploy.env` already accepted by the `deploy-install` parser and the ordered setup steps, and writes, creates or starts nothing. Review its output like any other `deploy.env`; the remaining setup steps are not available in this release.
+
 Create and review `deploy.env`. **Every value below is illustrative**, not a claim that an identity, address, port, Xcode or repository ID is suitable or available. Include current non-link-local host aliases in `HOST_ADDRESSES`, choose the protected ports to include in informational reachability reports, and pin real repository IDs out of band:
 
 ```sh
