@@ -112,6 +112,9 @@ func (h *Helper) jobLoginVerb(l *Ledger, loc LedgerLocation) (Response, error) {
 			return Response{}, err
 		}
 	}
+	if ok, detail, err := h.jobLogoutGate(l, loc, e.JobUID); err != nil || !ok {
+		return Response{Detail: detail}, err
+	}
 	ok, detail := h.checkJobLogin(e.JobUID, e.OwnerUID)
 	return Response{Done: ok, Detail: detail}, nil
 }
@@ -133,6 +136,9 @@ func (h *Helper) ownerActions(l *Ledger, loc LedgerLocation) (Response, error) {
 	}
 	granted, detail, err := h.checkFDA()
 	if err != nil || !granted {
+		return Response{Detail: detail}, err
+	}
+	if ok, detail, err := h.jobLogoutGate(l, loc, e.JobUID); err != nil || !ok {
 		return Response{Detail: detail}, err
 	}
 	if ok, detail := h.checkJobLogin(e.JobUID, e.OwnerUID); !ok {

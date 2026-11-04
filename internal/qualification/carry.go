@@ -215,6 +215,16 @@ func loadApprovedChallenge(dir string) (Challenge, Candidate, error) {
 // checkCarryProof binds the proof to the anchored and the installed binary
 // and requires it to claim only carry classes.
 func checkCarryProof(raw []byte, a ActivationAnchor, live map[string]string) (CarryProof, error) {
+	return ValidateCarryProof(raw, a.Bindings[installedHelper], live[installedHelper])
+}
+
+// ValidateCarryProof is every check qualify carry applies to the proof
+// itself: the strict decoding, the kind, complete and distinct release
+// identities, from binary fromSHA256 (the anchored one) to toSHA256 (the
+// installed one), unique changed paths of carry classes only and
+// classes_present equal to them. macserve upgrade's pre-check uses it too,
+// so a proof it accepts is one qualify carry accepts.
+func ValidateCarryProof(raw []byte, fromSHA256, toSHA256 string) (CarryProof, error) {
 	var p CarryProof
 	if err := decode(raw, &p); err != nil {
 		return p, fmt.Errorf("carry proof: %w", err)
@@ -228,10 +238,10 @@ func checkCarryProof(raw []byte, a ActivationAnchor, live map[string]string) (Ca
 	if len(p.From.BinarySHA256) != 64 || p.From.BinarySHA256 == p.To.BinarySHA256 {
 		return p, errors.New("carry proof binary digests invalid")
 	}
-	if p.From.BinarySHA256 != a.Bindings[installedHelper] {
+	if fromSHA256 == "" || p.From.BinarySHA256 != fromSHA256 {
 		return p, errors.New("carry proof starts from a binary other than the anchored one")
 	}
-	if p.To.BinarySHA256 != live[installedHelper] {
+	if toSHA256 == "" || p.To.BinarySHA256 != toSHA256 {
 		return p, errors.New("carry proof names a binary other than the installed one")
 	}
 	if len(p.Changed) == 0 {
@@ -526,4 +536,38 @@ func Carry(ctx context.Context, dir, proofPath string) error {
 		return fmt.Errorf("activation check after carry: %w", err)
 	}
 	return saveJSON(filepath.Join(dir, carryFile), CarryRecord{At: time.Now().UTC(), Session: dir, Carry: record, CarryIndex: len(next.Carries), CarryCap: carryCap, AnchorBeforeSHA256: digest(anchorRaw), AnchorAfterSHA256: digest(nextRaw), ActivationCheck: "pass"}, 0600)
+}
+
+// CarryPreflight is the read-only pre-check macserve upgrade runs as root
+// before it replaces bin/macserve, so a carry it starts is one qualify carry
+// can commit: the anchor is schema 2 and still equals the live configuration
+// (activation check), with the installed binary the anchored one; the carry
+// cap and window allow one more; the proof passes ValidateCarryProof from
+// that binary to target; and health is valid with the kept approval on this
+// boot.
+func CarryPreflight(ctx context.Context, proof []byte, target string) error {
+	if err := rootOnly(); err != nil {
+		return err
+	}
+	a, err := anchoredConfiguration()
+	if err != nil {
+		return err
+	}
+	if a.Schema != anchorSchema {
+		return errors.New("activation anchor predates release carry (schema 1); the owner's approve writes a carryable anchor")
+	}
+	if err := carryAllowed(a, time.Now().UTC()); err != nil {
+		return err
+	}
+	installed, err := fileDigest(installedHelper)
+	if err != nil {
+		return err
+	}
+	if installed != a.Bindings[installedHelper] {
+		return fmt.Errorf("%s is not the anchored binary", installedHelper)
+	}
+	if _, err := ValidateCarryProof(proof, installed, target); err != nil {
+		return err
+	}
+	return ActivationCheck(ctx)
 }

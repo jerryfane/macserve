@@ -23,6 +23,12 @@ type upgradeHost struct {
 	quiescent int
 	execErr   map[string]error
 	carried   []string
+	// failProcsAt makes that process listing (1-based) show a controller
+	// process.
+	failProcsAt, procCalls int
+	// atReplace: owner.pause and the anchor existed when the replace ran
+	// its stopped gate.
+	atReplace []bool
 }
 
 const newRelease = "macserve binary release v0.2.0"
@@ -50,7 +56,16 @@ func newUpgradeHost(t *testing.T) *upgradeHost {
 	writeRoot(t, exe, []byte(newRelease), 0o755)
 	f.h.Executable, f.h.SHA256, f.h.Upgrade = exe, digestHex([]byte(newRelease)), true
 	f.h.Version = fakeVersion
-	f.h.Processes = func() ([]Process, error) { return slices.Clone(u.procs), nil }
+	f.h.Processes = func() ([]Process, error) {
+		u.procCalls++
+		if u.procCalls == u.failProcsAt {
+			_, err := os.Lstat(f.h.configPath("owner.pause"))
+			_, anchor := os.Lstat(f.h.configPath("activation-anchor.json"))
+			u.atReplace = []bool{err == nil, anchor == nil}
+			return []Process{{PID: 3, UID: 6201, Executable: "/usr/bin/true"}}, nil
+		}
+		return slices.Clone(u.procs), nil
+	}
 	output := f.h.Output
 	f.h.Output = func(ctx context.Context, c Cmd) ([]byte, int, error) {
 		if len(c.Argv) > 1 && c.Argv[1] == "worker-quiescent" {
@@ -115,6 +130,65 @@ func (u *upgradeHost) proof() string {
 		u.t.Fatal(err)
 	}
 	return string(data)
+}
+
+// gui is a valid inventory with a live build-account GUI session.
+func (u *upgradeHost) gui() []Process {
+	return []Process{
+		{PID: 1, UID: 0, Executable: "/sbin/launchd"},
+		{PID: 9, UID: 6202, Executable: "/System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow"},
+	}
+}
+
+// sums is the release's SHA256SUMS listing the binary and proof.
+func (u *upgradeHost) sums(proof string) string {
+	return u.h.SHA256 + "  " + ReleaseAsset + "\n" + digestHex([]byte(proof)) + "  " + CarryProofAsset + "\n"
+}
+
+// carryRequest is an upgrade request with the release's proof and sums.
+func (u *upgradeHost) carryRequest(carry bool) Request {
+	if !carry {
+		return Request{}
+	}
+	p := u.proof()
+	return Request{Sums: u.sums(p), Proof: p}
+}
+
+// reproof edits the proof and lists the edited one in SHA256SUMS, so only
+// the proof's content is wrong.
+func (u *upgradeHost) reproof(r *Request, edit func(string) string) {
+	r.Proof = edit(r.Proof)
+	r.Sums = u.sums(r.Proof)
+}
+
+// dropApproval makes the ledger and the host unapproved.
+func (u *upgradeHost) dropApproval() {
+	l := u.ledger()
+	for _, s := range []Step{StepApproveAndStart, StepFirstBuild} {
+		l.Records[slices.Index(Steps, s)] = Record{Step: s, Status: StatusPending}
+	}
+	l.Approval = nil
+	if err := u.h.Store.Save(l, LedgerInstalled); err != nil {
+		u.t.Fatal(err)
+	}
+	for _, name := range ApprovedFiles[1:] {
+		os.Remove(u.h.configPath(name))
+	}
+}
+
+// wantLogoutGate: with the build account still logged in, setup counts no
+// job login; once it is logged out, the gate clears and is recorded.
+func (u *upgradeHost) wantLogoutGate() {
+	u.t.Helper()
+	u.h.Upgrade, u.h.Executable = false, u.h.installedPath()
+	if r := u.h.Handle(Request{Verb: VerbJobLogin}); r.Done || !strings.Contains(r.Detail, "still logged in from the upgrade") {
+		u.t.Fatalf("job login counted while the carry's session is live: %+v", r)
+	}
+	u.procs = u.gui()[:1]
+	u.h.Handle(Request{Verb: VerbJobLogin})
+	if u.ledger().JobLogoutPending() {
+		u.t.Fatal("logout not recorded")
+	}
 }
 
 // wantRequalified: the release is installed and recorded, the approval
@@ -276,15 +350,22 @@ func TestUpgradeVerbOnlyOnUpgradeHelper(t *testing.T) {
 }
 
 // TestUpgradeReplaceIsAtomicAndRechecked: the replace is one rename of a
-// fully written root file, re-hashed afterwards; a resumed upgrade whose
-// binary is already in place finishes without writing it again.
+// fully written root file, re-hashed afterwards, behind the stopped gate
+// again; an interrupted replace's temporary file is removed first.
 func TestUpgradeReplaceIsAtomicAndRechecked(t *testing.T) {
 	u := newUpgradeHost(t)
-	// The bytes to install must be the verified ones.
-	if err := u.h.replaceBinary([]byte("other")); err == nil {
+	ctx := context.Background()
+	if err := u.h.replaceBinary(ctx, 6201, []byte("other")); err == nil {
 		t.Fatal("replaced with unverified bytes")
 	}
-	if err := u.h.replaceBinary([]byte(newRelease)); err != nil {
+	stale := filepath.Join(filepath.Dir(u.h.installedPath()), ".macserve.0123456789abcdef")
+	writeRoot(t, stale, []byte("partial"), 0o600)
+	u.loaded["org.macserve.worker"] = true
+	if err := u.h.replaceBinary(ctx, 6201, []byte(newRelease)); err == nil || u.installed() == u.h.SHA256 {
+		t.Fatalf("replace passed a loaded service: %v", err)
+	}
+	u.loaded = map[string]bool{}
+	if err := u.h.replaceBinary(ctx, 6201, []byte(newRelease)); err != nil {
 		t.Fatal(err)
 	}
 	if got := u.installed(); got != u.h.SHA256 {
@@ -296,49 +377,128 @@ func TestUpgradeReplaceIsAtomicAndRechecked(t *testing.T) {
 			t.Fatalf("temporary file %s left behind", e.Name())
 		}
 	}
-	// A swap that does not read back as the verified digest is reported.
-	u.h.SHA256 = digestHex([]byte("x"))
-	if err := u.h.replaceBinary([]byte("x")); err != nil {
-		t.Fatal(err)
-	}
 	info, _ := os.Stat(u.h.installedPath())
 	if info.Mode().Perm() != 0o755 {
 		t.Fatalf("mode %v", info.Mode())
 	}
 }
 
+// TestUpgradeOrder: owner.pause and the invalidation precede the replace
+// on the full path, and owner.pause precedes it on the carry path.
+func TestUpgradeOrder(t *testing.T) {
+	for _, carry := range []bool{false, true} {
+		u := newUpgradeHost(t)
+		os.Remove(u.h.configPath("owner.pause"))
+		if carry {
+			u.procs = u.gui()
+		}
+		u.failProcsAt = 3 // the stopped gate repeated by the replace
+		r := u.upgrade(u.carryRequest(carry))
+		if want := []bool{true, carry}; !slices.Equal(u.atReplace, want) {
+			t.Fatalf("carry=%v: at the replace owner.pause, anchor = %v, want %v", carry, u.atReplace, want)
+		}
+		if carry {
+			// The carry falls back; the build account's logout is required.
+			if r.Error != "" || !strings.Contains(u.ledger().Releases[0].CarryAbandoned, "replace") || !u.ledger().JobLogoutPending() {
+				t.Fatalf("carry fallback %+v", r)
+			}
+		} else if r.Error == "" || u.installed() == u.h.SHA256 {
+			t.Fatalf("full path replaced past a failed gate: %+v", r)
+		}
+	}
+}
+
 // TestUpgradeResumesInterrupted: an upgrade interrupted after it was
-// recorded blocks setup and other releases, and the same release resumes
-// it to full requalification.
+// recorded blocks setup and other releases; the same release resumes it
+// to full requalification, with the job-session guard again (or, for an
+// interrupted carry, the job logout required).
 func TestUpgradeResumesInterrupted(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		carry, swapped bool
+		live           bool
+		want           string
+		logoutRequired bool
+	}{
+		{"before swap", false, false, false, "", false},
+		{"after swap", false, true, false, "", false},
+		{"after swap guard", false, true, true, "GUI session is live", false},
+		{"carry", true, true, true, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			u := newUpgradeHost(t)
+			l := u.ledger()
+			boot, _ := u.h.Boot()
+			rel := Release{Status: StatusRunning, Started: u.h.Now(), Boot: boot, From: "v0.1.0", To: "v0.2.0", FromSHA256: u.installed(), SHA256: u.h.SHA256}
+			if tc.carry {
+				rel.Carry, rel.CarryProofSHA256 = true, digestHex([]byte(u.proof()))
+			}
+			if err := l.BeginRelease(rel); err != nil {
+				t.Fatal(err)
+			}
+			if err := u.h.Store.Save(l, LedgerInstalled); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := u.ledger().Next(); err == nil || !strings.Contains(err.Error(), "interrupted") {
+				t.Fatalf("setup not blocked: %v", err)
+			}
+			if tc.swapped {
+				writeRoot(t, u.h.installedPath(), []byte(newRelease), 0o755)
+			}
+			if tc.live {
+				u.procs = u.gui()
+			}
+			// Another release cannot pass the interrupted one.
+			other := []byte("macserve binary release v0.3.0")
+			exe := u.h.Executable
+			writeRoot(t, exe, other, 0o755)
+			u.h.SHA256 = digestHex(other)
+			if r := u.upgrade(Request{}); !strings.Contains(r.Error, "was interrupted") {
+				t.Fatalf("other release %+v", r)
+			}
+			writeRoot(t, exe, []byte(newRelease), 0o755)
+			u.h.SHA256 = digestHex([]byte(newRelease))
+			r := u.upgrade(Request{})
+			if tc.want != "" {
+				if !strings.Contains(r.Error, tc.want) {
+					t.Fatalf("resume %+v, want %q", r, tc.want)
+				}
+				return
+			}
+			if r.Error != "" || !r.Done {
+				t.Fatalf("resume %+v", r)
+			}
+			abandoned := ""
+			if tc.carry {
+				abandoned = "interrupted"
+			}
+			u.wantRequalified(abandoned)
+			if u.ledger().JobLogoutPending() != tc.logoutRequired {
+				t.Fatalf("job logout pending %v", u.ledger().JobLogoutPending())
+			}
+		})
+	}
+	// A binary changed during the interruption is refused.
 	u := newUpgradeHost(t)
 	l := u.ledger()
 	boot, _ := u.h.Boot()
-	rel := Release{Status: StatusRunning, Started: u.h.Now(), Boot: boot, From: "v0.1.0", To: "v0.2.0", FromSHA256: u.installed(), SHA256: u.h.SHA256}
-	if err := l.BeginRelease(rel); err != nil {
+	if err := l.BeginRelease(Release{Status: StatusRunning, Started: u.h.Now(), Boot: boot, From: "v0.1.0", To: "v0.2.0", FromSHA256: u.installed(), SHA256: u.h.SHA256}); err != nil {
 		t.Fatal(err)
 	}
 	if err := u.h.Store.Save(l, LedgerInstalled); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := u.ledger().Next(); err == nil || !strings.Contains(err.Error(), "interrupted") {
-		t.Fatalf("setup not blocked: %v", err)
+	writeRoot(t, u.h.installedPath(), []byte("macserve binary release v0.1.5"), 0o755)
+	if r := u.upgrade(Request{}); !strings.Contains(r.Error, "changed during the interrupted upgrade") {
+		t.Fatalf("%+v", r)
 	}
-	if err := u.h.replaceBinary([]byte(newRelease)); err != nil {
-		t.Fatal(err)
-	}
-	r := u.upgrade(Request{})
-	if r.Error != "" || !r.Done {
-		t.Fatalf("resume %+v", r)
-	}
-	u.wantRequalified("")
 }
 
 func TestUpgradeCarry(t *testing.T) {
 	u := newUpgradeHost(t)
-	u.procs = []Process{{PID: 9, UID: 6202, Executable: "/System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow"}}
+	u.procs = u.gui()
 	approval := u.ledger().Approval
-	r := u.upgrade(Request{Proof: u.proof()})
+	r := u.upgrade(u.carryRequest(true))
 	if r.Error != "" || !r.Done || !slices.Equal(r.Items, []string{EffectCarried}) {
 		t.Fatalf("carry %+v", r)
 	}
@@ -350,28 +510,33 @@ func TestUpgradeCarry(t *testing.T) {
 		t.Fatalf("begin %q", begin)
 	}
 	l := u.ledger()
-	if l.Releases[0].Effect != EffectCarried || l.Approval == nil || l.Approval.SummarySHA256 != approval.SummarySHA256 || l.AnchorSHA256() != digestHex([]byte(`{"anchor":2}`)) {
+	if l.Releases[0].Effect != EffectCarried || !l.Releases[0].Carry || l.Approval == nil || l.Approval.SummarySHA256 != approval.SummarySHA256 || l.AnchorSHA256() != digestHex([]byte(`{"anchor":2}`)) {
 		t.Fatalf("ledger %+v", l.Releases)
 	}
 	if next, _, err := l.Next(); err != nil || next.Step != StepFirstBuild {
 		t.Fatalf("carried ledger next %v %v", next, err)
 	}
-	if u.installed() != u.h.SHA256 || l.InstalledBinary() != u.h.SHA256 {
+	if u.installed() != u.h.SHA256 || l.InstalledBinary() != u.h.SHA256 || l.JobLogoutPending() {
 		t.Fatal("carried binary not installed")
 	}
-	if !slices.ContainsFunc(u.outputs, func(a []string) bool { return len(a) > 1 && a[1] == "worker-quiescent" }) {
-		t.Fatal("worker-quiescent not run")
+	if !slices.ContainsFunc(u.outputs, func(a []string) bool { return len(a) > 1 && a[1] == "worker-quiescent" }) || !slices.Contains(u.q.calls, "CarryPreflight") {
+		t.Fatal("worker-quiescent or the qualify carry pre-check not run")
+	}
+	if _, err := os.Lstat(u.h.configPath("owner.pause")); err != nil {
+		t.Fatalf("owner.pause: %v", err)
 	}
 }
 
+// TestUpgradeCarryFallsBack: a failure of any carry verb after the swap
+// falls back to full requalification and requires the build account's
+// logout before setup counts a job login.
 func TestUpgradeCarryFallsBack(t *testing.T) {
-	gui := []Process{{PID: 9, UID: 6202, Executable: "/System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow"}}
 	for _, step := range []string{"self-test", "begin", "job-probe", "_qualify-tool-evidence", "carry"} {
 		t.Run(step, func(t *testing.T) {
 			u := newUpgradeHost(t)
-			u.procs = gui
+			u.procs = u.gui()
 			u.execErr[step] = errors.New("exit status 1")
-			r := u.upgrade(Request{Proof: u.proof()})
+			r := u.upgrade(u.carryRequest(true))
 			if r.Error != "" || !r.Done || !slices.Equal(r.Items, []string{EffectRequalify}) {
 				t.Fatalf("fallback %+v", r)
 			}
@@ -379,39 +544,161 @@ func TestUpgradeCarryFallsBack(t *testing.T) {
 				t.Fatalf("ran %q after the failed %s", u.carried, step)
 			}
 			u.wantRequalified("carry abandoned at")
+			if !u.ledger().JobLogoutPending() {
+				t.Fatal("job logout not required after a carry fallback")
+			}
+			if len(u.loaded) != 0 {
+				t.Fatalf("services started: %v", u.loaded)
+			}
+			u.wantLogoutGate()
 		})
 	}
-	// Before anything changes: a bad proof, no live session or residual
-	// job processes fall back too (the guard then applies).
+}
+
+// TestUpgradeCarryRefused: with a live build-account session (the only
+// guard a carry skips) every carry pre-check that fails keeps the guard:
+// the upgrade is refused and nothing changes. Each case breaks exactly one
+// pre-check; the base request carries.
+func TestUpgradeCarryRefused(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
-		prepare func(u *upgradeHost) string
-		err     string
+		prepare func(u *upgradeHost, r *Request)
+		want    string
 	}{
-		{"proof for another release", func(u *upgradeHost) string { return strings.Replace(u.proof(), "v0.2.0", "v0.3.0", 1) }, ""},
-		{"boundary class", func(u *upgradeHost) string { return strings.Replace(u.proof(), `"class":"T"`, `"class":"B"`, 1) }, ""},
-		{"not quiescent", func(u *upgradeHost) string { u.quiescent = 1; return u.proof() }, "GUI session is live"},
-		{"no job session", func(u *upgradeHost) string { u.procs = nil; return u.proof() }, ""},
+		{"proof for another release", func(u *upgradeHost, r *Request) {
+			u.reproof(r, func(s string) string { return strings.Replace(s, `"v0.2.0"`, `"v0.3.0"`, 1) })
+		}, "carry proof is for"},
+		{"boundary class", func(u *upgradeHost, r *Request) {
+			u.reproof(r, func(s string) string { return strings.ReplaceAll(s, `"T"`, `"B"`) })
+		}, "changes B path"},
+		{"empty commits", func(u *upgradeHost, r *Request) {
+			u.reproof(r, func(s string) string { return strings.ReplaceAll(s, `"commit":"c1"`, `"commit":""`) })
+		}, "identities incomplete"},
+		{"classes_present", func(u *upgradeHost, r *Request) {
+			u.reproof(r, func(s string) string {
+				return strings.Replace(s, `"classes_present":["T"]`, `"classes_present":["C"]`, 1)
+			})
+		}, "classes_present"},
+		{"duplicate path", func(u *upgradeHost, r *Request) {
+			u.reproof(r, func(s string) string {
+				return strings.Replace(s, `"changed":[`, `"changed":[{"path":"docs/install.md","class":"T","new":["100644","c"]},`, 1)
+			})
+		}, "change list invalid"},
+		{"unknown field", func(u *upgradeHost, r *Request) {
+			u.reproof(r, func(s string) string { return strings.Replace(s, `{`, `{"extra":1,`, 1) })
+		}, "carry proof"},
+		{"proof not in SHA256SUMS", func(u *upgradeHost, r *Request) { r.Sums = strings.Split(r.Sums, "\n")[0] + "\n" }, "publishes no carry-proof.json"},
+		{"proof not the asset", func(u *upgradeHost, r *Request) { r.Proof += " " }, "not the release's carry-proof.json"},
+		{"qualify carry pre-check", func(u *upgradeHost, r *Request) { u.q.errs["CarryPreflight"] = errors.New("anchor schema 1") }, "qualify carry would refuse"},
+		{"not quiescent", func(u *upgradeHost, r *Request) { u.quiescent = 1 }, "worker-quiescent"},
+		{"no approval", func(u *upgradeHost, r *Request) { u.dropApproval() }, "no completed approval"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			u := newUpgradeHost(t)
-			u.procs = gui
-			proof := tc.prepare(u)
-			if tc.err == "" {
-				u.procs = nil
+			u.procs = u.gui()
+			r := u.carryRequest(true)
+			tc.prepare(u, &r)
+			before := u.installed()
+			resp := u.upgrade(r)
+			if !strings.Contains(resp.Error, "carry not possible") || !strings.Contains(resp.Error, tc.want) || !strings.Contains(resp.Error, "GUI session is live") {
+				t.Fatalf("got %+v, want %q", resp, tc.want)
 			}
-			r := u.upgrade(Request{Proof: proof})
-			if tc.err != "" {
-				if !strings.Contains(r.Error, tc.err) || !strings.Contains(r.Error, "carry not possible") || len(u.ledger().Releases) != 0 {
-					t.Fatalf("got %+v", r)
-				}
-				return
+			if u.installed() != before || len(u.ledger().Releases) != 0 || len(u.carried) != 0 {
+				t.Fatal("a refused carry changed something")
 			}
-			if r.Error != "" || !slices.Equal(r.Items, []string{EffectRequalify}) || len(u.carried) != 0 {
-				t.Fatalf("got %+v ran %q", r, u.carried)
-			}
-			u.wantRequalified("carry not possible")
 		})
+	}
+	// Without a live session a carry is not possible either, and the
+	// upgrade requalifies with the guard satisfied (no logout needed).
+	u := newUpgradeHost(t)
+	r := u.upgrade(u.carryRequest(true))
+	if r.Error != "" || !slices.Equal(r.Items, []string{EffectRequalify}) || len(u.carried) != 0 {
+		t.Fatalf("got %+v", r)
+	}
+	u.wantRequalified("not live")
+	if u.ledger().JobLogoutPending() {
+		t.Fatal("logout required although the guard held")
+	}
+}
+
+// TestUpgradeGateUnknownExecutable: a live process without an executable
+// path fails the stopped gate closed; zombies and kernel_task do not.
+func TestUpgradeGateUnknownExecutable(t *testing.T) {
+	u := newUpgradeHost(t)
+	u.procs = []Process{{PID: 0, UID: 0}, {PID: 5, UID: 6201, Zombie: true}, {PID: 7, UID: 0, Executable: "/sbin/launchd"}}
+	if err := u.h.stoppedGate(context.Background(), 6201); err != nil {
+		t.Fatal(err)
+	}
+	u.procs = append(u.procs, Process{PID: 8, UID: 0})
+	if err := u.h.stoppedGate(context.Background(), 6201); err == nil || !strings.Contains(err.Error(), "no readable executable") {
+		t.Fatalf("gate %v", err)
+	}
+	u.procs = []Process{{PID: 8, UID: 0, Executable: u.h.installedPath() + "/."}}
+	if err := u.h.stoppedGate(context.Background(), 6201); err == nil {
+		t.Fatal("non-canonical installed path passed")
+	}
+}
+
+// TestUpgradeLedgerRefusals: an install not done, a failed step and an
+// installed binary other than the recorded one are refused.
+func TestUpgradeLedgerRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		name, want string
+		prepare    func(u *upgradeHost)
+	}{
+		{"installed digest", "the one setup recorded", func(u *upgradeHost) {
+			writeRoot(u.t, u.h.installedPath(), []byte("macserve binary release v0.1.1"), 0o755)
+		}},
+		{"failed step", "failed", func(u *upgradeHost) {
+			l := u.ledger()
+			i := slices.Index(Steps, StepFirstBuild)
+			now := u.h.Now()
+			boot, _ := u.h.Boot()
+			l.Records[i] = Record{Step: StepFirstBuild, Status: StatusFailed, Started: &now, Finished: &now, Boot: &boot, Error: "x"}
+			if err := u.h.Store.Save(l, LedgerInstalled); err != nil {
+				u.t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			u := newUpgradeHost(t)
+			tc.prepare(u)
+			if r := u.upgrade(Request{}); !strings.Contains(r.Error, tc.want) || len(u.ledger().Releases) != 0 {
+				t.Fatalf("got %+v, want %q", r, tc.want)
+			}
+		})
+	}
+	// Install not done: a staged ledger is not upgraded.
+	f := newFakeHost(t)
+	f.through(StepInstall)
+	f.h.Upgrade, f.h.Version = true, fakeVersion
+	f.h.Processes = func() ([]Process, error) { return nil, nil }
+	if r := f.h.Handle(Request{Verb: VerbUpgrade, SHA256: f.h.SHA256}); !strings.Contains(r.Error, "no installed setup ledger") {
+		t.Fatalf("%+v", r)
+	}
+}
+
+// TestReleaseChain: the ledger refuses a release that does not continue
+// from the previous one, or the first from another binary than install's.
+func TestReleaseChain(t *testing.T) {
+	u := newUpgradeHost(t)
+	if r := u.upgrade(Request{}); r.Error != "" {
+		t.Fatal(r.Error)
+	}
+	l := u.ledger()
+	boot, _ := u.h.Boot()
+	next := Release{Status: StatusRunning, Started: u.h.Now(), Boot: boot, From: "v0.2.0", To: "v0.3.0", FromSHA256: strings.Repeat("e", 64), SHA256: strings.Repeat("f", 64)}
+	if err := l.BeginRelease(next); err == nil || !strings.Contains(err.Error(), "does not continue") {
+		t.Fatalf("chain %v", err)
+	}
+	next.FromSHA256, next.From = u.h.SHA256, "v0.1.9"
+	if err := l.BeginRelease(next); err == nil {
+		t.Fatal("chain from another tag accepted")
+	}
+	l = u.ledger()
+	l.Releases[0].FromSHA256 = strings.Repeat("d", 64)
+	if err := l.validate(); err == nil || !strings.Contains(err.Error(), "installed binary") {
+		t.Fatalf("first release %v", err)
 	}
 }
 

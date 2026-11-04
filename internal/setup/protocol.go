@@ -75,19 +75,24 @@ var Verbs = []Verb{
 	VerbUpgrade,
 }
 
-// MaxRequest bounds one request line (deploy.env is at most 64 KiB).
-const MaxRequest = 128 << 10
+// MaxRequest bounds one request line (deploy.env, or an upgrade's carry
+// proof and SHA256SUMS, are at most 64 KiB each before JSON escaping).
+const MaxRequest = 512 << 10
+
+// maxSums bounds a release SHA256SUMS.
+const maxSums = 64 << 10
 
 // Request is one line from the wizard. Env is the generated deploy.env and
 // is accepted only with VerbPreflight; SHA256 is the digest of what the
 // owner confirmed and is accepted only with VerbRoundBegin, VerbApprove
-// and VerbUpgrade; Tag and Proof (the carry-proof.json bytes) only with
-// VerbUpgrade.
+// and VerbUpgrade; Tag, Sums (the release's SHA256SUMS bytes) and Proof
+// (its carry-proof.json bytes, only with Sums) only with VerbUpgrade.
 type Request struct {
 	Verb   Verb   `json:"verb"`
 	Env    string `json:"env,omitempty"`
 	SHA256 string `json:"sha256,omitempty"`
 	Tag    string `json:"tag,omitempty"`
+	Sums   string `json:"sums,omitempty"`
 	Proof  string `json:"proof,omitempty"`
 }
 
@@ -146,11 +151,11 @@ func DecodeRequest(line []byte) (Request, error) {
 	if digestVerb := r.Verb == VerbRoundBegin || r.Verb == VerbApprove || r.Verb == VerbUpgrade; digestVerb != (r.SHA256 != "") || (digestVerb && !sha256Hex.MatchString(r.SHA256)) {
 		return r, fmt.Errorf("verb %s: sha256 is accepted with round-begin, approve and upgrade only, and required there as 64 lowercase hex", r.Verb)
 	}
-	if r.Verb != VerbUpgrade && (r.Tag != "" || r.Proof != "") {
-		return r, fmt.Errorf("verb %s: tag and proof are accepted with upgrade only", r.Verb)
+	if r.Verb != VerbUpgrade && (r.Tag != "" || r.Proof != "" || r.Sums != "") {
+		return r, fmt.Errorf("verb %s: tag, sums and proof are accepted with upgrade only", r.Verb)
 	}
-	if (r.Tag != "" && !ValidRelease(r.Tag)) || len(r.Proof) > MaxCarryProof {
-		return r, errors.New("verb upgrade: tag must be vMAJOR.MINOR.PATCH and the proof at most 64 KiB")
+	if (r.Tag != "" && !ValidRelease(r.Tag)) || len(r.Proof) > MaxCarryProof || len(r.Sums) > maxSums || (r.Proof != "" && r.Sums == "") {
+		return r, errors.New("verb upgrade: tag must be vMAJOR.MINOR.PATCH, the proof at most 64 KiB and given only with the release's SHA256SUMS (at most 64 KiB)")
 	}
 	// Only the wizard's own encoding: no case-variant or duplicate keys.
 	if canonical, err := json.Marshal(r); err != nil || !bytes.Equal(canonical, line) {

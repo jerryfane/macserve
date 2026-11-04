@@ -37,6 +37,8 @@ type Probe struct {
 	Exists func(path string) (bool, error)
 	// Self is the path of the running binary.
 	Self func() (string, error)
+	// Version is setup.ReleaseVersion.
+	Version func(binary []byte) (string, error)
 }
 
 // Options are the command-line inputs. SHA256 or the SHA256SUMS bytes give
@@ -117,7 +119,7 @@ func Plan(ctx context.Context, p Probe, o Options) Result {
 		return r
 	}
 	r.add("release.digest", Pass, "%s matches the release digest %s", self, want)
-	if r.To, err = setup.ReleaseVersion(target); err != nil {
+	if r.To, err = p.Version(target); err != nil {
 		r.add("release.version", Fail, "this binary: %v", err)
 		return r
 	}
@@ -132,7 +134,7 @@ func Plan(ctx context.Context, p Probe, o Options) Result {
 		return r
 	}
 	fromSHA := digest(installed)
-	if r.From, err = setup.ReleaseVersion(installed); err != nil {
+	if r.From, err = p.Version(installed); err != nil {
 		r.add("release.installed", Fail, "%s: %v", installedPath, err)
 		return r
 	}
@@ -150,7 +152,7 @@ func Plan(ctx context.Context, p Probe, o Options) Result {
 	r.services(ctx, p)
 	approved, _ := p.Exists(Root + "/config/activation-anchor.json")
 	jobLive := r.jobSession(ctx, p)
-	r.carry(o.CarryProof, fromSHA, toSHA, approved, jobLive)
+	r.carry(o.CarryProof, o.SHA256Sums, fromSHA, toSHA, approved, jobLive)
 	r.WillHappen = r.steps(approved)
 	return r
 }
@@ -193,15 +195,21 @@ func (r *Result) jobSession(ctx context.Context, p Probe) bool {
 	return live
 }
 
-// carry reports whether a release carry is possible. Without a verified
-// proof, full requalification is the default.
-func (r *Result) carry(proof []byte, fromSHA, toSHA string, approved, jobLive bool) {
+// carry reports whether a release carry is possible. A carry is taken
+// only from the target release's carry-proof.json asset, listed in the
+// same SHA256SUMS that gave the binary's digest; without one, full
+// requalification is the default. The helper also runs qualify carry's
+// own pre-check (qualification.CarryPreflight) and worker-quiescent as
+// root, which the plan cannot.
+func (r *Result) carry(proof, sums []byte, fromSHA, toSHA string, approved, jobLive bool) {
 	if len(proof) == 0 {
 		r.add("release.carry", Info, "no carry proof given: full requalification (the default)")
 		return
 	}
 	var why error
-	if _, err := setup.CheckCarryProof(proof, r.From, fromSHA, r.To, toSHA); err != nil {
+	if len(sums) == 0 {
+		why = errors.New("a carry proof is accepted only with the release's SHA256SUMS (--sha256sums), which must list it")
+	} else if _, err := setup.CheckCarryProof(proof, sums, r.From, fromSHA, r.To, toSHA); err != nil {
 		why = err
 	} else if !approved {
 		why = errors.New("no activation anchor (nothing approved to carry)")
@@ -209,11 +217,11 @@ func (r *Result) carry(proof []byte, fromSHA, toSHA string, approved, jobLive bo
 		why = errors.New("the build account's GUI session is not live (a carry re-measures the new binary in it)")
 	}
 	if why != nil {
-		r.add("release.carry", Warn, "carry not possible (%v): full requalification instead", why)
+		r.add("release.carry", Warn, "carry not possible (%v): full requalification instead, which needs the build account logged out", why)
 		return
 	}
 	r.Carry = true
-	r.add("release.carry", Pass, "carry proof checks pass; the helper also requires your own approval and worker-quiescent, and any later failure falls back to full requalification")
+	r.add("release.carry", Pass, "the release's carry-proof.json passes qualify carry's proof checks; the helper also checks your approval, the anchor and worker-quiescent as root, and any later failure falls back to full requalification")
 }
 
 func (r Result) steps(approved bool) []string {
@@ -225,7 +233,8 @@ func (r Result) steps(approved bool) []string {
 		out = append(out,
 			"replace "+Root+"/bin/macserve with this binary (atomic, root:wheel 0755, digest re-checked)",
 			"with the new binary: job probe self-test, qualify begin --carry, the job probe, tool evidence and qualify carry --proof",
-			"on success the approval is kept (services stay stopped and owner.pause stays: re-grant Full Disk Access, then start them, docs/install.md); on any failure, the full requalification below",
+			"on success the approval is kept; services stay stopped and owner.pause stays (re-grant Full Disk Access to the new binary, start the services and remove owner.pause once health is valid, docs/install.md)",
+			"on any failure: the full requalification below, and setup waits until the build account is logged out",
 		)
 		return out
 	}

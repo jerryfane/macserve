@@ -88,8 +88,8 @@ func systemProcesses() ([]Process, error) {
 	}
 	procs := make([]Process, 0, len(rows))
 	for _, row := range rows {
-		p := Process{PID: int(row.Proc.P_pid), UID: row.Eproc.Ucred.Uid}
-		if row.Proc.P_stat != 5 {
+		p := Process{PID: int(row.Proc.P_pid), UID: row.Eproc.Ucred.Uid, Zombie: row.Proc.P_stat == 5}
+		if !p.Zombie {
 			p.Executable = processPath(p.PID)
 		}
 		procs = append(procs, p)

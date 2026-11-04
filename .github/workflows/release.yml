@@ -39,12 +39,17 @@ jobs:
       contents: write
       id-token: write
       attestations: write
+      # The carry-proof step reads CI runs of the tag commit.
+      actions: read
     env:
       GOMAXPROCS: "2"
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
+          # The carry-proof step diffs the tag against its predecessor tag.
+          fetch-depth: 0
+          fetch-tags: true
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
@@ -75,6 +80,29 @@ jobs:
             --source-ref "$GITHUB_REF" \
             --source-digest "$GITHUB_SHA" \
             --deny-self-hosted-runners
+      # A release that changes only C, G and T paths (by the predecessor
+      # release's BOUNDARY.json) carries qualification: macserve upgrade
+      # accepts a carry only from this release's carry-proof.json asset, with
+      # its digest in this SHA256SUMS. Any other release publishes without one
+      # (the generator then prints "no carry proof: REASON" and exits 0).
+      - name: Build release-carry proof
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          REBUILT_SHA256: ${{ needs.rebuild.outputs.sha256 }}
+          DIST: ${{ runner.temp }}/dist
+        run: |
+          binary=$(sha256sum "$DIST/macserve-darwin-arm64")
+          go run ./checks/carry-proof \
+            -repo "$GH_REPO" -tag "$RELEASE_TAG" \
+            -binary-sha256 "${binary%% *}" -rebuilt-sha256 "$REBUILT_SHA256" \
+            -out "$DIST/carry-proof.json"
+          if [ -f "$DIST/carry-proof.json" ]; then
+            (cd "$DIST" && sha256sum carry-proof.json >> SHA256SUMS)
+            cat "$DIST/carry-proof.json"
+          fi
+          cat "$DIST/SHA256SUMS"
       # Runs only after the byte-identical rebuild, attestation and consumer
       # verification gates above. The formula takes its digest from the
       # SHA256SUMS that was just checked against the rebuild, and is published
@@ -97,7 +125,12 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$RELEASE_TAG" \
-            macserve-darwin-arm64 SHA256SUMS macserve.rb \
+          assets=(macserve-darwin-arm64 SHA256SUMS macserve.rb)
+          carry="No carry-proof.json: this release changes a boundary path over its predecessor (or the change could not be proved), so it carries no qualification."
+          if [ -f carry-proof.json ]; then
+            assets+=(carry-proof.json)
+            carry="carry-proof.json, listed in SHA256SUMS, proves this release changes only C, G and T paths of its predecessor's BOUNDARY.json; macserve upgrade accepts a release carry only from it."
+          fi
+          gh release create "$RELEASE_TAG" "${assets[@]}" \
             --verify-tag --title "$RELEASE_TAG" \
-            --notes "Darwin arm64 macserve built by checks/release-build.sh (CGO disabled, -trimpath, -buildvcs=true), rebuilt byte-identically on a second runner, with a GitHub build provenance attestation (gh attestation verify macserve-darwin-arm64 --repo $GH_REPO). Verify SHA256SUMS against the reviewed release before installation."
+            --notes "Darwin arm64 macserve built by checks/release-build.sh (CGO disabled, -trimpath, -buildvcs=true), rebuilt byte-identically on a second runner, with a GitHub build provenance attestation (gh attestation verify macserve-darwin-arm64 --repo $GH_REPO). Verify SHA256SUMS against the reviewed release before installation. $carry"

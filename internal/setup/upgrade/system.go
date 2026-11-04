@@ -5,13 +5,14 @@ import (
 	"path/filepath"
 
 	"github.com/jerryfane/macserve/internal/doctor"
+	"github.com/jerryfane/macserve/internal/setup"
 )
 
 // SystemProbe reads the running host through doctor's read-only probe.
 func SystemProbe() Probe {
 	d := doctor.SystemProbe()
 	return Probe{
-		Run: d.Run, ReadFile: d.ReadFile, Self: executable,
+		Run: d.Run, ReadFile: d.ReadFile, Self: executable, Version: setup.ReleaseVersion,
 		Exists: func(path string) (bool, error) {
 			info, err := d.Lstat(path)
 			return info.Exists, err

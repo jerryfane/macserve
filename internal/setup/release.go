@@ -3,7 +3,6 @@ package setup
 import (
 	"bytes"
 	"debug/buildinfo"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -106,39 +105,36 @@ func CompareReleases(from, to string) error {
 // MaxCarryProof bounds a carry-proof.json.
 const MaxCarryProof = 64 << 10
 
-// carryClasses are the BOUNDARY.json classes a carried release may change.
-var carryClasses = []string{"C", "G", "T"}
+// CarryProofAsset is the release asset the release workflow publishes
+// when a release changes no boundary path; SHA256SUMS lists its digest.
+const CarryProofAsset = "carry-proof.json"
 
-// CheckCarryProof is the pre-check of a release-carry proof (N3's
-// carry-proof.json, qualification.CarryProof): a QualificationCarried
-// proof from the installed release to the target, naming their tags and
-// binary digests, that claims only carry classes. It is not authenticated;
-// `qualify carry` verifies it again against the activation anchor, the
-// installed binary and the carry sitting's evidence.
-func CheckCarryProof(raw []byte, from, fromSHA256, to, toSHA256 string) (qualification.CarryProof, error) {
+// CheckCarryProof accepts a release-carry proof only as the target
+// release's own carry-proof.json asset: its digest is the one the same
+// SHA256SUMS lists (the file that also gave the binary's digest), it passes
+// qualify carry's own proof checks (qualification.ValidateCarryProof) from
+// the installed binary to the target, and it names exactly the installed
+// and the target release.
+func CheckCarryProof(raw, sums []byte, from, fromSHA256, to, toSHA256 string) (qualification.CarryProof, error) {
 	var p qualification.CarryProof
 	if len(raw) == 0 || len(raw) > MaxCarryProof {
 		return p, errors.New("carry proof is empty or larger than 64 KiB")
 	}
-	if err := json.Unmarshal(raw, &p); err != nil {
-		return p, fmt.Errorf("carry proof: %w", err)
+	if binary, err := ReleaseDigest(sums, ReleaseAsset); err != nil || binary != toSHA256 {
+		return p, errors.Join(errors.New("a carry needs the release's SHA256SUMS, listing this binary"), err)
 	}
-	switch {
-	case p.Schema != 1 || p.Kind != "release-carry-proof" || p.ReleaseEffect != "QualificationCarried":
-		return p, errors.New("carry proof is not a QualificationCarried release-carry proof")
-	case p.From.Tag != from || p.To.Tag != to:
+	listed, err := ReleaseDigest(sums, CarryProofAsset)
+	if err != nil {
+		return p, fmt.Errorf("the release publishes no %s: %w", CarryProofAsset, err)
+	}
+	if digestHex(raw) != listed {
+		return p, fmt.Errorf("the carry proof is not the release's %s (SHA256SUMS lists %s)", CarryProofAsset, listed)
+	}
+	if p, err = qualification.ValidateCarryProof(raw, fromSHA256, toSHA256); err != nil {
+		return p, err
+	}
+	if p.From.Tag != from || p.To.Tag != to {
 		return p, fmt.Errorf("carry proof is for %s to %s, not %s to %s", p.From.Tag, p.To.Tag, from, to)
-	case p.From.BinarySHA256 != fromSHA256:
-		return p, errors.New("carry proof starts from a binary other than the installed one")
-	case p.To.BinarySHA256 != toSHA256:
-		return p, errors.New("carry proof names a binary other than the verified release")
-	case len(p.Changed) == 0:
-		return p, errors.New("carry proof lists no changed path")
-	}
-	for _, c := range p.Changed {
-		if !slices.Contains(carryClasses, c.Class) {
-			return p, fmt.Errorf("carry proof changes %s path %s; this release needs full requalification", c.Class, c.Path)
-		}
 	}
 	return p, nil
 }
@@ -176,6 +172,14 @@ type Release struct {
 	// CarryAbandoned is why a carry attempted after the swap fell back to
 	// full requalification.
 	CarryAbandoned string `json:"carry_abandoned,omitempty"`
+	// JobLogoutRequired: the upgrade did not apply the job-session guard
+	// (a carry was attempted with the build account logged in) and ended
+	// in requalification. macserve setup then counts no job login until it
+	// has seen the build account logged out (ClearJobLogout).
+	JobLogoutRequired bool `json:"job_logout_required,omitempty"`
+	// Carry: every carry pre-check passed, so the job-session guard was
+	// not applied and the carry verbs run (or ran) with the new binary.
+	Carry bool `json:"carry,omitempty"`
 	// AnchorSHA256 is the activation anchor qualify carry rewrote.
 	AnchorSHA256 string `json:"anchor_sha256,omitempty"`
 }
@@ -242,15 +246,16 @@ var RequalifySteps = []Step{StepOwnerActions, StepRound1, StepReboot, StepRound2
 
 // FinishRelease records the running upgrade's effect. EffectRequalify
 // resets RequalifySteps and the approval, so macserve setup resumes with
-// owner-actions and the guided qualification.
-func (l *Ledger) FinishRelease(effect, abandoned, anchor string, now time.Time) error {
+// owner-actions and the guided qualification; jobLogout records that the
+// job-session guard was not applied (JobLogoutRequired).
+func (l *Ledger) FinishRelease(effect, abandoned, anchor string, jobLogout bool, now time.Time) error {
 	r := l.PendingRelease()
 	if r == nil {
 		return errors.New("no macserve upgrade is running")
 	}
 	saved, approval := slices.Clone(l.Records), l.Approval
 	t := now.UTC()
-	r.Status, r.Finished, r.Effect, r.CarryAbandoned, r.AnchorSHA256 = StatusDone, &t, effect, abandoned, anchor
+	r.Status, r.Finished, r.Effect, r.CarryAbandoned, r.AnchorSHA256, r.JobLogoutRequired = StatusDone, &t, effect, abandoned, anchor, jobLogout
 	if effect == EffectRequalify {
 		for i := range l.Records {
 			if slices.Contains(RequalifySteps, l.Records[i].Step) {
@@ -261,10 +266,25 @@ func (l *Ledger) FinishRelease(effect, abandoned, anchor string, now time.Time) 
 	}
 	if err := l.validate(); err != nil {
 		l.Records, l.Approval = saved, approval
-		r.Status, r.Finished, r.Effect, r.CarryAbandoned, r.AnchorSHA256 = StatusRunning, nil, "", "", ""
+		r.Status, r.Finished, r.Effect, r.CarryAbandoned, r.AnchorSHA256, r.JobLogoutRequired = StatusRunning, nil, "", "", "", false
 		return err
 	}
 	return nil
+}
+
+// JobLogoutPending reports that the last upgrade left the build account
+// logged in without the job-session guard: setup must see it logged out
+// before it counts a job login.
+func (l *Ledger) JobLogoutPending() bool {
+	n := len(l.Releases)
+	return n > 0 && l.Releases[n-1].JobLogoutRequired
+}
+
+// ClearJobLogout records that setup saw the build account logged out.
+func (l *Ledger) ClearJobLogout() {
+	if n := len(l.Releases); n > 0 {
+		l.Releases[n-1].JobLogoutRequired = false
+	}
 }
 
 // validateReleases checks the upgrade history: a chain of strictly newer
@@ -282,12 +302,12 @@ func (l *Ledger) validateReleases() error {
 		if i > 0 && (l.Releases[i-1].SHA256 != r.FromSHA256 || l.Releases[i-1].To != r.From) {
 			return fmt.Errorf("setup ledger: release %d does not continue from release %d", i, i-1)
 		}
-		if r.CarryProofSHA256 != "" && !sha256Hex.MatchString(r.CarryProofSHA256) {
+		if (r.CarryProofSHA256 != "" && !sha256Hex.MatchString(r.CarryProofSHA256)) || (r.Carry && r.CarryProofSHA256 == "") {
 			return fmt.Errorf("setup ledger: release %d has an invalid carry proof digest", i)
 		}
 		switch r.Status {
 		case StatusRunning:
-			if !last || r.Finished != nil || r.Effect != "" || r.CarryAbandoned != "" || r.AnchorSHA256 != "" {
+			if !last || r.Finished != nil || r.Effect != "" || r.CarryAbandoned != "" || r.AnchorSHA256 != "" || r.JobLogoutRequired {
 				return fmt.Errorf("setup ledger: release %d is running out of order", i)
 			}
 		case StatusDone:
@@ -296,11 +316,11 @@ func (l *Ledger) validateReleases() error {
 			}
 			switch r.Effect {
 			case EffectRequalify:
-				if r.AnchorSHA256 != "" || (r.CarryAbandoned != "" && (!text(r.CarryAbandoned, 512) || r.CarryProofSHA256 == "")) {
+				if r.AnchorSHA256 != "" || (r.CarryAbandoned != "" && (!text(r.CarryAbandoned, 512) || r.CarryProofSHA256 == "")) || (r.JobLogoutRequired && !r.Carry) {
 					return fmt.Errorf("setup ledger: release %d requalification record is inconsistent", i)
 				}
 			case EffectCarried:
-				if !sha256Hex.MatchString(r.AnchorSHA256) || r.CarryProofSHA256 == "" || r.CarryAbandoned != "" {
+				if !sha256Hex.MatchString(r.AnchorSHA256) || !r.Carry || r.CarryProofSHA256 == "" || r.CarryAbandoned != "" || r.JobLogoutRequired {
 					return fmt.Errorf("setup ledger: release %d carry record is incomplete", i)
 				}
 				if last && !ownApproval(l) {

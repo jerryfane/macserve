@@ -162,13 +162,18 @@ Access and requalify. An interrupted upgrade blocks setup until macserve
 upgrade with the same release finishes it.
 
   --tag vX.Y.Z        The release you mean; refused unless this binary is it.
-  --carry-proof FILE  A release-carry proof (carry-proof.json) for exactly
-                      this upgrade. With a valid proof, your own approval, a
-                      live build-account session and worker-quiescent, the
-                      approval is carried instead: the new binary is
-                      re-measured (job probe, qualify begin --carry, tool
-                      evidence, qualify carry). Any failure falls back to
-                      full requalification. Services stay stopped.
+  --carry-proof FILE  The release's own carry-proof.json asset (the release
+                      workflow publishes it only when the release changes
+                      no boundary path); its digest must be listed in the
+                      --sha256sums file, and it must be for exactly the
+                      installed release to this one. With it, your own
+                      approval, a live build-account session, qualify
+                      carry's pre-check and worker-quiescent, the approval
+                      is carried: the new binary is re-measured (job probe,
+                      qualify begin --carry, tool evidence, qualify carry).
+                      Any failure falls back to full requalification, and
+                      setup then waits for the build account to log out.
+                      Services stay stopped.
 
 Exit status: 0 upgraded (or plan without failures), 1 refused or a check
 failed, 2 usage.

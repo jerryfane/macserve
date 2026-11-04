@@ -9,10 +9,13 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jerryfane/macserve/internal/deploy"
 )
 
 // macserve upgrade (design NEW-USER-ONBOARDING.md §5, BOUNDARY-PRESERVING-
@@ -73,6 +76,7 @@ type Process struct {
 	PID        int
 	UID        uint32
 	Executable string
+	Zombie     bool
 }
 
 func (h *Helper) installedPath() string { return filepath.Join(h.Root, "bin", "macserve") }
@@ -129,6 +133,11 @@ func (h *Helper) upgrade(r Request) (Response, error) {
 	if r.SHA256 != h.SHA256 {
 		return Response{}, errors.New("the release digest you verified is not this helper's; nothing was changed")
 	}
+	if r.Sums != "" {
+		if listed, err := ReleaseDigest([]byte(r.Sums), ReleaseAsset); err != nil || listed != h.SHA256 {
+			return Response{}, errors.Join(errors.New("the SHA256SUMS you gave does not list this helper's digest; nothing was changed"), err)
+		}
+	}
 	to, err := h.Version(self)
 	if err != nil {
 		return Response{}, fmt.Errorf("%s: %w", h.Executable, err)
@@ -155,26 +164,24 @@ func (h *Helper) upgrade(r Request) (Response, error) {
 	if err := h.stoppedGate(ctx, e.ControllerUID); err != nil {
 		return Response{Items: h.stopCommands()}, err
 	}
-	rel := l.PendingRelease()
-	if rel != nil {
+	if rel := l.PendingRelease(); rel != nil {
 		if rel.To != to || rel.SHA256 != h.SHA256 {
 			return Response{}, fmt.Errorf("the upgrade to %s (%s) was interrupted; finish it first by running that release's macserve upgrade", rel.To, rel.SHA256)
 		}
 		if installedSHA != rel.FromSHA256 && installedSHA != rel.SHA256 {
 			return Response{}, fmt.Errorf("%s changed during the interrupted upgrade (SHA-256 %s); reconcile by hand", h.installedPath(), installedSHA)
 		}
-		if installedSHA == rel.FromSHA256 && rel.CarryProofSHA256 == "" {
-			if err := h.jobSessionGuard(e.JobUID); err != nil {
-				return Response{}, err
-			}
-		}
 		// An interrupted carry is not resumed: its sitting cannot be
-		// trusted, so it completes as full requalification.
-		abandoned := ""
-		if rel.CarryProofSHA256 != "" {
-			abandoned = "the carry was interrupted; full requalification instead"
+		// trusted, so it completes as full requalification. The build
+		// account may still be logged in from the carry, so setup must see
+		// it log out first; any other resume applies the guard again.
+		if rel.Carry {
+			return h.requalify(ctx, l, loc, self, e.ControllerUID, "the carry was interrupted; full requalification instead", true)
 		}
-		return h.requalify(l, loc, self, abandoned)
+		if err := h.jobSessionGuard(e.JobUID); err != nil {
+			return Response{}, err
+		}
+		return h.requalify(ctx, l, loc, self, e.ControllerUID, "", false)
 	}
 	if _, _, err := l.Next(); err != nil {
 		return Response{}, err
@@ -203,12 +210,14 @@ func (h *Helper) upgrade(r Request) (Response, error) {
 	carry, abandoned := false, ""
 	if r.Proof != "" {
 		next.CarryProofSHA256 = digestHex([]byte(r.Proof))
-		if err := h.carryPossible(ctx, l, e.JobUID, []byte(r.Proof), next); err != nil {
+		if err := h.carryPossible(ctx, l, e.JobUID, []byte(r.Proof), []byte(r.Sums), next); err != nil {
 			abandoned = "carry not possible: " + err.Error()
 		} else {
-			carry = true
+			carry, next.Carry = true, true
 		}
 	}
+	// The job-session guard applies unless the proof passed every carry
+	// pre-check; a refused proof changes nothing about the guard.
 	if !carry {
 		if err := h.jobSessionGuard(e.JobUID); err != nil {
 			if abandoned != "" {
@@ -230,9 +239,9 @@ func (h *Helper) upgrade(r Request) (Response, error) {
 	}
 	h.audit(VerbUpgrade, "release "+from+" to "+to+" recorded", nil)
 	if !carry {
-		return h.requalify(l, loc, self, abandoned)
+		return h.requalify(ctx, l, loc, self, e.ControllerUID, abandoned, false)
 	}
-	return h.carry(ctx, l, loc, self, e.JobUID, []byte(r.Proof))
+	return h.carry(ctx, l, loc, self, e, []byte(r.Proof))
 }
 
 // ownAnchor refuses an approval this ledger did not record: an activation
@@ -257,7 +266,8 @@ func (h *Helper) ownAnchor(l *Ledger) error {
 }
 
 // stoppedGate requires the three services booted out, no controller-UID
-// process and no process running the installed binary.
+// process and no process running the installed binary. A live process
+// whose executable is unknown is refused too: it could be either.
 func (h *Helper) stoppedGate(ctx context.Context, controllerUID uint32) error {
 	var loaded []string
 	for _, label := range serviceLabels {
@@ -281,7 +291,13 @@ func (h *Helper) stoppedGate(ctx context.Context, controllerUID uint32) error {
 		return fmt.Errorf("process list: %w", err)
 	}
 	for _, p := range procs {
-		if p.UID == controllerUID || p.Executable == h.installedPath() {
+		if p.Zombie || p.PID == 0 {
+			continue // kernel_task has no executable path
+		}
+		if p.Executable == "" {
+			return fmt.Errorf("process %d (uid %d) has no readable executable path; the stopped gate cannot rule it out", p.PID, p.UID)
+		}
+		if p.UID == controllerUID || filepath.Clean(p.Executable) == h.installedPath() {
 			return fmt.Errorf("process %d (%s, uid %d) still runs as the controller or from %s; wait for it to exit", p.PID, p.Executable, p.UID, h.installedPath())
 		}
 	}
@@ -312,7 +328,7 @@ func (h *Helper) jobGUILive(jobUID uint32) (bool, error) {
 		return false, fmt.Errorf("process list: %w", err)
 	}
 	for _, p := range procs {
-		if p.UID == jobUID && filepath.Base(p.Executable) == "loginwindow" {
+		if p.UID == jobUID && !p.Zombie && filepath.Base(p.Executable) == "loginwindow" {
 			return true, nil
 		}
 	}
@@ -331,16 +347,26 @@ func (h *Helper) jobSessionGuard(jobUID uint32) error {
 	return nil
 }
 
-// carryPossible is the read-only carry pre-check, before anything changes:
-// the proof, the ledger's own approval in this boot's live session (a
-// carry keeps the job GUI session logged in), and worker-quiescent with the
-// installed binary.
-func (h *Helper) carryPossible(ctx context.Context, l *Ledger, jobUID uint32, proof []byte, next Release) error {
-	if _, err := CheckCarryProof(proof, next.From, next.FromSHA256, next.To, next.SHA256); err != nil {
+// carryPossible is the read-only carry pre-check, before anything changes
+// and before the job-session guard is skipped. It is at least as strict as
+// qualify carry's checks of the proof and the anchor: the proof is the
+// target release's SHA256SUMS-listed carry-proof.json and passes
+// qualification.ValidateCarryProof from the installed to the target binary
+// (CheckCarryProof); this ledger's own approval is complete; then
+// qualification.CarryPreflight (a schema-2 anchor equal to the live
+// configuration with the installed binary anchored, the carry cap, the
+// same proof check and the predecessor's activation check); the build
+// account's session is live (a carry keeps it); and worker-quiescent with
+// the installed binary passes.
+func (h *Helper) carryPossible(ctx context.Context, l *Ledger, jobUID uint32, proof, sums []byte, next Release) error {
+	if _, err := CheckCarryProof(proof, sums, next.From, next.FromSHA256, next.To, next.SHA256); err != nil {
 		return err
 	}
-	if !ownApproval(l) || l.record(StepApproveAndStart).Status != StatusDone {
+	if !ownApproval(l) || l.record(StepApproveAndStart).Status != StatusDone || l.AnchorSHA256() == "" {
 		return errors.New("this setup ledger has no completed approval to carry")
+	}
+	if err := h.Qualify.CarryPreflight(ctx, proof, next.SHA256); err != nil {
+		return fmt.Errorf("qualify carry would refuse: %w", err)
 	}
 	live, err := h.jobGUILive(jobUID)
 	if err != nil {
@@ -369,10 +395,16 @@ func (h *Helper) writePause() error {
 	return h.Store.writeFile(path, []byte(OwnerPauseUpgrade), 0o644)
 }
 
+// staleTemp is a temporary file Store.writeFile leaves in bin/ when the
+// helper stopped between its create and its rename.
+var staleTemp = regexp.MustCompile(`^\.macserve\.[0-9a-f]{16}$`)
+
 // replaceBinary atomically replaces bin/macserve with data (root:wheel
-// 0755) and re-hashes the installed file. It is a no-op when the file
-// already holds data.
-func (h *Helper) replaceBinary(data []byte) error {
+// 0755) and re-hashes the installed file. It first repeats the stopped
+// gate (closing the window since the first check) and removes temporaries
+// an interrupted replace left in bin/. It is a no-op when the file already
+// holds data.
+func (h *Helper) replaceBinary(ctx context.Context, controllerUID uint32, data []byte) error {
 	want := digestHex(data)
 	if want != h.SHA256 {
 		return errors.New("the bytes to install are not the verified release")
@@ -380,8 +412,23 @@ func (h *Helper) replaceBinary(data []byte) error {
 	if got, err := h.installedBinary(); err == nil && got == want {
 		return nil
 	}
-	if err := h.Store.checkAncestors(filepath.Dir(h.installedPath())); err != nil {
+	dir := filepath.Dir(h.installedPath())
+	if err := h.Store.checkAncestors(dir); err != nil {
 		return err
+	}
+	if err := h.stoppedGate(ctx, controllerUID); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if staleTemp.MatchString(e.Name()) && e.Type().IsRegular() {
+			if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
+				return err
+			}
+		}
 	}
 	if err := h.Store.writeFile(h.installedPath(), data, 0o755); err != nil {
 		return fmt.Errorf("replace %s: %w", h.installedPath(), err)
@@ -419,19 +466,22 @@ func (h *Helper) invalidate() error {
 	return syncDir(h.Store.Ledger)
 }
 
-// requalify is the full path: owner.pause, the invalidation, the replace
-// and the ledger reset to guided requalification.
-func (h *Helper) requalify(l *Ledger, loc LedgerLocation, self []byte, abandoned string) (Response, error) {
+// requalify is the full path: owner.pause, the invalidation (before the
+// replace, so the new binary never meets the old approval), the replace
+// and the ledger reset to guided requalification. jobLogout records that
+// the job-session guard was not applied (a carry was attempted), so setup
+// must see the build account logged out before it counts a job login.
+func (h *Helper) requalify(ctx context.Context, l *Ledger, loc LedgerLocation, self []byte, controllerUID uint32, abandoned string, jobLogout bool) (Response, error) {
 	if err := h.writePause(); err != nil {
 		return Response{}, fmt.Errorf("owner.pause: %w", err)
 	}
 	if err := h.invalidate(); err != nil {
 		return Response{}, fmt.Errorf("remove the approval: %w", err)
 	}
-	if err := h.replaceBinary(self); err != nil {
+	if err := h.replaceBinary(ctx, controllerUID, self); err != nil {
 		return Response{}, err
 	}
-	if err := l.FinishRelease(EffectRequalify, abandoned, "", h.Now()); err != nil {
+	if err := l.FinishRelease(EffectRequalify, abandoned, "", jobLogout, h.Now()); err != nil {
 		return Response{}, err
 	}
 	if err := h.Store.Save(l, loc); err != nil {
@@ -442,25 +492,29 @@ func (h *Helper) requalify(l *Ledger, loc LedgerLocation, self []byte, abandoned
 	if abandoned != "" {
 		detail = abandoned + "; " + detail
 	}
+	if jobLogout {
+		detail += "; log the build account out before macserve setup continues"
+	}
 	return Response{Done: true, Detail: detail, Items: []string{EffectRequalify}}, nil
 }
 
-// carry runs the N3 verbs with the new binary after the replace:
-// the job probe self-test, qualify begin --carry (strict persistence
-// rebind), the job probe, tool evidence and qualify carry. Any failure
-// falls back to the full path, with the reason recorded.
-func (h *Helper) carry(ctx context.Context, l *Ledger, loc LedgerLocation, self []byte, jobUID uint32, proof []byte) (Response, error) {
+// carry runs the N3 verbs with the new binary after the replace: the job
+// probe self-test, qualify begin --carry (strict persistence rebind), the
+// job probe, tool evidence and qualify carry. Any failure falls back to the
+// full path, with the reason recorded and the build account's logout
+// required (the guard was not applied). Services are never started.
+func (h *Helper) carry(ctx context.Context, l *Ledger, loc LedgerLocation, self []byte, e deploy.Environment, proof []byte) (Response, error) {
 	fallback := func(step string, cause error) (Response, error) {
 		h.audit(VerbUpgrade, "carry abandoned at "+step, cause)
-		return h.requalify(l, loc, self, reason(fmt.Errorf("carry abandoned at %s: %w", step, cause)))
+		return h.requalify(ctx, l, loc, self, e.ControllerUID, reason(fmt.Errorf("carry abandoned at %s: %w", step, cause)), true)
 	}
 	if err := h.writePause(); err != nil {
-		return Response{}, fmt.Errorf("owner.pause: %w", err)
+		return fallback("owner.pause", err)
 	}
-	if err := h.replaceBinary(self); err != nil {
-		return Response{}, err
+	if err := h.replaceBinary(ctx, e.ControllerUID, self); err != nil {
+		return fallback("replace", err)
 	}
-	proofPath := h.Store.staged("carry-proof.json")
+	proofPath := h.Store.staged(CarryProofAsset)
 	if err := h.Store.writePrivate(proofPath, proof); err != nil {
 		return fallback("stage the proof", err)
 	}
@@ -469,7 +523,7 @@ func (h *Helper) carry(ctx context.Context, l *Ledger, loc LedgerLocation, self 
 		return fallback("session", err)
 	}
 	id := "upgrade-carry-" + hex.EncodeToString(b[:])
-	bin, job := h.installedPath(), strconv.FormatUint(uint64(jobUID), 10)
+	bin, job := h.installedPath(), strconv.FormatUint(uint64(e.JobUID), 10)
 	steps := []struct {
 		name    string
 		argv    []string
@@ -490,7 +544,7 @@ func (h *Helper) carry(ctx context.Context, l *Ledger, loc LedgerLocation, self 
 	if err != nil {
 		return fallback("anchor", err)
 	}
-	if err := l.FinishRelease(EffectCarried, "", digestHex(anchor), h.Now()); err != nil {
+	if err := l.FinishRelease(EffectCarried, "", digestHex(anchor), false, h.Now()); err != nil {
 		return Response{}, err
 	}
 	if err := h.Store.Save(l, loc); err != nil {
@@ -498,4 +552,22 @@ func (h *Helper) carry(ctx context.Context, l *Ledger, loc LedgerLocation, self 
 	}
 	h.audit(VerbUpgrade, "qualification carried", nil)
 	return Response{Done: true, Detail: "installed; qualification carried (" + id + ")", Session: id, Items: []string{EffectCarried}}, nil
+}
+
+// jobLogoutGate: after an upgrade that skipped the job-session guard and
+// fell back to requalification, setup counts no job login until it has
+// seen the build account logged out (no GUI session); it then records that.
+func (h *Helper) jobLogoutGate(l *Ledger, loc LedgerLocation, jobUID uint32) (bool, string, error) {
+	if !l.JobLogoutPending() {
+		return true, "", nil
+	}
+	live, err := h.jobGUILive(jobUID)
+	if err != nil {
+		return false, "", err
+	}
+	if live {
+		return false, "the build account is still logged in from the upgrade's carry attempt; log it out first (Apple menu > Log Out in that account), then log in again", nil
+	}
+	l.ClearJobLogout()
+	return true, "", h.Store.Save(l, loc)
 }

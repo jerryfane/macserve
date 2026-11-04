@@ -64,6 +64,8 @@ func parseUpgradeFlags(args []string, stdout, stderr io.Writer) (upgradeFlags, i
 		fmt.Fprintln(stderr, "macserve upgrade: give the release digest: --sha256sums SHA256SUMS or --sha256 HEX (one of them)")
 	case f.sha256 != "" && !upgradeDigest.MatchString(f.sha256):
 		fmt.Fprintln(stderr, "macserve upgrade: --sha256 needs 64 lowercase hexadecimal characters")
+	case f.carryProof != "" && f.sums == "":
+		fmt.Fprintln(stderr, "macserve upgrade: --carry-proof needs --sha256sums: the proof must be the release's carry-proof.json, listed in its SHA256SUMS")
 	case f.tag != "" && !setup.ValidRelease(f.tag):
 		fmt.Fprintln(stderr, "macserve upgrade: --tag needs a release tag vMAJOR.MINOR.PATCH")
 	default:
@@ -195,7 +197,7 @@ func (u *upgradeRun) run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	defer session.Close()
-	resp, err := session.Call(setup.Request{Verb: setup.VerbUpgrade, SHA256: want, Tag: f.tag, Proof: string(o.CarryProof)})
+	resp, err := session.Call(setup.Request{Verb: setup.VerbUpgrade, SHA256: want, Tag: f.tag, Sums: string(o.SHA256Sums), Proof: string(o.CarryProof)})
 	if err != nil {
 		fmt.Fprintln(stderr, "macserve upgrade:", err)
 		for _, item := range resp.Items {
@@ -205,7 +207,7 @@ func (u *upgradeRun) run(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(u.out, "\n%s to %s: %s.\n", result.From, result.To, resp.Detail)
 	if len(resp.Items) == 1 && resp.Items[0] == setup.EffectCarried {
-		fmt.Fprintln(u.out, "The approval was carried. Services stay stopped and owner.pause stays: re-grant Full Disk Access to /Library/macserve/bin/macserve, then start the services (docs/install.md, Boundary-preserving releases).")
+		fmt.Fprintln(u.out, "The approval was carried. Services stay stopped and owner.pause stays. Re-grant Full Disk Access to /Library/macserve/bin/macserve, start the services, and remove owner.pause once health is valid (docs/install.md, Upgrading).")
 		return 0
 	}
 	fmt.Fprintln(u.out, "Run macserve setup (as yourself) to continue: it re-checks Full Disk Access for the new binary, then guides qualification again.")

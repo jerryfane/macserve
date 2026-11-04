@@ -62,6 +62,11 @@ var Upgrade = Policy{
 		// The running binary's path, then reads through doctor's readFile.
 		uses["os.Executable"] = Use{Caller: upgradeFunc + "executable", Max: 1}
 		uses["path/filepath.EvalSymlinks"] = Use{Caller: upgradeFunc + "executable", Max: 1, Args: []string{"self"}}
+		// qualify carry's strict proof decoding (qualification.decode and
+		// uniqueJSON), from bytes in memory.
+		for _, name := range []string{"encoding/json.NewDecoder", "(*encoding/json.Decoder).UseNumber", "(*encoding/json.Decoder).Token", "(*encoding/json.Decoder).More", "(*encoding/json.Decoder).DisallowUnknownFields", "(*encoding/json.Decoder).Decode"} {
+			uses[name] = Use{}
+		}
 		// The release version stamped into a binary already in memory.
 		uses["debug/buildinfo.Read"] = Use{Caller: setupFunc + "ReleaseVersion", Max: 1, Args: []string{"bytes.NewReader(binary)"}}
 		uses["flag.NewFlagSet"] = Use{Caller: mainPkg + ".parseUpgradeFlags", Max: 1}
