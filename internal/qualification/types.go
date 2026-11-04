@@ -57,9 +57,11 @@ type Challenge struct {
 	PrivatePaths      []string                `json:"private_paths"`
 	Socket            string                  `json:"socket"`
 	Profiles          []model.Profile         `json:"profiles"`
-	// Templates are the enabled org-level build templates. Each is qualified
-	// like a profile: by digest in the observation and by one tool-evidence
-	// run on its pinned source. Omitted when none are configured.
+	// Templates are the enabled org-level build and test templates. Each is
+	// qualified like a profile: by digest in the observation and by one
+	// tool-evidence run on its pinned source (a test template's on the pin's
+	// shard), and a test template's simulator pins are checked in tool
+	// inspection. Omitted when none are configured.
 	Templates      []model.Template `json:"templates,omitempty"`
 	Previous       string           `json:"previous,omitempty"`
 	PreviousSHA256 string           `json:"previous_sha256,omitempty"`
