@@ -42,9 +42,20 @@ type Client struct {
 
 var ErrPeerIdentity = errors.New("controller Unix peer UID mismatch")
 
-type HTTPError struct{ Status int }
+// HTTPError is a non-2xx controller reply to Method Path (the socket URL
+// path; no query, headers or body).
+type HTTPError struct {
+	Status       int
+	Method, Path string
+}
 
-func (e *HTTPError) Error() string { return fmt.Sprintf("controller HTTP status %d", e.Status) }
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("controller HTTP status %d for %s %s", e.Status, e.Method, e.Path)
+}
+
+func statusError(resp *http.Response) *HTTPError {
+	return &HTTPError{Status: resp.StatusCode, Method: resp.Request.Method, Path: resp.Request.URL.Path}
+}
 
 func New(config Config, engine Executor) (*Client, error) {
 	config, err := normalize(config)
@@ -128,7 +139,7 @@ func (c *Client) json(ctx context.Context, method, path, epoch, lease string, va
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return resp.StatusCode, &HTTPError{resp.StatusCode}
+		return resp.StatusCode, statusError(resp)
 	}
 	if resp.StatusCode == http.StatusNoContent || reply == nil {
 		return resp.StatusCode, nil
@@ -313,7 +324,7 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 		resp, err = c.http.Do(req)
 		if err == nil {
 			if resp.StatusCode != http.StatusOK {
-				err = &HTTPError{resp.StatusCode}
+				err = statusError(resp)
 			} else {
 				executed = true
 				result, err = c.engine.Execute(ctx, lease.Job, lease.Source, resp.Body, sink)
@@ -542,7 +553,7 @@ func (c *Client) deliver(ctx context.Context, saved pending) error {
 			return c.ackPending(jobID)
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return &HTTPError{resp.StatusCode}
+			return statusError(resp)
 		}
 	}
 	status, err := c.json(ctx, http.MethodPost, "/jobs/"+jobID+"/complete", saved.Epoch, saved.Lease.Token, saved.Result, nil)

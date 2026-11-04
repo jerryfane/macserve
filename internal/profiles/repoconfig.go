@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
 
 	"github.com/jerryfane/macserve/internal/model"
 )
@@ -24,6 +25,7 @@ const (
 var ErrRepoConfig = errors.New("repository has no valid .macserve.json")
 
 var (
+	configDigest     = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	projectPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 _.-]*\.xcodeproj$`)
 	workspacePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 _.-]*\.xcworkspace$`)
 	schemePattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 _.-]{0,127}$`)
@@ -136,4 +138,31 @@ func Derive(snapshot model.Profile, c model.RepoConfig) (model.Profile, error) {
 		}
 	}
 	return p, nil
+}
+
+// Effective returns the recipe a job ran: the snapshot itself for a profile
+// job, and for a template job the derivation from its reported repository
+// configuration, which must equal the reported recipe exactly. A profile job
+// must not report a recipe.
+func Effective(snapshot model.Profile, recipe *model.RepoRecipe) (model.Profile, error) {
+	if snapshot.Template == nil {
+		if recipe != nil {
+			return model.Profile{}, errors.New("unexpected repository recipe for a profile job")
+		}
+		return snapshot, nil
+	}
+	if recipe == nil || !configDigest.MatchString(recipe.ConfigSHA256) {
+		return model.Profile{}, errors.New("template job lacks repository recipe evidence")
+	}
+	derived, err := Derive(snapshot, recipe.Config)
+	if err != nil || derived.WorkDir != recipe.WorkDir || !sameCommands(append([]model.Command{derived.Run}, derived.Prepare...), append([]model.Command{recipe.Run}, recipe.Prepare...)) {
+		return model.Profile{}, errors.New("repository recipe does not match its template derivation")
+	}
+	return derived, nil
+}
+
+func sameCommands(a, b []model.Command) bool {
+	return slices.EqualFunc(a, b, func(x, y model.Command) bool {
+		return x.Executable == y.Executable && slices.Equal(x.Args, y.Args)
+	})
 }

@@ -115,6 +115,12 @@ func (f *runtimeFixture) enqueue(t *testing.T, key string, kind model.Kind) mode
 func (f *runtimeFixture) lease(t *testing.T, kind model.Kind) protocol.Lease {
 	t.Helper()
 	f.enqueue(t, "job", kind)
+	return f.dispatch(t)
+}
+
+// dispatch registers the worker and returns the lease of the queued job.
+func (f *runtimeFixture) dispatch(t *testing.T) protocol.Lease {
+	t.Helper()
 	if err := f.controller.register(context.Background(), protocol.Registration{Epoch: "epoch-a", Quiescent: true}); err != nil {
 		t.Fatal(err)
 	}

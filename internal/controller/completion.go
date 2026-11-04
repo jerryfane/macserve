@@ -9,7 +9,6 @@ import (
 	"errors"
 	"io"
 	"path"
-	"slices"
 	"strings"
 	"time"
 
@@ -297,31 +296,6 @@ func verifyObservation(job model.Job, o worker.Observation) error {
 			return errors.New("generated file digest mismatch")
 		}
 	}
-	return verifyRecipe(job.Profile, o.Recipe)
-}
-
-// verifyRecipe requires a template job's reported recipe to be exactly the
-// code-defined derivation from its parsed .macserve.json, and no recipe
-// report for a profile job.
-func verifyRecipe(snapshot model.Profile, recipe *model.RepoRecipe) error {
-	if snapshot.Template == nil {
-		if recipe != nil {
-			return errors.New("unexpected repository recipe for a profile job")
-		}
-		return nil
-	}
-	if recipe == nil || !hexDigest(recipe.ConfigSHA256, 64) {
-		return errors.New("template job lacks repository recipe evidence")
-	}
-	derived, err := profiles.Derive(snapshot, recipe.Config)
-	if err != nil || derived.WorkDir != recipe.WorkDir || !sameCommands(append([]model.Command{derived.Run}, derived.Prepare...), append([]model.Command{recipe.Run}, recipe.Prepare...)) {
-		return errors.New("repository recipe does not match its template derivation")
-	}
-	return nil
-}
-
-func sameCommands(a, b []model.Command) bool {
-	return slices.EqualFunc(a, b, func(x, y model.Command) bool {
-		return x.Executable == y.Executable && slices.Equal(x.Args, y.Args)
-	})
+	_, err := profiles.Effective(job.Profile, o.Recipe)
+	return err
 }
