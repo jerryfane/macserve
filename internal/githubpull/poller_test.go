@@ -199,6 +199,21 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
+	registry, err := profiles.New([]model.Profile{{ID: testProfile, Version: 1, Repo: testRepo, Kind: model.Build, Xcode: model.Xcode{Version: "26.0", Build: "17A100"}, DeveloperDir: "/Applications/ExampleToolchain.app/Contents/Developer", WorkDir: ".", Run: model.Command{Executable: "/usr/bin/true"}, DefaultTimeoutSeconds: 60, MaxTimeoutSeconds: 600, MemoryLimitMiB: 512}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := newFixtureWith(t, registry, []string{testProfile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+// newFixtureWith builds a poller over registry whose one policy names
+// policyProfiles; it returns New's error so callers can assert refusal.
+func newFixtureWith(t *testing.T, registry *profiles.Registry, policyProfiles []string) (*fixture, error) {
+	t.Helper()
 	remote := &fakeGitHub{now: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC), pull: githubapi.PullRequest{Number: 7, State: "open", HeadSHA: testSHA, HeadRepositoryID: 123, AuthorID: 42, BaseRef: "main"}, checks: make(map[int64]githubapi.Check)}
 	remote.server = httptest.NewServer(http.HandlerFunc(remote.serve))
 	t.Cleanup(remote.server.Close)
@@ -211,24 +226,20 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry, err := profiles.New([]model.Profile{{ID: testProfile, Version: 1, Repo: testRepo, Kind: model.Build, Xcode: model.Xcode{Version: "26.0", Build: "17A100"}, DeveloperDir: "/Applications/ExampleToolchain.app/Contents/Developer", WorkDir: ".", Run: model.Command{Executable: "/usr/bin/true"}, DefaultTimeoutSeconds: 60, MaxTimeoutSeconds: 600, MemoryLimitMiB: 512}}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
 	path := filepath.Join(t.TempDir(), "private", "queue.sqlite")
 	s, err := store.Open(path, store.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	options := Options{Store: s, Profiles: registry, Client: client, Policies: []Policy{{RepositoryID: 123, Repository: testRepo, AuthorIDs: []int64{42}, BaseBranches: []string{"main"}, Profiles: []string{testProfile}, PolicyRevision: 1, ActionsBotID: 55, ActionsAppID: 66}}, VerifyReceipt: func(model.Job, json.RawMessage) error {
+	options := Options{Store: s, Profiles: registry, Client: client, Policies: []Policy{{RepositoryID: 123, Repository: testRepo, AuthorIDs: []int64{42}, BaseBranches: []string{"main"}, Profiles: policyProfiles, PolicyRevision: 1, ActionsBotID: 55, ActionsAppID: 66}}, VerifyReceipt: func(model.Job, json.RawMessage) error {
 		return errors.New("no test receipt is cryptographically trusted")
 	}, Now: now}
 	p, err := New(options)
 	if err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
-	return &fixture{p: p, s: s, path: path, remote: remote, options: options}
+	return &fixture{p: p, s: s, path: path, remote: remote, options: options}, nil
 }
 func (f *fixture) advance(d time.Duration) {
 	f.remote.mu.Lock()

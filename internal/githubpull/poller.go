@@ -24,6 +24,14 @@ import (
 	"github.com/jerryfane/macserve/internal/store"
 )
 
+// Policy admits pull requests of one pinned repository. Each Profiles entry
+// names either an explicit profile whose Repo is that repository or an
+// org template whose owners include the repository owner; the template owner
+// rule is the one enforced by API admission (profiles.Registry.Resolve), and a
+// repository with an explicit profile of the template's kind cannot name it.
+// Policies stay per repository: the numeric ID pin is what binds GitHub
+// events, check runs and receipts to one repository, so there is no
+// owner-wide policy.
 type Policy struct {
 	RepositoryID   int64    `json:"repository_id"`
 	Repository     string   `json:"repository"`
@@ -90,6 +98,7 @@ type Poller struct {
 	options  Options
 	policies map[string]Policy
 	recipes  map[string]model.Profile
+	tmpls    map[string]model.Template
 	mu       sync.Mutex
 }
 
@@ -103,9 +112,12 @@ func New(options Options) (*Poller, error) {
 	if options.PollInterval == 0 {
 		options.PollInterval = 45 * time.Second
 	}
-	p := &Poller{options: options, policies: make(map[string]Policy), recipes: make(map[string]model.Profile)}
+	p := &Poller{options: options, policies: make(map[string]Policy), recipes: make(map[string]model.Profile), tmpls: make(map[string]model.Template)}
 	for _, profile := range options.Profiles.List() {
 		p.recipes[profile.ID] = profile
+	}
+	for _, template := range options.Profiles.Templates() {
+		p.tmpls[template.ID] = template
 	}
 	ids := make(map[int64]bool)
 	for _, original := range options.Policies {
@@ -129,8 +141,8 @@ func New(options Options) (*Poller, error) {
 		}
 		seen := make(map[string]bool)
 		for _, id := range policy.Profiles {
-			profile, ok := p.recipes[id]
-			if !ok || profile.Repo != policy.Repository || !profilePattern.MatchString(id) || seen[id] {
+			_, ok := p.recipe(policy, id)
+			if !ok || !profilePattern.MatchString(id) || seen[id] {
 				return nil, errors.New("invalid GitHub profile policy")
 			}
 			seen[id] = true
@@ -189,8 +201,32 @@ func eligible(policy Policy, pull githubapi.PullRequest) bool {
 	return pull.Number > 0 && pull.State == "open" && shaPattern.MatchString(pull.HeadSHA) && pull.HeadRepositoryID == policy.RepositoryID && slices.Contains(policy.AuthorIDs, pull.AuthorID) && slices.Contains(policy.BaseBranches, pull.BaseRef)
 }
 
+// recipe returns the admitted recipe snapshot that profile id names for the
+// policy repository: an explicit profile of that repository, or a template
+// whose owners include the repository owner while the repository has no
+// explicit profile of the template's kind.
+func (p *Poller) recipe(policy Policy, id string) (model.Profile, bool) {
+	if profile, ok := p.recipes[id]; ok {
+		return profile, profile.Repo == policy.Repository
+	}
+	template, ok := p.tmpls[id]
+	if !ok {
+		return model.Profile{}, false
+	}
+	owner, _, _ := strings.Cut(policy.Repository, "/")
+	if !slices.Contains(template.Owners, owner) {
+		return model.Profile{}, false
+	}
+	for _, explicit := range p.recipes {
+		if explicit.Repo == policy.Repository && explicit.Kind == template.Kind {
+			return model.Profile{}, false
+		}
+	}
+	return profiles.TemplateSnapshot(template, policy.Repository), true
+}
+
 func (p *Poller) admission(policy Policy, pull githubapi.PullRequest, profileID string) (store.GitHubAdmission, error) {
-	profile, ok := p.recipes[profileID]
+	profile, ok := p.recipe(policy, profileID)
 	if !ok || !slices.Contains(policy.Profiles, profileID) {
 		return store.GitHubAdmission{}, ErrIneligible
 	}
