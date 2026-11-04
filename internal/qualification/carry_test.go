@@ -3,6 +3,7 @@ package qualification
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -649,5 +650,72 @@ func TestCarrySessionNotApprovable(t *testing.T) {
 		if !calls["Carry"][gate] {
 			t.Fatalf("qualify carry skips %s", gate)
 		}
+	}
+}
+
+// TestCarryPreflight: the read-only pre-check macserve upgrade runs before
+// it skips the job-session guard refuses a schema-1 anchor, a live
+// configuration other than the anchored one, an installed binary other
+// than the anchored one, the cap, and any proof qualify carry refuses.
+func TestCarryPreflight(t *testing.T) {
+	encodeProof := func(p CarryProof) []byte {
+		b, err := encode(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	proof, now := encodeProof(carryProofFixture()), time.Now().UTC()
+	if err := carryPreflight(carryAnchorFixture(), carryBindings(oldBinary), oldBinary, proof, newBinary, now); err != nil {
+		t.Fatalf("valid pre-check refused: %v", err)
+	}
+	for name, tc := range map[string]struct {
+		anchor    func(*ActivationAnchor)
+		live      map[string]string
+		installed string
+		target    string
+		want      string
+	}{
+		"schema 1 anchor": {anchor: func(a *ActivationAnchor) { a.Schema = 1; a.Carries = nil }, want: "schema 1"},
+		"config changed": {live: func() map[string]string {
+			m := carryBindings(oldBinary)
+			m["/Library/macserve/config/worker.json"] = "w2"
+			return m
+		}(), want: "configuration changed"},
+		"binary swapped early":   {live: carryBindings(newBinary), installed: newBinary, want: "configuration changed"},
+		"installed not anchored": {installed: nextBin, want: "not the anchored binary"},
+		"no installed digest":    {installed: "-", want: "not the anchored binary"},
+		"cap reached": {anchor: func(a *ActivationAnchor) {
+			for i := 0; i < carryCap; i++ {
+				a.Carries = append(a.Carries, carryRecord(oldBinary, oldBinary, fmt.Sprint("s", i), now))
+			}
+		}, want: "cap"},
+		"proof to another binary": {target: nextBin, want: "installed one"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := carryAnchorFixture()
+			if tc.anchor != nil {
+				tc.anchor(&a)
+			}
+			live := tc.live
+			if live == nil {
+				live = carryBindings(oldBinary)
+			}
+			installed := tc.installed
+			switch installed {
+			case "":
+				installed = oldBinary
+			case "-":
+				installed = ""
+			}
+			target := tc.target
+			if target == "" {
+				target = newBinary
+			}
+			err := carryPreflight(a, live, installed, proof, target, now)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got %v, want %q", err, tc.want)
+			}
+		})
 	}
 }

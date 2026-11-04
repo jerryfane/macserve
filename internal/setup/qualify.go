@@ -73,6 +73,10 @@ type Qualifier interface {
 	ActivationCheck(ctx context.Context) error
 	// Health is the controller readiness gate's blockers (controller.Guard).
 	Health(ctx context.Context) ([]string, error)
+	// CarryPreflight is qualification.CarryPreflight: qualify carry's
+	// proof and anchor checks, read-only, before macserve upgrade skips the
+	// job-session guard.
+	CarryPreflight(ctx context.Context, proof []byte, target string) error
 }
 
 // JobProcess is one process of the job UID. Restricted is nil when

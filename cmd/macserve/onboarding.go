@@ -16,7 +16,8 @@ import (
 // file. Names starting with "_" are internal (started by setup itself) and
 // not listed in the usage. checks/readonly proves that onboardingCommand,
 // runSetup (outside its apply clause), runDoctor (outside its --live
-// clause) and everything they reach cannot change host state.
+// clause), runUpgrade (outside its apply clause) and everything they reach
+// cannot change host state.
 var onboardingCommands = []struct {
 	name, summary, help string
 	run                 func(args []string, stdout, stderr io.Writer) int
@@ -25,7 +26,7 @@ var onboardingCommands = []struct {
 	{"connect-github", "Create the GitHub App from a manifest and install it on one repository (sudo, after deploy-install)", connectGitHubHelp, runConnectGitHub},
 	{"doctor", "Diagnose this Mac with fixed check IDs and fixes (read-only without --live)", doctorHelp, runDoctor},
 	{"build", "Build a commit of your repository here and verify its receipt", buildHelp, runBuild},
-	{"upgrade", "Upgrade behind the stopped gate with verified release bytes (not in this release)", upgradeHelp, nil},
+	{"upgrade", "Upgrade to a newer release with verified bytes (--plan: read-only)", upgradeHelp, runUpgrade},
 	{"_setup-root", "", setupRootHelp, runSetupRoot},
 	{"_fda-check", "", fdaCheckHelp, runFDACheck},
 }
@@ -69,11 +70,12 @@ Exit status: 0 ready or stopped at a resumable point, 1 blocked or
 failed, 2 usage.
 `
 
-const setupRootHelp = `Usage: sudo macserve _setup-root --sha256 HEX
+const setupRootHelp = `Usage: sudo macserve _setup-root [--upgrade] --sha256 HEX
 
-The root helper of macserve setup, which starts it; do not run it yourself.
-It serves a fixed set of setup steps to your login only and exits when
-setup disconnects or after 15 idle minutes.
+The root helper of macserve setup (and, with --upgrade, of macserve
+upgrade), which starts it; do not run it yourself. It serves a fixed set
+of steps to your login only and exits when setup or upgrade disconnects
+or after 15 idle minutes.
 `
 
 const fdaCheckHelp = `Usage: macserve _fda-check
@@ -130,13 +132,51 @@ Exit status: 0 the job succeeded and its receipt verifies, 1 it did not
 (or an error), 2 usage, 3 interrupted (the job keeps running).
 `
 
-const upgradeHelp = `Usage: macserve upgrade [--check]
+const upgradeHelp = `Usage: macserve upgrade --plan (--sha256sums SHA256SUMS | --sha256 HEX) [--tag vX.Y.Z] [--carry-proof FILE]
+       macserve upgrade (--sha256sums SHA256SUMS | --sha256 HEX) [--tag vX.Y.Z] [--carry-proof FILE]
 
-Upgrades the installed release behind the stopped gate and job-session
-guard, after verifying the release bytes against the tag's SHA256SUMS and
-build attestation.
+Upgrades a Mac set up by macserve setup to a newer release. Run the
+downloaded new release (macserve-darwin-arm64) as yourself, not with sudo,
+after verifying the release (gh attestation verify macserve-darwin-arm64
+--repo jerryfane/macserve). Its digest always comes from the release, never
+from the file: this binary must match the macserve-darwin-arm64 line of the
+release's SHA256SUMS (or --sha256).
 
-Not available in this release.
+--plan is read-only: it compares the installed and the new release, checks
+the digest, the stopped services and the build account's session, says
+whether a release carry is possible and lists what the upgrade will do.
+It writes, starts and contacts nothing.
+
+Without --plan, after you type yes, sudo asks for your password once and
+the setup helper (from this binary) checks everything again as root:
+  - the three services booted out and no controller process (stopped
+    gate; upgrade never stops services or jobs);
+  - no build-account GUI session, unless the release is carried;
+  - a newer release than the installed one (never the same or older), and
+    no approval this setup ledger did not record.
+It then records the release in the setup ledger, writes owner.pause,
+removes the approval and activation anchor, replaces
+/Library/macserve/bin/macserve with these bytes (atomic, digest re-checked)
+and resets setup to owner-actions: run macserve setup to re-grant Full Disk
+Access and requalify. An interrupted upgrade blocks setup until macserve
+upgrade with the same release finishes it.
+
+  --tag vX.Y.Z        The release you mean; refused unless this binary is it.
+  --carry-proof FILE  The release's own carry-proof.json asset (the release
+                      workflow publishes it only when the release changes
+                      no boundary path); its digest must be listed in the
+                      --sha256sums file, and it must be for exactly the
+                      installed release to this one. With it, your own
+                      approval, a live build-account session, qualify
+                      carry's pre-check and worker-quiescent, the approval
+                      is carried: the new binary is re-measured (job probe,
+                      qualify begin --carry, tool evidence, qualify carry).
+                      Any failure falls back to full requalification, and
+                      setup then waits for the build account to log out.
+                      Services stay stopped.
+
+Exit status: 0 upgraded (or plan without failures), 1 refused or a check
+failed, 2 usage.
 `
 
 func onboardingCommand(name string) (func(args []string, stdout, stderr io.Writer) int, bool) {

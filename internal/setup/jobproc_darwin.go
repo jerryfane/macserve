@@ -78,3 +78,21 @@ func sipRestricted(path string) error {
 	}
 	return nil
 }
+
+// systemProcesses lists every process with its effective UID and the
+// exec path of KERN_PROCARGS2 ("" when unavailable, or for a zombie).
+func systemProcesses() ([]Process, error) {
+	rows, err := unix.SysctlKinfoProcSlice("kern.proc.all")
+	if err != nil {
+		return nil, err
+	}
+	procs := make([]Process, 0, len(rows))
+	for _, row := range rows {
+		p := Process{PID: int(row.Proc.P_pid), UID: row.Eproc.Ucred.Uid, Zombie: row.Proc.P_stat == 5}
+		if !p.Zombie {
+			p.Executable = processPath(p.PID)
+		}
+		procs = append(procs, p)
+	}
+	return procs, nil
+}

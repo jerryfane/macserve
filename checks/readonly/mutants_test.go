@@ -62,7 +62,7 @@ func at(file, anchor, code string) edit { return edit{file, anchor, anchor + "\n
 func tableHook(hook, decl string) []edit {
 	edits := []edit{cmdOS, {command, tableType, "\trun                 func(args []string, stdout, stderr io.Writer) int\n\tpre                 func()\n}{"}}
 	edits = append(edits, edit{command, setupEntry, strings.Replace(setupEntry, "runSetup}", "runSetup, "+hook+"}", 1)})
-	for _, name := range []string{"connectGitHubHelp, runConnectGitHub}", "doctorHelp, runDoctor}", "buildHelp, runBuild}", "upgradeHelp, nil}", "setupRootHelp, runSetupRoot}", "fdaCheckHelp, runFDACheck}"} {
+	for _, name := range []string{"connectGitHubHelp, runConnectGitHub}", "doctorHelp, runDoctor}", "buildHelp, runBuild}", "upgradeHelp, runUpgrade}", "setupRootHelp, runSetupRoot}", "fdaCheckHelp, runFDACheck}"} {
 		edits = append(edits, edit{command, name, strings.TrimSuffix(name, "}") + ", nil}"})
 	}
 	edits = append(edits, edit{command, "\t\thelp, run := c.help, c.run", "\t\thelp, run := c.help, c.run\n\t\tif c.pre != nil {\n\t\t\tc.pre()\n\t\t}"})

@@ -682,6 +682,9 @@ func TestHelperRefusesAfterApproval(t *testing.T) {
 			t.Errorf("%s: CheckStart %v", name, err)
 		}
 		for _, v := range Verbs[1:] {
+			if v == VerbUpgrade {
+				continue // the setup helper never serves it (TestUpgradeVerbOnlyOnUpgradeHelper)
+			}
 			if r := f.call(v, testEnvIf(v, f.h.Owner)); !strings.Contains(r.Error, "approved") {
 				t.Errorf("%s: %s %+v", name, v, r)
 			}
@@ -712,6 +715,9 @@ func TestDecodeRequestGrammar(t *testing.T) {
 		`{"verb":"install","env":"X=1"}`, `{"verb":"preflight"}`, `{"verb":"STATUS"}`, `[]`, `{"verb":"status","argv":["/bin/sh"]}`,
 		`{"verb":"status","Verb":"install"}`, `{"verb":"approve"}`, `{"verb":"round-begin","sha256":"AB"}`,
 		`{"verb":"status","sha256":"` + strings.Repeat("a", 64) + `"}`, `{"verb":"approve","sha256":"` + strings.Repeat("A", 64) + `"}`,
+		`{"verb":"upgrade"}`, `{"verb":"upgrade","sha256":"` + strings.Repeat("a", 64) + `","tag":"0.1.2"}`,
+		`{"verb":"approve","sha256":"` + strings.Repeat("a", 64) + `","tag":"v0.1.2"}`, `{"verb":"status","proof":"{}"}`,
+		`{"verb":"upgrade","sha256":"` + strings.Repeat("a", 64) + `","proof":"` + strings.Repeat("x", MaxCarryProof+1) + `"}`,
 	} {
 		if _, err := DecodeRequest([]byte(line)); err == nil {
 			t.Errorf("accepted %s", line)
@@ -722,7 +728,7 @@ func TestDecodeRequestGrammar(t *testing.T) {
 	}
 	for _, v := range Verbs {
 		r := Request{Verb: v, Env: testEnvIf(v, Owner{UID: 501, Name: "jdoe"})}
-		if v == VerbRoundBegin || v == VerbApprove {
+		if v == VerbRoundBegin || v == VerbApprove || v == VerbUpgrade {
 			r.SHA256 = strings.Repeat("a", 64)
 		}
 		line, _ := json.Marshal(r)
@@ -734,11 +740,14 @@ func TestDecodeRequestGrammar(t *testing.T) {
 
 func TestParseRootArgsAndSudoOwner(t *testing.T) {
 	sha := strings.Repeat("a", 64)
-	if got, err := ParseRootArgs([]string{"--sha256", sha}); err != nil || got != sha {
-		t.Errorf("valid: %q %v", got, err)
+	if got, upgrade, err := ParseRootArgs([]string{"--sha256", sha}); err != nil || got != sha || upgrade {
+		t.Errorf("valid: %q %v %v", got, upgrade, err)
 	}
-	for _, args := range [][]string{nil, {"--sha256"}, {"--sha256", strings.ToUpper(sha)}, {"--sha256", sha, "--ledger", "/tmp/x"}, {"--env", "/tmp/x"}, {"--sha256=" + sha}} {
-		if _, err := ParseRootArgs(args); err == nil {
+	if got, upgrade, err := ParseRootArgs([]string{"--upgrade", "--sha256", sha}); err != nil || got != sha || !upgrade {
+		t.Errorf("valid upgrade: %q %v %v", got, upgrade, err)
+	}
+	for _, args := range [][]string{nil, {"--sha256"}, {"--sha256", strings.ToUpper(sha)}, {"--sha256", sha, "--ledger", "/tmp/x"}, {"--env", "/tmp/x"}, {"--sha256=" + sha}, {"--sha256", sha, "--upgrade"}, {"--upgrade"}, {"--upgrade", "--upgrade", "--sha256", sha}} {
+		if _, _, err := ParseRootArgs(args); err == nil {
 			t.Errorf("accepted %q", args)
 		}
 	}

@@ -302,3 +302,7 @@ func verifyArchive(path string, want worker.Source) error {
 	}
 	return nil
 }
+
+func (q *SystemQualifier) CarryPreflight(ctx context.Context, proof []byte, target string) error {
+	return qualification.CarryPreflight(ctx, proof, target)
+}

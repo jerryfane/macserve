@@ -570,25 +570,6 @@ func TestSetupApplyDigestComesFromTheRelease(t *testing.T) {
 	}
 }
 
-func TestReleaseDigestFromSHA256SUMS(t *testing.T) {
-	a, b := strings.Repeat("a", 64), strings.Repeat("b", 64)
-	if got, err := releaseDigest([]byte(a+"  macserve-darwin-arm64\n"+b+" *macserve.rb\n"), releaseAsset); err != nil || got != a {
-		t.Errorf("valid: %q %v", got, err)
-	}
-	for name, data := range map[string]string{
-		"missing":    b + "  macserve.rb\n",
-		"twice":      a + "  macserve-darwin-arm64\n" + b + "  macserve-darwin-arm64\n",
-		"uppercase":  strings.ToUpper(a) + "  macserve-darwin-arm64\n",
-		"path":       a + "  bin/macserve-darwin-arm64\n",
-		"extra text": a + "  macserve-darwin-arm64 extra\n",
-		"empty":      "",
-	} {
-		if _, err := releaseDigest([]byte(data), releaseAsset); err == nil {
-			t.Errorf("%s accepted", name)
-		}
-	}
-}
-
 // TestHelperIdentityAfterInstall: once installed, the helper is the
 // installed binary, refused if it is writable by others; a given digest
 // must match it.

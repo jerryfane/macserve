@@ -105,7 +105,7 @@ func runSetupApply(args []string, stdout, stderr io.Writer) int {
 	if sums != "" {
 		data, err := readSmallFile(sums, 64<<10)
 		if err == nil {
-			sha, err = releaseDigest(data, releaseAsset)
+			sha, err = setup.ReleaseDigest(data, setup.ReleaseAsset)
 		}
 		if err != nil {
 			fmt.Fprintln(stderr, "macserve setup: --sha256sums:", err)
@@ -135,7 +135,7 @@ func runSetupApply(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "macserve setup:", err)
 		return 1
 	}
-	w.start = func(path, digest string) (setupSession, error) { return startRootHelper(path, digest, stderr) }
+	w.start = func(path, digest string) (setupSession, error) { return startRootHelper(path, digest, false, stderr) }
 	return w.run(choices, sha, stderr)
 }
 
@@ -452,33 +452,6 @@ func (w *setupWizard) waitJobLogin(s setupSession, when string) error {
 	}
 }
 
-// releaseAsset is the release binary's name in SHA256SUMS.
-const releaseAsset = "macserve-darwin-arm64"
-
-var sumsLine = regexp.MustCompile(`^([0-9a-f]{64}) [ *]([A-Za-z0-9._-]+)$`)
-
-// releaseDigest returns name's digest from a release SHA256SUMS file. Every
-// line must be a shasum line, and name must appear exactly once.
-func releaseDigest(data []byte, name string) (string, error) {
-	found := ""
-	for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
-		m := sumsLine.FindStringSubmatch(line)
-		if m == nil {
-			return "", fmt.Errorf("not a SHA256SUMS line: %q", line)
-		}
-		if m[2] == name {
-			if found != "" {
-				return "", fmt.Errorf("%s is listed twice", name)
-			}
-			found = m[1]
-		}
-	}
-	if found == "" {
-		return "", fmt.Errorf("%s is not listed", name)
-	}
-	return found, nil
-}
-
 func readSmallFile(path string, max int64) ([]byte, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -521,7 +494,7 @@ func helperIdentity(root, self, want string) (string, string, error) {
 		return "", "", err
 	}
 	if want == "" {
-		return "", "", fmt.Errorf("before install, give the release digest of this binary: --sha256sums SHA256SUMS (from the same release; verify it first with gh attestation verify %s --repo jerryfane/macserve) or --sha256 HEX", releaseAsset)
+		return "", "", fmt.Errorf("before install, give the release digest of this binary: --sha256sums SHA256SUMS (from the same release; verify it first with gh attestation verify %s --repo jerryfane/macserve) or --sha256 HEX", setup.ReleaseAsset)
 	}
 	digest, err := fileDigest(self)
 	if err != nil {
@@ -534,9 +507,13 @@ func helperIdentity(root, self, want string) (string, string, error) {
 }
 
 // startRootHelper starts the one root helper, sudo path _setup-root
-// --sha256 digest, and connects to it.
-func startRootHelper(path, digest string, stderr io.Writer) (setupSession, error) {
-	cmd := exec.Command("/usr/bin/sudo", path, "_setup-root", "--sha256", digest)
+// [--upgrade] --sha256 digest, and connects to it.
+func startRootHelper(path, digest string, upgrade bool, stderr io.Writer) (setupSession, error) {
+	argv := []string{path, "_setup-root", "--sha256", digest}
+	if upgrade {
+		argv = []string{path, "_setup-root", "--upgrade", "--sha256", digest}
+	}
+	cmd := exec.Command("/usr/bin/sudo", argv...)
 	cmd.Env, cmd.Dir = []string{setup.FixedPath, "LANG=C"}, "/"
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, stderr
 	if err := cmd.Start(); err != nil {

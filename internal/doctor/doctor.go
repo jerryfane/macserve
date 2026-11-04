@@ -418,10 +418,16 @@ func (s *state) network() {
 	s.set("net.tailnet", Pass, ap.String()+" accepts connections", "")
 }
 
-// recordedBinary is the digest setup recorded for the installed binary.
+// recordedBinary is the digest setup recorded for the installed binary:
+// install's, or the last macserve upgrade's.
 func (s *state) recordedBinary() string {
 	if s.ledger == nil {
 		return ""
+	}
+	for i := len(s.ledger.Releases) - 1; i >= 0; i-- {
+		if s.ledger.Releases[i].Status == setup.StatusDone {
+			return s.ledger.Releases[i].SHA256
+		}
 	}
 	for i := len(s.ledger.Records) - 1; i >= 0; i-- {
 		if d := s.ledger.Records[i].Inputs["macserve"]; d != "" {
