@@ -33,6 +33,7 @@ var (
 	runtimePattern = regexp.MustCompile(`^com\.apple\.CoreSimulator\.SimRuntime\.[A-Za-z]+-[0-9]+(-[0-9]+)+$`)
 	devicePattern  = regexp.MustCompile(`^com\.apple\.CoreSimulator\.SimDeviceType\.[A-Za-z0-9][A-Za-z0-9.-]*$`)
 	ownerPattern   = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,38}$`)
+	shardPattern   = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 )
 
 type entry struct {
@@ -152,6 +153,9 @@ func (r *Registry) Resolve(request model.Request) (model.Admission, error) {
 	if !validRepo(request.Repo) || !shaPattern.MatchString(request.SHA) || !idPattern.MatchString(request.Profile) || request.TimeoutSeconds < 0 {
 		return model.Admission{}, fmt.Errorf("%w: repository, SHA, profile ID or timeout", ErrInvalid)
 	}
+	if request.Shard != "" && !shardPattern.MatchString(request.Shard) {
+		return model.Admission{}, fmt.Errorf("%w: shard must match %s", ErrInvalid, shardPattern)
+	}
 	request.Repo = strings.ToLower(request.Repo)
 	request.SHA = strings.ToLower(request.SHA)
 	index, found := r.byID[request.Profile]
@@ -162,6 +166,9 @@ func (r *Registry) Resolve(request model.Request) (model.Admission, error) {
 	p := e.profile
 	if request.Repo != p.Repo || request.Kind != p.Kind || request.Xcode != p.Xcode || !sameSimulator(request.Simulator, p.Simulator) {
 		return model.Admission{}, fmt.Errorf("%w: repository, kind or toolchain pins", ErrUnsupported)
+	}
+	if request.Shard != "" {
+		return model.Admission{}, fmt.Errorf("%w: only test templates accept a shard", ErrUnsupported)
 	}
 	if request.TimeoutSeconds == 0 {
 		request.TimeoutSeconds = p.DefaultTimeoutSeconds
@@ -184,8 +191,28 @@ func (r *Registry) resolveTemplate(request model.Request) (model.Admission, erro
 	if !slices.Contains(t.Owners, owner) {
 		return model.Admission{}, fmt.Errorf("%w: repository owner is not approved for template", ErrUnsupported)
 	}
-	if request.Kind != t.Kind || request.Xcode != t.Xcode || request.Simulator != nil {
+	if request.Kind != t.Kind || request.Xcode != t.Xcode {
 		return model.Admission{}, fmt.Errorf("%w: repository, kind or toolchain pins", ErrUnsupported)
+	}
+	if t.Kind == model.Build {
+		if request.Simulator != nil {
+			return model.Admission{}, fmt.Errorf("%w: repository, kind or toolchain pins", ErrUnsupported)
+		}
+		if request.Shard != "" {
+			return model.Admission{}, fmt.Errorf("%w: only test templates accept a shard", ErrUnsupported)
+		}
+	} else {
+		if request.Shard == "" {
+			return model.Admission{}, fmt.Errorf("%w: test templates require a shard", ErrInvalid)
+		}
+		// The device is fixed at admission: an omitted simulator is the
+		// template's first pin, any other must be one of its pins.
+		if request.Simulator == nil {
+			request.Simulator = &t.Simulators[0]
+		} else if !slices.Contains(t.Simulators, *request.Simulator) {
+			return model.Admission{}, fmt.Errorf("%w: simulator is not pinned by the template", ErrUnsupported)
+		}
+		request.Simulator = cloneSimulator(request.Simulator)
 	}
 	for _, explicit := range r.entries {
 		if explicit.profile.Repo == request.Repo && explicit.profile.Kind == request.Kind {
@@ -198,12 +225,15 @@ func (r *Registry) resolveTemplate(request model.Request) (model.Admission, erro
 	if request.TimeoutSeconds > t.MaxTimeoutSeconds {
 		return model.Admission{}, fmt.Errorf("%w: timeout exceeds profile maximum", ErrInvalid)
 	}
-	return model.Admission{Request: request, Profile: TemplateSnapshot(t, request.Repo), ProfileDigest: e.digest}, nil
+	snapshot := TemplateSnapshot(t, request.Repo)
+	snapshot.Simulator, snapshot.Shard = cloneSimulator(request.Simulator), request.Shard
+	return model.Admission{Request: request, Profile: snapshot, ProfileDigest: e.digest}, nil
 }
 
 // TemplateSnapshot is the admitted recipe snapshot of a template job for repo:
 // the template's identity, pins and budgets with no recipe commands, which the
-// worker derives from the repository's .macserve.json.
+// worker derives from the repository's .macserve.json. Admission of a test
+// template job adds the request's simulator and shard.
 func TemplateSnapshot(t model.Template, repo string) model.Profile {
 	snapshot := cloneTemplate(t)
 	return model.Profile{ID: t.ID, Version: t.Version, Repo: repo, Kind: t.Kind, Xcode: t.Xcode, DeveloperDir: t.DeveloperDir, DefaultTimeoutSeconds: t.DefaultTimeoutSeconds, MaxTimeoutSeconds: t.MaxTimeoutSeconds, MemoryLimitMiB: t.MemoryLimitMiB, Template: &snapshot}
@@ -243,8 +273,22 @@ func normalizeTemplate(t *model.Template) error {
 	if !idPattern.MatchString(t.ID) || t.Version <= 0 {
 		return fmt.Errorf("%w: ID or version", ErrInvalid)
 	}
-	if t.Kind != model.Build {
-		return fmt.Errorf("%w: templates support only build jobs", ErrUnsupported)
+	switch t.Kind {
+	case model.Build:
+		if len(t.Simulators) != 0 {
+			return fmt.Errorf("%w: build templates pin no simulator", ErrInvalid)
+		}
+	case model.UnitTest, model.SimulatorUITest:
+		if len(t.Simulators) == 0 || len(t.Simulators) > 4 {
+			return fmt.Errorf("%w: test templates pin one to four simulators", ErrInvalid)
+		}
+		for i, s := range t.Simulators {
+			if !validSimulator(s) || slices.Contains(t.Simulators[:i], s) {
+				return fmt.Errorf("%w: exact, unique simulator runtime, build and device type required", ErrInvalid)
+			}
+		}
+	default:
+		return fmt.Errorf("%w: templates support only build, unit_test and simulator_ui_test jobs", ErrUnsupported)
 	}
 	if len(t.Owners) == 0 {
 		return fmt.Errorf("%w: at least one owner is required", ErrInvalid)
@@ -264,8 +308,8 @@ func normalizeTemplate(t *model.Template) error {
 }
 
 func normalizeProfile(p *model.Profile) error {
-	if p.Template != nil {
-		return fmt.Errorf("%w: configured profiles cannot embed a template", ErrInvalid)
+	if p.Template != nil || p.Shard != "" {
+		return fmt.Errorf("%w: configured profiles cannot embed a template or shard", ErrInvalid)
 	}
 	if !idPattern.MatchString(p.ID) || p.Version <= 0 || !validRepo(p.Repo) {
 		return fmt.Errorf("%w: ID, version or repository", ErrInvalid)
@@ -280,11 +324,8 @@ func normalizeProfile(p *model.Profile) error {
 	if !absolutePath(p.DeveloperDir) || !relativePath(p.WorkDir, true, false) {
 		return fmt.Errorf("%w: developer directory or working directory", ErrInvalid)
 	}
-	if p.Simulator != nil {
-		s := p.Simulator
-		if !runtimePattern.MatchString(s.Runtime) || !buildPattern.MatchString(s.RuntimeBuild) || !devicePattern.MatchString(s.DeviceType) {
-			return fmt.Errorf("%w: exact simulator runtime, build and device type required", ErrInvalid)
-		}
+	if p.Simulator != nil && !validSimulator(*p.Simulator) {
+		return fmt.Errorf("%w: exact simulator runtime, build and device type required", ErrInvalid)
 	}
 	if p.Kind != model.Build && (p.Simulator == nil || len(p.RequiredTests) == 0) {
 		return fmt.Errorf("%w: test jobs require a simulator and required tests", ErrInvalid)
@@ -339,6 +380,10 @@ func normalizeBudgets(kind model.Kind, defaultTimeout, maxTimeout, memory *int) 
 
 func supportedKind(kind model.Kind) bool {
 	return kind == model.Build || kind == model.UnitTest || kind == model.SimulatorUITest
+}
+
+func validSimulator(s model.Simulator) bool {
+	return runtimePattern.MatchString(s.Runtime) && buildPattern.MatchString(s.RuntimeBuild) && devicePattern.MatchString(s.DeviceType)
 }
 
 func validRepo(repo string) bool {
@@ -452,5 +497,6 @@ func cloneProfile(p model.Profile) model.Profile {
 
 func cloneTemplate(t model.Template) model.Template {
 	t.Owners = append([]string(nil), t.Owners...)
+	t.Simulators = append([]model.Simulator(nil), t.Simulators...)
 	return t
 }
