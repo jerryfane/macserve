@@ -216,7 +216,13 @@ func (h *handler) capabilities(w http.ResponseWriter, r *http.Request, p store.P
 			}
 		}
 		if len(owners) > 0 {
-			templates = append(templates, map[string]any{"id": template.ID, "version": template.Version, "owners": owners, "kind": template.Kind, "xcode": template.Xcode, "repo_config": ".macserve.json", "default_timeout_seconds": template.DefaultTimeoutSeconds, "max_timeout_seconds": template.MaxTimeoutSeconds})
+			item := map[string]any{"id": template.ID, "version": template.Version, "owners": owners, "kind": template.Kind, "xcode": template.Xcode, "repo_config": ".macserve.json", "default_timeout_seconds": template.DefaultTimeoutSeconds, "max_timeout_seconds": template.MaxTimeoutSeconds}
+			// A test template's pinned simulators: a job may name one, or
+			// omit it for the first.
+			if len(template.Simulators) > 0 {
+				item["simulators"] = template.Simulators
+			}
+			templates = append(templates, item)
 		}
 	}
 	// Do not expose active job IDs, trusted command recipes or filesystem paths.

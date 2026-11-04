@@ -37,7 +37,7 @@ needs network credentials for your private network. No VM required.
 | --- | --- |
 | **Exact commits** | `build`, `unit_test` and `simulator_ui_test` jobs for a repository at an exact 40-character commit SHA. |
 | **Pinned toolchains** | The Xcode version and build, and the simulator runtime, are pinned per job. |
-| **Zero-config onboarding** | Org-level build templates: any repository of an approved GitHub owner builds by committing a small `.macserve.json`. |
+| **Zero-config onboarding** | Org-level templates: any repository of an approved GitHub owner builds, and runs sharded unit or UI tests on a pinned simulator, by committing a small `.macserve.json`. |
 | **No command injection** | Controller-owned, versioned profiles and templates fix the xcodebuild command line; clients cannot inject shell commands, environment variables or paths. |
 | **Rich results** | Status, paged and streamed (SSE) logs, an `xcresult` summary as JSON or JUnit, artifacts and range downloads. |
 | **Signed receipts** | Ed25519 signatures over RFC 8785 canonical JSON, verified against pinned keys. |
@@ -115,8 +115,11 @@ is the whole per-repository setup:
 {"version": 1, "work_dir": "ios", "project": "App.xcodeproj", "scheme": "App", "xcodegen": true, "resolve_packages": true}
 ```
 
-Use exactly one of `project` or `workspace`; `xcodegen` and `resolve_packages` are optional. Repository content
-cannot choose executables, flags, environment, destinations, configurations or signing. Full rules:
+Use exactly one of `project` or `workspace`; `xcodegen` and `resolve_packages` are optional. For test templates, add
+`ui_test` and/or `unit_test` sections of named shards (`{"shards": {"terminal": ["AppUITests/TerminalTests"]}}`,
+selectors `Target/Class` or `Target/Class/method`); a test job names one shard with `"shard"` and runs exactly its
+selectors, which its receipt requires to have executed. Repository content cannot choose executables, flags,
+environment, destinations, configurations or signing. Full rules:
 [Onboarding a repository](docs/install.md#onboarding-a-repository).
 
 **3. Submit a job.** On the Mac, from the repository root, after pushing the commit:
@@ -193,7 +196,6 @@ deployment and background GUI operation have not been qualified by the automated
 - **No network isolation in phase 1.** PF enforcement may be a separately reviewed future opt-in; it is not
   implemented or implied by phase-1 health.
 - No VM management, no device farm, no multi-host scheduling.
-- Templates support only `build` jobs; unit and UI test jobs use per-repository profiles.
 - GitHub merge-queue (`merge_group`) evidence is not implemented.
 
 ## Documentation

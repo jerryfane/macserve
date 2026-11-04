@@ -41,6 +41,52 @@ func jsonMember(t *testing.T, v any, key string) any {
 	return viaJSON[map[string]any](t, v, nil)[key]
 }
 
+// Capabilities list a test template's simulator pins, first (the default)
+// first; a build template lists none.
+func TestCapabilitiesListTestTemplateSimulators(t *testing.T) {
+	f := setup(t)
+	iPhone := model.Simulator{Runtime: "com.apple.CoreSimulator.SimRuntime.iOS-27-0", RuntimeBuild: "24A434", DeviceType: "com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro"}
+	iPad := model.Simulator{Runtime: iPhone.Runtime, RuntimeBuild: iPhone.RuntimeBuild, DeviceType: "com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M5-12GB"}
+	base := model.Template{Version: 1, Owners: []string{"themartianapp"}, Xcode: model.Xcode{Version: "27.0", Build: "27A100"}, DeveloperDir: "/Applications/Example.app/Contents/Developer"}
+	ui, build := base, base
+	ui.ID, ui.Kind, ui.Simulators = "org-ios-sim-uitest-v1", model.SimulatorUITest, []model.Simulator{iPhone, iPad}
+	build.ID, build.Kind = "org-build-v1", model.Build
+	registry, err := profiles.New(nil, []model.Template{ui, build})
+	if err != nil {
+		t.Fatal(err)
+	}
+	org := principal(strings.Repeat("1", 64), "org", "themartianapp/*", "jobs:read")
+	if err := f.db.ReplacePrincipals(context.Background(), []store.Principal{f.owner, org}); err != nil {
+		t.Fatal(err)
+	}
+	f.options.Profiles = registry
+	h, err := New(f.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := perform(h, "GET", "/v1/capabilities", strings.Repeat("1", 64), "", "")
+	var body struct {
+		Templates []struct {
+			ID         string             `json:"id"`
+			Kind       model.Kind         `json:"kind"`
+			Simulators *[]model.Simulator `json:"simulators"`
+		} `json:"templates"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); w.Code != 200 || err != nil {
+		t.Fatalf("capabilities: %d %s %v", w.Code, w.Body.String(), err)
+	}
+	listed := map[string]*[]model.Simulator{}
+	for _, item := range body.Templates {
+		listed[item.ID] = item.Simulators
+	}
+	if got := listed[ui.ID]; len(listed) != 2 || got == nil || len(*got) != 2 || (*got)[0] != iPhone || (*got)[1] != iPad {
+		t.Fatalf("test template simulators not listed: %s", w.Body.String())
+	}
+	if got, ok := listed[build.ID]; !ok || got != nil {
+		t.Fatalf("build template listed simulators: %s", w.Body.String())
+	}
+}
+
 func TestSubmitTestTemplateJobPinsSimulatorAndShard(t *testing.T) {
 	f := setup(t)
 	ctx := context.Background()

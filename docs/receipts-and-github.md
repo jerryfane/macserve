@@ -98,8 +98,10 @@ macserve wait --pins /absolute/trusted-pins.json \
 `PR_HEAD_SHA` must be the event's `pull_request.head.sha`, not `GITHUB_SHA`'s synthetic merge commit.
 The pins JSON contains `repository_id`, `app_id`, `profile_digest`, `required_tests`, `verification_keys`,
 and `request` with `repo`, `profile`, `kind`, `xcode` (version/build), and the exact `simulator` pins when needed.
-An optional pinned `request.sha` must match `--sha`. Use the admitted profile digest, not a hash of hand-edited
-JSON. Public keys are standard base64. Protect this policy independently of the submitted branch.
+An optional pinned `request.sha` must match `--sha`. For an org test-template job, `required_tests` is the job's
+`.macserve.json` shard selectors in file order (its admitted snapshot has none). Use the admitted profile digest,
+not a hash of hand-edited JSON. Public keys are standard base64. Protect this policy independently of the
+submitted branch.
 
 The waiter posts a machine comment, binds its immutable ID/body to the admitted job/attempt, filters paginated
 checks by exact head/name/App, rereads the selected check, verifies the pinned receipt and rereads the PR head.

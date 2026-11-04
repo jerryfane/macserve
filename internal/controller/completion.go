@@ -211,6 +211,13 @@ func (c *Controller) verifyResult(ctx context.Context, job model.Job, result wor
 	if result.LogsTruncated {
 		reject("log evidence truncated")
 	}
+	// A template job's executed recipe and required tests (a test template's
+	// shard selectors) are the derivation from its reported repository
+	// configuration; a profile job's are its snapshot.
+	profile, recipeErr := profiles.Effective(job.Profile, result.Observation.Recipe)
+	if recipeErr != nil {
+		profile = job.Profile
+	}
 	if job.Request.Kind != model.Build {
 		tests, hasTests := names["evidence/tests.json"]
 		archive, hasArchive := names["results.xcresult.tar.gz"]
@@ -225,7 +232,7 @@ func (c *Controller) verifyResult(ctx context.Context, job model.Job, result wor
 			}
 			raw, readErr := io.ReadAll(io.LimitReader(file, (32<<20)+1))
 			file.Close()
-			summary, parseErr := evidence.ParseTests(raw, job.Profile.RequiredTests)
+			summary, parseErr := evidence.ParseTests(raw, profile.RequiredTests)
 			summary.XCResultSHA256 = archive.SHA256
 			result.Summary = &summary
 			if readErr != nil || parseErr != nil || summary.ParseStatus != "parsed" || summary.Tests == 0 || summary.Failed != 0 {
@@ -237,7 +244,7 @@ func (c *Controller) verifyResult(ctx context.Context, job model.Job, result wor
 		if result.ExitCode == nil || *result.ExitCode != 0 || result.Signal != "" || !result.CleanupOK {
 			reject("exit status or cleanup did not prove success")
 		}
-		if err := verifyObservation(job, result.Observation); err != nil {
+		if err := errors.Join(verifyObservation(job, result.Observation), recipeErr); err != nil {
 			reject(err.Error())
 		}
 		for _, name := range []string{"evidence/stdout.log", "evidence/stderr.log"} {
@@ -245,7 +252,7 @@ func (c *Controller) verifyResult(ctx context.Context, job model.Job, result wor
 				reject("raw log evidence missing")
 			}
 		}
-		for _, rule := range job.Profile.Artifacts {
+		for _, rule := range profile.Artifacts {
 			if !rule.Required {
 				continue
 			}
@@ -296,6 +303,5 @@ func verifyObservation(job model.Job, o worker.Observation) error {
 			return errors.New("generated file digest mismatch")
 		}
 	}
-	_, err := profiles.Effective(job.Profile, o.Recipe)
-	return err
+	return nil
 }

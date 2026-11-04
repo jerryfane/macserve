@@ -107,8 +107,13 @@ func validLogs(logs []evidence.Artifact) bool {
 	}
 	return found["evidence/stdout.log"] && found["evidence/stderr.log"]
 }
+
+// requiredExecuted applies the parser's required-test rule (evidence.RequiredMatch,
+// including bundle-relative Target/Class[/method] selectors) to a recorded
+// case, and also accepts the case name; only passed or expected-failure
+// outcomes count.
 func requiredExecuted(c evidence.TestCase, name string) bool {
-	return !c.Container && (c.Outcome == "passed" || c.Outcome == "expected-failure") && (c.ID == name || c.Name == name || c.Suite == name || strings.HasPrefix(c.ID, name+"/") || strings.HasPrefix(c.Suite, name+"/"))
+	return !c.Container && (c.Outcome == "passed" || c.Outcome == "expected-failure") && (c.Name == name || evidence.RequiredMatch(c, name))
 }
 func testEvidence(kind model.Kind, required []string, s *evidence.Summary) TestEvidence {
 	t := TestEvidence{Status: "missing", Required: append([]string(nil), required...)}
@@ -142,14 +147,16 @@ func validateDetails(p Payload, require func(bool, string)) {
 	r := d.Result
 	snapshot := d.Profile
 	snapshotDigest, err := snapshot.SnapshotDigest()
-	require(err == nil && snapshotDigest == p.ProfileDigest && snapshot.ID == p.Request.Profile && snapshot.Version == p.ProfileVersion && snapshot.Repo == p.Request.Repo && snapshot.Kind == p.Request.Kind && snapshot.Xcode == p.Request.Xcode && sameSimulator(snapshot.Simulator, p.Request.Simulator) && sameStrings(snapshot.RequiredTests, p.Tests.Required) && snapshot.MemoryLimitMiB == p.Resources.MemoryLimitMiB, "recipe manifest")
-	// A template job's snapshot has no recipe; the executed recipe is the
-	// derivation from its reported repository configuration.
+	require(err == nil && snapshotDigest == p.ProfileDigest && snapshot.ID == p.Request.Profile && snapshot.Version == p.ProfileVersion && snapshot.Repo == p.Request.Repo && snapshot.Kind == p.Request.Kind && snapshot.Xcode == p.Request.Xcode && sameSimulator(snapshot.Simulator, p.Request.Simulator) && snapshot.MemoryLimitMiB == p.Resources.MemoryLimitMiB, "recipe manifest")
+	// A template job's snapshot has no recipe; the executed recipe, and a test
+	// template's required tests (its shard's selectors), are the derivation
+	// from its reported repository configuration.
 	profile, err := profiles.Effective(snapshot, r.Observation.Recipe)
 	if err != nil {
 		require(false, "template recipe manifest")
 		profile = snapshot
 	}
+	require(sameStrings(profile.RequiredTests, p.Tests.Required), "recipe manifest")
 	require(r.State == p.State && r.Source == p.Source && r.StartedAt.Equal(p.StartedAt) && r.FinishedAt.Equal(p.FinishedAt) && r.CleanupOK == p.Resources.CleanupOK && reflect.DeepEqual(r.ExitCode, p.ExitCode) && r.Signal == p.Signal && r.Reason == p.Reason && r.LogsTruncated == p.LogsTruncated && r.PeakMemoryMiB == p.Resources.PeakMemoryMiB && observed(r.Observation) == p.Observation, "execution manifest")
 	require(len(r.Commands) == p.CommandCount && len(r.Artifacts) == p.ArtifactCount, "manifest counts")
 	for _, item := range []struct {

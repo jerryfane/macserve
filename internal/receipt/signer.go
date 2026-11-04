@@ -17,6 +17,7 @@ import (
 
 	"github.com/jerryfane/macserve/internal/evidence"
 	"github.com/jerryfane/macserve/internal/model"
+	"github.com/jerryfane/macserve/internal/profiles"
 	"github.com/jerryfane/macserve/internal/worker"
 )
 
@@ -132,7 +133,14 @@ func (s *Signer) Seal(ctx context.Context, job model.Job, result worker.Result) 
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	p := Payload{Schema: 1, JobID: job.ID, AttemptID: approval.AttemptID, InputDigest: inputDigest, Service: s.options.Service, Repository: repository, Approval: approval, Request: job.Request, ProfileDigest: job.ProfileDigest, ProfileVersion: job.Profile.Version, Source: result.Source, Observation: observed(result.Observation), State: result.State, Reason: result.Reason, ExitCode: result.ExitCode, Signal: result.Signal, CreatedAt: job.CreatedAt, StartedAt: result.StartedAt, FinishedAt: result.FinishedAt, Deadline: job.Deadline, SealedAt: s.options.Now().UTC(), WorkerEpoch: job.WorkerEpoch, Resources: ResourcePolicy{TimeoutSeconds: job.Request.TimeoutSeconds, MemoryLimitMiB: job.Profile.MemoryLimitMiB, PeakMemoryMiB: result.PeakMemoryMiB, CleanupRequired: true, CleanupOK: result.CleanupOK}, Tests: testEvidence(job.Request.Kind, job.Profile.RequiredTests, result.Summary), Logs: []evidence.Artifact{}, LogsTruncated: result.LogsTruncated, CommandCount: len(result.Commands), ArtifactCount: len(result.Artifacts), Details: &Details{Profile: job.Profile, Result: result}}
+	// A template test job's required tests are its shard's selectors, from the
+	// recipe derived from its reported repository configuration; a recipe that
+	// does not derive leaves the snapshot's, and success validation refuses it.
+	required := job.Profile.RequiredTests
+	if effective, err := profiles.Effective(job.Profile, result.Observation.Recipe); err == nil {
+		required = effective.RequiredTests
+	}
+	p := Payload{Schema: 1, JobID: job.ID, AttemptID: approval.AttemptID, InputDigest: inputDigest, Service: s.options.Service, Repository: repository, Approval: approval, Request: job.Request, ProfileDigest: job.ProfileDigest, ProfileVersion: job.Profile.Version, Source: result.Source, Observation: observed(result.Observation), State: result.State, Reason: result.Reason, ExitCode: result.ExitCode, Signal: result.Signal, CreatedAt: job.CreatedAt, StartedAt: result.StartedAt, FinishedAt: result.FinishedAt, Deadline: job.Deadline, SealedAt: s.options.Now().UTC(), WorkerEpoch: job.WorkerEpoch, Resources: ResourcePolicy{TimeoutSeconds: job.Request.TimeoutSeconds, MemoryLimitMiB: job.Profile.MemoryLimitMiB, PeakMemoryMiB: result.PeakMemoryMiB, CleanupRequired: true, CleanupOK: result.CleanupOK}, Tests: testEvidence(job.Request.Kind, required, result.Summary), Logs: []evidence.Artifact{}, LogsTruncated: result.LogsTruncated, CommandCount: len(result.Commands), ArtifactCount: len(result.Artifacts), Details: &Details{Profile: job.Profile, Result: result}}
 	p.RequestDigest = job.RequestDigest
 	for _, a := range result.Artifacts {
 		if a.Name == "evidence/stdout.log" || a.Name == "evidence/stderr.log" {

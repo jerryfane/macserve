@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -193,7 +194,11 @@ func newIntegrations(ctx context.Context, config controller.Config, db *store.St
 				if err != nil {
 					return err
 				}
-				return receipt.ValidateSuccess(payload, receipt.Expected{RepositoryID: config.Receipt.Repositories[job.Request.Repo], Repo: job.Request.Repo, SHA: job.Request.SHA, Profile: job.Request.Profile, ProfileDigest: job.ProfileDigest, Kind: job.Request.Kind, Xcode: job.Request.Xcode, Simulator: job.Request.Simulator, RequiredTests: job.Profile.RequiredTests})
+				expected, err := receiptExpectation(config.Receipt.Repositories, job)
+				if err != nil {
+					return err
+				}
+				return receipt.ValidateSuccess(payload, expected)
 			},
 		})
 		if err != nil {
@@ -238,4 +243,20 @@ func publicKeys(encoded map[string]string) (map[string]ed25519.PublicKey, error)
 		keys[id] = ed25519.PublicKey(key)
 	}
 	return keys, nil
+}
+
+// receiptExpectation is the policy a completed job's receipt must match. A
+// template test job's admitted snapshot has no required tests: they are its
+// shard's selectors, derived from the repository recipe its completion
+// recorded, exactly as the signer sealed them.
+func receiptExpectation(repositories map[string]int64, job model.Job) (receipt.Expected, error) {
+	var completion controller.Completion
+	if err := json.Unmarshal(job.Result, &completion); err != nil {
+		return receipt.Expected{}, fmt.Errorf("job %s completion: %w", job.ID, err)
+	}
+	profile, err := profiles.Effective(job.Profile, completion.Result.Observation.Recipe)
+	if err != nil {
+		return receipt.Expected{}, err
+	}
+	return receipt.Expected{RepositoryID: repositories[job.Request.Repo], Repo: job.Request.Repo, SHA: job.Request.SHA, Profile: job.Request.Profile, ProfileDigest: job.ProfileDigest, Kind: job.Request.Kind, Xcode: job.Request.Xcode, Simulator: job.Request.Simulator, RequiredTests: profile.RequiredTests}, nil
 }

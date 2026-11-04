@@ -127,9 +127,12 @@ func (s *Store) Replay(ctx context.Context, principal, key string, request model
 	if request.TimeoutSeconds == 0 {
 		request.TimeoutSeconds = original.Profile.DefaultTimeoutSeconds
 	}
-	// A test template admits an omitted simulator as its first pin.
-	if request.Simulator == nil && original.Profile.Template != nil {
-		request.Simulator = original.Profile.Simulator
+	// A test template admits an omitted simulator as its first pin, not as
+	// whichever pin the original request chose, so an omitted-simulator
+	// resubmission of a job that chose another pin is a conflict.
+	if t := original.Profile.Template; request.Simulator == nil && t != nil && len(t.Simulators) != 0 {
+		first := t.Simulators[0]
+		request.Simulator = &first
 	}
 	_, digest, err := requestBytes(request)
 	if err != nil {

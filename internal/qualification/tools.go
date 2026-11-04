@@ -28,27 +28,7 @@ func inspectTools(ctx context.Context, c Challenge, developer string) (bool, str
 	run("/usr/bin/xcrun", "swift", "--version")
 	run("/usr/bin/sw_vers", "-productVersion")
 	run("/usr/bin/sw_vers", "-buildVersion")
-	sdks := []string{"macosx"}
-	var pins []model.Simulator
-	for _, p := range c.Profiles {
-		if p.DeveloperDir != developer || p.Simulator == nil {
-			continue
-		}
-		pins = append(pins, *p.Simulator)
-		sdk := "iphonesimulator"
-		if strings.Contains(p.Simulator.Runtime, "tvOS-") {
-			sdk = "appletvsimulator"
-		}
-		if strings.Contains(p.Simulator.Runtime, "watchOS-") {
-			sdk = "watchsimulator"
-		}
-		if strings.Contains(p.Simulator.Runtime, "xrOS-") {
-			sdk = "xrsimulator"
-		}
-		sdks = append(sdks, sdk)
-	}
-	slices.Sort(sdks)
-	sdks = slices.Compact(sdks)
+	pins, sdks := simulatorPins(c, developer)
 	for _, sdk := range sdks {
 		run("/usr/bin/xcrun", "--sdk", sdk, "--show-sdk-version")
 		run("/usr/bin/xcrun", "--sdk", sdk, "--show-sdk-build-version")
@@ -64,6 +44,40 @@ func inspectTools(ctx context.Context, c Challenge, developer string) (bool, str
 		return false, log.String() + "\nTool evidence exceeded bounded output; qualification refused."
 	}
 	return ok, log.String()
+}
+
+// simulatorPins returns the simulator pins of the recipes that use developer:
+// each explicit profile's, and every pin of each test template (a job may
+// select any of them at admission); and the SDKs to inspect for them, always
+// with macosx, sorted and unique.
+func simulatorPins(c Challenge, developer string) ([]model.Simulator, []string) {
+	var pins []model.Simulator
+	for _, p := range c.Profiles {
+		if p.DeveloperDir == developer && p.Simulator != nil {
+			pins = append(pins, *p.Simulator)
+		}
+	}
+	for _, t := range c.Templates {
+		if t.DeveloperDir == developer {
+			pins = append(pins, t.Simulators...)
+		}
+	}
+	sdks := []string{"macosx"}
+	for _, pin := range pins {
+		sdk := "iphonesimulator"
+		if strings.Contains(pin.Runtime, "tvOS-") {
+			sdk = "appletvsimulator"
+		}
+		if strings.Contains(pin.Runtime, "watchOS-") {
+			sdk = "watchsimulator"
+		}
+		if strings.Contains(pin.Runtime, "xrOS-") {
+			sdk = "xrsimulator"
+		}
+		sdks = append(sdks, sdk)
+	}
+	slices.Sort(sdks)
+	return pins, slices.Compact(sdks)
 }
 func runtimePins(raw []byte, pins []model.Simulator) bool {
 	var listing struct {
