@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -55,22 +57,24 @@ var StepSummaries = map[Step]string{
 	StepGitHub:          "add a build profile and run sudo macserve connect-github (temporary until O5/O7; detected)",
 	StepTools:           "accept the Xcode license, run first launch and install the Metal toolchain system-wide",
 	StepOwnerActions:    "you grant Full Disk Access and log in to the build account once (detected)",
-	StepRound1:          "qualification round 1, unattended",
+	StepRound1:          "qualification round 1: you confirm the build account's login items and process baseline, then unattended",
 	StepReboot:          "restart the Mac (FileVault asks for your password, not macserve)",
-	StepRound2:          "qualification round 2 on the new boot, unattended",
-	StepApproveAndStart: "you type approve; services start only after that",
+	StepRound2:          "log in to the build account again, then qualification round 2 on the new boot",
+	StepApproveAndStart: "you type approve; services start only after that, and owner.pause is removed once health is valid",
 	StepFirstBuild:      "first build of your repository and receipt check",
 }
 
 // Retryable reports a step that may begin again after it was interrupted
 // or returned an error while running: it only checks host state or runs
 // commands that converge (preflight, github detection, the Xcode system
-// steps, owner-action detection). Every other interrupted step stays
-// blocked; install in particular must never be rerun (deploy-install
-// "do not rerun").
+// steps, owner-action detection), or it is a qualification round: every
+// attempt resets the GUI baseline and begins a new qualification session,
+// sessions are append-only evidence and nothing is approved by a round.
+// Every other interrupted step stays blocked; install in particular must
+// never be rerun (deploy-install "do not rerun").
 func Retryable(s Step) bool {
 	switch s {
-	case StepPreflight, StepGitHub, StepTools, StepOwnerActions:
+	case StepPreflight, StepGitHub, StepTools, StepOwnerActions, StepRound1, StepRound2:
 		return true
 	}
 	return false
@@ -100,6 +104,12 @@ func (b Boot) valid() bool {
 // differs reports a new boot: both identifiers changed.
 func (b Boot) differs(o Boot) bool { return b.Time != o.Time && b.SessionUUID != o.SessionUUID }
 
+// same reports the same boot: kern.bootsessionuuid is unchanged.
+// kern.boottime is derived from the wall clock and moves with a clock
+// step, so it is not compared (qualification's reboot check needs both to
+// change for a new boot, see differs).
+func (b Boot) same(o Boot) bool { return b.SessionUUID == o.SessionUUID }
+
 // text accepts 1..max bytes of printable ASCII.
 func text(s string, max int) bool {
 	if s == "" || len(s) > max {
@@ -128,12 +138,23 @@ type Record struct {
 }
 
 // Approval is the owner's typed approval: the digest of the summary they
-// saw and the boot it was given in.
+// saw, the boot it was given in and the owner.pause and profiles.json
+// state the summary showed (Bindings, compared before and during the
+// start, in every later run). Approved holds the digests of the files
+// qualify approve wrote, recorded once it returned; the start trusts only
+// those files, never their mere presence.
 type Approval struct {
-	At            time.Time `json:"at"`
-	SummarySHA256 string    `json:"summary_sha256"`
-	Boot          Boot      `json:"boot"`
+	At            time.Time         `json:"at"`
+	SummarySHA256 string            `json:"summary_sha256"`
+	Boot          Boot              `json:"boot"`
+	Bindings      string            `json:"bindings"`
+	Approved      map[string]string `json:"approved,omitempty"`
 }
+
+// ApprovedFiles are the files qualify approve writes that the approval
+// records: the round 2 session's approved evidence and the installed
+// qualification and activation anchor.
+var ApprovedFiles = []string{"approved-boundary-evidence.json", "qualification.json", "activation-anchor.json"}
 
 // Ledger is the ordered native setup state. A failed step blocks every
 // later mutation; services may start only after round 2 on a new boot and
@@ -252,11 +273,11 @@ func (l *Ledger) Complete(s Step, boot Boot, inputs map[string]string, now time.
 	if s == StepReboot && !boot.differs(*r.Boot) {
 		return errors.New("reboot step completes only after the host restarted")
 	}
-	if s != StepReboot && boot != *r.Boot {
+	if s != StepReboot && !boot.same(*r.Boot) {
 		return fmt.Errorf("setup step %s began in another boot; it cannot complete", s)
 	}
-	if s == StepApproveAndStart && (l.Approval == nil || l.Approval.Boot != boot) {
-		return errors.New("approve-and-start completes only after approval in this boot")
+	if s == StepApproveAndStart && (l.Approval == nil || !l.Approval.Boot.same(boot) || l.Approval.Approved == nil) {
+		return errors.New("approve-and-start completes only after approval and qualify approve in this boot")
 	}
 	t := now.UTC()
 	b := boot
@@ -287,24 +308,53 @@ func (l *Ledger) Fail(s Step, reason string, now time.Time) error {
 	return nil
 }
 
-// Approve records the owner's typed approval of the summary digest. It is
-// accepted only while approve-and-start runs, after round 2 is done, in
-// the boot approve-and-start began in.
-func (l *Ledger) Approve(summarySHA256 string, boot Boot, now time.Time) error {
+// Approve records the owner's typed approval of the summary digest and the
+// bindings it showed. It is accepted only while approve-and-start runs,
+// after round 2 is done, in the boot approve-and-start began in. A new
+// approval replaces an earlier one only until qualify approve has run.
+func (l *Ledger) Approve(summarySHA256, bindings string, boot Boot, now time.Time) error {
 	if _, failed := l.Failed(); failed {
 		return errors.New("a failed setup step blocks approval")
 	}
-	if !sha256Hex.MatchString(summarySHA256) || !boot.valid() {
-		return errors.New("approval needs the summary sha256 and boot identity")
+	if !sha256Hex.MatchString(summarySHA256) || !text(bindings, 1024) || !boot.valid() {
+		return errors.New("approval needs the summary sha256, its bindings and boot identity")
 	}
 	step := l.record(StepApproveAndStart)
 	if l.record(StepRound2).Status != StatusDone || step.Status != StatusRunning {
 		return errors.New("approval is accepted only after round 2, during approve-and-start")
 	}
-	if boot != *step.Boot {
+	if !boot.same(*step.Boot) {
 		return errors.New("approval must be given in the boot approve-and-start began in")
 	}
-	l.Approval = &Approval{At: now.UTC(), SummarySHA256: summarySHA256, Boot: boot}
+	if l.Approval != nil && l.Approval.Approved != nil {
+		return errors.New("qualify approve already ran for the recorded approval; it cannot be replaced")
+	}
+	l.Approval = &Approval{At: now.UTC(), SummarySHA256: summarySHA256, Boot: boot, Bindings: bindings}
+	return nil
+}
+
+// RecordApproved records the digests of ApprovedFiles once qualify
+// approve returned for the recorded approval. It is recorded once.
+func (l *Ledger) RecordApproved(files map[string]string) error {
+	if l.Approval == nil || l.Approval.Approved != nil || l.record(StepApproveAndStart).Status != StatusRunning {
+		return errors.New("qualify approve is recorded once, for the approval of a running approve-and-start")
+	}
+	if err := validApproved(files); err != nil {
+		return err
+	}
+	l.Approval.Approved = maps.Clone(files)
+	return nil
+}
+
+func validApproved(files map[string]string) error {
+	if len(files) != len(ApprovedFiles) {
+		return errors.New("approved files: want " + strings.Join(ApprovedFiles, ", "))
+	}
+	for _, name := range ApprovedFiles {
+		if !sha256Hex.MatchString(files[name]) {
+			return fmt.Errorf("approved files: invalid digest of %s", name)
+		}
+	}
 	return nil
 }
 
@@ -320,7 +370,7 @@ func (l *Ledger) AuthorizeStart(boot Boot) error {
 	if l.Approval == nil {
 		return errors.New("services start only after you type approve")
 	}
-	if l.Approval.Boot != boot {
+	if !l.Approval.Boot.same(boot) {
 		return errors.New("approval was given in another boot; approve again")
 	}
 	return nil
@@ -395,7 +445,7 @@ func (l *Ledger) validate() error {
 			if !started || r.Finished == nil || r.FinishBoot == nil || !r.FinishBoot.valid() || r.Error != "" {
 				return fmt.Errorf("setup ledger: step %s done out of order or incomplete", r.Step)
 			}
-			if (r.Step == StepReboot) != r.Boot.differs(*r.FinishBoot) || (r.Step != StepReboot && *r.Boot != *r.FinishBoot) {
+			if (r.Step == StepReboot) != r.Boot.differs(*r.FinishBoot) || (r.Step != StepReboot && !r.Boot.same(*r.FinishBoot)) {
 				return fmt.Errorf("setup ledger: step %s has inconsistent boots", r.Step)
 			}
 		case StatusRunning, StatusFailed:
@@ -423,8 +473,15 @@ func (l *Ledger) validate() error {
 	}
 	step := l.record(StepApproveAndStart)
 	if l.Approval != nil {
-		if step.Status == StatusPending || !sha256Hex.MatchString(l.Approval.SummarySHA256) || l.Approval.At.IsZero() || l.Approval.Boot != *step.Boot {
+		if step.Status == StatusPending || !sha256Hex.MatchString(l.Approval.SummarySHA256) || !text(l.Approval.Bindings, 1024) || l.Approval.At.IsZero() || !l.Approval.Boot.valid() || !l.Approval.Boot.same(*step.Boot) {
 			return errors.New("setup ledger: approval recorded outside approve-and-start")
+		}
+		if l.Approval.Approved != nil {
+			if err := validApproved(l.Approval.Approved); err != nil {
+				return fmt.Errorf("setup ledger: %w", err)
+			}
+		} else if step.Status == StatusDone {
+			return errors.New("setup ledger: approve-and-start done without qualify approve")
 		}
 	} else if step.Status == StatusDone {
 		return errors.New("setup ledger: approve-and-start done without approval")

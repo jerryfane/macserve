@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,6 +22,8 @@ import (
 var (
 	wizardBoot = setup.Boot{Time: "t1", SessionUUID: "11111111-1111-1111-1111-111111111111"}
 	wizardNow  = time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	// rebootedBoot is the boot after the setup restart.
+	rebootedBoot = setup.Boot{Time: "t2", SessionUUID: "22222222-2222-2222-2222-222222222222"}
 )
 
 // fakeHelper is the root helper as the wizard sees it: a real ledger,
@@ -34,6 +38,52 @@ type fakeHelper struct {
 	failInstall                       bool
 	closed                            bool
 	env                               string
+	// boot is the Mac's boot; restarted reports a boot after the reboot
+	// step began. session is the round's begun session.
+	boot      setup.Boot
+	restarted bool
+	session   string
+	approved  string
+	released  bool
+}
+
+// fakeToken is deploy-install's one-time API token in the fake.
+var fakeToken = strings.Repeat("5e", 32)
+
+var fakeReview = setup.RoundReview{Persistence: []string{}, Accept: true, Processes: 3, Executables: []string{"cfprefsd (2)", "loginwindow"}, Digest: strings.Repeat("d", 64)}
+
+const fakeSummary = "Summary: what you approve\n  Owner: jdoe (uid 501).\n"
+
+// currentBoot is the boot the Mac runs: the new one once the reboot step
+// is recorded.
+func (f *fakeHelper) currentBoot() setup.Boot {
+	for _, r := range f.ledger.Records {
+		if r.Step == setup.StepReboot && r.Status == setup.StatusDone {
+			return rebootedBoot
+		}
+	}
+	return wizardBoot
+}
+
+func (f *fakeHelper) begin(s setup.Step) {
+	f.t.Helper()
+	if f.ledger.Records[slices.IndexFunc(f.ledger.Records, func(r setup.Record) bool { return r.Step == s })].Status == setup.StatusRunning {
+		return
+	}
+	if err := f.ledger.Begin(s, f.currentBoot(), wizardNow); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+func (f *fakeHelper) complete(s setup.Step) {
+	f.t.Helper()
+	boot := f.currentBoot()
+	if s == setup.StepReboot {
+		boot = rebootedBoot
+	}
+	if err := f.ledger.Complete(s, boot, nil, wizardNow); err != nil {
+		f.t.Fatal(err)
+	}
 }
 
 func (f *fakeHelper) Close() error { f.closed = true; return nil }
@@ -84,6 +134,7 @@ func (f *fakeHelper) handle(r setup.Request) (setup.Response, error) {
 			}
 		}
 		f.step(setup.StepInstall)
+		return setup.Response{Done: true, Token: fakeToken}, nil
 	case setup.VerbGitHub:
 		if f.githubAfter > 0 {
 			f.githubAfter--
@@ -104,6 +155,68 @@ func (f *fakeHelper) handle(r setup.Request) (setup.Response, error) {
 		}
 	case setup.VerbOwnerActions:
 		f.step(setup.StepOwnerActions)
+	case setup.VerbRoundPrepare:
+		next, _, _ := f.ledger.Next()
+		f.begin(next.Step)
+		if f.session != "" {
+			return setup.Response{Session: f.session}, nil
+		}
+		review := fakeReview
+		return setup.Response{Review: &review}, nil
+	case setup.VerbRoundBegin:
+		if r.SHA256 != fakeReview.Digest {
+			return setup.Response{}, errors.New("not the review you confirmed")
+		}
+		next, _, _ := f.ledger.Next()
+		f.session = "setup-" + string(next.Step) + "-0123456789abcdef"
+		return setup.Response{Session: f.session}, nil
+	case setup.VerbRoundJobProbe:
+		if f.session == "" {
+			return setup.Response{}, errors.New("no session")
+		}
+	case setup.VerbRoundCollect:
+		next, _, _ := f.ledger.Next()
+		f.complete(next.Step)
+		f.session = ""
+		categories := map[string]string{"boundary": "pass", "reboot": "pass", "network": "not enforced in phase 1"}
+		if next.Step == setup.StepRound1 {
+			categories["reboot"] = "pending"
+		}
+		return setup.Response{Done: true, Categories: categories}, nil
+	case setup.VerbReboot:
+		f.begin(setup.StepReboot)
+		if !f.restarted {
+			return setup.Response{Detail: setup.AfterBoot, Items: []string{setup.RestartAuth}}, nil
+		}
+		f.complete(setup.StepReboot)
+	case setup.VerbSummary:
+		f.begin(setup.StepApproveAndStart)
+		return setup.Response{Detail: fakeSummary}, nil
+	case setup.VerbApprove:
+		sum := sha256.Sum256([]byte(fakeSummary))
+		if r.SHA256 != hex.EncodeToString(sum[:]) {
+			return setup.Response{}, errors.New("the summary changed since you read it")
+		}
+		if err := f.ledger.Approve(r.SHA256, "owner.pause "+strings.Repeat("b", 64)+", profiles.json "+strings.Repeat("c", 64), f.currentBoot(), wizardNow); err != nil {
+			return setup.Response{}, err
+		}
+		approved := map[string]string{}
+		for _, name := range setup.ApprovedFiles {
+			approved[name] = strings.Repeat("e", 64)
+		}
+		if err := f.ledger.RecordApproved(approved); err != nil {
+			return setup.Response{}, err
+		}
+		f.approved = r.SHA256
+		f.complete(setup.StepApproveAndStart)
+		return setup.Response{Done: true, Items: []string{"org.macserve.worker", "org.macserve.maintenance", "org.macserve.controller"}}, nil
+	case setup.VerbReleasePause:
+		// The real helper serves it once, right after its own start.
+		if f.approved == "" || f.released {
+			return setup.Response{}, errors.New("setup removes owner.pause only right after it started the services")
+		}
+		f.released = true
+		return setup.Response{Done: true, Detail: "owner.pause removed"}, nil
 	default:
 		return setup.Response{}, errors.New("unknown verb")
 	}
@@ -119,6 +232,18 @@ type wizardRun struct {
 	started [][2]string
 	ran     int
 	sha     string
+	// tokens went to the keychain; restarts are the restart kinds; owner
+	// lists the owner-side runs (control, probe) by session.
+	tokens   []string
+	restarts []string
+	mu       sync.Mutex
+	owner    []string
+}
+
+func (r *wizardRun) ownerRun(what string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.owner = append(r.owner, what)
 }
 
 func newWizardRun(t *testing.T, input string) *wizardRun {
@@ -139,6 +264,19 @@ func newWizardRun(t *testing.T, input string) *wizardRun {
 		},
 		open:  func(args ...string) error { r.opens = append(r.opens, args); return nil },
 		sleep: func(time.Duration) {}, loginPoll: time.Millisecond, loginWait: time.Hour,
+		home:     t.TempDir(),
+		keychain: func(token string) error { r.tokens = append(r.tokens, token); return nil },
+		homeControl: func(ctx context.Context, sessionDir, out string) error {
+			r.ownerRun("control " + filepath.Base(sessionDir))
+			<-ctx.Done()
+			return nil
+		},
+		ownerReport: func(_ context.Context, sessionDir, out string) error {
+			r.ownerRun("probe " + filepath.Base(sessionDir))
+			return nil
+		},
+		restart:    func(kind string) error { r.restarts = append(r.restarts, kind); return nil },
+		healthWait: time.Hour,
 	}
 	return r
 }
@@ -175,11 +313,13 @@ func TestSetupApplyDeclineChangesNothing(t *testing.T) {
 	}
 }
 
-// TestSetupApplyRunsToRound1: preflight, one helper start, install,
-// github with the exact commands, tools, guided owner actions; it stops
-// before round 1 and never asks the helper for anything else.
+// TestSetupApplyRunsToRound1: preflight, one helper start, install (the
+// token goes to the keychain, never to the terminal), github with the
+// exact commands, tools, guided owner actions, then round 1 with the
+// owner's review and both owner-side runs; it stops at the restart when
+// the owner declines it, and a second run resumes there.
 func TestSetupApplyRunsToRound1(t *testing.T) {
-	r := newWizardRun(t, "yes\n\n\n")
+	r := newWizardRun(t, "yes\n\n\ny\nn\n")
 	r.helper.githubAfter, r.helper.fdaAfter, r.helper.loginAfter = 1, 1, 3
 	got := r.run(repoChoices())
 	out := r.out.String()
@@ -195,35 +335,147 @@ func TestSetupApplyRunsToRound1(t *testing.T) {
 		`"id": "myapp-build-v1"`,
 		`"version": "26.1"`,
 		"sudo " + r.w.root + "/bin/macserve connect-github --profile myapp-build-v1 --repository jdoe/myapp\n",
-		"API_BEARER_TOKEN once",
-		"does not read, log or store it",
+		`Your API token is saved in your login keychain as "macserve API token".`,
 		"Full Disk Access: granted in launchd context.",
 		"Switch User",
-		"round 1, which this release of macserve setup does not run",
+		"Qualification round 1.",
+		"Build account has 0 third-party login items or agents ✓",
+		"Build-session processes: 3",
+		"cfprefsd (2), loginwindow",
+		"Round 1: 1/3 categories passed.",
+		"FileVault is on: fdesetup asks for your password now",
+		setup.AfterBoot,
+		"Restart when you are ready",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q", want)
 		}
 	}
+	if strings.Contains(out, fakeToken) || strings.Contains(r.stderr.String(), fakeToken) {
+		t.Error("the API token reached the terminal")
+	}
+	if !slices.Equal(r.tokens, []string{fakeToken}) {
+		t.Errorf("keychain got %q", r.tokens)
+	}
 	wantOpens := [][]string{{"x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"}, {"-R", r.w.root + "/bin/macserve"}}
 	if !slices.EqualFunc(r.opens, wantOpens, slices.Equal) {
 		t.Errorf("opened %q", r.opens)
 	}
-	for _, v := range r.helper.requests {
-		if v == "" {
-			t.Errorf("empty verb")
-		}
+	session := "setup-round-1-0123456789abcdef"
+	if slices.Sort(r.owner); !slices.Equal(r.owner, []string{"control " + session, "probe " + session}) {
+		t.Errorf("owner side %q", r.owner)
+	}
+	canary, err := os.ReadFile(setup.OwnerCanary(r.w.home))
+	if err != nil || string(canary) != setup.OwnerCanaryContent {
+		t.Errorf("owner canary %q %v", canary, err)
+	}
+	if info, err := os.Stat(setup.OwnerCanary(r.w.home)); err != nil || info.Mode().Perm() != 0o644 {
+		t.Errorf("owner canary mode %v", info)
+	}
+	roundVerbs := []setup.Verb{setup.VerbJobLogin, setup.VerbRoundPrepare, setup.VerbRoundBegin, setup.VerbRoundJobProbe, setup.VerbRoundCollect}
+	if i := slices.Index(r.helper.requests, setup.VerbRoundPrepare) - 1; i < 0 || !slices.Equal(r.helper.requests[i:i+len(roundVerbs)], roundVerbs) {
+		t.Errorf("round requests %v", r.helper.requests)
 	}
 	if l := r.helper.ledger; l == nil {
 		t.Fatal("no ledger")
-	} else if next, _, _ := l.Next(); next.Step != setup.StepRound1 {
+	} else if next, _, _ := l.Next(); next.Step != setup.StepReboot {
 		t.Errorf("stopped at %s", next.Step)
 	}
-	// Running again resumes from the ledger: no preflight, no prompt.
+	if len(r.restarts) != 0 {
+		t.Errorf("restarted %v without a y", r.restarts)
+	}
+	// Running again resumes from the ledger: no preflight, no install, the
+	// restart guidance again.
 	r.helper.requests = nil
+	r.out.Reset()
 	r.w.in = bufio.NewReader(strings.NewReader(""))
-	if got := r.run(plan.DefaultChoices()); got != 0 || !slices.Equal(r.helper.requests, []setup.Verb{setup.VerbStatus}) {
-		t.Errorf("resume: exit %d requests %v", got, r.helper.requests)
+	if got := r.run(plan.DefaultChoices()); got != 0 || !slices.Equal(r.helper.requests, []setup.Verb{setup.VerbStatus, setup.VerbReboot}) || !strings.Contains(r.out.String(), setup.AfterBoot) {
+		t.Errorf("resume: exit %d requests %v\n%s", got, r.helper.requests, r.out.String())
+	}
+}
+
+// TestSetupApplyQualifiesAndStarts: the restart on a typed y, then after
+// it round 2, the summary, the typed approval of exactly that summary,
+// and owner.pause released once health is valid.
+func TestSetupApplyQualifiesAndStarts(t *testing.T) {
+	r := newWizardRun(t, "yes\ny\ny\n")
+	got := r.run(repoChoices())
+	if got != 0 || !slices.Equal(r.restarts, []string{setup.RestartAuth}) || !strings.Contains(r.out.String(), "Restarting.") {
+		t.Fatalf("exit %d restarts %v stderr %s\n%s", got, r.restarts, r.stderr.String(), r.out.String())
+	}
+	// After the restart.
+	r.helper.restarted, r.helper.requests, r.owner = true, nil, nil
+	r.out.Reset()
+	r.w.in = bufio.NewReader(strings.NewReader("y\nnot yet\n"))
+	if got := r.run(plan.DefaultChoices()); got != 0 || !strings.Contains(r.out.String(), "Stopped. Run macserve setup again") {
+		t.Fatalf("declined approval: exit %d\n%s", got, r.out.String())
+	}
+	out := r.out.String()
+	for _, want := range []string{"The Mac restarted; continuing.", "Qualification round 2.", "Round 2: 2/3 categories passed.", fakeSummary, `Type "approve"`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q", want)
+		}
+	}
+	if strings.Contains(out, `"reboot" passes in round 2`) {
+		t.Error("round 2 promises the reboot category again")
+	}
+	if r.helper.approved != "" || slices.Contains(r.helper.requests, setup.VerbApprove) {
+		t.Fatal("approved without the typed word")
+	}
+	session := "setup-round-2-0123456789abcdef"
+	if slices.Sort(r.owner); !slices.Equal(r.owner, []string{"control " + session, "probe " + session}) {
+		t.Errorf("owner side %q", r.owner)
+	}
+	r.helper.requests = nil
+	r.out.Reset()
+	r.w.in = bufio.NewReader(strings.NewReader("approve\n"))
+	if got := r.run(plan.DefaultChoices()); got != 0 {
+		t.Fatalf("approve: exit %d stderr %s\n%s", got, r.stderr.String(), r.out.String())
+	}
+	sum := sha256.Sum256([]byte(fakeSummary))
+	if r.helper.approved != hex.EncodeToString(sum[:]) {
+		t.Errorf("approved %q", r.helper.approved)
+	}
+	want := []setup.Verb{setup.VerbStatus, setup.VerbSummary, setup.VerbApprove, setup.VerbReleasePause, setup.VerbStatus}
+	if !slices.Equal(r.helper.requests, want) {
+		t.Errorf("requests %v, want %v", r.helper.requests, want)
+	}
+	for _, line := range []string{"services started: org.macserve.worker, org.macserve.maintenance, org.macserve.controller", "owner.pause removed; macserve accepts builds"} {
+		if !strings.Contains(r.out.String(), line) {
+			t.Errorf("output lacks %q:\n%s", line, r.out.String())
+		}
+	}
+	if len(r.tokens) != 1 {
+		t.Errorf("keychain writes %d", len(r.tokens))
+	}
+	// A later run never asks to remove owner.pause (a pause the owner
+	// sets again is theirs).
+	r.helper.requests = nil
+	r.out.Reset()
+	if got := r.run(plan.DefaultChoices()); got != 0 || !slices.Equal(r.helper.requests, []setup.Verb{setup.VerbStatus}) || !strings.Contains(r.out.String(), "never later") {
+		t.Errorf("later run: exit %d requests %v\n%s", got, r.helper.requests, r.out.String())
+	}
+}
+
+// TestSetupApplyTokenNotStored: a keychain that refuses the token leaves
+// it shown only on the owner's typed request, and discarded otherwise.
+func TestSetupApplyTokenNotStored(t *testing.T) {
+	for _, tc := range []struct {
+		answer string
+		shown  bool
+	}{{"show", true}, {"no", false}} {
+		r := newWizardRun(t, "yes\n"+tc.answer+"\n")
+		r.w.keychain = func(string) error { return errors.New("keychain locked") }
+		got := r.run(repoChoices())
+		if strings.Contains(r.out.String(), fakeToken) != tc.shown {
+			t.Errorf("%s: token shown %v\n%s", tc.answer, !tc.shown, r.out.String())
+		}
+		if !tc.shown && (got != 1 || !strings.Contains(r.stderr.String(), "API token was discarded")) {
+			t.Errorf("%s: exit %d stderr %s", tc.answer, got, r.stderr.String())
+		}
+		if strings.Contains(r.stderr.String(), fakeToken) {
+			t.Errorf("%s: token on stderr", tc.answer)
+		}
 	}
 }
 

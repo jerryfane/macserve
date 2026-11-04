@@ -36,29 +36,68 @@ const (
 	VerbJobLogin Verb = "job-login-check"
 	// VerbOwnerActions re-checks both owner actions and records the step.
 	VerbOwnerActions Verb = "owner-actions"
+	// VerbRoundPrepare begins the next qualification round: the job
+	// account's login items and agents and the baseline proposal, for the
+	// owner to confirm (or the round's already begun session).
+	VerbRoundPrepare Verb = "round-prepare"
+	// VerbRoundBegin applies the confirmed review (SHA256 is its digest):
+	// accepts the reviewed persistence, resets the GUI baseline to the
+	// proposal, pins the tool-evidence source and runs qualify begin.
+	VerbRoundBegin Verb = "round-begin"
+	// VerbRoundJobProbe runs the root background job probe.
+	VerbRoundJobProbe Verb = "round-job-probe"
+	// VerbRoundCollect runs tool evidence and qualify collect and records
+	// the round when its categories pass.
+	VerbRoundCollect Verb = "round-collect"
+	// VerbReboot begins the reboot step, or records it once the Mac has
+	// restarted.
+	VerbReboot Verb = "reboot"
+	// VerbSummary begins approve-and-start and returns the summary the
+	// owner approves.
+	VerbSummary Verb = "summary"
+	// VerbApprove records the typed approval of the summary (SHA256 is its
+	// digest), runs qualify approve and activation-check and starts the
+	// services.
+	VerbApprove Verb = "approve"
+	// VerbReleasePause removes owner.pause once health is valid.
+	VerbReleasePause Verb = "release-pause"
 )
 
 // Verbs is the helper's grammar.
-var Verbs = []Verb{VerbStatus, VerbPreflight, VerbInstall, VerbGitHub, VerbTools, VerbFDACheck, VerbJobLogin, VerbOwnerActions}
+var Verbs = []Verb{
+	VerbStatus, VerbPreflight, VerbInstall, VerbGitHub, VerbTools, VerbFDACheck, VerbJobLogin, VerbOwnerActions,
+	VerbRoundPrepare, VerbRoundBegin, VerbRoundJobProbe, VerbRoundCollect, VerbReboot, VerbSummary, VerbApprove, VerbReleasePause,
+}
 
 // MaxRequest bounds one request line (deploy.env is at most 64 KiB).
 const MaxRequest = 128 << 10
 
 // Request is one line from the wizard. Env is the generated deploy.env and
-// is accepted only with VerbPreflight.
+// is accepted only with VerbPreflight; SHA256 is the digest of what the
+// owner confirmed and is accepted only with VerbRoundBegin and VerbApprove.
 type Request struct {
-	Verb Verb   `json:"verb"`
-	Env  string `json:"env,omitempty"`
+	Verb   Verb   `json:"verb"`
+	Env    string `json:"env,omitempty"`
+	SHA256 string `json:"sha256,omitempty"`
 }
 
 // Response is one line from the helper. Ledger is the canonical ledger
 // encoding after the verb; Done reports that the verb's detection or step
-// succeeded; Detail explains what is missing.
+// succeeded; Detail explains what is missing. Token is the one-time API
+// token, only in the install response; it goes to the owner's keychain
+// and is never logged or stored by setup. Session is the qualification
+// session the round runs; Review is the round's review; Categories are a
+// collected round's category statuses; Items lists what blocks a step.
 type Response struct {
-	Error  string `json:"error,omitempty"`
-	Ledger []byte `json:"ledger,omitempty"`
-	Done   bool   `json:"done,omitempty"`
-	Detail string `json:"detail,omitempty"`
+	Error      string            `json:"error,omitempty"`
+	Ledger     []byte            `json:"ledger,omitempty"`
+	Done       bool              `json:"done,omitempty"`
+	Detail     string            `json:"detail,omitempty"`
+	Token      string            `json:"token,omitempty"`
+	Session    string            `json:"session,omitempty"`
+	Review     *RoundReview      `json:"review,omitempty"`
+	Categories map[string]string `json:"categories,omitempty"`
+	Items      []string          `json:"items,omitempty"`
 }
 
 func validVerb(v Verb) bool {
@@ -71,8 +110,9 @@ func validVerb(v Verb) bool {
 }
 
 // DecodeRequest parses one request line strictly: known fields only, one
-// value in canonical encoding, a verb of the grammar, and Env only with
-// preflight.
+// value in canonical encoding, a verb of the grammar, Env only with
+// preflight and SHA256 (64 lowercase hex) only with round-begin and
+// approve.
 func DecodeRequest(line []byte) (Request, error) {
 	var r Request
 	if len(line) == 0 || len(line) > MaxRequest {
@@ -91,6 +131,9 @@ func DecodeRequest(line []byte) (Request, error) {
 	}
 	if (r.Env != "") != (r.Verb == VerbPreflight) {
 		return r, fmt.Errorf("verb %s: env is accepted with preflight only, and required there", r.Verb)
+	}
+	if digestVerb := r.Verb == VerbRoundBegin || r.Verb == VerbApprove; digestVerb != (r.SHA256 != "") || (digestVerb && !sha256Hex.MatchString(r.SHA256)) {
+		return r, fmt.Errorf("verb %s: sha256 is accepted with round-begin and approve only, and required there as 64 lowercase hex", r.Verb)
 	}
 	// Only the wizard's own encoding: no case-variant or duplicate keys.
 	if canonical, err := json.Marshal(r); err != nil || !bytes.Equal(canonical, line) {
