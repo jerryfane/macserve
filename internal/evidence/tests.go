@@ -230,6 +230,10 @@ func failures(n xcresultNode) []string {
 type testParser struct {
 	summary  Summary
 	attempts map[string]int
+	// scopes[i] is the container path enclosing Cases[i]'s Test Case node,
+	// before per-device or per-argument labels; "" for container records.
+	scopes []string
+	scope  string
 }
 
 func (p *testParser) emit(n xcresultNode, id, suite, name string) error {
@@ -247,6 +251,7 @@ func (p *testParser) emit(n xcresultNode, id, suite, name string) error {
 	}
 	p.attempts[id]++
 	p.summary.Cases = append(p.summary.Cases, TestCase{ID: id, Suite: suite, Name: name, Outcome: status, DurationSeconds: seconds, Failures: messages, Attempt: p.attempts[id]})
+	p.scopes = append(p.scopes, p.scope)
 	return nil
 }
 
@@ -339,6 +344,7 @@ func (p *testParser) containerFailure(n xcresultNode, path string, start int) {
 			ID: path, Suite: path, Name: n.Name, Outcome: "failed",
 			Attempt: 1, Container: true,
 		})
+		p.scopes = append(p.scopes, "")
 		messages = append([]string{n.Type + " " + path + " failed"}, messages...)
 	}
 	for _, message := range messages {
@@ -363,6 +369,7 @@ func (p *testParser) visit(n xcresultNode, parent string) error {
 			}
 		}
 		start := len(p.summary.Cases)
+		p.scope = parent
 		_, err := p.executions(n, id, suite, n.Name)
 		if err != nil {
 			return err
@@ -410,8 +417,41 @@ func (p *testParser) visit(n xcresultNode, parent string) error {
 	return nil
 }
 
-func requiredMatch(c TestCase, required string) bool {
-	return !c.Container && (c.ID == required || c.Suite == required || strings.HasPrefix(c.ID, required+"/") || strings.HasPrefix(c.Suite, required+"/"))
+// requiredMatch accepts an exact or "/"-prefix match of the case ID or suite,
+// or a bundle-relative selector Target/Class[/method]. Real Xcode reports
+// class-relative case identifiers ("Class/method()") under a suite path that
+// starts with the test plan ("Plan/Target/Class"), so the selector also
+// matches when the case's enclosing container path ends in [Target, Class]
+// and, for a method selector, the case ID is Class/method or Class/method().
+func requiredMatch(c TestCase, scope, required string) bool {
+	if c.Container {
+		return false
+	}
+	if c.ID == required || c.Suite == required || strings.HasPrefix(c.ID, required+"/") || strings.HasPrefix(c.Suite, required+"/") {
+		return true
+	}
+	selector := strings.Split(required, "/")
+	if len(selector) != 2 && len(selector) != 3 {
+		return false
+	}
+	for _, part := range selector {
+		if part == "" {
+			return false
+		}
+	}
+	path := strings.Split(scope, "/")
+	if len(path) < 2 || path[len(path)-2] != selector[0] || path[len(path)-1] != selector[1] {
+		return false
+	}
+	if len(selector) == 2 {
+		return true
+	}
+	method := strings.TrimSuffix(selector[2], "()")
+	if strings.ContainsAny(method, "()") {
+		return false
+	}
+	method = selector[1] + "/" + method
+	return c.ID == method || c.ID == method+"()"
 }
 
 // ParseTests parses only schema 0.4.0's test tree, not command exit status.
@@ -477,8 +517,8 @@ func ParseTests(data []byte, required []string) (Summary, error) {
 	}
 	for _, name := range required {
 		executed := false
-		for _, c := range p.summary.Cases {
-			if name != "" && requiredMatch(c, name) && c.Outcome != "skipped" {
+		for i, c := range p.summary.Cases {
+			if name != "" && requiredMatch(c, p.scopes[i], name) && c.Outcome != "skipped" {
 				executed = true
 				break
 			}

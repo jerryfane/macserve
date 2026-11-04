@@ -1,0 +1,517 @@
+{
+  "devices": [
+    {
+      "architecture": "arm64",
+      "deviceId": "77AA4492-C787-4EEE-A772-05D4B3E9ECCD",
+      "deviceName": "iPhone 17 Pro",
+      "modelName": "iPhone 17 Pro",
+      "osBuildNumber": "23F77",
+      "osVersion": "26.5",
+      "platform": "iOS Simulator"
+    }
+  ],
+  "testNodes": [
+    {
+      "children": [
+        {
+          "children": [
+            {
+              "children": [
+                {
+                  "duration": "1m 1s",
+                  "durationInSeconds": 61.5076379776001,
+                  "name": "testACopiedDocumentBeatsItsFinderIcon()",
+                  "nodeIdentifier": "TerminalControlTests/testACopiedDocumentBeatsItsFinderIcon()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "47s",
+                  "durationInSeconds": 47.561411023139954,
+                  "name": "testACopiedFileURLAttachesTheFileRatherThanItsPath()",
+                  "nodeIdentifier": "TerminalControlTests/testACopiedFileURLAttachesTheFileRatherThanItsPath()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "42s",
+                  "durationInSeconds": 42.14916491508484,
+                  "name": "testAppDeactivationDisarmsBeforeNextDirectKey()",
+                  "nodeIdentifier": "TerminalControlTests/testAppDeactivationDisarmsBeforeNextDirectKey()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "22s",
+                  "durationInSeconds": 22.796028971672058,
+                  "name": "testAttachButtonPicksAFileThatUploadsAndPrompts()",
+                  "nodeIdentifier": "TerminalControlTests/testAttachButtonPicksAFileThatUploadsAndPrompts()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "29s",
+                  "durationInSeconds": 29.666017055511475,
+                  "name": "testComposerGrowthNeverResizesTheTerminal()",
+                  "nodeIdentifier": "TerminalControlTests/testComposerGrowthNeverResizesTheTerminal()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "20s",
+                  "durationInSeconds": 20.521088004112244,
+                  "name": "testCopiedFileOffersPasteAndSendsAttachment()",
+                  "nodeIdentifier": "TerminalControlTests/testCopiedFileOffersPasteAndSendsAttachment()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "23s",
+                  "durationInSeconds": 23.784711956977844,
+                  "name": "testCopiedPhotoOffersPasteAndSendsAttachment()",
+                  "nodeIdentifier": "TerminalControlTests/testCopiedPhotoOffersPasteAndSendsAttachment()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "1m 1s",
+                  "durationInSeconds": 61.101884961128235,
+                  "name": "testDeleteNonASCIICompositionAndPasteDisarm()",
+                  "nodeIdentifier": "TerminalControlTests/testDeleteNonASCIICompositionAndPasteDisarm()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "14s",
+                  "durationInSeconds": 14.856888055801392,
+                  "name": "testDictatedReplyKeepsItsNewestTextInView()",
+                  "nodeIdentifier": "TerminalControlTests/testDictatedReplyKeepsItsNewestTextInView()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "46s",
+                  "durationInSeconds": 46.92378103733063,
+                  "name": "testDictationStartDisarmsEvenIfPermissionIsDenied()",
+                  "nodeIdentifier": "TerminalControlTests/testDictationStartDisarmsEvenIfPermissionIsDenied()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "38s",
+                  "durationInSeconds": 38.88698899745941,
+                  "name": "testExplicitKeycapAndKeyboardDismissalDisarm()",
+                  "nodeIdentifier": "TerminalControlTests/testExplicitKeycapAndKeyboardDismissalDisarm()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "15s",
+                  "durationInSeconds": 15.140887022018433,
+                  "name": "testFirstNativeBackspaceDeliversBeforeFocusBinding()",
+                  "nodeIdentifier": "TerminalControlTests/testFirstNativeBackspaceDeliversBeforeFocusBinding()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "11s",
+                  "durationInSeconds": 11.304286003112793,
+                  "name": "testFirstNativeKeyDeliversBeforeFocusBinding()",
+                  "nodeIdentifier": "TerminalControlTests/testFirstNativeKeyDeliversBeforeFocusBinding()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "18s",
+                  "durationInSeconds": 18.3781681060791,
+                  "name": "testKeyboardHideKeepsTheTerminalLive()",
+                  "nodeIdentifier": "TerminalControlTests/testKeyboardHideKeepsTheTerminalLive()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "15s",
+                  "durationInSeconds": 15.588710069656372,
+                  "name": "testKeyboardShowKeepsTheTerminalLive()",
+                  "nodeIdentifier": "TerminalControlTests/testKeyboardShowKeepsTheTerminalLive()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "13s",
+                  "durationInSeconds": 13.32843804359436,
+                  "name": "testKeyboardSweepCommitsOneGrid()",
+                  "nodeIdentifier": "TerminalControlTests/testKeyboardSweepCommitsOneGrid()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "31s",
+                  "durationInSeconds": 31.14773201942444,
+                  "name": "testKittyHistoryUsesNativeEnhancedEncodingOnce()",
+                  "nodeIdentifier": "TerminalControlTests/testKittyHistoryUsesNativeEnhancedEncodingOnce()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "32s",
+                  "durationInSeconds": 32.686882972717285,
+                  "name": "testLegacyPreviousIsOneEventThenOrdinaryCharacter()",
+                  "nodeIdentifier": "TerminalControlTests/testLegacyPreviousIsOneEventThenOrdinaryCharacter()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "24s",
+                  "durationInSeconds": 24.263352036476135,
+                  "name": "testNativeHistoryCoastSurvivesComposerFocusTypingAndSend()",
+                  "nodeIdentifier": "TerminalControlTests/testNativeHistoryCoastSurvivesComposerFocusTypingAndSend()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "46s",
+                  "durationInSeconds": 46.76687300205231,
+                  "name": "testPaneSwitchAndTypingDuringCoverDoNotLeakOrRearm()",
+                  "nodeIdentifier": "TerminalControlTests/testPaneSwitchAndTypingDuringCoverDoNotLeakOrRearm()",
+                  "nodeType": "Test Case",
+                  "result": "Passed",
+                  "children": [
+                    {
+                      "name": "Modifying state during view update, this will cause undefined behavior.",
+                      "nodeType": "Runtime Warning"
+                    }
+                  ]
+                },
+                {
+                  "duration": "27s",
+                  "durationInSeconds": 27.951565980911255,
+                  "name": "testReplyComposerReturnsToOneRowWhenTextFitsAgain()",
+                  "nodeIdentifier": "TerminalControlTests/testReplyComposerReturnsToOneRowWhenTextFitsAgain()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "43s",
+                  "durationInSeconds": 43.1200430393219,
+                  "name": "testReplyComposerStartsAsOneRowThenDropsToToolbarAndScrolls()",
+                  "nodeIdentifier": "TerminalControlTests/testReplyComposerStartsAsOneRowThenDropsToToolbarAndScrolls()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "24s",
+                  "durationInSeconds": 24.566832065582275,
+                  "name": "testReplyContainingOnlyNewlinesIsNotSendable()",
+                  "nodeIdentifier": "TerminalControlTests/testReplyContainingOnlyNewlinesIsNotSendable()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "32s",
+                  "durationInSeconds": 32.65779709815979,
+                  "name": "testReplyFieldStillConsumesControl()",
+                  "nodeIdentifier": "TerminalControlTests/testReplyFieldStillConsumesControl()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "29s",
+                  "durationInSeconds": 29.147632002830505,
+                  "name": "testTwoPastedFilesAreBothStagedAndSentTogether()",
+                  "nodeIdentifier": "TerminalControlTests/testTwoPastedFilesAreBothStagedAndSentTogether()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "31s",
+                  "durationInSeconds": 31.67370903491974,
+                  "name": "testTwoTapsCancelInDirectInput()",
+                  "nodeIdentifier": "TerminalControlTests/testTwoTapsCancelInDirectInput()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "12s",
+                  "durationInSeconds": 12.45199203491211,
+                  "name": "testTypingKeepsReplyFocusedAcrossStateUpdates()",
+                  "nodeIdentifier": "TerminalControlTests/testTypingKeepsReplyFocusedAcrossStateUpdates()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "12s",
+                  "durationInSeconds": 12.738440036773682,
+                  "name": "testUnchangedKeyboardNotificationDoesNotFreezeTheTerminal()",
+                  "nodeIdentifier": "TerminalControlTests/testUnchangedKeyboardNotificationDoesNotFreezeTheTerminal()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                }
+              ],
+              "name": "TerminalControlTests",
+              "nodeIdentifier": "TerminalControlTests",
+              "nodeType": "Test Suite",
+              "result": "Passed"
+            },
+            {
+              "children": [
+                {
+                  "duration": "16s",
+                  "durationInSeconds": 16.918518900871277,
+                  "name": "testAppBackgroundReleasesClaimAndReturnReclaims()",
+                  "nodeIdentifier": "TerminalResizeTests/testAppBackgroundReleasesClaimAndReturnReclaims()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "22s",
+                  "durationInSeconds": 22.468361973762512,
+                  "name": "testBoxedHistoryPansWithoutReflowOrFontShrinking()",
+                  "nodeIdentifier": "TerminalResizeTests/testBoxedHistoryPansWithoutReflowOrFontShrinking()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "24s",
+                  "durationInSeconds": 24.687206983566284,
+                  "name": "testDraggingDuringCoveredResizeTakesControl()",
+                  "nodeIdentifier": "TerminalResizeTests/testDraggingDuringCoveredResizeTakesControl()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "31s",
+                  "durationInSeconds": 31.785991072654724,
+                  "name": "testExternalKeycapDuringCoveredResizeTakesControlOnce()",
+                  "nodeIdentifier": "TerminalResizeTests/testExternalKeycapDuringCoveredResizeTakesControlOnce()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "20s",
+                  "durationInSeconds": 20.77781593799591,
+                  "name": "testFailureAndNoRedrawReleaseCoverAtAuthoritativeGrid()",
+                  "nodeIdentifier": "TerminalResizeTests/testFailureAndNoRedrawReleaseCoverAtAuthoritativeGrid()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "15s",
+                  "durationInSeconds": 15.50424599647522,
+                  "name": "testHiddenPaneReleasesAfterGraceAndReclaimsWhenShown()",
+                  "nodeIdentifier": "TerminalResizeTests/testHiddenPaneReleasesAfterGraceAndReclaimsWhenShown()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "24s",
+                  "durationInSeconds": 24.436493039131165,
+                  "name": "testLiveTailBusyOutputAndExplicitReturnToTail()",
+                  "nodeIdentifier": "TerminalResizeTests/testLiveTailBusyOutputAndExplicitReturnToTail()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "35s",
+                  "durationInSeconds": 35.327641010284424,
+                  "name": "testLogicalHistorySurvivesWidthCyclesAndHeightChange()",
+                  "nodeIdentifier": "TerminalResizeTests/testLogicalHistorySurvivesWidthCyclesAndHeightChange()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "27s",
+                  "durationInSeconds": 27.344888925552368,
+                  "name": "testMountedPaneSwitchResetAndCloseDuringResize()",
+                  "nodeIdentifier": "TerminalResizeTests/testMountedPaneSwitchResetAndCloseDuringResize()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "52s",
+                  "durationInSeconds": 52.75181496143341,
+                  "name": "testOrderedGeometryResponseAndWiderViewerDoNotReconnect()",
+                  "nodeIdentifier": "TerminalResizeTests/testOrderedGeometryResponseAndWiderViewerDoNotReconnect()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "19s",
+                  "durationInSeconds": 19.433645009994507,
+                  "name": "testQuickHideAndShowWithinGraceSendsNoRelease()",
+                  "nodeIdentifier": "TerminalResizeTests/testQuickHideAndShowWithinGraceSendsNoRelease()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "10s",
+                  "durationInSeconds": 10.591495037078857,
+                  "name": "testRealSidebarOrientationAndFontPreserveHistory()",
+                  "nodeIdentifier": "TerminalResizeTests/testRealSidebarOrientationAndFontPreserveHistory()",
+                  "nodeType": "Test Case",
+                  "result": "Skipped",
+                  "children": [
+                    {
+                      "name": "Test skipped - Actual sidebar/orientation receipt runs on the iPad destination; iPhone uses exact-grid sweeps",
+                      "nodeType": "Skip Message"
+                    }
+                  ]
+                },
+                {
+                  "duration": "16s",
+                  "durationInSeconds": 16.66942608356476,
+                  "name": "testReturningToEarlierTargetStillUsesLatestQuietWindow()",
+                  "nodeIdentifier": "TerminalResizeTests/testReturningToEarlierTargetStillUsesLatestQuietWindow()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "16s",
+                  "durationInSeconds": 16.805976033210754,
+                  "name": "testSplitSynchronizedAlternateFrameStaysHidden()",
+                  "nodeIdentifier": "TerminalResizeTests/testSplitSynchronizedAlternateFrameStaysHidden()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "19s",
+                  "durationInSeconds": 19.806308031082153,
+                  "name": "testStationaryTargetAndSupersededInflightRequests()",
+                  "nodeIdentifier": "TerminalResizeTests/testStationaryTargetAndSupersededInflightRequests()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                }
+              ],
+              "name": "TerminalResizeTests",
+              "nodeIdentifier": "TerminalResizeTests",
+              "nodeType": "Test Suite",
+              "result": "Passed"
+            },
+            {
+              "children": [
+                {
+                  "duration": "27s",
+                  "durationInSeconds": 27.472268104553223,
+                  "name": "testClosingSearchKeepsThePosition()",
+                  "nodeIdentifier": "TerminalSearchTests/testClosingSearchKeepsThePosition()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "17s",
+                  "durationInSeconds": 17.59075105190277,
+                  "name": "testEngineAndWiringAgree()",
+                  "nodeIdentifier": "TerminalSearchTests/testEngineAndWiringAgree()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "16s",
+                  "durationInSeconds": 16.997005939483643,
+                  "name": "testFindRevealsAMatchInHistory()",
+                  "nodeIdentifier": "TerminalSearchTests/testFindRevealsAMatchInHistory()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "18s",
+                  "durationInSeconds": 18.757763981819153,
+                  "name": "testFindRevealsMatchBeyondThePhoneWidth()",
+                  "nodeIdentifier": "TerminalSearchTests/testFindRevealsMatchBeyondThePhoneWidth()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "21s",
+                  "durationInSeconds": 21.56699299812317,
+                  "name": "testMissingTermReportsNone()",
+                  "nodeIdentifier": "TerminalSearchTests/testMissingTermReportsNone()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "22s",
+                  "durationInSeconds": 22.126811981201172,
+                  "name": "testNextAndPreviousStepBetweenMatches()",
+                  "nodeIdentifier": "TerminalSearchTests/testNextAndPreviousStepBetweenMatches()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "13s",
+                  "durationInSeconds": 13.537433981895447,
+                  "name": "testRefreshStillReconnects()",
+                  "nodeIdentifier": "TerminalSearchTests/testRefreshStillReconnects()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                }
+              ],
+              "name": "TerminalSearchTests",
+              "nodeIdentifier": "TerminalSearchTests",
+              "nodeType": "Test Suite",
+              "result": "Passed"
+            },
+            {
+              "children": [
+                {
+                  "duration": "13s",
+                  "durationInSeconds": 13.50808596611023,
+                  "name": "testATapFocusesTheTerminalWhileOutputIsStreaming()",
+                  "nodeIdentifier": "TerminalSelectionTests/testATapFocusesTheTerminalWhileOutputIsStreaming()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "46s",
+                  "durationInSeconds": 46.76512897014618,
+                  "name": "testATapThatStopsAScrollDoesNotRaiseTheKeyboard()",
+                  "nodeIdentifier": "TerminalSelectionTests/testATapThatStopsAScrollDoesNotRaiseTheKeyboard()",
+                  "nodeType": "Test Case",
+                  "result": "Skipped",
+                  "children": [
+                    {
+                      "name": "Test skipped - no synthesized tap landed while the content was still moving in 6 attempts (motionms never below 300 on a reading published by the focus decision), so neither the guard nor its absence was exercised. Skipping rather than reporting a pass that measured nothing.",
+                      "nodeType": "Skip Message"
+                    }
+                  ]
+                },
+                {
+                  "duration": "22s",
+                  "durationInSeconds": 22.887850999832153,
+                  "name": "testDoubleTapSelectsAWordAndASingleTapDeselectsIt()",
+                  "nodeIdentifier": "TerminalSelectionTests/testDoubleTapSelectsAWordAndASingleTapDeselectsIt()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                },
+                {
+                  "duration": "17s",
+                  "durationInSeconds": 17.995105981826782,
+                  "name": "testKeyboardDismissalRespectsHardwareAndPreservesSelection()",
+                  "nodeIdentifier": "TerminalSelectionTests/testKeyboardDismissalRespectsHardwareAndPreservesSelection()",
+                  "nodeType": "Test Case",
+                  "result": "Passed"
+                }
+              ],
+              "name": "TerminalSelectionTests",
+              "nodeIdentifier": "TerminalSelectionTests",
+              "nodeType": "Test Suite",
+              "result": "Passed"
+            }
+          ],
+          "name": "HerdrUITests",
+          "nodeType": "UI test bundle",
+          "result": "Passed"
+        }
+      ],
+      "name": "Herdr",
+      "nodeType": "Test Plan",
+      "result": "Passed"
+    }
+  ],
+  "testPlanConfigurations": [
+    {
+      "configurationId": "1",
+      "configurationName": "Test Scheme Action"
+    }
+  ]
+}
