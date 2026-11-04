@@ -24,14 +24,20 @@ import (
 
 // RootUsage is the only argv `macserve _setup-root` accepts. The digest is
 // the one the wizard computed of this binary (or the owner's --sha256).
-const RootUsage = "Usage: sudo /path/to/macserve _setup-root --sha256 LOWERCASE_HEX (started by macserve setup)"
+// --upgrade starts the upgrade helper (macserve upgrade), which serves
+// only the upgrade verb.
+const RootUsage = "Usage: sudo /path/to/macserve _setup-root [--upgrade] --sha256 LOWERCASE_HEX (started by macserve setup or macserve upgrade)"
 
-// ParseRootArgs accepts exactly --sha256 and a lowercase sha256.
-func ParseRootArgs(args []string) (string, error) {
-	if len(args) != 2 || args[0] != "--sha256" || !sha256Hex.MatchString(args[1]) {
-		return "", errors.New(RootUsage)
+// ParseRootArgs accepts exactly --sha256 and a lowercase sha256, optionally
+// preceded by --upgrade.
+func ParseRootArgs(args []string) (sha string, upgrade bool, err error) {
+	if len(args) == 3 && args[0] == "--upgrade" {
+		args, upgrade = args[1:], true
 	}
-	return args[1], nil
+	if len(args) != 2 || args[0] != "--sha256" || !sha256Hex.MatchString(args[1]) {
+		return "", false, errors.New(RootUsage)
+	}
+	return args[1], upgrade, nil
 }
 
 // SudoOwner resolves SUDO_UID: a canonical decimal, not root, a local
@@ -57,7 +63,7 @@ func SudoOwner(sudoUID string, lookup func(string) (*user.User, error)) (Owner, 
 }
 
 // RootHelper is the production helper.
-func RootHelper(owner Owner, sha string, terminal io.Writer) (*Helper, error) {
+func RootHelper(owner Owner, sha string, upgrade bool, terminal io.Writer) (*Helper, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return nil, err
@@ -76,6 +82,7 @@ func RootHelper(owner Owner, sha string, terminal io.Writer) (*Helper, error) {
 		ConsoleUID: hostguard.ConsoleUID, ToolCheck: hostguard.ToolchainExecutable,
 		Boot: SystemBoot, Now: time.Now, Terminal: terminal, TerminalCheck: stdoutTerminal, FDAWait: 30 * time.Second,
 		Output: outputCommand, Qualify: &SystemQualifier{Root: deploy.Prefix, Staging: StagingDir},
+		Upgrade: upgrade, Version: ReleaseVersion, Processes: systemProcesses,
 	}, nil
 }
 
@@ -202,7 +209,7 @@ func RunRoot(args []string, stdout, stderr io.Writer) int {
 	if os.Getuid() != 0 || os.Geteuid() != 0 {
 		return fail(errors.New("requires real and effective root; macserve setup starts it with sudo"))
 	}
-	sha, err := ParseRootArgs(args)
+	sha, upgrade, err := ParseRootArgs(args)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 2
@@ -223,7 +230,7 @@ func RunRoot(args []string, stdout, stderr io.Writer) int {
 		return fail(err)
 	}
 	syscall.Umask(0o077)
-	h, err := RootHelper(owner, sha, stdout)
+	h, err := RootHelper(owner, sha, upgrade, stdout)
 	if err != nil {
 		return fail(err)
 	}

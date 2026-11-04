@@ -61,12 +61,18 @@ const (
 	VerbApprove Verb = "approve"
 	// VerbReleasePause removes owner.pause once health is valid.
 	VerbReleasePause Verb = "release-pause"
+	// VerbUpgrade installs the release the upgrade helper runs (SHA256 is
+	// its verified digest, Tag the release the owner named, Proof an
+	// optional carry proof) behind the stopped gate and the job-session
+	// guard. Only `_setup-root --upgrade` serves it, and nothing else.
+	VerbUpgrade Verb = "upgrade"
 )
 
 // Verbs is the helper's grammar.
 var Verbs = []Verb{
 	VerbStatus, VerbPreflight, VerbInstall, VerbGitHub, VerbTools, VerbFDACheck, VerbJobLogin, VerbOwnerActions,
 	VerbRoundPrepare, VerbRoundBegin, VerbRoundJobProbe, VerbRoundCollect, VerbReboot, VerbSummary, VerbApprove, VerbReleasePause,
+	VerbUpgrade,
 }
 
 // MaxRequest bounds one request line (deploy.env is at most 64 KiB).
@@ -74,11 +80,15 @@ const MaxRequest = 128 << 10
 
 // Request is one line from the wizard. Env is the generated deploy.env and
 // is accepted only with VerbPreflight; SHA256 is the digest of what the
-// owner confirmed and is accepted only with VerbRoundBegin and VerbApprove.
+// owner confirmed and is accepted only with VerbRoundBegin, VerbApprove
+// and VerbUpgrade; Tag and Proof (the carry-proof.json bytes) only with
+// VerbUpgrade.
 type Request struct {
 	Verb   Verb   `json:"verb"`
 	Env    string `json:"env,omitempty"`
 	SHA256 string `json:"sha256,omitempty"`
+	Tag    string `json:"tag,omitempty"`
+	Proof  string `json:"proof,omitempty"`
 }
 
 // Response is one line from the helper. Ledger is the canonical ledger
@@ -111,8 +121,9 @@ func validVerb(v Verb) bool {
 
 // DecodeRequest parses one request line strictly: known fields only, one
 // value in canonical encoding, a verb of the grammar, Env only with
-// preflight and SHA256 (64 lowercase hex) only with round-begin and
-// approve.
+// preflight, SHA256 (64 lowercase hex) only with round-begin, approve and
+// upgrade, and Tag (a release tag) and Proof (at most MaxCarryProof bytes)
+// only with upgrade.
 func DecodeRequest(line []byte) (Request, error) {
 	var r Request
 	if len(line) == 0 || len(line) > MaxRequest {
@@ -132,8 +143,14 @@ func DecodeRequest(line []byte) (Request, error) {
 	if (r.Env != "") != (r.Verb == VerbPreflight) {
 		return r, fmt.Errorf("verb %s: env is accepted with preflight only, and required there", r.Verb)
 	}
-	if digestVerb := r.Verb == VerbRoundBegin || r.Verb == VerbApprove; digestVerb != (r.SHA256 != "") || (digestVerb && !sha256Hex.MatchString(r.SHA256)) {
-		return r, fmt.Errorf("verb %s: sha256 is accepted with round-begin and approve only, and required there as 64 lowercase hex", r.Verb)
+	if digestVerb := r.Verb == VerbRoundBegin || r.Verb == VerbApprove || r.Verb == VerbUpgrade; digestVerb != (r.SHA256 != "") || (digestVerb && !sha256Hex.MatchString(r.SHA256)) {
+		return r, fmt.Errorf("verb %s: sha256 is accepted with round-begin, approve and upgrade only, and required there as 64 lowercase hex", r.Verb)
+	}
+	if r.Verb != VerbUpgrade && (r.Tag != "" || r.Proof != "") {
+		return r, fmt.Errorf("verb %s: tag and proof are accepted with upgrade only", r.Verb)
+	}
+	if (r.Tag != "" && !ValidRelease(r.Tag)) || len(r.Proof) > MaxCarryProof {
+		return r, errors.New("verb upgrade: tag must be vMAJOR.MINOR.PATCH and the proof at most 64 KiB")
 	}
 	// Only the wizard's own encoding: no case-variant or duplicate keys.
 	if canonical, err := json.Marshal(r); err != nil || !bytes.Equal(canonical, line) {

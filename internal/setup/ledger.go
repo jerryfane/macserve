@@ -166,6 +166,8 @@ type Ledger struct {
 	Created  time.Time `json:"created"`
 	Records  []Record  `json:"records"`
 	Approval *Approval `json:"approval,omitempty"`
+	// Releases are the macserve upgrades since install, oldest first.
+	Releases []Release `json:"releases,omitempty"`
 }
 
 const ledgerSchema = 1
@@ -205,10 +207,14 @@ func (l *Ledger) Failed() (Record, bool) {
 }
 
 // Next returns the step setup resumes at: the first step not done. It
-// fails while any step is failed, and reports done=true when all are done.
+// fails while any step is failed or a macserve upgrade is running, and
+// reports done=true when all are done.
 func (l *Ledger) Next() (Record, bool, error) {
 	if r, failed := l.Failed(); failed {
 		return r, false, fmt.Errorf("setup step %s failed (%s); later steps are blocked", r.Step, r.Error)
+	}
+	if r := l.PendingRelease(); r != nil {
+		return Record{}, false, fmt.Errorf("the upgrade to %s was interrupted; run macserve upgrade again with that release to finish it", r.To)
 	}
 	for _, r := range l.Records {
 		if r.Status != StatusDone {
@@ -486,5 +492,5 @@ func (l *Ledger) validate() error {
 	} else if step.Status == StatusDone {
 		return errors.New("setup ledger: approve-and-start done without approval")
 	}
-	return nil
+	return l.validateReleases()
 }

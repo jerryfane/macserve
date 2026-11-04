@@ -96,6 +96,14 @@ type Helper struct {
 	// Qualify is the existing qualification and worker APIs the rounds and
 	// approve-and-start call.
 	Qualify Qualifier
+	// Upgrade selects the upgrade helper (`_setup-root --upgrade`): it
+	// runs from the verified new release (Executable, SHA256) and serves
+	// only VerbStatus and VerbUpgrade.
+	Upgrade bool
+	// Version is ReleaseVersion: the release tag stamped into a binary.
+	Version func(binary []byte) (string, error)
+	// Processes lists every process with its UID and executable.
+	Processes func() ([]Process, error)
 
 	// started is set when this helper process started the services; it
 	// allows one release-pause in the same run (never on a later run).
@@ -155,8 +163,12 @@ var errApproved = errors.New("qualification is approved on this Mac; macserve se
 // approved (unless by this setup ledger, to finish approve-and-start),
 // whose ledger is someone else's, whose running binary is not the one the
 // owner verified (checkExecutable), or (decision D12) whose
-// /Library/macserve exists without a native ledger.
+// /Library/macserve exists without a native ledger. The upgrade helper
+// has its own start conditions (checkUpgradeStart).
 func (h *Helper) CheckStart() error {
+	if h.Upgrade {
+		return h.checkUpgradeStart()
+	}
 	approved, err := h.Approved()
 	if err != nil {
 		return err
@@ -204,31 +216,36 @@ func (h *Helper) checkExecutable(l *Ledger) error {
 	if h.Executable != filepath.Join(h.Root, "bin", "macserve") {
 		return fmt.Errorf("after install the setup helper must be %s/bin/macserve, not %s", h.Root, h.Executable)
 	}
-	if want := l.record(StepInstall).Inputs["macserve"]; h.SHA256 != want {
-		return fmt.Errorf("the installed macserve has SHA-256 %s, not %s, the one install recorded", h.SHA256, want)
+	if want := l.InstalledBinary(); h.SHA256 != want {
+		return fmt.Errorf("the installed macserve has SHA-256 %s, not %s, the one install recorded (or the last macserve upgrade)", h.SHA256, want)
 	}
 	return nil
 }
 
 // fileSHA256 hashes a bounded regular file without following a link.
 func fileSHA256(path string) (string, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return "", err
-	}
-	if !info.Mode().IsRegular() || info.Size() == 0 || info.Size() > maxBinary {
-		return "", fmt.Errorf("%s is not a bounded regular file", path)
-	}
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, maxBinary+1))
+	data, err := readBinary(path)
 	if err != nil {
 		return "", err
 	}
 	return digestHex(data), nil
+}
+
+// readBinary reads a bounded regular file without following a link.
+func readBinary(path string) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() == 0 || info.Size() > maxBinary {
+		return nil, fmt.Errorf("%s is not a bounded regular file", path)
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, maxBinary+1))
 }
 
 // Handle serves one request. It never panics the helper: every failure is
@@ -247,9 +264,14 @@ func (h *Helper) Handle(r Request) Response {
 }
 
 func (h *Helper) handle(r Request) (Response, error) {
-	if r.Verb == VerbStatus {
-		_, _, err := h.load()
-		return Response{}, err
+	if r.Verb == VerbStatus || h.Upgrade != (r.Verb == VerbUpgrade) {
+		if _, _, err := h.load(); err != nil || r.Verb == VerbStatus {
+			return Response{}, err
+		}
+		return Response{}, fmt.Errorf("%s is not served by this helper: the upgrade helper (macserve upgrade) serves only upgrade, the setup helper everything else", r.Verb)
+	}
+	if h.Upgrade {
+		return h.upgrade(r)
 	}
 	approved, err := h.Approved()
 	if err != nil {

@@ -31,31 +31,12 @@ func TestOnboardingCommandsHelpExitZero(t *testing.T) {
 	}
 }
 
-// TestOnboardingHelpTakesNoArguments: only a lone --help prints help.
-func TestOnboardingHelpTakesNoArguments(t *testing.T) {
-	for _, name := range []string{"upgrade"} {
-		var stdout, stderr bytes.Buffer
-		if got := run([]string{name, "--help", "extra"}, &stdout, &stderr); got != 2 || stdout.Len() != 0 {
-			t.Errorf("%s --help extra: exit %d stdout %q", name, got, stdout.String())
-		}
-	}
-}
-
 // TestOnboardingNamesDoNotShadowCommands: the hook runs only in the
 // default branch, and no onboarding name equals an existing command.
 func TestOnboardingNamesDoNotShadowCommands(t *testing.T) {
 	for _, existing := range []string{"controller", "worker", "deploy-install", "qualify", "wait", "maintenance-observe", "worker-persistence", "worker-reset"} {
 		if _, ok := onboardingCommand(existing); ok {
 			t.Errorf("onboarding table shadows %s", existing)
-		}
-	}
-}
-
-func TestOnboardingShellsAreNotAvailable(t *testing.T) {
-	for _, name := range []string{"upgrade"} {
-		var stdout, stderr bytes.Buffer
-		if got := run([]string{name}, &stdout, &stderr); got != 2 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "not available in this release") {
-			t.Errorf("%s: exit %d stdout %q stderr %q", name, got, stdout.String(), stderr.String())
 		}
 	}
 }
@@ -72,31 +53,18 @@ func TestUsageListsOnboardingCommands(t *testing.T) {
 	}
 }
 
-// TestInactiveShellsHaveNoRunFunction: checks/readonly does not follow the
-// command table, so the inactive shells must stay without code. Active
-// commands other than setup (connect-github, which writes the App key and
-// controller.json under sudo) are not read-only and not on that walk.
-func TestInactiveShellsHaveNoRunFunction(t *testing.T) {
-	inactive := map[string]bool{"upgrade": true}
-	active := map[string]bool{"setup": true, "connect-github": true, "doctor": true, "build": true, "_setup-root": true, "_fda-check": true}
-	seen := 0
+// TestOnboardingCommandsAreActive: every onboarding command has code.
+// checks/readonly proves setup, doctor and upgrade outside their effectful
+// clauses; connect-github, build and the hidden root commands are not on
+// that walk.
+func TestOnboardingCommandsAreActive(t *testing.T) {
+	active := map[string]bool{"setup": true, "connect-github": true, "doctor": true, "build": true, "upgrade": true, "_setup-root": true, "_fda-check": true}
 	for _, c := range onboardingCommands {
-		switch {
-		case inactive[c.name]:
-			seen++
-			if c.run != nil {
-				t.Errorf("%s has a run function; prove it read-only or list it as active", c.name)
-			}
-		case active[c.name]:
-			if c.run == nil {
-				t.Errorf("active command %s has no run function", c.name)
-			}
-		default:
+		if !active[c.name] {
 			t.Errorf("unexpected onboarding command %s", c.name)
+		} else if c.run == nil {
+			t.Errorf("active command %s has no run function", c.name)
 		}
-	}
-	if seen != len(inactive) {
-		t.Errorf("found %d inactive shells, want %d", seen, len(inactive))
 	}
 }
 
