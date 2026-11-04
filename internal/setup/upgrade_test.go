@@ -729,3 +729,42 @@ func TestReleaseChecks(t *testing.T) {
 		t.Error("release before install")
 	}
 }
+
+// TestOwnerActionsWaitsForCarryLogout: after a carry fallback the
+// owner-actions step (the verb that records it) is not completed while the
+// build account is still logged in from the carry; once it is logged out
+// the gate clears and the step completes.
+func TestOwnerActionsWaitsForCarryLogout(t *testing.T) {
+	u := newUpgradeHost(t)
+	u.procs = u.gui()
+	u.execErr["begin"] = errors.New("exit status 1")
+	if r := u.upgrade(u.carryRequest(true)); r.Error != "" || !u.ledger().JobLogoutPending() {
+		t.Fatalf("fallback %+v", r)
+	}
+	u.h.Upgrade, u.h.Executable = false, u.h.installedPath()
+	r := u.h.Handle(Request{Verb: VerbOwnerActions})
+	if r.Done || !strings.Contains(r.Detail, "still logged in from the upgrade") || u.status(StepOwnerActions) == StatusDone {
+		t.Fatalf("owner-actions counted the carry's session: %+v", r)
+	}
+	u.procs = u.gui()[:1]
+	if r := u.h.Handle(Request{Verb: VerbOwnerActions}); r.Error != "" || !r.Done || u.ledger().JobLogoutPending() || u.status(StepOwnerActions) != StatusDone {
+		t.Fatalf("owner-actions after logout %+v", r)
+	}
+}
+
+// TestUpgradeRefusesSumsWithoutOwnDigest: a SHA256SUMS that does not list
+// the helper's own digest is refused before anything changes, also with a
+// proof it lists.
+func TestUpgradeRefusesSumsWithoutOwnDigest(t *testing.T) {
+	u := newUpgradeHost(t)
+	u.procs = u.gui()
+	r := u.carryRequest(true)
+	r.Sums = strings.Repeat("e", 64) + "  " + ReleaseAsset + "\n" + digestHex([]byte(r.Proof)) + "  " + CarryProofAsset + "\n"
+	before := u.installed()
+	if resp := u.upgrade(r); !strings.Contains(resp.Error, "does not list this helper's digest") {
+		t.Fatalf("got %+v", resp)
+	}
+	if u.installed() != before || len(u.ledger().Releases) != 0 || len(u.carried) != 0 {
+		t.Fatal("refused upgrade changed something")
+	}
+}

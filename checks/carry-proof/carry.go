@@ -57,8 +57,16 @@ type refusal struct{ reason string }
 
 func (r *refusal) Error() string { return r.reason }
 
+// Its reason is printed on one line in the release log: control
+// characters (a newline in a tree path could start a workflow command) are
+// escaped.
 func refuse(format string, args ...any) error {
-	return &refusal{reason: fmt.Sprintf(format, args...)}
+	reason := fmt.Sprintf(format, args...)
+	if strings.ContainsFunc(reason, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+		q := strconv.Quote(reason)
+		reason = q[1 : len(q)-1]
+	}
+	return &refusal{reason: reason}
 }
 
 // fetcher performs an HTTP GET and returns the body of a 200 response.
@@ -447,7 +455,10 @@ func blobID(format string, content []byte) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// ciRun finds a successful CI workflow run on commit.
+// ciRun finds a successful CI workflow run on commit: ci.yml of this
+// repository, run for a push of exactly that commit, completed with
+// conclusion success. Pull-request runs (another repository's code may be
+// tested on the same head) do not count.
 func (p params) ciRun(ctx context.Context, commit string) (*qualification.CarryCI, error) {
 	q := url.Values{"head_sha": {commit}, "status": {"success"}, "per_page": {"100"}}
 	u := fmt.Sprintf("%s/repos/%s/actions/workflows/%s/runs?%s", p.api, p.repo, path.Base(ciWorkflow), q.Encode())
@@ -467,6 +478,7 @@ func (p params) ciRun(ctx context.Context, commit string) (*qualification.CarryC
 			ID         int64  `json:"id"`
 			Path       string `json:"path"`
 			HeadSHA    string `json:"head_sha"`
+			Event      string `json:"event"`
 			Status     string `json:"status"`
 			Conclusion string `json:"conclusion"`
 			Repository struct {
@@ -480,7 +492,7 @@ func (p params) ciRun(ctx context.Context, commit string) (*qualification.CarryC
 	var best *qualification.CarryCI
 	for _, r := range runs.WorkflowRuns {
 		workflow, _, _ := strings.Cut(r.Path, "@")
-		if r.ID <= 0 || workflow != ciWorkflow || r.HeadSHA != commit || r.Status != "completed" || r.Conclusion != "success" || !strings.EqualFold(r.Repository.FullName, p.repo) {
+		if r.ID <= 0 || workflow != ciWorkflow || r.HeadSHA != commit || r.Event != "push" || r.Status != "completed" || r.Conclusion != "success" || !strings.EqualFold(r.Repository.FullName, p.repo) {
 			continue
 		}
 		if best == nil || r.ID > best.RunID {

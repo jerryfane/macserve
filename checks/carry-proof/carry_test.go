@@ -178,8 +178,8 @@ func ciURL(commit string) string {
 
 func ciRuns(commit string) []byte {
 	return []byte(fmt.Sprintf(`{"total_count":2,"workflow_runs":[`+
-		`{"id":41,"name":"CI","path":".github/workflows/ci.yml","head_sha":%q,"status":"completed","conclusion":"success","repository":{"full_name":%q}},`+
-		`{"id":4242,"name":"CI","path":".github/workflows/ci.yml","head_sha":%q,"status":"completed","conclusion":"success","repository":{"full_name":%q}}]}`,
+		`{"id":41,"name":"CI","path":".github/workflows/ci.yml","head_sha":%q,"event":"push","status":"completed","conclusion":"success","repository":{"full_name":%q}},`+
+		`{"id":4242,"name":"CI","path":".github/workflows/ci.yml","head_sha":%q,"event":"push","status":"completed","conclusion":"success","repository":{"full_name":%q}}]}`,
 		commit, testRepo, commit, testRepo))
 }
 
@@ -567,5 +567,51 @@ func TestReadArchiveRefusesEscapes(t *testing.T) {
 	files, data, err := readArchive(gzipBytes(t, buf.Bytes()), "c", "sha1")
 	if err != nil || files["l"].mode != "120000" || data["l"] != nil {
 		t.Fatalf("symlink entry: %v %v %v", files, data, err)
+	}
+}
+
+// TestCIRunFilters: only a completed, successful push run of this
+// repository's ci.yml on exactly the commit is accepted; each case changes
+// one field of an otherwise accepted run.
+func TestCIRunFilters(t *testing.T) {
+	commit := strings.Repeat("c", 40)
+	run := func(edit func(m map[string]any)) []byte {
+		r := map[string]any{"id": 7, "path": ".github/workflows/ci.yml", "head_sha": commit, "event": "push", "status": "completed", "conclusion": "success", "repository": map[string]any{"full_name": testRepo}}
+		edit(r)
+		b, err := json.Marshal(map[string]any{"total_count": 1, "workflow_runs": []any{r}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	lookup := func(body []byte) (*qualification.CarryCI, error) {
+		p := params{repo: testRepo, get: func(context.Context, string, http.Header) ([]byte, error) { return body, nil }}
+		p.withDefaults()
+		return p.ciRun(context.Background(), commit)
+	}
+	if ci, err := lookup(run(func(map[string]any) {})); err != nil || ci.RunID != 7 || ci.HeadSHA != commit || ci.Workflow != ".github/workflows/ci.yml" {
+		t.Fatalf("accepted run refused: %+v %v", ci, err)
+	}
+	for name, edit := range map[string]func(m map[string]any){
+		"other workflow":   func(m map[string]any) { m["path"] = ".github/workflows/release.yml" },
+		"other head_sha":   func(m map[string]any) { m["head_sha"] = strings.Repeat("d", 40) },
+		"pull_request run": func(m map[string]any) { m["event"] = "pull_request" },
+		"not completed":    func(m map[string]any) { m["status"] = "in_progress" },
+		"failed":           func(m map[string]any) { m["conclusion"] = "failure" },
+		"other repository": func(m map[string]any) { m["repository"] = map[string]any{"full_name": "fork/macserve"} },
+		"no id":            func(m map[string]any) { m["id"] = 0 },
+	} {
+		if ci, err := lookup(run(edit)); err == nil {
+			t.Errorf("%s: accepted %+v", name, ci)
+		}
+	}
+}
+
+// TestRefusalIsOneLine: a path with a newline cannot start a workflow
+// command line in the release log.
+func TestRefusalIsOneLine(t *testing.T) {
+	err := refuse("%s is class %s", "docs/a\n::error::x", "B")
+	if r := err.(*refusal).reason; strings.ContainsAny(r, "\n\r") || !strings.Contains(r, `\n::error::x`) {
+		t.Fatalf("%q", r)
 	}
 }
