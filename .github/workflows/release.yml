@@ -75,6 +75,21 @@ jobs:
             --source-ref "$GITHUB_REF" \
             --source-digest "$GITHUB_SHA" \
             --deny-self-hosted-runners
+      # Runs only after the byte-identical rebuild, attestation and consumer
+      # verification gates above. The formula takes its digest from the
+      # SHA256SUMS that was just checked against the rebuild, and is published
+      # with the release. The tap (jerryfane/homebrew-macserve) is bumped by a
+      # reviewed PR that copies this asset; this workflow holds no tap token.
+      - name: Render Homebrew formula
+        env:
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          DIST: ${{ runner.temp }}/dist
+        run: |
+          go run ./checks/homebrew-formula \
+            -tag "$RELEASE_TAG" -repo "$GH_REPO" \
+            -sums "$DIST/SHA256SUMS" > "$DIST/macserve.rb"
+          cat "$DIST/macserve.rb"
       - name: Publish GitHub release
         working-directory: ${{ runner.temp }}/dist
         env:
@@ -83,6 +98,6 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           gh release create "$RELEASE_TAG" \
-            macserve-darwin-arm64 SHA256SUMS \
+            macserve-darwin-arm64 SHA256SUMS macserve.rb \
             --verify-tag --title "$RELEASE_TAG" \
             --notes "Darwin arm64 macserve built by checks/release-build.sh (CGO disabled, -trimpath, -buildvcs=true), rebuilt byte-identically on a second runner, with a GitHub build provenance attestation (gh attestation verify macserve-darwin-arm64 --repo $GH_REPO). Verify SHA256SUMS against the reviewed release before installation."

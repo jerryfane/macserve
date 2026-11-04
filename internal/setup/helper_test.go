@@ -47,6 +47,13 @@ type fakeHost struct {
 	boot        Boot
 	terminalErr error
 	toolChecks  int
+	// The qualification fakes (qualify_test.go): q stands in for every
+	// Qualifier method; outputs records every Output command, loaded is
+	// what launchctl has bootstrapped and fileVault is fdesetup status.
+	q         *fakeQualifier
+	outputs   [][]string
+	loaded    map[string]bool
+	fileVault string
 }
 
 func testEnv(owner Owner) string {
@@ -108,6 +115,9 @@ func newFakeHost(t *testing.T) *fakeHost {
 		TerminalCheck: func() error { return f.terminalErr },
 	}
 	f.h.Terminal = &f.terminal
+	f.loaded, f.fileVault = map[string]bool{}, "FileVault is On."
+	f.q = newFakeQualifier(f)
+	f.h.Qualify, f.h.Output = f.q, f.output
 	return f
 }
 
@@ -255,15 +265,22 @@ func (f *fakeHost) ledger() *Ledger {
 func (f *fakeHost) through(s Step) {
 	f.t.Helper()
 	order := map[Step]func(){
-		StepPreflight:    func() { f.mustDo(VerbPreflight, testEnv(f.h.Owner)) },
-		StepInstall:      func() { f.mustDo(VerbInstall, "") },
-		StepGitHub:       func() { f.connectGitHub(); f.mustDo(VerbGitHub, "") },
-		StepTools:        func() { f.mustDo(VerbTools, "") },
-		StepOwnerActions: func() { f.mustDo(VerbOwnerActions, "") },
+		StepPreflight:       func() { f.mustDo(VerbPreflight, testEnv(f.h.Owner)) },
+		StepInstall:         func() { f.mustDo(VerbInstall, "") },
+		StepGitHub:          func() { f.connectGitHub(); f.mustDo(VerbGitHub, "") },
+		StepTools:           func() { f.mustDo(VerbTools, "") },
+		StepOwnerActions:    func() { f.mustDo(VerbOwnerActions, "") },
+		StepRound1:          func() { f.round(StepRound1) },
+		StepReboot:          func() { f.restart() },
+		StepRound2:          func() { f.round(StepRound2) },
+		StepApproveAndStart: func() { f.approveAndStart() },
 	}
 	for _, step := range Steps {
 		if step == s {
 			return
+		}
+		if l, _, _ := f.h.Store.Load(); l != nil && l.record(step).Status == StatusDone {
+			continue
 		}
 		order[step]()
 	}
@@ -365,14 +382,16 @@ func TestInstallUsesDeployInstallAndMovesLedger(t *testing.T) {
 	if info, err := os.Lstat(f.h.Store.Ledger); err != nil || info.Mode().Perm() != 0o755 {
 		t.Errorf("ledger dir %v %v", info, err)
 	}
-	// The one-time token reached only the terminal.
-	if !strings.Contains(f.terminal.String(), testToken) {
-		t.Error("token not on the terminal")
+	// The one-time token goes back to the wizard only (for the keychain):
+	// never to the terminal, the audit log, the ledger or any file.
+	if r.Token != strings.TrimPrefix(testToken, tokenPrefix) {
+		t.Errorf("response token %q", r.Token)
 	}
 	audit, _ := os.ReadFile(filepath.Join(f.h.Store.Staging, auditName))
 	ledger, _ := os.ReadFile(filepath.Join(f.h.Store.Ledger, ledgerName))
+	r.Token = ""
 	resp, _ := json.Marshal(r)
-	for name, data := range map[string][]byte{"audit": audit, "ledger": ledger, "response": resp} {
+	for name, data := range map[string][]byte{"audit": audit, "ledger": ledger, "response without token": resp, "terminal": f.terminal.Bytes()} {
 		if bytes.Contains(data, []byte("tok-0123456789abcdef")) {
 			t.Errorf("token in the %s", name)
 		}
@@ -466,7 +485,7 @@ func TestGitHubDetection(t *testing.T) {
 	if f.ledger().record(StepGitHub).Status != StatusPending {
 		t.Error("github began before detection")
 	}
-	if r := f.call(VerbTools, ""); !strings.Contains(r.Error, "not tools") {
+	if r := f.call(VerbTools, ""); !strings.Contains(r.Error, "tools is not served") {
 		t.Errorf("tools before github: %+v", r)
 	}
 	f.connectGitHub()
@@ -628,11 +647,20 @@ func TestOwnerActionsCompleteOnlyWhenBothDetected(t *testing.T) {
 	if next.Step != StepRound1 {
 		t.Errorf("next %s", next.Step)
 	}
-	// Nothing of round 1 is served.
+	// At round 1 only the job-login check and the round verbs are
+	// served (verbSteps); every other verb is refused.
+	var served []Verb
 	for _, v := range Verbs[1:] {
+		if slices.Contains(verbSteps[v], StepRound1) {
+			served = append(served, v)
+			continue
+		}
 		if r := f.call(v, testEnvIf(v, f.h.Owner)); r.Error == "" {
 			t.Errorf("%s after owner-actions: %+v", v, r)
 		}
+	}
+	if want := []Verb{VerbJobLogin, VerbRoundPrepare, VerbRoundBegin, VerbRoundJobProbe, VerbRoundCollect}; !slices.Equal(served, want) {
+		t.Errorf("served at round 1: %v, want %v", served, want)
 	}
 }
 
@@ -682,7 +710,8 @@ func TestDecodeRequestGrammar(t *testing.T) {
 	for _, line := range []string{
 		``, `{}`, `{"verb":"qualify"}`, `{"verb":"status","path":"/etc"}`, `{"verb":"status"} {"verb":"install"}`,
 		`{"verb":"install","env":"X=1"}`, `{"verb":"preflight"}`, `{"verb":"STATUS"}`, `[]`, `{"verb":"status","argv":["/bin/sh"]}`,
-		`{"verb":"status","Verb":"install"}`,
+		`{"verb":"status","Verb":"install"}`, `{"verb":"approve"}`, `{"verb":"round-begin","sha256":"AB"}`,
+		`{"verb":"status","sha256":"` + strings.Repeat("a", 64) + `"}`, `{"verb":"approve","sha256":"` + strings.Repeat("A", 64) + `"}`,
 	} {
 		if _, err := DecodeRequest([]byte(line)); err == nil {
 			t.Errorf("accepted %s", line)
@@ -692,7 +721,11 @@ func TestDecodeRequestGrammar(t *testing.T) {
 		t.Error("accepted oversized request")
 	}
 	for _, v := range Verbs {
-		line, _ := json.Marshal(Request{Verb: v, Env: testEnvIf(v, Owner{UID: 501, Name: "jdoe"})})
+		r := Request{Verb: v, Env: testEnvIf(v, Owner{UID: 501, Name: "jdoe"})}
+		if v == VerbRoundBegin || v == VerbApprove {
+			r.SHA256 = strings.Repeat("a", 64)
+		}
+		line, _ := json.Marshal(r)
 		if r, err := DecodeRequest(line); err != nil || r.Verb != v {
 			t.Errorf("%s: %v", v, err)
 		}

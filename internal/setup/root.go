@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -74,6 +75,7 @@ func RootHelper(owner Owner, sha string, terminal io.Writer) (*Helper, error) {
 		Install: deploy.Install, Exec: terminalCommand(terminal), Probe: quietCommand,
 		ConsoleUID: hostguard.ConsoleUID, ToolCheck: hostguard.ToolchainExecutable,
 		Boot: SystemBoot, Now: time.Now, Terminal: terminal, TerminalCheck: stdoutTerminal, FDAWait: 30 * time.Second,
+		Output: outputCommand, Qualify: &SystemQualifier{Root: deploy.Prefix, Staging: StagingDir},
 	}, nil
 }
 
@@ -90,14 +92,15 @@ func command(ctx context.Context, c Cmd) (*exec.Cmd, context.CancelFunc) {
 }
 
 // stdoutTerminal requires the helper's stdout (the owner's terminal, where
-// deploy-install prints the one-time API token) to be a terminal.
+// deploy-install's account helper asks for the build account's password)
+// to be a terminal.
 func stdoutTerminal() error {
 	info, err := os.Stdout.Stat()
 	if err != nil {
 		return err
 	}
 	if info.Mode()&fs.ModeCharDevice == 0 {
-		return errors.New("deploy-install prints the one-time API token to this terminal; run macserve setup with its output on the terminal, not into a pipe or file")
+		return errors.New("deploy-install asks for the build account's password on this terminal; run macserve setup with its output on the terminal, not into a pipe or file")
 	}
 	return nil
 }
@@ -110,6 +113,37 @@ func terminalCommand(terminal io.Writer) func(context.Context, Cmd) error {
 		cmd.Stdout, cmd.Stderr = terminal, terminal
 		return cmd.Run()
 	}
+}
+
+// outputCommand runs c and returns its standard output (at most 1 MiB)
+// and exit status; err is set only when it could not run or timed out.
+func outputCommand(ctx context.Context, c Cmd) ([]byte, int, error) {
+	cmd, cancel := command(ctx, c)
+	defer cancel()
+	var out bytes.Buffer
+	cmd.Stdout = &limitedBuffer{b: &out, max: 1 << 20}
+	err := cmd.Run()
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && cmd.ProcessState != nil && cmd.ProcessState.Exited() {
+		return out.Bytes(), exit.ExitCode(), nil
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	return out.Bytes(), 0, nil
+}
+
+// limitedBuffer keeps the first max bytes and reports an error beyond.
+type limitedBuffer struct {
+	b   *bytes.Buffer
+	max int
+}
+
+func (l *limitedBuffer) Write(p []byte) (int, error) {
+	if l.b.Len()+len(p) > l.max {
+		return 0, errors.New("command output exceeds its bound")
+	}
+	return l.b.Write(p)
 }
 
 // quietCommand runs c and discards its output.
