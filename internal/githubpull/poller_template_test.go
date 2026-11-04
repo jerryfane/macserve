@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -113,5 +114,47 @@ func TestPolicyNamingTemplateEnrollsAndReceiptBindsTemplateDigest(t *testing.T) 
 	}
 	if payload.ProfileDigest != want || payload.Request.Profile != testTemplate || payload.Approval.Intake != "github_pull" || payload.Approval.AttemptID != run.AttemptID {
 		t.Fatalf("receipt does not bind the template digest and PR approval: %+v", payload)
+	}
+}
+
+// A template edit changes its digest, which must change the run key and stop
+// a job admitted under the old template from dispatching.
+func TestTemplateDigestPinsRunKeyAndDispatch(t *testing.T) {
+	template := templateFor("example-org")
+	f, err := newFixtureWith(t, registryOf(t, nil, template), []string{testTemplate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.poll(t)
+	run := f.run(t)
+	ctx := context.Background()
+	job, err := f.s.Get(ctx, run.JobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.p.BeforeDispatch(ctx, job); err != nil {
+		t.Fatalf("current template job refused: %v", err)
+	}
+	edited := template
+	edited.Version = 2
+	options := f.options
+	options.Profiles = registryOf(t, nil, edited)
+	p, err := New(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input, err := p.admission(options.Policies[0], f.remote.pull, testTemplate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := edited.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if input.Admission.ProfileDigest != want || input.Run.Key == run.Key {
+		t.Fatalf("run key does not bind the template digest: key=%s old=%s digest=%s", input.Run.Key, run.Key, input.Admission.ProfileDigest)
+	}
+	if err = p.BeforeDispatch(ctx, job); !errors.Is(err, ErrIneligible) {
+		t.Fatalf("job admitted under the old template still dispatches: %v", err)
 	}
 }
