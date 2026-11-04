@@ -93,6 +93,34 @@ func (w synchronizedWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
+// exitStatusError is a reaped command's ordinary non-zero exit, with no
+// signal: the command's own verdict rather than a runner, output, deadline or
+// cleanup failure.
+type exitStatusError struct{ code int }
+
+func (e *exitStatusError) Error() string {
+	return fmt.Sprintf("worker command exited with status %d", e.code)
+}
+
+// onlyExitStatus reports whether err is exactly one ordinary non-zero exit
+// with status code and nothing else joined to it.
+func onlyExitStatus(err error, code int) bool {
+	for {
+		switch e := err.(type) {
+		case *exitStatusError:
+			return e.code == code
+		case interface{ Unwrap() []error }:
+			errs := e.Unwrap()
+			if len(errs) != 1 {
+				return false
+			}
+			err = errs[0]
+		default:
+			return false
+		}
+	}
+}
+
 // Run does not inherit the caller's environment or working directory. Writers
 // must return from Write; as with other io.Writer consumers, a caller-provided
 // writer that never returns cannot be interrupted by closing the child pipes.
@@ -255,7 +283,7 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 		if result.Signal != "" {
 			runErr = errors.Join(runErr, fmt.Errorf("worker command terminated by signal %s", result.Signal))
 		} else {
-			runErr = errors.Join(runErr, fmt.Errorf("worker command exited with status %d", result.ExitCode))
+			runErr = errors.Join(runErr, &exitStatusError{code: result.ExitCode})
 		}
 	}
 

@@ -10,6 +10,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/jerryfane/macserve/internal/model"
 )
 
 func (x *execution) simulator(ctx context.Context) error {
@@ -59,37 +61,73 @@ func (x *execution) simulator(ctx context.Context) error {
 	if !matched {
 		return errors.New("pinned simulator runtime missing")
 	}
-	// Record the inventory before creation. An interrupted create must never
-	// infer ownership from a device name or delete an unrecorded UDID.
+	for attempt := 1; ; attempt++ {
+		x.result.Observation.SimulatorBootAttempts = attempt
+		id, err := x.createDevice(ctx, pin)
+		if err != nil {
+			return err
+		}
+		retryable, err := x.bootDevice(ctx, id)
+		if err == nil || !retryable || attempt == simulatorBootAttempts {
+			return err
+		}
+		// The one infrastructure retry: discard the device that failed to
+		// boot through the teardown path (shutdown and delete the recorded
+		// UDID, prove it absent, quiesce the job UID) and create a fresh one.
+		// Tests are never retried.
+		if stopErr := x.engine.stopWriters(ctx, &x.manifest); stopErr != nil {
+			return errors.Join(err, stopErr)
+		}
+		x.result.Observation.DeviceUDID = ""
+		if _, logErr := fmt.Fprintf(x.stderr, "macserve: simulator boot failed (%v); retrying once on a new device\n", err); logErr != nil {
+			return logErr
+		}
+	}
+}
+
+// simulatorBootAttempts bounds how many fresh devices a job may create when
+// `simctl boot` or `bootstatus` fails: one retry, for infrastructure flakes.
+const simulatorBootAttempts = 2
+
+// createDevice creates the job's own device and records its UDID. The
+// inventory is recorded before creation: an interrupted create must never
+// infer ownership from a device name or delete an unrecorded UDID.
+func (x *execution) createDevice(ctx context.Context, pin *model.Simulator) (string, error) {
 	before, err := x.engine.deviceInventory(ctx, &x.manifest)
 	if err != nil {
-		return err
+		return "", err
 	}
 	x.manifest.DevicesBefore = before
 	x.manifest.DeviceCreatePending = true
 	if err := x.engine.saveManifest(x.manifest); err != nil {
-		return err
+		return "", err
 	}
 	output, err := x.capture(ctx, "/usr/bin/xcrun", "simctl", "create", "macserve-"+x.job.ID, pin.DeviceType, pin.Runtime)
 	id := strings.TrimSpace(string(output))
 	if !udidPattern.MatchString(id) {
-		return errors.Join(err, errors.New("simulator creation did not return a valid owned UDID"))
+		return "", errors.Join(err, errors.New("simulator creation did not return a valid owned UDID"))
 	}
 	x.manifest.DeviceUDID = id
 	x.manifest.DeviceCreatePending = false
 	x.manifest.DevicesBefore = nil
 	x.result.Observation.DeviceUDID = id
 	if saveErr := x.engine.saveManifest(x.manifest); saveErr != nil {
-		return errors.Join(err, saveErr)
+		return "", errors.Join(err, saveErr)
 	}
-	if err != nil {
-		return err
+	return id, err
+}
+
+// bootDevice boots the owned device and waits for it. retryable reports a
+// plain boot failure: simctl failed with its processes cleaned up, nothing was
+// contaminated and the job itself is still live.
+func (x *execution) bootDevice(ctx context.Context, id string) (retryable bool, err error) {
+	for _, args := range [][]string{{"simctl", "boot", id}, {"simctl", "bootstatus", id, "-b"}} {
+		result, err := x.invoke(ctx, x.command("/usr/bin/xcrun", args), x.stdout, x.stderr)
+		if err != nil {
+			return result.CleanupOK && ctx.Err() == nil && !errors.Is(err, ErrContamination) && !errors.Is(err, ErrRecovery), err
+		}
 	}
-	if _, err := x.capture(ctx, "/usr/bin/xcrun", "simctl", "boot", id); err != nil {
-		return err
-	}
-	_, err = x.capture(ctx, "/usr/bin/xcrun", "simctl", "bootstatus", id, "-b")
-	return err
+	return false, nil
 }
 
 // environment is the whole environment of every job command. HOME, TMPDIR and
@@ -140,6 +178,11 @@ func (e *Engine) stopDevice(ctx context.Context, m *manifest) error {
 			if !result.CleanupOK {
 				return errors.Join(err, ErrRecovery)
 			}
+			if action == "shutdown" && alreadyShutdown(err, result, output, stderr) {
+				// A device that failed to boot may already be shut down; the
+				// delete and the absence proof below still decide ownership.
+				continue
+			}
 			if err != nil || result.ExitCode != 0 || result.Signal != "" || output.err != nil || stderr.err != nil {
 				failures = append(failures, fmt.Errorf("simulator %s failed: %w", action, errors.Join(err, output.err, stderr.err, fmt.Errorf("exit %d signal %s: %s %s", result.ExitCode, result.Signal, output.String(), stderr.String()))))
 			}
@@ -155,6 +198,20 @@ func (e *Engine) stopDevice(ctx context.Context, m *manifest) error {
 		}
 	}
 	return nil
+}
+
+// simctlAlreadyShutdown is CoreSimulator's refusal to shut down a device that
+// is already in the Shutdown state.
+const simctlAlreadyShutdown = "Unable to shutdown device in current state: Shutdown"
+
+// alreadyShutdown reports whether a completed `simctl shutdown <recorded UDID>`
+// failed only because the device was already shut down: a plain non-zero
+// exit (the runner's error is exactly that exit status, or none), no signal,
+// intact output and CoreSimulator's state refusal. Cancellation, output,
+// drain and cleanup failures are joined to the runner's error, so they never
+// qualify.
+func alreadyShutdown(err error, result ProcessResult, output, stderr *boundedBuffer) bool {
+	return (err == nil || onlyExitStatus(err, result.ExitCode)) && result.ExitCode > 0 && result.Signal == "" && result.CleanupOK && output.err == nil && stderr.err == nil && strings.Contains(output.String()+stderr.String(), simctlAlreadyShutdown)
 }
 
 func (e *Engine) cleanup(ctx context.Context, m *manifest) error {
