@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -79,22 +80,31 @@ type Helper struct {
 	ToolCheck func(path string, jobUID uint32) error
 	Boot      func() (Boot, error)
 	Now       func() time.Time
-	// Terminal is the owner's terminal (the helper's inherited stdout).
-	// deploy-install prints the one-time API token here; it never passes
-	// through the wizard, the ledger or the audit log.
+	// Terminal is the owner's terminal (the helper's inherited stdout),
+	// where deploy-install's account helper asks for the build account's
+	// password. deploy-install's one-time API token line is taken out of
+	// its output (tokenFilter) and returned to the wizard only.
 	Terminal io.Writer
 	// TerminalCheck requires Terminal to be a terminal, not a pipe or
-	// file that would keep the token.
+	// file.
 	TerminalCheck func() error
 	// FDAWait bounds the wait for the transient launchd check.
 	FDAWait time.Duration
+	// Output runs a fixed command and returns its standard output and
+	// exit status; err is set only when it could not run or timed out.
+	Output func(context.Context, Cmd) (stdout []byte, status int, err error)
+	// Qualify is the existing qualification and worker APIs the rounds and
+	// approve-and-start call.
+	Qualify Qualifier
 }
 
 func (h *Helper) configPath(name string) string { return filepath.Join(h.Root, "config", name) }
 
 // Approved reports an approved qualification: activation-anchor.json or
-// qualification.json exists. The helper then refuses everything except
-// status: setup changes after approval would break the activation anchor.
+// qualification.json exists. Setup changes after approval would break the
+// activation anchor, so the helper then serves only the verbs that finish
+// approve-and-start (ownApproval), and nothing on a Mac approved outside
+// this setup ledger.
 func (h *Helper) Approved() (bool, error) {
 	for _, name := range []string{"activation-anchor.json", "qualification.json"} {
 		_, err := os.Lstat(h.configPath(name))
@@ -106,6 +116,18 @@ func (h *Helper) Approved() (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// ownApproval reports an approval this setup ledger recorded: round 2 is
+// done and the owner typed approve during approve-and-start.
+func ownApproval(l *Ledger) bool {
+	return l != nil && l.Approval != nil && l.record(StepRound2).Status == StatusDone
+}
+
+// afterApproval are the only verbs served once the qualification is
+// approved: they finish approve-and-start and change no bound file.
+func afterApproval(v Verb) bool {
+	return v == VerbStatus || v == VerbSummary || v == VerbApprove || v == VerbReleasePause
 }
 
 // load returns the ledger, refusing one that belongs to another user.
@@ -120,19 +142,25 @@ func (h *Helper) load() (*Ledger, LedgerLocation, error) {
 	return l, loc, nil
 }
 
+// errApproved refuses changes on an approved Mac.
+var errApproved = errors.New("qualification is approved on this Mac; macserve setup changes nothing after approval")
+
 // CheckStart refuses to start the helper on a Mac whose qualification is
-// approved, whose ledger is someone else's, whose running binary is not
-// the one the owner verified (checkExecutable), or (decision D12) whose
+// approved (unless by this setup ledger, to finish approve-and-start),
+// whose ledger is someone else's, whose running binary is not the one the
+// owner verified (checkExecutable), or (decision D12) whose
 // /Library/macserve exists without a native ledger.
 func (h *Helper) CheckStart() error {
-	if approved, err := h.Approved(); err != nil {
+	approved, err := h.Approved()
+	if err != nil {
 		return err
-	} else if approved {
-		return errors.New("qualification is approved on this Mac; macserve setup changes nothing after approval")
 	}
 	l, _, err := h.load()
 	if err != nil {
 		return err
+	}
+	if approved && !ownApproval(l) {
+		return errApproved
 	}
 	if err := h.checkExecutable(l); err != nil {
 		return err
@@ -217,14 +245,16 @@ func (h *Helper) handle(r Request) (Response, error) {
 		_, _, err := h.load()
 		return Response{}, err
 	}
-	if approved, err := h.Approved(); err != nil {
+	approved, err := h.Approved()
+	if err != nil {
 		return Response{}, err
-	} else if approved {
-		return Response{}, errors.New("qualification is approved on this Mac; macserve setup changes nothing after approval")
 	}
 	l, loc, err := h.load()
 	if err != nil {
 		return Response{}, err
+	}
+	if approved && (!afterApproval(r.Verb) || !ownApproval(l)) {
+		return Response{}, errApproved
 	}
 	if r.Verb == VerbPreflight {
 		return h.preflight(l, r.Env)
@@ -232,12 +262,12 @@ func (h *Helper) handle(r Request) (Response, error) {
 	if l == nil {
 		return Response{}, errors.New("no setup ledger yet; preflight comes first")
 	}
-	if l.Approval != nil || l.record(StepRound1).Status != StatusPending {
-		return Response{}, errors.New("qualification has started; this release of macserve setup stops before round 1")
-	}
-	if _, failed := l.Failed(); failed {
-		_, _, err := l.Next()
+	next, done, err := l.Next()
+	if err != nil {
 		return Response{}, err
+	}
+	if done || !slices.Contains(verbSteps[r.Verb], next.Step) {
+		return Response{}, fmt.Errorf("setup continues at %s; %s is not served there", next.Step, r.Verb)
 	}
 	switch r.Verb {
 	case VerbInstall:
@@ -252,8 +282,44 @@ func (h *Helper) handle(r Request) (Response, error) {
 		return h.jobLoginVerb(l, loc)
 	case VerbOwnerActions:
 		return h.ownerActions(l, loc)
+	case VerbRoundPrepare:
+		return h.roundPrepare(l, loc, next.Step)
+	case VerbRoundBegin:
+		return h.roundBegin(l, loc, next.Step, r.SHA256)
+	case VerbRoundJobProbe:
+		return h.roundJobProbe(l, next.Step)
+	case VerbRoundCollect:
+		return h.roundCollect(l, loc, next.Step)
+	case VerbReboot:
+		return h.reboot(l, loc)
+	case VerbSummary:
+		return h.summaryVerb(l, loc)
+	case VerbApprove:
+		return h.approve(l, loc, r.SHA256)
+	case VerbReleasePause:
+		return h.releasePause(l)
 	}
 	return Response{}, fmt.Errorf("unknown verb %q", r.Verb)
+}
+
+// verbSteps is the step each verb serves: the ledger's next step must be
+// one of them. Everything is served in ledger order only, and a failed
+// step blocks every verb (Ledger.Next).
+var verbSteps = map[Verb][]Step{
+	VerbInstall:       {StepInstall},
+	VerbGitHub:        {StepGitHub},
+	VerbTools:         {StepTools},
+	VerbFDACheck:      {StepOwnerActions},
+	VerbJobLogin:      {StepOwnerActions, StepRound1, StepRound2},
+	VerbOwnerActions:  {StepOwnerActions},
+	VerbRoundPrepare:  {StepRound1, StepRound2},
+	VerbRoundBegin:    {StepRound1, StepRound2},
+	VerbRoundJobProbe: {StepRound1, StepRound2},
+	VerbRoundCollect:  {StepRound1, StepRound2},
+	VerbReboot:        {StepReboot},
+	VerbSummary:       {StepApproveAndStart},
+	VerbApprove:       {StepApproveAndStart},
+	VerbReleasePause:  {StepFirstBuild},
 }
 
 // begin starts step s and saves the ledger. A retryable step that is

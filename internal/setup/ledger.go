@@ -55,22 +55,24 @@ var StepSummaries = map[Step]string{
 	StepGitHub:          "add a build profile and run sudo macserve connect-github (temporary until O5/O7; detected)",
 	StepTools:           "accept the Xcode license, run first launch and install the Metal toolchain system-wide",
 	StepOwnerActions:    "you grant Full Disk Access and log in to the build account once (detected)",
-	StepRound1:          "qualification round 1, unattended",
+	StepRound1:          "qualification round 1: you confirm the build account's login items and process baseline, then unattended",
 	StepReboot:          "restart the Mac (FileVault asks for your password, not macserve)",
-	StepRound2:          "qualification round 2 on the new boot, unattended",
-	StepApproveAndStart: "you type approve; services start only after that",
+	StepRound2:          "log in to the build account again, then qualification round 2 on the new boot",
+	StepApproveAndStart: "you type approve; services start only after that, and owner.pause is removed once health is valid",
 	StepFirstBuild:      "first build of your repository and receipt check",
 }
 
 // Retryable reports a step that may begin again after it was interrupted
 // or returned an error while running: it only checks host state or runs
 // commands that converge (preflight, github detection, the Xcode system
-// steps, owner-action detection). Every other interrupted step stays
-// blocked; install in particular must never be rerun (deploy-install
-// "do not rerun").
+// steps, owner-action detection), or it is a qualification round: every
+// attempt resets the GUI baseline and begins a new qualification session,
+// sessions are append-only evidence and nothing is approved by a round.
+// Every other interrupted step stays blocked; install in particular must
+// never be rerun (deploy-install "do not rerun").
 func Retryable(s Step) bool {
 	switch s {
-	case StepPreflight, StepGitHub, StepTools, StepOwnerActions:
+	case StepPreflight, StepGitHub, StepTools, StepOwnerActions, StepRound1, StepRound2:
 		return true
 	}
 	return false

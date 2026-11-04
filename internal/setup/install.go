@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/jerryfane/macserve/assets"
@@ -23,7 +25,10 @@ const maxBinary = 256 << 20
 // this macserve binary (its digest must equal SHA256) and the embedded
 // assets are staged root-only, then deploy.Install applies them exactly as
 // `deploy-install --apply` does, with the owner's terminal for the job
-// password prompt and the one-time API token. On success the ledger moves
+// password prompt. deploy-install's one-time API token line is taken out
+// of that output (tokenFilter) and returned in the response only, for the
+// wizard to put into the owner's login keychain (decision D11); it is
+// never printed, logged or written to a file. On success the ledger moves
 // into LedgerDir and the staged inputs are removed. A failure, or an
 // interruption, blocks setup: deploy-install must not be rerun.
 func (h *Helper) install(l *Ledger, loc LedgerLocation) (Response, error) {
@@ -63,17 +68,101 @@ func (h *Helper) install(l *Ledger, loc LedgerLocation) (Response, error) {
 		AssetsPath:      h.Store.staged(stagedAssets),
 		Apply:           true,
 	}
-	if err := h.Install(opts, h.Terminal, h.Terminal); err != nil {
+	stdout := &tokenFilter{out: h.Terminal}
+	err = h.Install(opts, stdout, h.Terminal)
+	if err != nil {
 		return Response{}, h.fail(l, loc, StepInstall, err)
+	}
+	// From here the install is done: the token goes back to the wizard
+	// even if a later step errs, so it reaches the owner's keychain.
+	resp := Response{Token: stdout.token()}
+	if resp.Token == "" {
+		return Response{}, h.fail(l, loc, StepInstall, errors.New("deploy-install finished without the one-time API token; reconcile by hand"))
 	}
 	inputs := map[string]string{"deploy.env": digestHex(env), "macserve": h.SHA256, "assets": assetsDigest(h.Assets)}
 	if err := h.complete(l, LedgerStaged, StepInstall, boot, inputs); err != nil {
-		return Response{}, err
+		return resp, err
 	}
 	if err := h.Store.MoveLedger(l); err != nil {
-		return Response{}, fmt.Errorf("installed, but the setup ledger could not be moved into %s (run macserve setup again to retry the move): %w", h.Store.Ledger, err)
+		return resp, fmt.Errorf("installed, but the setup ledger could not be moved into %s (run macserve setup again to retry the move): %w", h.Store.Ledger, err)
 	}
-	return Response{Done: true}, h.Store.RemoveStagedInputs()
+	resp.Done = true
+	return resp, h.Store.RemoveStagedInputs()
+}
+
+// tokenPrefix starts deploy-install's one-time API token line.
+const tokenPrefix = "API_BEARER_TOKEN="
+
+// tokenFilter passes deploy-install's output to out as it comes (the
+// account helper's password prompt has no newline), except a line that
+// starts with tokenPrefix: that line is kept, never written.
+type tokenFilter struct {
+	mu   sync.Mutex
+	out  io.Writer
+	line []byte // the current line while it may still be the token line
+	keep bool   // the current line is the token line
+	pass bool   // the current line is passed through
+	tok  []byte
+}
+
+func (f *tokenFilter) Write(p []byte) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := 0; i < len(p); {
+		switch {
+		case f.keep:
+			j := bytes.IndexByte(p[i:], '\n')
+			if j < 0 {
+				f.tok = append(f.tok, p[i:]...)
+				return len(p), nil
+			}
+			f.tok = append(f.tok, p[i:i+j]...)
+			f.keep, f.tok = false, append(f.tok, '\n')
+			i += j + 1
+		case f.pass:
+			j := bytes.IndexByte(p[i:], '\n')
+			end := len(p)
+			if j >= 0 {
+				end = i + j + 1
+				f.pass = false
+			}
+			if _, err := f.out.Write(p[i:end]); err != nil {
+				return i, err
+			}
+			i = end
+		default:
+			// At a line start: hold bytes while they may begin the token line.
+			for i < len(p) && len(f.line) < len(tokenPrefix) && p[i] == tokenPrefix[len(f.line)] {
+				f.line = append(f.line, p[i])
+				i++
+			}
+			if len(f.line) == len(tokenPrefix) {
+				f.keep, f.line = true, nil
+				continue
+			}
+			if i == len(p) {
+				return len(p), nil
+			}
+			held := f.line
+			f.line, f.pass = nil, true
+			if _, err := f.out.Write(held); err != nil {
+				return i, err
+			}
+		}
+	}
+	return len(p), nil
+}
+
+// token is the last complete token line's value.
+func (f *tokenFilter) token() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	lines := strings.Split(strings.TrimSuffix(string(f.tok), "\n"), "\n")
+	t := lines[len(lines)-1]
+	if !strings.HasSuffix(string(f.tok), "\n") || t == "" {
+		return ""
+	}
+	return t
 }
 
 func sortedKeys(m map[string][]byte) []string {

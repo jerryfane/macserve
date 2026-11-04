@@ -99,16 +99,18 @@ func (h *Helper) fdaVerb(l *Ledger, loc LedgerLocation) (Response, error) {
 	return Response{Done: granted, Detail: detail}, err
 }
 
+// jobLoginVerb checks the build account's GUI session and the console
+// owner. At owner-actions it begins that step; before a round (the job
+// account logs in again after the restart) it only checks.
 func (h *Helper) jobLoginVerb(l *Ledger, loc LedgerLocation) (Response, error) {
-	if err := h.ownerActionsNext(l); err != nil {
-		return Response{}, err
-	}
 	e, _, err := h.installedEnv(l)
 	if err != nil {
 		return Response{}, err
 	}
-	if _, err := h.begin(l, loc, StepOwnerActions); err != nil {
-		return Response{}, err
+	if next, _, _ := l.Next(); next.Step == StepOwnerActions {
+		if _, err := h.begin(l, loc, StepOwnerActions); err != nil {
+			return Response{}, err
+		}
 	}
 	ok, detail := h.checkJobLogin(e.JobUID, e.OwnerUID)
 	return Response{Done: ok, Detail: detail}, nil

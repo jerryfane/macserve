@@ -50,6 +50,25 @@ type setupWizard struct {
 	sleep func(time.Duration)
 	// loginPoll and loginWait pace the job-login detection.
 	loginPoll, loginWait time.Duration
+	// home is the owner's home directory (owner canary and owner files).
+	home string
+	// keychain stores the one-time API token in the owner's login
+	// keychain (decision D11).
+	keychain func(token string) error
+	// canary and probe are the owner-home control and the owner probe of
+	// a qualification session (qualification.Canary owner-home and
+	// qualification.Probe owner), run in this process as the owner.
+	homeControl func(ctx context.Context, sessionDir, out string) error
+	ownerReport func(ctx context.Context, sessionDir, out string) error
+	// canaryLead lets the owner-home control take its first read before
+	// the job probe.
+	canaryLead time.Duration
+	// restart restarts the Mac (kind: setup.RestartAuth, RestartUnlock or
+	// RestartPlain) through sudo on the owner's terminal.
+	restart func(kind string) error
+	// healthWait bounds the wait for valid health before owner.pause is
+	// removed.
+	healthWait time.Duration
 }
 
 func runSetupApply(args []string, stdout, stderr io.Writer) int {
@@ -109,6 +128,12 @@ func runSetupApply(args []string, stdout, stderr io.Writer) int {
 			return cmd.Run()
 		},
 		sleep: time.Sleep, loginPoll: 5 * time.Second, loginWait: 30 * time.Minute,
+		keychain: saveKeychainToken, homeControl: runOwnerHomeControl, ownerReport: runOwnerProbe, canaryLead: 3 * time.Second,
+		restart: restartMac, healthWait: 10 * time.Minute,
+	}
+	if w.home, err = ownerHome(); err != nil {
+		fmt.Fprintln(stderr, "macserve setup:", err)
+		return 1
 	}
 	w.start = func(path, digest string) (setupSession, error) { return startRootHelper(path, digest, stderr) }
 	return w.run(choices, sha, stderr)
@@ -205,9 +230,16 @@ func (w *setupWizard) run(choices plan.Choices, sha string, stderr io.Writer) in
 			_, err = w.call(session, setup.Request{Verb: setup.VerbTools})
 		case setup.StepOwnerActions:
 			err = w.ownerActions(session)
-		default:
-			w.say("\nmacserve is installed with every service disabled and owner.pause set; GitHub, the Xcode steps and the owner actions are recorded.")
-			w.say("Next is qualification round %s, which this release of macserve setup does not run (O5). Until then continue with docs/install.md from sitting 2; run macserve setup again after upgrading to resume here.", strings.TrimPrefix(string(step), "round-"))
+		case setup.StepRound1, setup.StepRound2:
+			err = w.round(session, step)
+		case setup.StepReboot:
+			err = w.reboot(session)
+		case setup.StepApproveAndStart:
+			err = w.approve(session)
+		case setup.StepFirstBuild:
+			return w.finish(session, stderr)
+		}
+		if errors.Is(err, errRestarting) {
 			return 0
 		}
 		if errors.Is(err, errStopped) {
@@ -227,9 +259,15 @@ func (w *setupWizard) call(s setupSession, r setup.Request) (setup.Response, err
 
 func (w *setupWizard) install(s setupSession) error {
 	w.say("\nInstall (as root, through deploy-install): creates the controller and build accounts, /Library/macserve, TLS and receipt keys and three launchd services, all disabled, with owner.pause set.")
-	w.say("sysadminctl asks for the build account's password: choose one and keep it; you log in to that account once later.")
-	w.say("deploy-install prints API_BEARER_TOKEN once at the end. Save it in your password manager now: macserve setup does not read, log or store it.")
-	if _, err := w.call(s, setup.Request{Verb: setup.VerbInstall}); err != nil {
+	w.say("sysadminctl asks for the build account's password: choose one and keep it; you log in to that account later.")
+	resp, err := w.call(s, setup.Request{Verb: setup.VerbInstall})
+	if resp.Token != "" {
+		if kerr := w.saveToken(resp.Token); kerr != nil {
+			err = errors.Join(err, kerr)
+		}
+		resp.Token = ""
+	}
+	if err != nil {
 		return err
 	}
 	w.say("Installed.")
@@ -366,6 +404,25 @@ func (w *setupWizard) ownerActions(s setupSession) error {
 			return errStopped
 		}
 	}
+	if err := w.waitJobLogin(s, "once"); err != nil {
+		return err
+	}
+	resp, err := w.call(s, setup.Request{Verb: setup.VerbOwnerActions})
+	if err != nil {
+		return err
+	}
+	if !resp.Done {
+		w.say("Owner actions not complete yet: %s.", resp.Detail)
+		return nil
+	}
+	w.say("Owner actions recorded.")
+	return nil
+}
+
+// waitJobLogin polls the build account's GUI session and the console
+// until the build account is logged in in the background and the owner
+// (or the login window) holds the screen; it explains how once.
+func (w *setupWizard) waitJobLogin(s setupSession, when string) error {
 	e, err := w.installedEnv()
 	if err != nil {
 		return err
@@ -378,13 +435,13 @@ func (w *setupWizard) ownerActions(s setupSession) error {
 			return err
 		}
 		if resp.Done {
-			break
+			return nil
 		}
 		if !shown {
-			w.say("\nLog in to the build account once, then come back:")
+			w.say("\nLog in to the build account %s, then come back:", when)
 			w.say("  1. Control Center > your name > %q (or Apple menu > Lock Screen and choose it), and log in with the password you chose at install.", e.JobRealName)
 			w.say("  2. When its desktop appears, Control Center > %q > Switch User..., and log back in to your own account.", e.JobRealName)
-			w.say("  Do not type anything in the build account. Setup notices both steps on its own.")
+			w.say("  Do not open or type anything in the build account. Setup notices both steps on its own.")
 			shown = true
 		}
 		if time.Now().After(deadline) {
@@ -393,16 +450,6 @@ func (w *setupWizard) ownerActions(s setupSession) error {
 		}
 		w.sleep(w.loginPoll)
 	}
-	resp, err := w.call(s, setup.Request{Verb: setup.VerbOwnerActions})
-	if err != nil {
-		return err
-	}
-	if !resp.Done {
-		w.say("Owner actions not complete yet: %s.", resp.Detail)
-		return nil
-	}
-	w.say("Owner actions recorded.")
-	return nil
 }
 
 // releaseAsset is the release binary's name in SHA256SUMS.
