@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -11,7 +12,11 @@ var (
 	boot1  = Boot{Time: "{ sec = 1000, usec = 0 }", SessionUUID: "11111111-1111-1111-1111-111111111111"}
 	boot2  = Boot{Time: "{ sec = 2000, usec = 0 }", SessionUUID: "22222222-2222-2222-2222-222222222222"}
 	digest = strings.Repeat("a", 64)
-	t0     = time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	// bindings and approved are a summary's owner.pause binding and qualify
+	// approve's recorded files.
+	bindings = "owner.pause " + strings.Repeat("b", 64) + " inode 1:2 mtime 3, profiles.json " + strings.Repeat("c", 64)
+	approved = map[string]string{"approved-boundary-evidence.json": strings.Repeat("d", 64), "qualification.json": strings.Repeat("e", 64), "activation-anchor.json": strings.Repeat("f", 64)}
+	t0       = time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
 )
 
 func mustStep(t *testing.T, l *Ledger, s Step, boot Boot) {
@@ -46,7 +51,10 @@ func ledgerAt(t *testing.T, s Step) *Ledger {
 			if err := l.Begin(step, boot2, t0); err != nil {
 				t.Fatal(err)
 			}
-			if err := l.Approve(digest, boot2, t0); err != nil {
+			if err := l.Approve(digest, bindings, boot2, t0); err != nil {
+				t.Fatal(err)
+			}
+			if err := l.RecordApproved(approved); err != nil {
 				t.Fatal(err)
 			}
 			if err := l.Complete(step, boot2, nil, t0); err != nil {
@@ -264,7 +272,7 @@ func forged(t *testing.T, edit func(*Ledger)) []byte {
 		}
 		l.Records[i] = Record{Step: Steps[i], Status: StatusDone, Started: &at, Finished: &at, Boot: &b, FinishBoot: &f}
 	}
-	l.Approval = &Approval{At: t0, SummarySHA256: digest, Boot: boot2}
+	l.Approval = &Approval{At: t0, SummarySHA256: digest, Boot: boot2, Bindings: bindings, Approved: approved}
 	edit(l)
 	data, err := l.encode()
 	if err != nil {
@@ -293,6 +301,13 @@ func TestDecodeLedgerRechecksBootRules(t *testing.T) {
 		}),
 		"approval from another boot":   forged(t, func(l *Ledger) { l.Approval.Boot = boot1 }),
 		"done without approval":        forged(t, func(l *Ledger) { l.Approval = nil }),
+		"done without qualify approve": forged(t, func(l *Ledger) { l.Approval.Approved = nil }),
+		"approval without bindings":    forged(t, func(l *Ledger) { l.Approval.Bindings = "" }),
+		"approved file missing":        forged(t, func(l *Ledger) { l.Approval.Approved = map[string]string{"qualification.json": digest} }),
+		"approved file bad digest": forged(t, func(l *Ledger) {
+			l.Approval.Approved = maps.Clone(approved)
+			l.Approval.Approved["qualification.json"] = "x"
+		}),
 		"owner with control character": forged(t, func(l *Ledger) { l.Owner = "jdoe\n" }),
 		"system owner uid":             forged(t, func(l *Ledger) { l.OwnerUID = 0 }),
 		"low owner uid":                forged(t, func(l *Ledger) { l.OwnerUID = 500 }),
@@ -346,11 +361,11 @@ func TestStartRefusedBeforeApprove(t *testing.T) {
 	if err := l.AuthorizeStart(boot2); err == nil {
 		t.Fatal("start authorized before round 2")
 	}
-	if err := l.Approve(digest, boot2, t0); err == nil {
+	if err := l.Approve(digest, bindings, boot2, t0); err == nil {
 		t.Fatal("approval accepted before round 2")
 	}
 	mustStep(t, l, StepRound2, boot2)
-	if err := l.Approve(digest, boot2, t0); err == nil {
+	if err := l.Approve(digest, bindings, boot2, t0); err == nil {
 		t.Fatal("approval accepted before approve-and-start began")
 	}
 	if err := l.Begin(StepApproveAndStart, boot2, t0); err != nil {
@@ -362,13 +377,13 @@ func TestStartRefusedBeforeApprove(t *testing.T) {
 	if err := l.Complete(StepApproveAndStart, boot2, nil, t0); err == nil {
 		t.Fatal("approve-and-start completed without approval")
 	}
-	if err := l.Approve("not-a-digest", boot2, t0); err == nil {
+	if err := l.Approve("not-a-digest", bindings, boot2, t0); err == nil {
 		t.Fatal("malformed approval accepted")
 	}
-	if err := l.Approve(digest, boot1, t0); err == nil {
+	if err := l.Approve(digest, bindings, boot1, t0); err == nil {
 		t.Fatal("approval accepted from another boot")
 	}
-	if err := l.Approve(digest, boot2, t0); err != nil {
+	if err := l.Approve(digest, bindings, boot2, t0); err != nil {
 		t.Fatal(err)
 	}
 	if err := l.AuthorizeStart(boot1); err == nil {
@@ -377,11 +392,72 @@ func TestStartRefusedBeforeApprove(t *testing.T) {
 	if err := l.AuthorizeStart(boot2); err != nil {
 		t.Fatal(err)
 	}
+	if err := l.Complete(StepApproveAndStart, boot2, nil, t0); err == nil {
+		t.Fatal("approve-and-start completed before qualify approve was recorded")
+	}
+	if err := l.RecordApproved(map[string]string{"qualification.json": digest}); err == nil {
+		t.Fatal("incomplete approved files recorded")
+	}
+	if err := l.RecordApproved(approved); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.RecordApproved(approved); err == nil {
+		t.Fatal("approved files recorded twice")
+	}
+	if err := l.Approve(strings.Repeat("9", 64), bindings, boot2, t0); err == nil {
+		t.Fatal("approval replaced after qualify approve")
+	}
 	if err := l.Complete(StepApproveAndStart, boot2, nil, t0); err != nil {
 		t.Fatal(err)
 	}
 	if err := l.AuthorizeStart(boot2); err == nil {
 		t.Fatal("start authorized after approve-and-start finished")
+	}
+}
+
+// TestClockStepIsTheSameBoot: kern.boottime moves with a wall-clock step
+// while kern.bootsessionuuid stays; that is the same boot for approval,
+// start and completion, and no new boot for the reboot step.
+func TestClockStepIsTheSameBoot(t *testing.T) {
+	stepped := boot2
+	stepped.Time = "{ sec = 2600, usec = 0 }"
+	l := ledgerAt(t, StepApproveAndStart)
+	if err := l.Begin(StepApproveAndStart, boot2, t0); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Approve(digest, bindings, stepped, t0); err != nil {
+		t.Fatalf("approval after a clock step: %v", err)
+	}
+	if err := l.AuthorizeStart(boot2); err != nil {
+		t.Fatalf("start after a clock step: %v", err)
+	}
+	if err := l.RecordApproved(approved); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Complete(StepApproveAndStart, stepped, nil, t0); err != nil {
+		t.Fatalf("complete after a clock step: %v", err)
+	}
+	if _, err := l.Encode(); err != nil {
+		t.Fatalf("ledger with a clock step: %v", err)
+	}
+	// A clock step is not a restart.
+	l = ledgerAt(t, StepReboot)
+	if err := l.Begin(StepReboot, boot1, t0); err != nil {
+		t.Fatal(err)
+	}
+	clock := boot1
+	clock.Time = "{ sec = 1600, usec = 0 }"
+	if err := l.Complete(StepReboot, clock, nil, t0); err == nil {
+		t.Fatal("a clock step completed the reboot step")
+	}
+	// Another session UUID is another boot, whatever the time says.
+	l = ledgerAt(t, StepApproveAndStart)
+	if err := l.Begin(StepApproveAndStart, boot2, t0); err != nil {
+		t.Fatal(err)
+	}
+	other := Boot{Time: boot2.Time, SessionUUID: "33333333-3333-3333-3333-333333333333"}
+	if err := l.Approve(digest, bindings, other, t0); err == nil {
+		t.Fatal("approval from another boot session accepted")
 	}
 }
 
@@ -412,7 +488,7 @@ func TestMethodsRecheckInvariantsInMemory(t *testing.T) {
 	l = ledgerAt(t, StepRound2)
 	b := boot2
 	l.Records[8] = Record{Step: StepApproveAndStart, Status: StatusRunning, Started: &at, Boot: &b}
-	if err := l.Approve(digest, boot2, t0); err == nil {
+	if err := l.Approve(digest, bindings, boot2, t0); err == nil {
 		t.Error("approval accepted while round 2 is pending")
 	}
 
@@ -421,7 +497,7 @@ func TestMethodsRecheckInvariantsInMemory(t *testing.T) {
 	if err := l.Begin(StepApproveAndStart, boot2, t0); err != nil {
 		t.Fatal(err)
 	}
-	l.Approval = &Approval{At: t0, SummarySHA256: digest, Boot: boot1}
+	l.Approval = &Approval{At: t0, SummarySHA256: digest, Boot: boot1, Bindings: bindings, Approved: approved}
 	if err := l.Complete(StepApproveAndStart, boot2, nil, t0); err == nil {
 		t.Error("approve-and-start completed with an approval from another boot")
 	}

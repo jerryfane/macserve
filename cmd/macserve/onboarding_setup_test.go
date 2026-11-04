@@ -44,6 +44,7 @@ type fakeHelper struct {
 	restarted bool
 	session   string
 	approved  string
+	released  bool
 }
 
 // fakeToken is deploy-install's one-time API token in the fake.
@@ -196,13 +197,25 @@ func (f *fakeHelper) handle(r setup.Request) (setup.Response, error) {
 		if r.SHA256 != hex.EncodeToString(sum[:]) {
 			return setup.Response{}, errors.New("the summary changed since you read it")
 		}
-		if err := f.ledger.Approve(r.SHA256, f.currentBoot(), wizardNow); err != nil {
+		if err := f.ledger.Approve(r.SHA256, "owner.pause "+strings.Repeat("b", 64)+", profiles.json "+strings.Repeat("c", 64), f.currentBoot(), wizardNow); err != nil {
+			return setup.Response{}, err
+		}
+		approved := map[string]string{}
+		for _, name := range setup.ApprovedFiles {
+			approved[name] = strings.Repeat("e", 64)
+		}
+		if err := f.ledger.RecordApproved(approved); err != nil {
 			return setup.Response{}, err
 		}
 		f.approved = r.SHA256
 		f.complete(setup.StepApproveAndStart)
 		return setup.Response{Done: true, Items: []string{"org.macserve.worker", "org.macserve.maintenance", "org.macserve.controller"}}, nil
 	case setup.VerbReleasePause:
+		// The real helper serves it once, right after its own start.
+		if f.approved == "" || f.released {
+			return setup.Response{}, errors.New("setup removes owner.pause only right after it started the services")
+		}
+		f.released = true
 		return setup.Response{Done: true, Detail: "owner.pause removed"}, nil
 	default:
 		return setup.Response{}, errors.New("unknown verb")
@@ -423,7 +436,7 @@ func TestSetupApplyQualifiesAndStarts(t *testing.T) {
 	if r.helper.approved != hex.EncodeToString(sum[:]) {
 		t.Errorf("approved %q", r.helper.approved)
 	}
-	want := []setup.Verb{setup.VerbStatus, setup.VerbSummary, setup.VerbApprove, setup.VerbStatus, setup.VerbReleasePause}
+	want := []setup.Verb{setup.VerbStatus, setup.VerbSummary, setup.VerbApprove, setup.VerbReleasePause, setup.VerbStatus}
 	if !slices.Equal(r.helper.requests, want) {
 		t.Errorf("requests %v, want %v", r.helper.requests, want)
 	}
@@ -434,6 +447,13 @@ func TestSetupApplyQualifiesAndStarts(t *testing.T) {
 	}
 	if len(r.tokens) != 1 {
 		t.Errorf("keychain writes %d", len(r.tokens))
+	}
+	// A later run never asks to remove owner.pause (a pause the owner
+	// sets again is theirs).
+	r.helper.requests = nil
+	r.out.Reset()
+	if got := r.run(plan.DefaultChoices()); got != 0 || !slices.Equal(r.helper.requests, []setup.Verb{setup.VerbStatus}) || !strings.Contains(r.out.String(), "never later") {
+		t.Errorf("later run: exit %d requests %v\n%s", got, r.helper.requests, r.out.String())
 	}
 }
 

@@ -237,7 +237,7 @@ func (w *setupWizard) run(choices plan.Choices, sha string, stderr io.Writer) in
 		case setup.StepApproveAndStart:
 			err = w.approve(session)
 		case setup.StepFirstBuild:
-			return w.finish(session, stderr)
+			return w.finish()
 		}
 		if errors.Is(err, errRestarting) {
 			return 0

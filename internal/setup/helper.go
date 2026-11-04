@@ -96,6 +96,10 @@ type Helper struct {
 	// Qualify is the existing qualification and worker APIs the rounds and
 	// approve-and-start call.
 	Qualify Qualifier
+
+	// started is set when this helper process started the services; it
+	// allows one release-pause in the same run (never on a later run).
+	started bool
 }
 
 func (h *Helper) configPath(name string) string { return filepath.Join(h.Root, "config", name) }
@@ -119,9 +123,11 @@ func (h *Helper) Approved() (bool, error) {
 }
 
 // ownApproval reports an approval this setup ledger recorded: round 2 is
-// done and the owner typed approve during approve-and-start.
+// done, the owner typed approve during approve-and-start and qualify
+// approve's files were recorded for it. startServices then compares those
+// files exactly; their mere presence is never trusted.
 func ownApproval(l *Ledger) bool {
-	return l != nil && l.Approval != nil && l.record(StepRound2).Status == StatusDone
+	return l != nil && l.Approval != nil && l.Approval.Approved != nil && l.record(StepRound2).Status == StatusDone
 }
 
 // afterApproval are the only verbs served once the qualification is
@@ -343,7 +349,7 @@ func (h *Helper) begin(l *Ledger, loc LedgerLocation, s Step) (Boot, error) {
 	if err != nil {
 		return boot, fmt.Errorf("boot identity: %w", err)
 	}
-	if r := l.record(s); r.Status == StatusRunning && Retryable(s) && *r.Boot == boot {
+	if r := l.record(s); r.Status == StatusRunning && Retryable(s) && r.Boot.same(boot) {
 		return boot, nil
 	}
 	if err := l.Begin(s, boot, h.Now()); err != nil {

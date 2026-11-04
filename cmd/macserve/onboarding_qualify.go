@@ -239,7 +239,9 @@ func (w *setupWizard) reboot(s setupSession) error {
 }
 
 // approve shows the summary and records the typed approval; the helper
-// approves, checks the activation anchor and starts the services.
+// approves, checks the activation anchor and starts the services. Then,
+// in this run only, it waits for valid health and removes owner.pause
+// (decision D15).
 func (w *setupWizard) approve(s setupSession) error {
 	resp, err := w.call(s, setup.Request{Verb: setup.VerbSummary})
 	if err != nil {
@@ -259,32 +261,44 @@ func (w *setupWizard) approve(s setupSession) error {
 		return err
 	}
 	w.say("✓ approved, activation anchor written, services started: %s.", strings.Join(resp.Items, ", "))
-	return nil
+	return w.releasePause(s)
 }
 
-// finish removes owner.pause once health is valid (decision D15), then
-// stops: the first build is not in this release of setup.
-func (w *setupWizard) finish(s setupSession, stderr io.Writer) int {
+// releasePause waits for valid health and has the helper remove
+// owner.pause. The helper serves it once, right after it started the
+// services; on timeout owner.pause stays for the owner to remove.
+func (w *setupWizard) releasePause(s setupSession) error {
 	w.say("\nWaiting for valid health before macserve accepts builds ...")
 	deadline := time.Now().Add(w.healthWait)
 	for {
 		resp, err := w.call(s, setup.Request{Verb: setup.VerbReleasePause})
 		if err != nil {
-			fmt.Fprintln(stderr, "macserve setup:", err)
-			return 1
+			return err
 		}
 		if resp.Done {
 			w.say("✓ %s; macserve accepts builds. Your API token is in your login keychain as %q.", resp.Detail, keychainService)
-			w.say("The first build through setup is not in this release; see docs/install.md to start one.")
-			return 0
+			return nil
 		}
 		if time.Now().After(deadline) {
 			slices.Sort(resp.Items)
-			w.say("Health is not valid yet (%s); owner.pause stays. Run macserve setup again later.", strings.Join(resp.Items, ", "))
-			return 0
+			w.say("Health is not valid yet (%s); owner.pause stays.", strings.Join(resp.Items, ", "))
+			w.say("%s", pauseByHand)
+			return nil
 		}
 		w.sleep(w.loginPoll)
 	}
+}
+
+// pauseByHand is how the owner removes owner.pause when setup did not.
+const pauseByHand = "setup removes owner.pause only right after it starts the services, never later. Once GET /v1/admin/state reports health valid with only the owner marker blocking, remove it yourself: sudo rm /Library/macserve/config/owner.pause (docs/install.md)."
+
+// finish is setup at the first build, which this release does not run.
+// It never removes owner.pause: a pause set after the start is the
+// owner's.
+func (w *setupWizard) finish() int {
+	w.say("\nmacserve is approved and its services are started. The first build through setup is not in this release; see docs/install.md to start one.")
+	w.say("If owner.pause is still present: %s", pauseByHand)
+	return 0
 }
 
 // ownerHome is the invoking user's home directory.

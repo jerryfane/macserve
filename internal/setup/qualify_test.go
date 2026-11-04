@@ -37,6 +37,8 @@ type fakeQualifier struct {
 	// categories overrides the collected category statuses.
 	categories map[string]string
 	health     []string
+	// afterApprove runs after a successful Approve (a change during it).
+	afterApprove func()
 }
 
 func newFakeQualifier(f *fakeHost) *fakeQualifier {
@@ -174,16 +176,14 @@ func (q *fakeQualifier) Approve(_ context.Context, dir string) error {
 	}
 	writeRoot(q.f.t, filepath.Join(dir, "approved-boundary-evidence.json"), []byte("{}"), 0o600)
 	writeRoot(q.f.t, q.f.h.configPath("qualification.json"), []byte("{}"), 0o644)
+	writeRoot(q.f.t, q.f.h.configPath("activation-anchor.json"), []byte("{\"anchor\":1}"), 0o644)
+	if q.afterApprove != nil {
+		q.afterApprove()
+	}
 	return nil
 }
 
-func (q *fakeQualifier) ActivationCheck(context.Context) error {
-	if err := q.call("ActivationCheck"); err != nil {
-		return err
-	}
-	writeRoot(q.f.t, q.f.h.configPath("activation-anchor.json"), []byte("{\"anchor\":1}"), 0o644)
-	return nil
-}
+func (q *fakeQualifier) ActivationCheck(context.Context) error { return q.call("ActivationCheck") }
 
 func (q *fakeQualifier) Health(context.Context) ([]string, error) {
 	if err := q.call("Health"); err != nil {
@@ -497,7 +497,7 @@ func TestQualificationLedgerTransitions(t *testing.T) {
 	if _, err := os.Lstat(f.h.configPath("owner.pause")); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("owner.pause: %v", err)
 	}
-	if r := f.mustDo(VerbReleasePause, ""); r.Detail != "owner.pause is already removed" {
+	if r := f.call(VerbReleasePause, ""); !strings.Contains(r.Error, "only right after it started the services") {
 		t.Errorf("second release %+v", r)
 	}
 	// The approved Mac serves nothing that changes a bound file.
@@ -812,7 +812,7 @@ func TestApproveRefusals(t *testing.T) {
 		// A ledger approval of another boot never authorizes a start.
 		l := f.ledger()
 		old := *l.record(StepApproveAndStart).Boot
-		if err := l.Approve(digestHex([]byte(s.Detail)), old, time.Now()); err != nil {
+		if err := l.Approve(digestHex([]byte(s.Detail)), "owner.pause absent, profiles.json x", old, time.Now()); err != nil {
 			t.Fatal(err)
 		}
 		if err := l.AuthorizeStart(f.boot); err == nil || !strings.Contains(err.Error(), "another boot") {

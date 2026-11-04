@@ -185,7 +185,7 @@ func (h *Helper) readRound(round Step) (roundState, []byte, error) {
 // discarded (its session cannot continue).
 func (h *Helper) currentRound(round Step, boot Boot) (roundState, error) {
 	st, _, err := h.readRound(round)
-	if err != nil || st.Boot != boot {
+	if err != nil || !st.Boot.same(boot) {
 		return roundState{Round: round, Boot: boot}, err
 	}
 	return st, nil
@@ -207,7 +207,7 @@ func (h *Helper) runningRound(l *Ledger, round Step) (Boot, roundState, error) {
 	if err != nil {
 		return boot, roundState{}, fmt.Errorf("boot identity: %w", err)
 	}
-	if r := l.record(round); r.Status != StatusRunning || *r.Boot != boot {
+	if r := l.record(round); r.Status != StatusRunning || !r.Boot.same(boot) {
 		return boot, roundState{}, fmt.Errorf("%s is not running in this boot; run macserve setup again to prepare it", round)
 	}
 	st, err := h.currentRound(round, boot)
@@ -721,7 +721,7 @@ func (h *Helper) reboot(l *Ledger, loc LedgerLocation) (Response, error) {
 		return Response{}, fmt.Errorf("boot identity: %w", err)
 	}
 	r := l.record(StepReboot)
-	if r.Status == StatusRunning && *r.Boot != boot {
+	if r.Status == StatusRunning && r.Boot.differs(boot) {
 		if err := h.complete(l, loc, StepReboot, boot, nil); err != nil {
 			return Response{}, err
 		}

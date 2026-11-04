@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jerryfane/macserve/internal/controller"
@@ -223,9 +224,11 @@ func plistTop(data []byte) (map[string]string, error) {
 	return keys, nil
 }
 
-// pauseBinding is the digest of owner.pause and profiles.json, which the
-// controller must read from their fixed paths. The start compares it
-// before, during and after.
+// pauseBinding is the state of owner.pause and profiles.json, which the
+// controller must read from their fixed paths: owner.pause absent, or its
+// digest, device, inode and modification time; and the profiles digest.
+// The summary shows it, the approval records it and the start compares
+// it before, during and after, in every run.
 func (h *Helper) pauseBinding() (string, error) {
 	c, err := controller.LoadConfig(h.configPath("controller.json"))
 	if err != nil {
@@ -234,15 +237,47 @@ func (h *Helper) pauseBinding() (string, error) {
 	if c.PauseFile != h.configPath("owner.pause") || c.ProfilesFile != h.configPath("profiles.json") {
 		return "", errors.New("controller must honor the fixed owner.pause and reviewed profiles paths")
 	}
-	pause, err := h.readConfig("owner.pause", 64<<10)
+	pause, err := h.pauseState()
 	if err != nil {
-		return "", fmt.Errorf("owner.pause: %w", err)
+		return "", err
 	}
 	prof, err := h.readConfig("profiles.json", 1<<20)
 	if err != nil {
 		return "", err
 	}
-	return digestHex(pause) + digestHex(prof), nil
+	return pause + ", profiles.json " + digestHex(prof), nil
+}
+
+// pauseState is "owner.pause absent" or the file's digest and identity,
+// read between two equal lstats.
+func (h *Helper) pauseState() (string, error) {
+	path := h.configPath("owner.pause")
+	identity := func() (string, error) {
+		info, err := os.Lstat(path)
+		if err != nil {
+			return "", err
+		}
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			return "", errors.New("owner.pause: no file identity")
+		}
+		return fmt.Sprintf("inode %d:%d mtime %d", uint64(st.Dev), uint64(st.Ino), info.ModTime().UnixNano()), nil
+	}
+	before, err := identity()
+	if errors.Is(err, fs.ErrNotExist) {
+		return "owner.pause absent", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	data, err := h.readConfig("owner.pause", 64<<10)
+	if err != nil {
+		return "", fmt.Errorf("owner.pause: %w", err)
+	}
+	if after, err := identity(); err != nil || after != before {
+		return "", errors.Join(errors.New("owner.pause changed while it was read"), err)
+	}
+	return "owner.pause " + digestHex(data) + " " + before, nil
 }
 
 // errAnotherBoot refuses approve-and-start after a restart: approval is
@@ -260,52 +295,53 @@ func (h *Helper) summaryVerb(l *Ledger, loc LedgerLocation) (Response, error) {
 		if boot, err = h.begin(l, loc, StepApproveAndStart); err != nil {
 			return Response{}, err
 		}
-	} else if *r.Boot != boot {
+	} else if !r.Boot.same(boot) {
 		return Response{}, errAnotherBoot
 	}
-	text, err := h.summary(l)
+	text, _, err := h.summary(l)
 	if err != nil {
 		return Response{}, err
 	}
 	return Response{Detail: text}, nil
 }
 
-// summary is the one screen the owner approves. Its digest is recorded
-// with the approval; approve recomputes it and refuses any difference.
-func (h *Helper) summary(l *Ledger) (string, error) {
+// summary is the one screen the owner approves and the bindings it shows.
+// Its digest is recorded with the approval; approve recomputes it and
+// refuses any difference.
+func (h *Helper) summary(l *Ledger) (string, string, error) {
 	e, envData, err := h.installedEnv(l)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	c, err := controller.LoadConfig(h.configPath("controller.json"))
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if c.GitHub == nil {
-		return "", errors.New("controller.json has no GitHub section")
+		return "", "", errors.New("controller.json has no GitHub section")
 	}
 	registry, err := h.registry()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	round1, _, err := h.readRound(StepRound1)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	round2, _, err := h.readRound(StepRound2)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if round1.Phase != phaseDone || round2.Phase != phaseDone {
-		return "", errors.New("both qualification rounds must be recorded")
+		return "", "", errors.New("both qualification rounds must be recorded")
 	}
 	candidate, err := h.Store.readPrivate(filepath.Join(h.sessionDir(round2.Session), "candidate.json"), 4<<20)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	var cand qualification.Candidate
 	if err := json.Unmarshal(candidate, &cand); err != nil {
-		return "", fmt.Errorf("candidate.json: %w", err)
+		return "", "", fmt.Errorf("candidate.json: %w", err)
 	}
 	var b strings.Builder
 	line := func(format string, args ...any) { fmt.Fprintf(&b, format+"\n", args...) }
@@ -335,13 +371,13 @@ func (h *Helper) summary(l *Ledger) (string, error) {
 	if pins, err := h.readConfig("qualification-sources.json", 1<<20); err == nil {
 		var sp qualification.SourcePins
 		if err := json.Unmarshal(pins, &sp); err != nil {
-			return "", err
+			return "", "", err
 		}
 		for _, s := range sp.Sources {
 			line("  Qualified with a real build of %s at %s (%s).", s.Profile, s.Commit, s.Repo)
 		}
 	} else if !errors.Is(err, fs.ErrNotExist) {
-		return "", err
+		return "", "", err
 	}
 	line("  Qualification: round 1 %s, round 2 %s (after the restart).", round1.Session, round2.Session)
 	for _, name := range slices.Sorted(maps.Keys(cand.Categories)) {
@@ -349,12 +385,21 @@ func (h *Helper) summary(l *Ledger) (string, error) {
 	}
 	line("  macserve builds only the repositories above and trusts their code, everyone who can write to them and their dependencies (docs/install.md).")
 	line("  Approving installs the approval and the activation anchor and starts the three services. owner.pause is removed once health is valid.")
-	line("  Bound: deploy.env %s, round 2 candidate %s.", digestHex(envData), digestHex(candidate))
-	return b.String(), nil
+	bindings, err := h.pauseBinding()
+	if err != nil {
+		return "", "", err
+	}
+	if strings.HasPrefix(bindings, "owner.pause absent") {
+		return "", "", errors.New("owner.pause is missing; deploy-install set it and setup removes it only after the start, once health is valid. Restore it (docs/install.md) before approving")
+	}
+	line("  Bound: deploy.env %s, round 2 candidate %s, %s.", digestHex(envData), digestHex(candidate), bindings)
+	return b.String(), bindings, nil
 }
 
 // approve records the owner's typed approval of the summary (digest) and
-// starts the services.
+// starts the services. Once qualify approve has run for the recorded
+// approval, the summary must still be exactly the approved one: any change
+// then fails the step (the approval cannot be replaced any more).
 func (h *Helper) approve(l *Ledger, loc LedgerLocation, digest string) (Response, error) {
 	boot, err := h.Boot()
 	if err != nil {
@@ -364,7 +409,7 @@ func (h *Helper) approve(l *Ledger, loc LedgerLocation, digest string) (Response
 	if r.Status != StatusRunning {
 		return Response{}, errors.New("read the summary first")
 	}
-	if *r.Boot != boot {
+	if !r.Boot.same(boot) {
 		return Response{}, errAnotherBoot
 	}
 	console, err := h.ConsoleUID()
@@ -374,74 +419,116 @@ func (h *Helper) approve(l *Ledger, loc LedgerLocation, digest string) (Response
 	if console != h.Owner.UID {
 		return Response{}, errors.New("approve at this Mac's screen, logged in as yourself; nothing was approved")
 	}
-	text, err := h.summary(l)
+	text, bindings, err := h.summary(l)
 	if err != nil {
 		return Response{}, err
 	}
-	if digestHex([]byte(text)) != digest {
+	current := digestHex([]byte(text))
+	if a := l.Approval; a != nil && a.Approved != nil && a.SummarySHA256 != current {
+		return Response{}, h.fail(l, loc, StepApproveAndStart, errors.New("the summary changed after qualify approve ran for your approval; nothing was started. Reconcile by hand (docs/install.md)"))
+	}
+	if current != digest {
 		return Response{}, errors.New("the summary changed since you read it; nothing was approved. Run macserve setup again")
 	}
-	if err := l.Approve(digest, boot, h.Now()); err != nil {
-		return Response{}, err
-	}
-	if err := h.Store.Save(l, loc); err != nil {
-		return Response{}, err
+	if l.Approval == nil || l.Approval.Approved == nil {
+		if err := l.Approve(digest, bindings, boot, h.Now()); err != nil {
+			return Response{}, err
+		}
+		if err := h.Store.Save(l, loc); err != nil {
+			return Response{}, err
+		}
 	}
 	return h.startServices(context.Background(), l, loc, boot)
 }
 
-// startServices runs qualify approve (unless this setup's approval is
-// already installed), activation-check, then starts the services. Nothing
-// starts unless the ledger holds an approval given in this boot.
+// approvedDigests reads the digests of ApprovedFiles.
+func (h *Helper) approvedDigests(session string) (map[string]string, error) {
+	files := map[string]string{}
+	evidence, err := h.Store.readPrivate(filepath.Join(h.sessionDir(session), "approved-boundary-evidence.json"), 4<<20)
+	if err != nil {
+		return nil, err
+	}
+	files["approved-boundary-evidence.json"] = digestHex(evidence)
+	for _, name := range []string{"qualification.json", "activation-anchor.json"} {
+		data, err := h.readConfig(name, 4<<20)
+		if err != nil {
+			return nil, err
+		}
+		files[name] = digestHex(data)
+	}
+	return files, nil
+}
+
+// startServices runs qualify approve once for the recorded approval and
+// records what it wrote; a later run trusts only exactly those files.
+// Then activation-check, then the services start. Nothing starts unless
+// the ledger holds an approval given in this boot, and owner.pause and
+// profiles.json are still as the approved summary showed them.
 func (h *Helper) startServices(ctx context.Context, l *Ledger, loc LedgerLocation, boot Boot) (Response, error) {
 	if err := l.AuthorizeStart(boot); err != nil {
 		return Response{}, err
 	}
+	a := l.Approval
 	round2, _, err := h.readRound(StepRound2)
 	if err != nil {
 		return Response{}, err
 	}
-	dir := h.sessionDir(round2.Session)
-	before, err := h.pauseBinding()
-	if err != nil {
-		return Response{}, err
-	}
-	approved, err := h.Approved()
-	if err != nil {
-		return Response{}, err
-	}
-	if err := h.servicesDisabled(ctx); err != nil {
-		if approved {
-			return h.partialStart(l, loc, nil, err)
+	bindingsHeld := func(when string) error {
+		now, err := h.pauseBinding()
+		if err == nil && now == a.Bindings {
+			return nil
 		}
-		return Response{}, err
+		return errors.Join(fmt.Errorf("owner.pause or profiles.json changed %s; no services started", when), err)
 	}
-	if !approved {
-		if err := h.Qualify.Approve(ctx, dir); err != nil {
+	if a.Approved == nil {
+		if approved, err := h.Approved(); err != nil || approved {
+			return Response{}, errors.Join(errors.New("this Mac has an approved qualification this setup did not record; nothing was started. Reconcile by hand (docs/install.md)"), err)
+		}
+		if err := bindingsHeld("since you approved; run macserve setup again to read the new summary"); err != nil {
+			return Response{}, err
+		}
+		if err := h.servicesDisabled(ctx); err != nil {
+			return Response{}, err
+		}
+		if err := h.Qualify.Approve(ctx, h.sessionDir(round2.Session)); err != nil {
 			return Response{}, fmt.Errorf("qualify approve: %w", err)
 		}
-		if _, err := h.Store.readPrivate(filepath.Join(dir, "approved-boundary-evidence.json"), 4<<20); err != nil {
-			return Response{}, fmt.Errorf("qualify approve left no approved evidence: %w", err)
+		files, err := h.approvedDigests(round2.Session)
+		if err != nil {
+			return Response{}, h.fail(l, loc, StepApproveAndStart, fmt.Errorf("qualify approve left no approved evidence: %w", err))
 		}
-		if after, err := h.pauseBinding(); err != nil || after != before {
-			return Response{}, errors.Join(errors.New("owner.pause/profile bindings changed during approval; no services started"), err)
+		if err := l.RecordApproved(files); err != nil {
+			return Response{}, err
 		}
+		if err := h.Store.Save(l, loc); err != nil {
+			return Response{}, err
+		}
+	} else {
+		files, err := h.approvedDigests(round2.Session)
+		if err != nil || !maps.Equal(files, a.Approved) {
+			return Response{}, h.fail(l, loc, StepApproveAndStart, errors.Join(errors.New("the files qualify approve wrote changed since it ran; nothing was started"), err))
+		}
+		if err := h.servicesDisabled(ctx); err != nil {
+			return h.partialStart(l, loc, nil, err)
+		}
+	}
+	// From here the approval is spent: a changed binding needs a reviewed
+	// recovery, not a new approval.
+	if err := bindingsHeld("during approval"); err != nil {
+		return Response{}, h.fail(l, loc, StepApproveAndStart, err)
 	}
 	if err := h.Qualify.ActivationCheck(ctx); err != nil {
 		return Response{}, fmt.Errorf("activation-check: %w", err)
 	}
-	started, err := h.startLabels(ctx, before)
+	started, err := h.startLabels(ctx, a.Bindings)
 	if err != nil {
 		return h.partialStart(l, loc, started, err)
 	}
-	anchor, err := h.readConfig("activation-anchor.json", 4<<20)
-	if err != nil {
-		return Response{}, err
-	}
-	inputs := map[string]string{"activation-anchor.json": digestHex(anchor), "summary": l.Approval.SummarySHA256}
+	inputs := map[string]string{"activation-anchor.json": a.Approved["activation-anchor.json"], "summary": a.SummarySHA256}
 	if err := h.complete(l, loc, StepApproveAndStart, boot, inputs); err != nil {
 		return Response{}, err
 	}
+	h.started = true
 	return Response{Done: true, Items: started}, nil
 }
 
@@ -487,22 +574,26 @@ func (h *Helper) partialStart(l *Ledger, loc LedgerLocation, started []string, c
 
 // releasePause removes owner.pause once the readiness gate reports no
 // blocker other than owner_pause (health valid in launchd context, written
-// by the maintenance service). It is logged separately.
+// by the maintenance service). It is served once, only by the helper run
+// that started the services, and removes only the owner.pause the
+// approval bound: one the owner sets again is never removed. It is
+// logged separately.
 func (h *Helper) releasePause(l *Ledger) (Response, error) {
+	if !h.started {
+		return Response{}, errors.New("setup removes owner.pause only right after it started the services, in the same run; remove it yourself once health is valid (docs/install.md)")
+	}
 	boot, err := h.Boot()
 	if err != nil {
 		return Response{}, fmt.Errorf("boot identity: %w", err)
 	}
-	if l.Approval == nil || l.Approval.Boot != boot {
+	if l.Approval == nil || !l.Approval.Boot.same(boot) {
 		return Response{}, errAnotherBoot
 	}
+	if now, err := h.pauseBinding(); err != nil || now != l.Approval.Bindings {
+		h.started = false
+		return Response{}, errors.Join(errors.New("owner.pause or profiles.json changed since your approval; setup does not remove owner.pause"), err)
+	}
 	path := h.configPath("owner.pause")
-	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
-		return Response{Done: true, Detail: "owner.pause is already removed"}, nil
-	}
-	if _, err := h.readConfig("owner.pause", 64<<10); err != nil {
-		return Response{}, err
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	blockers, err := h.Qualify.Health(ctx)
@@ -518,6 +609,7 @@ func (h *Helper) releasePause(l *Ledger) (Response, error) {
 	if len(others) > 0 {
 		return Response{Detail: "health is not valid yet", Items: others}, nil
 	}
+	h.started = false
 	if err := os.Remove(path); err != nil {
 		return Response{}, err
 	}
