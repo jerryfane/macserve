@@ -206,22 +206,33 @@ func TestSimulatorBootRetriedOnceThenFails(t *testing.T) {
 		cleanup  bool
 		creates  int
 		succeed  bool
+		// shutdown, when set, is the stderr of a failed first
+		// `simctl shutdown` of the device that failed to boot.
+		shutdown string
 	}{
 		{name: "boot-recovers", failVerb: "boot", failures: 1, cleanup: true, creates: 2, succeed: true},
 		{name: "bootstatus-recovers", failVerb: "bootstatus", failures: 1, cleanup: true, creates: 2, succeed: true},
 		{name: "fails-twice", failVerb: "boot", failures: 2, cleanup: true, creates: 2},
 		{name: "unconfirmed-cleanup", failVerb: "boot", failures: 1, creates: 1},
+		{name: "already-shut-down-recovers", failVerb: "boot", failures: 1, cleanup: true, creates: 2, succeed: true, shutdown: "An error was encountered processing the command (domain=com.apple.CoreSimulator.SimError, code=405):\nUnable to shutdown device in current state: Shutdown\n"},
+		{name: "shutdown-error-not-retried", failVerb: "boot", failures: 1, cleanup: true, creates: 1, shutdown: "An error was encountered processing the command (domain=NSPOSIXErrorDomain, code=60):\nOperation timed out\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			runner := &fakeRunner{}
 			var mu sync.Mutex
-			failed := 0
-			runner.hook = func(_ context.Context, c Command, _, _ io.Writer) (bool, ProcessResult, error) {
+			failed, shutdowns := 0, 0
+			runner.hook = func(_ context.Context, c Command, _, stderr io.Writer) (bool, ProcessResult, error) {
 				mu.Lock()
 				defer mu.Unlock()
 				if len(c.Args) > 1 && c.Args[0] == "simctl" && c.Args[1] == tc.failVerb && failed < tc.failures {
 					failed++
 					return true, ProcessResult{ExitCode: 164, CleanupOK: tc.cleanup}, nil
+				}
+				if tc.shutdown != "" && len(c.Args) > 1 && c.Args[0] == "simctl" && c.Args[1] == "shutdown" {
+					if shutdowns++; shutdowns == 1 {
+						io.WriteString(stderr, tc.shutdown)
+						return true, ProcessResult{ExitCode: 149, CleanupOK: true}, nil
+					}
 				}
 				return false, ProcessResult{}, nil
 			}

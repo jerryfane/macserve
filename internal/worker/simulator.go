@@ -178,6 +178,11 @@ func (e *Engine) stopDevice(ctx context.Context, m *manifest) error {
 			if !result.CleanupOK {
 				return errors.Join(err, ErrRecovery)
 			}
+			if action == "shutdown" && alreadyShutdown(err, result, output, stderr) {
+				// A device that failed to boot may already be shut down; the
+				// delete and the absence proof below still decide ownership.
+				continue
+			}
 			if err != nil || result.ExitCode != 0 || result.Signal != "" || output.err != nil || stderr.err != nil {
 				failures = append(failures, fmt.Errorf("simulator %s failed: %w", action, errors.Join(err, output.err, stderr.err, fmt.Errorf("exit %d signal %s: %s %s", result.ExitCode, result.Signal, output.String(), stderr.String()))))
 			}
@@ -193,6 +198,17 @@ func (e *Engine) stopDevice(ctx context.Context, m *manifest) error {
 		}
 	}
 	return nil
+}
+
+// simctlAlreadyShutdown is CoreSimulator's refusal to shut down a device that
+// is already in the Shutdown state.
+const simctlAlreadyShutdown = "Unable to shutdown device in current state: Shutdown"
+
+// alreadyShutdown reports whether a completed `simctl shutdown <recorded UDID>`
+// failed only because the device was already shut down: a plain non-zero
+// exit, no signal, intact output and CoreSimulator's state refusal.
+func alreadyShutdown(err error, result ProcessResult, output, stderr *boundedBuffer) bool {
+	return err == nil && result.ExitCode != 0 && result.Signal == "" && output.err == nil && stderr.err == nil && strings.Contains(output.String()+stderr.String(), simctlAlreadyShutdown)
 }
 
 func (e *Engine) cleanup(ctx context.Context, m *manifest) error {
