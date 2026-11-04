@@ -206,9 +206,12 @@ const simctlAlreadyShutdown = "Unable to shutdown device in current state: Shutd
 
 // alreadyShutdown reports whether a completed `simctl shutdown <recorded UDID>`
 // failed only because the device was already shut down: a plain non-zero
-// exit, no signal, intact output and CoreSimulator's state refusal.
+// exit (the runner's error is exactly that exit status, or none), no signal,
+// intact output and CoreSimulator's state refusal. Cancellation, output,
+// drain and cleanup failures are joined to the runner's error, so they never
+// qualify.
 func alreadyShutdown(err error, result ProcessResult, output, stderr *boundedBuffer) bool {
-	return err == nil && result.ExitCode != 0 && result.Signal == "" && output.err == nil && stderr.err == nil && strings.Contains(output.String()+stderr.String(), simctlAlreadyShutdown)
+	return (err == nil || onlyExitStatus(err, result.ExitCode)) && result.ExitCode > 0 && result.Signal == "" && result.CleanupOK && output.err == nil && stderr.err == nil && strings.Contains(output.String()+stderr.String(), simctlAlreadyShutdown)
 }
 
 func (e *Engine) cleanup(ctx context.Context, m *manifest) error {

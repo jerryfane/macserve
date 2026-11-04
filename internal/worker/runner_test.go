@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/jerryfane/macserve/internal/model"
 )
 
 // The only subprocess executed by the tests is this harmless Go helper (plus
@@ -59,6 +61,13 @@ func TestNativeRunnerHelper(t *testing.T) {
 		fmt.Fprint(os.Stdout, "ready\n")
 	case "signal":
 		_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+	case "already-shutdown", "shutdown-timeout":
+		message := "Unable to shutdown device in current state: Shutdown"
+		if mode == "shutdown-timeout" {
+			message = "Operation timed out"
+		}
+		fmt.Fprintf(os.Stderr, "An error was encountered processing the command (domain=com.apple.CoreSimulator.SimError, code=405):\n%s\n", message)
+		os.Exit(164)
 	default:
 		os.Exit(93)
 	}
@@ -87,6 +96,59 @@ func helperRunner(t *testing.T, mode string) (*nativeRunner, Command) {
 		Args:       []string{"-test.run=^TestNativeRunnerHelper$"},
 		Dir:        t.TempDir(),
 		Env:        []string{"MACSERVE_RUNNER_HELPER=" + mode},
+	}
+}
+
+// The boot retry tears down the device that failed to boot. When that device
+// is already shut down, the production runner reports `simctl shutdown` as an
+// ordinary non-zero exit error with CoreSimulator's state refusal; teardown
+// accepts exactly that (delete and the absence proof still run) and the job
+// retries on a fresh device. Any other shutdown failure is not retried.
+func TestSimulatorRetryTeardownAcceptsAlreadyShutdownFromNativeRunner(t *testing.T) {
+	for _, tc := range []struct {
+		mode    string
+		creates int
+		succeed bool
+	}{
+		{mode: "already-shutdown", creates: 2, succeed: true},
+		{mode: "shutdown-timeout", creates: 1},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			native, helper := helperRunner(t, tc.mode)
+			runner := &fakeRunner{}
+			var mu sync.Mutex
+			booted, shutdowns := false, 0
+			runner.hook = func(ctx context.Context, c Command, stdout, stderr io.Writer) (bool, ProcessResult, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				if len(c.Args) < 2 || c.Args[0] != "simctl" {
+					return false, ProcessResult{}, nil
+				}
+				if c.Args[1] == "boot" && !booted {
+					booted = true
+					return true, ProcessResult{ExitCode: 164, CleanupOK: true}, nil
+				}
+				if c.Args[1] == "shutdown" {
+					if shutdowns++; shutdowns == 1 {
+						result, err := native.Run(ctx, helper, stdout, stderr)
+						return true, result, err
+					}
+				}
+				return false, ProcessResult{}, nil
+			}
+			engine := engineFixture(t, runner)
+			source, data := sourceFixture(t)
+			result, err := engine.Execute(context.Background(), fixtureJob(t, model.SimulatorUITest), source, bytes.NewReader(data), nil)
+			if tc.succeed != (err == nil && result.State == model.Succeeded) || !result.CleanupOK {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+			if got := len(simctl(runner, "create")); got != tc.creates {
+				t.Fatalf("created %d devices, want %d", got, tc.creates)
+			}
+			if tc.succeed && len(simctl(runner, "delete")) != 2 {
+				t.Fatalf("both devices must be deleted: %+v", simctl(runner, "delete"))
+			}
+		})
 	}
 }
 
