@@ -1,0 +1,105 @@
+{
+  "schema": 1,
+  "root": false,
+  "live": false,
+  "checks": [
+    {
+      "id": "host.macos",
+      "status": "pass",
+      "detail": "macOS 15.3"
+    },
+    {
+      "id": "host.arch",
+      "status": "pass",
+      "detail": "Apple silicon"
+    },
+    {
+      "id": "host.sip",
+      "status": "pass",
+      "detail": "System Integrity Protection is on"
+    },
+    {
+      "id": "host.filevault",
+      "status": "pass",
+      "detail": "FileVault is on and supports authenticated restart"
+    },
+    {
+      "id": "xcode.pins",
+      "status": "pass",
+      "detail": "Xcode 16.2 (16C5032a) matches every pin"
+    },
+    {
+      "id": "net.tailnet",
+      "status": "pass",
+      "detail": "100.64.0.10:8443 accepts connections"
+    },
+    {
+      "id": "release.bytes",
+      "status": "unknown",
+      "detail": "/Library/macserve/bin/macserve is readable only by root",
+      "fix": "Run sudo macserve doctor for this check."
+    },
+    {
+      "id": "fs.protect",
+      "status": "pass",
+      "detail": "the installation, its secrets and the service plists are protected"
+    },
+    {
+      "id": "tcc.fda",
+      "status": "unknown",
+      "detail": "Full Disk Access is checked only from launchd context",
+      "fix": "Run sudo macserve doctor --live for this check."
+    },
+    {
+      "id": "session.job",
+      "status": "pass",
+      "detail": "the build account is logged in in the background"
+    },
+    {
+      "id": "persistence",
+      "status": "unknown",
+      "detail": "the maintenance health file is readable only by root",
+      "fix": "Run sudo macserve doctor for this check."
+    },
+    {
+      "id": "qual.state",
+      "status": "pass",
+      "detail": "qualification and activation anchor exist; the approval needs sudo to check"
+    },
+    {
+      "id": "svc.state",
+      "status": "pass",
+      "detail": "the three services are loaded and enabled"
+    },
+    {
+      "id": "health",
+      "status": "unknown",
+      "detail": "the maintenance health file is readable only by root",
+      "fix": "Run sudo macserve doctor for this check."
+    },
+    {
+      "id": "github.app",
+      "status": "unknown",
+      "detail": "the GitHub App is checked only with --live",
+      "fix": "Run sudo macserve doctor --live for this check."
+    },
+    {
+      "id": "disk",
+      "status": "unknown",
+      "detail": "the maintenance health file is readable only by root",
+      "fix": "Run sudo macserve doctor for this check."
+    },
+    {
+      "id": "setup.ledger",
+      "status": "unknown",
+      "detail": "the setup ledger is readable only by root",
+      "fix": "Run sudo macserve doctor for this check."
+    }
+  ],
+  "summary": {
+    "fail": 0,
+    "pass": 10,
+    "unknown": 7,
+    "warn": 0
+  }
+}

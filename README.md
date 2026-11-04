@@ -119,8 +119,22 @@ Use exactly one of `project` or `workspace`; `xcodegen` and `resolve_packages` a
 cannot choose executables, flags, environment, destinations, configurations or signing. Full rules:
 [Onboarding a repository](docs/install.md#onboarding-a-repository).
 
-**3. Submit a job.** The API listens only on the Mac's tailnet address, over TLS 1.3 with the installer-generated
-certificate. The request must carry the template's exact Xcode pins, which `GET /v1/capabilities` reports:
+**3. Submit a job.** On the Mac, from the repository root, after pushing the commit:
+
+```sh
+macserve build            # --repo from remote "origin", --sha from HEAD; --profile ID if several match
+```
+
+It reads the API token from your login keychain (item `macserve API token`, saved by `macserve setup`; never
+printed), checks `.macserve.json` without running anything, submits through `/v1/jobs` with an `Idempotency-Key`,
+prints the logs and verifies the signed receipt against `/Library/macserve/config/deployment-pins.json`. Exit 0
+means the job succeeded and its receipt verifies. `macserve doctor` (read-only; `--json` for machine output,
+`sudo` for the root-only checks, `sudo macserve doctor --live` adds Full Disk Access and GitHub App checks)
+explains a host that does not admit jobs.
+
+From another machine, use the API directly. It listens only on the Mac's tailnet address, over TLS 1.3 with the
+installer-generated certificate. The request must carry the template's exact Xcode pins, which
+`GET /v1/capabilities` reports:
 
 ```sh
 MACSERVE=https://100.64.0.10:8443          # your controller's tailnet address and port

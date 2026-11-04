@@ -179,6 +179,8 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		f.write(w, http.StatusCreated, reply)
 	case !installationToken:
 		f.write(w, http.StatusUnauthorized, nil)
+	case r.Method == http.MethodDelete && path == "/installation/token":
+		w.WriteHeader(http.StatusNoContent)
 	case path == "/installation/repositories":
 		f.write(w, http.StatusOK, map[string]any{"total_count": len(f.repos), "repositories": f.repos})
 	case strings.HasPrefix(path, "/users/"):

@@ -16,6 +16,7 @@
       "internal/api/**",
       "internal/controller/**",
       "internal/deploy/**",
+      "internal/doctor/**",
       "internal/evidence/**",
       "internal/githubapi/**",
       "internal/githubpull/**",
