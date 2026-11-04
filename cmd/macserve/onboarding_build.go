@@ -179,9 +179,9 @@ func exitText(code *int) string {
 }
 
 // keychainArgs finds the item setup's saveKeychainToken adds (PR #73):
-// service onboarding.KeychainService, account the owner's username.
+// service keychainService, account the owner's username.
 func keychainArgs(account string) []string {
-	return []string{"find-generic-password", "-a", account, "-s", onboarding.KeychainService, "-w"}
+	return []string{"find-generic-password", "-a", account, "-s", keychainService, "-w"}
 }
 
 // keychainToken reads the API token from the invoking user's login

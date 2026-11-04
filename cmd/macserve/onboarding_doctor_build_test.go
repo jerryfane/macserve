@@ -157,3 +157,15 @@ func TestBuildCommand(t *testing.T) {
 		}
 	}
 }
+
+// TestKeychainItemMatchesSetup: build looks up exactly the item setup's
+// saveKeychainToken adds (service keychainService, account the owner).
+func TestKeychainItemMatchesSetup(t *testing.T) {
+	if keychainService != "macserve API token" || onboarding.KeychainService != keychainService {
+		t.Errorf("keychain service %q / %q", keychainService, onboarding.KeychainService)
+	}
+	want := []string{"find-generic-password", "-a", "jdoe", "-s", "macserve API token", "-w"}
+	if got := keychainArgs("jdoe"); strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Errorf("keychainArgs %q", got)
+	}
+}
