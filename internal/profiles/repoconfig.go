@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"regexp"
 	"slices"
+	"strings"
 
 	"github.com/jerryfane/macserve/internal/model"
 )
@@ -15,8 +17,8 @@ import (
 const (
 	// RepoConfigFile is the only repository file a template job reads.
 	RepoConfigFile = ".macserve.json"
-	// MaxRepoConfigBytes bounds RepoConfigFile.
-	MaxRepoConfigBytes = 4096
+	// MaxRepoConfigBytes bounds RepoConfigFile, test shards included.
+	MaxRepoConfigBytes = 16384
 	// XcodeGenPath is the root-installed XcodeGen the xcodegen step runs.
 	XcodeGenPath = "/Library/macserve/tools/xcodegen"
 )
@@ -29,7 +31,19 @@ var (
 	projectPattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 _.-]*\.xcodeproj$`)
 	workspacePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 _.-]*\.xcworkspace$`)
 	schemePattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 _.-]{0,127}$`)
-	repoConfigKeys   = map[string]bool{"version": true, "work_dir": true, "project": true, "workspace": true, "scheme": true, "xcodegen": true, "resolve_packages": true}
+	// selectorPattern is an -only-testing selector Target/Class or
+	// Target/Class/method, the method optionally spelled with "()". It admits
+	// no ':', '$', ',', whitespace or leading '-'.
+	selectorPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}/[A-Za-z_][A-Za-z0-9_]{0,127}(/[A-Za-z_][A-Za-z0-9_]{0,127}(\(\))?)?$`)
+	repoConfigKeys  = map[string]bool{"version": true, "work_dir": true, "project": true, "workspace": true, "scheme": true, "xcodegen": true, "resolve_packages": true, "ui_test": true, "unit_test": true}
+)
+
+// Test shard limits, per ui_test or unit_test section.
+const (
+	maxShards           = 16
+	maxShardSelectors   = 32
+	maxSectionSelectors = 256
+	maxTestSectionDepth = 3
 )
 
 func repoConfigError(format string, args ...any) error {
@@ -69,6 +83,11 @@ func ParseRepoConfig(data []byte) (model.RepoConfig, error) {
 		if string(value) == "null" {
 			return config, repoConfigError("field %q is null", key)
 		}
+		if key == "ui_test" || key == "unit_test" {
+			if err := strictJSON(json.NewDecoder(bytes.NewReader(value)), key, 0); err != nil {
+				return config, err
+			}
+		}
 	}
 	if _, err := decoder.Token(); err != nil {
 		return config, repoConfigError("%v", err)
@@ -85,6 +104,58 @@ func ParseRepoConfig(data []byte) (model.RepoConfig, error) {
 		return model.RepoConfig{}, err
 	}
 	return config, nil
+}
+
+// strictJSON walks one JSON value of a test section and refuses what the
+// strict struct decode would silently accept: duplicate keys (the last would
+// win), a case-folded "shards" key, nulls (a zero value) and deep nesting.
+// Types and other unknown fields are left to it.
+func strictJSON(decoder *json.Decoder, path string, depth int) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return repoConfigError("%v", err)
+	}
+	switch token {
+	case nil:
+		return repoConfigError("%s has a null value", path)
+	case json.Delim('{'), json.Delim('['):
+		if depth >= maxTestSectionDepth {
+			return repoConfigError("%s is nested too deeply", path)
+		}
+	default:
+		return nil
+	}
+	if token == json.Delim('[') {
+		for decoder.More() {
+			if err := strictJSON(decoder, path+"[]", depth+1); err != nil {
+				return err
+			}
+		}
+	} else {
+		seen := make(map[string]bool)
+		for decoder.More() {
+			token, err := decoder.Token()
+			if err != nil {
+				return repoConfigError("%v", err)
+			}
+			key, _ := token.(string)
+			if seen[key] {
+				return repoConfigError("%s has duplicate key %q", path, key)
+			}
+			// The struct decode matches field names case-insensitively.
+			if depth == 0 && key != "shards" {
+				return repoConfigError("%s has unknown field %q", path, key)
+			}
+			seen[key] = true
+			if err := strictJSON(decoder, path+"."+key, depth+1); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := decoder.Token(); err != nil {
+		return repoConfigError("%v", err)
+	}
+	return nil
 }
 
 // ValidateRepoConfig checks a parsed RepoConfigFile, including one reported back
@@ -104,13 +175,63 @@ func ValidateRepoConfig(c model.RepoConfig) error {
 	case !schemePattern.MatchString(c.Scheme):
 		return repoConfigError("scheme must match %s", schemePattern)
 	}
+	if err := validateShards("ui_test", c.UITest); err != nil {
+		return err
+	}
+	return validateShards("unit_test", c.UnitTest)
+}
+
+// validateShards checks one test section: 1 to 16 shards named by
+// shardPattern, each 1 to 32 selectors, at most 256 in all. Within a shard a
+// selector may not repeat, also as method and method(), nor be a "/"-prefix of
+// another.
+func validateShards(key string, s *model.TestShards) error {
+	if s == nil {
+		return nil
+	}
+	if len(s.Shards) == 0 || len(s.Shards) > maxShards {
+		return repoConfigError("%s.shards must name 1 to %d shards", key, maxShards)
+	}
+	total := 0
+	for _, name := range slices.Sorted(maps.Keys(s.Shards)) {
+		selectors := s.Shards[name]
+		if !shardPattern.MatchString(name) {
+			return repoConfigError("%s shard name %q must match %s", key, name, shardPattern)
+		}
+		if len(selectors) == 0 || len(selectors) > maxShardSelectors {
+			return repoConfigError("%s shard %q must list 1 to %d selectors", key, name, maxShardSelectors)
+		}
+		total += len(selectors)
+		if total > maxSectionSelectors {
+			return repoConfigError("%s lists more than %d selectors", key, maxSectionSelectors)
+		}
+		bare := make([]string, len(selectors))
+		for i, selector := range selectors {
+			if !selectorPattern.MatchString(selector) {
+				return repoConfigError("%s shard %q selector %q must be Target/Class or Target/Class/method", key, name, selector)
+			}
+			bare[i] = strings.TrimSuffix(selector, "()")
+		}
+		for i, a := range bare {
+			for j, b := range bare {
+				if i != j && (a == b || strings.HasPrefix(b, a+"/")) {
+					return repoConfigError("%s shard %q selector %q repeats or contains %q", key, name, selectors[i], selectors[j])
+				}
+			}
+		}
+	}
 	return nil
 }
 
 // Derive returns the effective recipe of a template job snapshot for a
 // repository configuration. Only the work directory, the project or workspace,
-// the scheme and the two optional fixed steps come from the repository; the
-// executables, flags and environment are fixed here and by the worker.
+// the scheme, the two optional fixed steps and a test template's shard
+// selectors come from the repository; the executables, flags, destination and
+// environment are fixed here and by the worker.
+//
+// A test template builds for testing on the job's own simulator in prepare and
+// runs test-without-building on it, both restricted to the snapshot shard's
+// selectors, which become the job's required tests.
 func Derive(snapshot model.Profile, c model.RepoConfig) (model.Profile, error) {
 	if snapshot.Template == nil {
 		return model.Profile{}, fmt.Errorf("%w: not a template job snapshot", ErrInvalid)
@@ -122,6 +243,9 @@ func Derive(snapshot model.Profile, c model.RepoConfig) (model.Profile, error) {
 	if c.Workspace != "" {
 		container = []string{"-workspace", c.Workspace}
 	}
+	xcodebuild := func(args ...string) model.Command {
+		return model.Command{Executable: "/usr/bin/xcrun", Args: append(append([]string{"xcodebuild"}, container...), args...)}
+	}
 	p := cloneProfile(snapshot)
 	p.WorkDir = c.WorkDir
 	p.Prepare = nil
@@ -129,9 +253,40 @@ func Derive(snapshot model.Profile, c model.RepoConfig) (model.Profile, error) {
 		p.Prepare = append(p.Prepare, model.Command{Executable: XcodeGenPath, Args: []string{"generate", "--spec", "project.yml"}})
 	}
 	if c.ResolvePackages {
-		p.Prepare = append(p.Prepare, model.Command{Executable: "/usr/bin/xcrun", Args: append(append([]string{"xcodebuild"}, container...), "-scheme", c.Scheme, "-resolvePackageDependencies")})
+		p.Prepare = append(p.Prepare, xcodebuild("-scheme", c.Scheme, "-resolvePackageDependencies"))
 	}
-	p.Run = model.Command{Executable: "/usr/bin/xcrun", Args: append(append([]string{"xcodebuild"}, container...), "-scheme", c.Scheme, "-configuration", "Debug", "-sdk", "iphonesimulator", "-destination", "generic/platform=iOS Simulator", "-derivedDataPath", "${DERIVED_DATA}", "CODE_SIGNING_ALLOWED=NO", "build")}
+	switch snapshot.Kind {
+	case model.Build:
+		if snapshot.Shard != "" {
+			return model.Profile{}, fmt.Errorf("%w: build template snapshot has a shard", ErrInvalid)
+		}
+		p.Run = xcodebuild("-scheme", c.Scheme, "-configuration", "Debug", "-sdk", "iphonesimulator", "-destination", "generic/platform=iOS Simulator", "-derivedDataPath", "${DERIVED_DATA}", "CODE_SIGNING_ALLOWED=NO", "build")
+	case model.UnitTest, model.SimulatorUITest:
+		key, section := "ui_test", c.UITest
+		if snapshot.Kind == model.UnitTest {
+			key, section = "unit_test", c.UnitTest
+		}
+		if !shardPattern.MatchString(snapshot.Shard) || snapshot.Simulator == nil {
+			return model.Profile{}, fmt.Errorf("%w: test template snapshot lacks its shard or simulator", ErrInvalid)
+		}
+		var selectors []string
+		if section != nil {
+			selectors = section.Shards[snapshot.Shard]
+		}
+		if len(selectors) == 0 {
+			return model.Profile{}, repoConfigError("%s.shards has no shard %q", key, snapshot.Shard)
+		}
+		only := make([]string, len(selectors))
+		for i, selector := range selectors {
+			only[i] = "-only-testing:" + selector
+		}
+		test := []string{"-scheme", c.Scheme, "-configuration", "Debug", "-sdk", "iphonesimulator", "-destination", "id=${SIMULATOR_ID}", "-derivedDataPath", "${DERIVED_DATA}"}
+		p.Prepare = append(p.Prepare, xcodebuild(append(append(slices.Clone(test), "CODE_SIGNING_ALLOWED=NO", "build-for-testing"), only...)...))
+		p.Run = xcodebuild(append(append(slices.Clone(test), "-resultBundlePath", "${RESULT_BUNDLE}", "CODE_SIGNING_ALLOWED=NO", "test-without-building"), only...)...)
+		p.RequiredTests = slices.Clone(selectors)
+	default:
+		return model.Profile{}, fmt.Errorf("%w: template job kind", ErrUnsupported)
+	}
 	for _, command := range append([]model.Command{p.Run}, p.Prepare...) {
 		if err := validateCommand(command); err != nil {
 			return model.Profile{}, err
@@ -155,7 +310,7 @@ func Effective(snapshot model.Profile, recipe *model.RepoRecipe) (model.Profile,
 		return model.Profile{}, errors.New("template job lacks repository recipe evidence")
 	}
 	derived, err := Derive(snapshot, recipe.Config)
-	if err != nil || derived.WorkDir != recipe.WorkDir || !sameCommands(append([]model.Command{derived.Run}, derived.Prepare...), append([]model.Command{recipe.Run}, recipe.Prepare...)) {
+	if err != nil || derived.WorkDir != recipe.WorkDir || !sameCommands(append([]model.Command{derived.Run}, derived.Prepare...), append([]model.Command{recipe.Run}, recipe.Prepare...)) || recipe.Shard != derived.Shard || !slices.Equal(recipe.RequiredTests, derived.RequiredTests) {
 		return model.Profile{}, errors.New("repository recipe does not match its template derivation")
 	}
 	return derived, nil

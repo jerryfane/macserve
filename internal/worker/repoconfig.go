@@ -29,7 +29,7 @@ func templateRecipe(checkout *os.Root, snapshot model.Profile) (model.Profile, *
 		return model.Profile{}, nil, err
 	}
 	sum := sha256.Sum256(data)
-	return derived, &model.RepoRecipe{ConfigSHA256: hex.EncodeToString(sum[:]), Config: config, WorkDir: derived.WorkDir, Prepare: derived.Prepare, Run: derived.Run}, nil
+	return derived, &model.RepoRecipe{ConfigSHA256: hex.EncodeToString(sum[:]), Config: config, WorkDir: derived.WorkDir, Prepare: derived.Prepare, Run: derived.Run, Shard: derived.Shard, RequiredTests: derived.RequiredTests}, nil
 }
 
 func readRepoConfig(checkout *os.Root) ([]byte, error) {

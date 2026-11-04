@@ -81,6 +81,7 @@ type Request struct {
 	Profile        string         `json:"profile"`
 	Xcode          Xcode          `json:"xcode"`
 	Simulator      *Simulator     `json:"simulator,omitempty"`
+	Shard          string         `json:"shard,omitempty"` // test templates only: the .macserve.json shard to run
 	TimeoutSeconds int            `json:"timeout_seconds,omitempty"`
 	Context        RequestContext `json:"context,omitempty"`
 }
@@ -120,46 +121,65 @@ type Profile struct {
 	MaxTimeoutSeconds     int             `json:"max_timeout_seconds"`
 	MemoryLimitMiB        int             `json:"memory_limit_mib"`
 	// Template is set only on the admitted snapshot of a template job. Its
-	// work_dir, prepare and run are derived by the worker from the template and
-	// the repository's .macserve.json; configured profiles never carry it.
+	// work_dir, prepare, run and required tests are derived by the worker from
+	// the template and the repository's .macserve.json; configured profiles
+	// never carry it.
 	Template *Template `json:"template,omitempty"`
+	// Shard is the admitted request's shard on a test template job snapshot;
+	// configured profiles never carry it.
+	Shard string `json:"shard,omitempty"`
 }
 
-// Template is a controller-owned, owner-scoped build recipe. Every repository
-// of a listed GitHub account may use it by declaring its Xcode project or
-// workspace and scheme in .macserve.json; the command line is fixed in code.
+// Template is a controller-owned, owner-scoped recipe. Every repository of a
+// listed GitHub account may use it by declaring its Xcode project or workspace
+// and scheme, and for a test template its test shards, in .macserve.json; the
+// command line is fixed in code. A test template pins one to four simulators;
+// a build template pins none.
 type Template struct {
-	ID                    string   `json:"id"`
-	Version               int      `json:"version"`
-	Kind                  Kind     `json:"kind"`
-	Owners                []string `json:"owners"`
-	Xcode                 Xcode    `json:"xcode"`
-	DeveloperDir          string   `json:"developer_dir"`
-	DefaultTimeoutSeconds int      `json:"default_timeout_seconds"`
-	MaxTimeoutSeconds     int      `json:"max_timeout_seconds"`
-	MemoryLimitMiB        int      `json:"memory_limit_mib"`
+	ID                    string      `json:"id"`
+	Version               int         `json:"version"`
+	Kind                  Kind        `json:"kind"`
+	Owners                []string    `json:"owners"`
+	Xcode                 Xcode       `json:"xcode"`
+	DeveloperDir          string      `json:"developer_dir"`
+	Simulators            []Simulator `json:"simulators,omitempty"`
+	DefaultTimeoutSeconds int         `json:"default_timeout_seconds"`
+	MaxTimeoutSeconds     int         `json:"max_timeout_seconds"`
+	MemoryLimitMiB        int         `json:"memory_limit_mib"`
 }
 
 // RepoConfig is the parsed repository-root .macserve.json. It may only name
-// the work directory, project or workspace, scheme and two fixed steps.
+// the work directory, project or workspace, scheme, two fixed steps and the
+// test shards of the test templates.
 type RepoConfig struct {
-	Version         int    `json:"version"`
-	WorkDir         string `json:"work_dir"`
-	Project         string `json:"project,omitempty"`
-	Workspace       string `json:"workspace,omitempty"`
-	Scheme          string `json:"scheme"`
-	XcodeGen        bool   `json:"xcodegen,omitempty"`
-	ResolvePackages bool   `json:"resolve_packages,omitempty"`
+	Version         int         `json:"version"`
+	WorkDir         string      `json:"work_dir"`
+	Project         string      `json:"project,omitempty"`
+	Workspace       string      `json:"workspace,omitempty"`
+	Scheme          string      `json:"scheme"`
+	XcodeGen        bool        `json:"xcodegen,omitempty"`
+	ResolvePackages bool        `json:"resolve_packages,omitempty"`
+	UITest          *TestShards `json:"ui_test,omitempty"`
+	UnitTest        *TestShards `json:"unit_test,omitempty"`
+}
+
+// TestShards maps each shard name to its -only-testing selectors,
+// Target/Class or Target/Class/method. Build derivation ignores them.
+type TestShards struct {
+	Shards map[string][]string `json:"shards"`
 }
 
 // RepoRecipe is the worker's evidence of what a template job ran: the digest of
-// the exact .macserve.json bytes, their parsed form, and the derived commands.
+// the exact .macserve.json bytes, their parsed form, the derived commands and,
+// for a test template, the shard and its required tests.
 type RepoRecipe struct {
-	ConfigSHA256 string     `json:"config_sha256"`
-	Config       RepoConfig `json:"config"`
-	WorkDir      string     `json:"work_dir"`
-	Prepare      []Command  `json:"prepare"`
-	Run          Command    `json:"run"`
+	ConfigSHA256  string     `json:"config_sha256"`
+	Config        RepoConfig `json:"config"`
+	WorkDir       string     `json:"work_dir"`
+	Prepare       []Command  `json:"prepare"`
+	Run           Command    `json:"run"`
+	Shard         string     `json:"shard,omitempty"`
+	RequiredTests []string   `json:"required_tests,omitempty"`
 }
 
 func digestJSON(value any) (string, error) {

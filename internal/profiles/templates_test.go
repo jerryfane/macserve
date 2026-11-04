@@ -111,7 +111,7 @@ func TestTemplatesLoadStrictlyBesideProfiles(t *testing.T) {
 	dir := t.TempDir()
 	cases := map[string]string{
 		"unknown template field":       strings.Replace(buildTemplate, `"version":1`, `"version":1,"run":{"executable":"/bin/sh","args":[]}`, 1),
-		"unsupported kind":             strings.Replace(buildTemplate, `"kind":"build"`, `"kind":"unit_test"`, 1),
+		"unsupported kind":             strings.Replace(buildTemplate, `"kind":"build"`, `"kind":"release"`, 1),
 		"no owners":                    strings.Replace(buildTemplate, `["themartianapp","jerryfane"]`, `[]`, 1),
 		"uppercase owner":              strings.Replace(buildTemplate, `"jerryfane"`, `"JerryFane"`, 1),
 		"repository as owner":          strings.Replace(buildTemplate, `"jerryfane"`, `"jerryfane/app"`, 1),

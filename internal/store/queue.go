@@ -27,6 +27,9 @@ func requestBytes(request model.Request) ([]byte, string, error) {
 	if request.Kind != model.Build && request.Simulator == nil {
 		return nil, "", ErrInvalid
 	}
+	if request.Shard != "" && !validOpaque(request.Shard, 32) {
+		return nil, "", ErrInvalid
+	}
 	if sim := request.Simulator; sim != nil && (!validOpaque(sim.Runtime, 256) || !validOpaque(sim.RuntimeBuild, 128) || !validOpaque(sim.DeviceType, 256)) {
 		return nil, "", ErrInvalid
 	}
@@ -78,12 +81,20 @@ func profileBytes(admission model.Admission) ([]byte, error) {
 	}
 	if t := profile.Template; t != nil {
 		// A template snapshot carries no recipe: the worker derives it from the
-		// repository's .macserve.json. Everything else must come from the template.
+		// repository's .macserve.json. Everything else must come from the
+		// template, and a test template's simulator and shard from the request.
 		owner, _, _ := strings.Cut(request.Repo, "/")
-		if t.ID != profile.ID || t.Version != profile.Version || t.Kind != profile.Kind || t.Xcode != profile.Xcode || t.DeveloperDir != profile.DeveloperDir || t.DefaultTimeoutSeconds != profile.DefaultTimeoutSeconds || t.MaxTimeoutSeconds != profile.MaxTimeoutSeconds || t.MemoryLimitMiB != profile.MemoryLimitMiB || !slices.Contains(t.Owners, owner) || profile.Simulator != nil || profile.WorkDir != "" || len(profile.Prepare) != 0 || profile.Run.Executable != "" || len(profile.Run.Args) != 0 || len(profile.GeneratedFiles) != 0 || len(profile.Artifacts) != 0 || len(profile.RequiredTests) != 0 {
+		if t.ID != profile.ID || t.Version != profile.Version || t.Kind != profile.Kind || t.Xcode != profile.Xcode || t.DeveloperDir != profile.DeveloperDir || t.DefaultTimeoutSeconds != profile.DefaultTimeoutSeconds || t.MaxTimeoutSeconds != profile.MaxTimeoutSeconds || t.MemoryLimitMiB != profile.MemoryLimitMiB || !slices.Contains(t.Owners, owner) || profile.WorkDir != "" || len(profile.Prepare) != 0 || profile.Run.Executable != "" || len(profile.Run.Args) != 0 || len(profile.GeneratedFiles) != 0 || len(profile.Artifacts) != 0 || len(profile.RequiredTests) != 0 || profile.Shard != request.Shard {
 			return nil, ErrInvalid
 		}
-	} else if !validOpaque(profile.Run.Executable, 4096) {
+		if t.Kind == model.Build {
+			if profile.Simulator != nil || profile.Shard != "" {
+				return nil, ErrInvalid
+			}
+		} else if profile.Simulator == nil || !slices.Contains(t.Simulators, *profile.Simulator) || profile.Shard == "" {
+			return nil, ErrInvalid
+		}
+	} else if !validOpaque(profile.Run.Executable, 4096) || profile.Shard != "" || request.Shard != "" {
 		return nil, ErrInvalid
 	}
 	if (request.Simulator == nil) != (profile.Simulator == nil) || request.Simulator != nil && *request.Simulator != *profile.Simulator {
@@ -115,6 +126,10 @@ func (s *Store) Replay(ctx context.Context, principal, key string, request model
 	request.SHA = strings.ToLower(request.SHA)
 	if request.TimeoutSeconds == 0 {
 		request.TimeoutSeconds = original.Profile.DefaultTimeoutSeconds
+	}
+	// A test template admits an omitted simulator as its first pin.
+	if request.Simulator == nil && original.Profile.Template != nil {
+		request.Simulator = original.Profile.Simulator
 	}
 	_, digest, err := requestBytes(request)
 	if err != nil {
