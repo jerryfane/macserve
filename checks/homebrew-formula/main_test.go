@@ -78,6 +78,42 @@ func TestRefusesBadInputs(t *testing.T) {
 	}
 }
 
+// TestRefusesJunkAroundValidValues pins the ^ and $ anchors of the tag, repo
+// and sha patterns: a valid value with leading or trailing junk, including a
+// newline, must never reach the formula.
+func TestRefusesJunkAroundValidValues(t *testing.T) {
+	valid := formula{Repo: "jerryfane/macserve", Tag: "v0.1.29", SHA256: goldenSHA}
+	for name, tc := range map[string]struct {
+		edit func(*formula)
+		want string
+	}{
+		"sha trailing newline":  {func(f *formula) { f.SHA256 += "\nsystem 'x'" }, "invalid sha256"},
+		"sha trailing quote":    {func(f *formula) { f.SHA256 += `"` }, "invalid sha256"},
+		"sha leading junk":      {func(f *formula) { f.SHA256 = "\"\n" + f.SHA256 }, "invalid sha256"},
+		"tag trailing newline":  {func(f *formula) { f.Tag += "\nfoo" }, "invalid tag"},
+		"tag trailing junk":     {func(f *formula) { f.Tag += `"` }, "invalid tag"},
+		"tag leading junk":      {func(f *formula) { f.Tag = "x\n" + f.Tag }, "invalid tag"},
+		"repo trailing quote":   {func(f *formula) { f.Repo += `"` }, "invalid repository"},
+		"repo trailing newline": {func(f *formula) { f.Repo += "\nsystem 'x'" }, "invalid repository"},
+		"repo leading junk":     {func(f *formula) { f.Repo = `"` + f.Repo }, "invalid repository"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := valid
+			tc.edit(&f)
+			out, err := render("{{.Repo}} {{.Tag}} {{.SHA256}}", f)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want %q", err, tc.want)
+			}
+			if out != nil {
+				t.Fatalf("rendered on error: %q", out)
+			}
+		})
+	}
+	if _, err := render("{{.Repo}}", valid); err != nil {
+		t.Fatalf("valid values refused: %v", err)
+	}
+}
+
 func TestTemplateRefusesUnknownField(t *testing.T) {
 	_, err := render("{{.Missing}}", formula{Repo: "a/b", Tag: "v1.0.0", SHA256: goldenSHA})
 	if err == nil {

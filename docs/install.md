@@ -41,7 +41,7 @@ The rebuilt sha256 must equal `EXPECTED_SHA256` and the downloaded binary's dige
 
 #### Homebrew formula (release asset)
 
-Each release also publishes `macserve.rb`, rendered by `checks/homebrew-formula` from `assets/homebrew/macserve.rb.tmpl` only after the byte-identical rebuild and attestation checks pass. It pins the release URL and the `macserve-darwin-arm64` digest from that release's `SHA256SUMS`, requires macOS on arm64, and installs `macserve` into the Homebrew keg only. That copy is owner-writable and never becomes the service binary: `macserve setup` verifies the release digest itself and copies those bytes into root-owned `/Library/macserve/bin`. The formula's caveats point to `macserve setup --plan`.
+Each release also publishes `macserve.rb`, rendered by `checks/homebrew-formula` from `assets/homebrew/macserve.rb.tmpl` only after the byte-identical rebuild and attestation checks pass. It pins the release URL and the `macserve-darwin-arm64` digest from that release's `SHA256SUMS`, requires macOS on arm64, and installs `macserve` only into the Homebrew prefix. That copy is owner-writable and never becomes the service binary: `macserve setup` verifies the release digest itself and copies those bytes into root-owned `/Library/macserve/bin`. The formula's caveats point to `macserve setup --plan`.
 
 The tap `jerryfane/homebrew-macserve` is maintained by hand; CI holds no token for it. For each release, open a one-line bump PR in the tap that replaces `Formula/macserve.rb` with the release's `macserve.rb` asset, after checking that its `sha256` equals the `macserve-darwin-arm64` line of that release's `SHA256SUMS`:
 

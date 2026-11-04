@@ -12,7 +12,7 @@ class Macserve < Formula
   depends_on :macos
 
   def install
-    # The keg copy is owner-writable and is never the service binary:
+    # The Homebrew copy is owner-writable and is never the service binary:
     # macserve setup verifies the release digest and copies those bytes into
     # root-owned /Library/macserve/bin itself.
     bin.install "macserve-darwin-arm64" => "macserve"

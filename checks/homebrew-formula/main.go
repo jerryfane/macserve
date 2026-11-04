@@ -20,6 +20,8 @@ import (
 
 const asset = "macserve-darwin-arm64"
 
+// Go's ^ and $ without (?m) match only at the start and end of the text, so a
+// value with a newline or any other junk around it is refused.
 var (
 	tagPattern  = regexp.MustCompile(`^v([0-9]+\.[0-9]+\.[0-9]+)$`)
 	repoPattern = regexp.MustCompile(`^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$`)
