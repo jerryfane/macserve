@@ -6,21 +6,22 @@ import (
 	"bytes"
 	"errors"
 	"strconv"
-	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
 
-const (
-	procInfoPIDInfo = 2
-	procPIDPathInfo = 11
-)
-
-// jobProcesses reads the kernel facts the baseline rule uses, as the
-// worker reads them (internal/worker identity_darwin.go and
-// respawn_darwin.go): every process whose effective UID is jobUID, its
-// start time, its PROC_PIDPATHINFO executable and whether that file is
-// SIP-restricted, root-owned and not group or other writable.
+// jobProcesses reads the kernel facts the baseline proposal checks: every
+// process whose effective UID is jobUID, its start time, its executable
+// and whether that file is SIP-restricted, root-owned and not group or
+// other writable.
+//
+// The executable is the exec path the kernel records in KERN_PROCARGS2,
+// read through x/sys's safe sysctl wrapper: setup may not import unsafe
+// (checks/readonly), and PROC_PIDPATHINFO needs it. This is a pre-check
+// only, so a refused process is reported before any reset. The binding
+// check stays worker.CheckBaselinePolicy (PROC_PIDPATHINFO) on the reset
+// baseline, which round-begin runs, and which qualify begin, collect and
+// approve enforce again.
 func jobProcesses(jobUID uint32) ([]JobProcess, error) {
 	rows, err := unix.SysctlKinfoProcSlice("kern.proc.all")
 	if err != nil {
@@ -42,16 +43,18 @@ func jobProcesses(jobUID uint32) ([]JobProcess, error) {
 	return procs, nil
 }
 
+// processPath is the exec path of pid's KERN_PROCARGS2 (argc, then the
+// NUL-terminated path), or "" when it is unavailable or not absolute.
 func processPath(pid int) string {
-	path := make([]byte, 4096)
-	if _, _, errno := unix.Syscall6(unix.SYS_PROC_INFO, procInfoPIDInfo, uintptr(pid), procPIDPathInfo, 0, uintptr(unsafe.Pointer(&path[0])), uintptr(len(path))); errno != 0 {
+	raw, err := unix.SysctlRaw("kern.procargs2", pid)
+	if err != nil || len(raw) < 4 {
 		return ""
 	}
-	end := bytes.IndexByte(path, 0)
-	if end <= 0 {
+	path, _, ok := bytes.Cut(raw[4:], []byte{0})
+	if !ok || len(path) == 0 || path[0] != '/' {
 		return ""
 	}
-	return string(path[:end])
+	return string(path)
 }
 
 // sipRestricted is the baseline executable rule: a regular file (never a

@@ -269,6 +269,9 @@ func (h *Helper) handle(r Request) (Response, error) {
 	if done || !slices.Contains(verbSteps[r.Verb], next.Step) {
 		return Response{}, fmt.Errorf("setup continues at %s; %s is not served there", next.Step, r.Verb)
 	}
+	if qualifierVerb(r.Verb) && (h.Qualify == nil || h.Output == nil) {
+		return Response{}, fmt.Errorf("%s needs the qualification APIs, which this helper was not given", r.Verb)
+	}
 	switch r.Verb {
 	case VerbInstall:
 		return h.install(l, loc)
@@ -320,6 +323,17 @@ var verbSteps = map[Verb][]Step{
 	VerbSummary:       {StepApproveAndStart},
 	VerbApprove:       {StepApproveAndStart},
 	VerbReleasePause:  {StepFirstBuild},
+}
+
+// qualifierVerb reports a verb that calls Qualify or Output: the rounds,
+// the reboot and approve-and-start. A helper built without them refuses
+// those verbs instead of failing on a nil seam.
+func qualifierVerb(v Verb) bool {
+	switch v {
+	case VerbRoundPrepare, VerbRoundBegin, VerbRoundJobProbe, VerbRoundCollect, VerbReboot, VerbSummary, VerbApprove, VerbReleasePause:
+		return true
+	}
+	return false
 }
 
 // begin starts step s and saves the ledger. A retryable step that is

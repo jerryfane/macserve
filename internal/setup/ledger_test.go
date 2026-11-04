@@ -106,11 +106,12 @@ func TestOldStepOrderRefusedOnDecode(t *testing.T) {
 }
 
 // TestRetryableStepsRestartAndInstallDoesNot: an interrupted detection or
-// converging step begins again (recording the new boot); an interrupted
-// install, reboot or round stays blocked.
+// converging step or qualification round begins again (recording the new
+// boot; a round begins a new session); an interrupted install or reboot
+// stays blocked.
 func TestRetryableStepsRestartAndInstallDoesNot(t *testing.T) {
 	for _, s := range Steps {
-		want := s == StepPreflight || s == StepGitHub || s == StepTools || s == StepOwnerActions
+		want := s == StepPreflight || s == StepGitHub || s == StepTools || s == StepOwnerActions || s == StepRound1 || s == StepRound2
 		if Retryable(s) != want {
 			t.Errorf("Retryable(%s) = %v", s, !want)
 		}
@@ -132,7 +133,7 @@ func TestRetryableStepsRestartAndInstallDoesNot(t *testing.T) {
 	if _, err := DecodeLedger(mustEncode(t, l)); err != nil {
 		t.Fatal(err)
 	}
-	for _, s := range []Step{StepInstall, StepRound1} {
+	for _, s := range []Step{StepInstall, StepReboot} {
 		l := ledgerAt(t, s)
 		if err := l.Begin(s, boot1, t0); err != nil {
 			t.Fatal(err)

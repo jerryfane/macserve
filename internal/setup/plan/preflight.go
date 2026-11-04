@@ -390,7 +390,7 @@ func WritePlan(w io.Writer, plan Plan) error {
 		fmt.Fprintf(&b, "  %2d. %-18s %s\n", i+1, s, setup.StepSummaries[s])
 	}
 	if plan.Ready() {
-		b.WriteString("\nResult: ready. macserve setup (without --plan) applies it, up to qualification round 1.\n")
+		b.WriteString("\nResult: ready. macserve setup (without --plan) applies it, through qualification and your typed approval.\n")
 	} else {
 		n := 0
 		for _, c := range plan.Checks {
