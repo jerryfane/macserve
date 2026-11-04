@@ -19,18 +19,22 @@ type Source struct {
 }
 
 type Observation struct {
-	Xcode            model.Xcode       `json:"xcode"`
-	SDKVersion       string            `json:"sdk_version"`
-	SDKBuild         string            `json:"sdk_build"`
-	SwiftVersion     string            `json:"swift_version"`
-	OSVersion        string            `json:"os_version"`
-	OSBuild          string            `json:"os_build"`
-	Architecture     string            `json:"architecture"`
-	RuntimeVersion   string            `json:"runtime_version,omitempty"`
-	RuntimeBuild     string            `json:"runtime_build,omitempty"`
-	DeviceUDID       string            `json:"device_udid,omitempty"`
-	GeneratedDigests map[string]string `json:"generated_digests,omitempty"`
-	LockfileDigests  map[string]string `json:"lockfile_digests,omitempty"`
+	Xcode          model.Xcode `json:"xcode"`
+	SDKVersion     string      `json:"sdk_version"`
+	SDKBuild       string      `json:"sdk_build"`
+	SwiftVersion   string      `json:"swift_version"`
+	OSVersion      string      `json:"os_version"`
+	OSBuild        string      `json:"os_build"`
+	Architecture   string      `json:"architecture"`
+	RuntimeVersion string      `json:"runtime_version,omitempty"`
+	RuntimeBuild   string      `json:"runtime_build,omitempty"`
+	DeviceUDID     string      `json:"device_udid,omitempty"`
+	// SimulatorBootAttempts is how many devices the job created to get one
+	// booted: 1, or 2 after the one infrastructure retry. Zero without a
+	// simulator.
+	SimulatorBootAttempts int               `json:"simulator_boot_attempts,omitempty"`
+	GeneratedDigests      map[string]string `json:"generated_digests,omitempty"`
+	LockfileDigests       map[string]string `json:"lockfile_digests,omitempty"`
 	// MetalToolchain is what `xcodebuild -showComponent MetalToolchain`
 	// reported for the job; see observeMetalToolchain.
 	MetalToolchain *MetalToolchain `json:"metal_toolchain,omitempty"`

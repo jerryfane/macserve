@@ -260,7 +260,7 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 	}
 	x.stdout = &logWriter{state: x.logs, file: stdout, stream: "stdout", sink: sink, cancel: cancel}
 	x.stderr = &logWriter{state: x.logs, file: stderr, stream: "stderr", sink: sink, cancel: cancel}
-	prepareCtx, prepareCancel := context.WithTimeout(ctx, 10*time.Minute)
+	prepareCtx, prepareCancel := context.WithTimeout(ctx, prepareBudget(job.Request.Kind))
 	checkout, err := x.root.OpenRoot("checkout")
 	if err != nil {
 		prepareCancel()
@@ -331,6 +331,16 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 	x.ranRecipe = true
 	returned = x.recipe(ctx, x.job.Profile.Run)
 	return result, returned
+}
+
+// prepareBudget bounds source extraction, the simulator and every prepare
+// command, always within the job deadline. A test job's prepare may include a
+// template's build-for-testing, so test kinds get 30 minutes; builds keep 10.
+func prepareBudget(kind model.Kind) time.Duration {
+	if kind == model.Build {
+		return 10 * time.Minute
+	}
+	return 30 * time.Minute
 }
 
 func (x *execution) prepare(ctx context.Context) error {
