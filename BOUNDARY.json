@@ -23,6 +23,7 @@
       "internal/launchctlprint/**",
       "internal/maintenance/**",
       "internal/model/**",
+      "internal/onboarding/**",
       "internal/peercred/**",
       "internal/pfctl/**",
       "internal/profiles/**",

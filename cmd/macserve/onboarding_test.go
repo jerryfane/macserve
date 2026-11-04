@@ -52,7 +52,7 @@ func TestOnboardingNamesDoNotShadowCommands(t *testing.T) {
 }
 
 func TestOnboardingShellsAreNotAvailable(t *testing.T) {
-	for _, name := range []string{"connect-github", "doctor", "build", "upgrade"} {
+	for _, name := range []string{"doctor", "build", "upgrade"} {
 		var stdout, stderr bytes.Buffer
 		if got := run([]string{name}, &stdout, &stderr); got != 2 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "not available in this release") {
 			t.Errorf("%s: exit %d stdout %q stderr %q", name, got, stdout.String(), stderr.String())
@@ -73,17 +73,25 @@ func TestUsageListsOnboardingCommands(t *testing.T) {
 }
 
 // TestInactiveShellsHaveNoRunFunction: checks/readonly does not follow the
-// command table, so the inactive shells must stay without code.
+// command table, so the inactive shells must stay without code. Active
+// commands other than setup (connect-github, which writes the App key and
+// controller.json under sudo) are not read-only and not on that walk.
 func TestInactiveShellsHaveNoRunFunction(t *testing.T) {
-	inactive := map[string]bool{"connect-github": true, "doctor": true, "build": true, "upgrade": true}
+	inactive := map[string]bool{"doctor": true, "build": true, "upgrade": true}
+	active := map[string]bool{"setup": true, "connect-github": true}
 	seen := 0
 	for _, c := range onboardingCommands {
-		if inactive[c.name] {
+		switch {
+		case inactive[c.name]:
 			seen++
 			if c.run != nil {
 				t.Errorf("%s has a run function; prove it read-only or list it as active", c.name)
 			}
-		} else if c.name != "setup" {
+		case active[c.name]:
+			if c.run == nil {
+				t.Errorf("active command %s has no run function", c.name)
+			}
+		default:
 			t.Errorf("unexpected onboarding command %s", c.name)
 		}
 	}
