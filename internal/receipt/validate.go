@@ -11,6 +11,7 @@ import (
 
 	"github.com/jerryfane/macserve/internal/evidence"
 	"github.com/jerryfane/macserve/internal/model"
+	"github.com/jerryfane/macserve/internal/profiles"
 )
 
 func sameSimulator(a, b *model.Simulator) bool {
@@ -139,10 +140,16 @@ func testEvidence(kind model.Kind, required []string, s *evidence.Summary) TestE
 func validateDetails(p Payload, require func(bool, string)) {
 	d := p.Details
 	r := d.Result
-	profile := d.Profile
-	snapshotDigest, err := profile.SnapshotDigest()
-	require(err == nil && snapshotDigest == p.ProfileDigest && profile.ID == p.Request.Profile && profile.Version == p.ProfileVersion && profile.Repo == p.Request.Repo && profile.Kind == p.Request.Kind && profile.Xcode == p.Request.Xcode && sameSimulator(profile.Simulator, p.Request.Simulator) && sameStrings(profile.RequiredTests, p.Tests.Required) && profile.MemoryLimitMiB == p.Resources.MemoryLimitMiB, "recipe manifest")
-	require((profile.Template != nil) == (r.Observation.Recipe != nil), "template recipe manifest")
+	snapshot := d.Profile
+	snapshotDigest, err := snapshot.SnapshotDigest()
+	require(err == nil && snapshotDigest == p.ProfileDigest && snapshot.ID == p.Request.Profile && snapshot.Version == p.ProfileVersion && snapshot.Repo == p.Request.Repo && snapshot.Kind == p.Request.Kind && snapshot.Xcode == p.Request.Xcode && sameSimulator(snapshot.Simulator, p.Request.Simulator) && sameStrings(snapshot.RequiredTests, p.Tests.Required) && snapshot.MemoryLimitMiB == p.Resources.MemoryLimitMiB, "recipe manifest")
+	// A template job's snapshot has no recipe; the executed recipe is the
+	// derivation from its reported repository configuration.
+	profile, err := profiles.Effective(snapshot, r.Observation.Recipe)
+	if err != nil {
+		require(false, "template recipe manifest")
+		profile = snapshot
+	}
 	require(r.State == p.State && r.Source == p.Source && r.StartedAt.Equal(p.StartedAt) && r.FinishedAt.Equal(p.FinishedAt) && r.CleanupOK == p.Resources.CleanupOK && reflect.DeepEqual(r.ExitCode, p.ExitCode) && r.Signal == p.Signal && r.Reason == p.Reason && r.LogsTruncated == p.LogsTruncated && r.PeakMemoryMiB == p.Resources.PeakMemoryMiB && observed(r.Observation) == p.Observation, "execution manifest")
 	require(len(r.Commands) == p.CommandCount && len(r.Artifacts) == p.ArtifactCount, "manifest counts")
 	for _, item := range []struct {

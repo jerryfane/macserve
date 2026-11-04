@@ -13,6 +13,10 @@ Receipts bind the admitted request digest, repository/commit/tree/export, recipe
 actual argv/timing/exit, cleanup, test outcomes and artifact hashes. `complete` describes evidence completeness;
 it is not a success verdict. Verification must also require successful state and the exact expected policy.
 Container failures cannot count as executed tests. Build receipts explicitly say tests were not run.
+An org-template job's admitted snapshot carries no recipe; its success is checked against the recipe derived
+from the reported `.macserve.json`, which must equal the reported recipe and whose executable must have exited 0.
+The controller logs a refused or failed worker request with its method, route and job ID; a receipt refusal
+returns HTTP 422.
 Submodules and Git LFS are unsupported and rejected, not silently omitted.
 
 Every public receipt is a compact signed core, regardless of size, with a full-manifest SHA-256, size and

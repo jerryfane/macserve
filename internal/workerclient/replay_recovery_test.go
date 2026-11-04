@@ -62,7 +62,7 @@ func TestUncertainPendingCompletionReplaysBeforeRecoveryWithoutRegistration(t *t
 			}
 			if !accepted {
 				var status *HTTPError
-				if !errors.As(err, &status) || status.Status != 503 || recovered {
+				if !errors.As(err, &status) || status.Status != 503 || recovered || err.Error() != "controller HTTP status 503 for POST "+protocol.Prefix+"/jobs/uncertain/complete" {
 					t.Fatalf("delivery error lost or recovery ran before replay: recovered=%v err=%v", recovered, err)
 				}
 			}

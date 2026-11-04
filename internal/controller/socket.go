@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/jerryfane/macserve/internal/evidence"
 	"github.com/jerryfane/macserve/internal/model"
 	"github.com/jerryfane/macserve/internal/protocol"
+	"github.com/jerryfane/macserve/internal/receipt"
 	"github.com/jerryfane/macserve/internal/store"
 	"github.com/jerryfane/macserve/internal/worker"
 	"golang.org/x/sys/unix"
@@ -39,7 +41,10 @@ func decodeJSON(reader io.Reader, maximum int64, value any) error {
 	return nil
 }
 
-func respond(w http.ResponseWriter, value any, err error) {
+// respond writes a worker-socket reply. Unmapped failures and receipt
+// refusals are logged with the method, route and job id only: the worker sees
+// just the status, and neither request bodies nor lease headers are logged.
+func respond(w http.ResponseWriter, r *http.Request, value any, err error) {
 	if err != nil {
 		status := http.StatusInternalServerError
 		switch {
@@ -49,12 +54,22 @@ func respond(w http.ResponseWriter, value any, err error) {
 			status = http.StatusNotFound
 		case errors.Is(err, store.ErrConflict), errors.Is(err, store.ErrTransition):
 			status = http.StatusConflict
+		case errors.Is(err, receipt.ErrInvalid):
+			// The signer refused the evidence; replaying it cannot succeed.
+			status = http.StatusUnprocessableEntity
 		case errors.Is(err, store.ErrInvalid), errors.Is(err, evidence.ErrArtifact):
 			status = http.StatusBadRequest
 		case errors.Is(err, evidence.ErrArtifactLimit), errors.Is(err, store.ErrLogLimit), errors.Is(err, store.ErrResultLimit):
 			status = http.StatusRequestEntityTooLarge
 		case errors.Is(err, ErrNotReady):
 			status = http.StatusServiceUnavailable
+		}
+		if status == http.StatusInternalServerError || status == http.StatusUnprocessableEntity {
+			job := r.PathValue("job")
+			if !safeID(job) {
+				job = "-"
+			}
+			log.Printf("controller worker request failed: method=%s route=%q job=%s status=%d: %v", r.Method, r.Pattern, job, status, err)
 		}
 		http.Error(w, http.StatusText(status), status)
 		return
@@ -78,19 +93,19 @@ func (c *Controller) handler() http.Handler {
 		if err == nil {
 			err = c.register(r.Context(), registration)
 		}
-		respond(w, nil, err)
+		respond(w, r, nil, err)
 	})
 	mux.HandleFunc("POST "+protocol.Prefix+"/next", func(w http.ResponseWriter, r *http.Request) {
 		var empty struct{}
 		if err := decodeJSON(r.Body, 4096, &empty); err != nil {
-			respond(w, nil, err)
+			respond(w, r, nil, err)
 			return
 		}
 		lease, err := c.next(r.Context(), r.Header.Get(protocol.EpochHeader))
 		if lease == nil {
-			respond(w, nil, err)
+			respond(w, r, nil, err)
 		} else {
-			respond(w, lease, err)
+			respond(w, r, lease, err)
 		}
 	})
 	mux.HandleFunc("GET "+protocol.Prefix+"/jobs/{job}/source", c.serveSource)
@@ -101,15 +116,15 @@ func (c *Controller) handler() http.Handler {
 	mux.HandleFunc("POST "+protocol.Prefix+"/jobs/{job}/complete", func(w http.ResponseWriter, r *http.Request) {
 		job, err := c.requestJob(r, true)
 		if err != nil {
-			respond(w, nil, err)
+			respond(w, r, nil, err)
 			return
 		}
 		var result worker.Result
 		if err := decodeJSON(r.Body, 64<<20, &result); err != nil {
-			respond(w, nil, err)
+			respond(w, r, nil, err)
 			return
 		}
-		respond(w, nil, c.complete(r.Context(), job, result))
+		respond(w, r, nil, c.complete(r.Context(), job, result))
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authenticated, _ := r.Context().Value(peerKey{}).(bool)
@@ -155,17 +170,17 @@ func (c *Controller) heartbeat(w http.ResponseWriter, r *http.Request) {
 		c.lastSeen = c.active.heartbeat
 		return protocol.Heartbeat{Cancel: c.closed || job.CancelRequested || !c.options.Now().Before(*job.Deadline), Deadline: *job.Deadline}, nil
 	}()
-	respond(w, value, err)
+	respond(w, r, value, err)
 }
 
 func (c *Controller) stage(w http.ResponseWriter, r *http.Request) {
 	var value protocol.Stage
 	if err := decodeJSON(r.Body, 4096, &value); err != nil {
-		respond(w, nil, err)
+		respond(w, r, nil, err)
 		return
 	}
 	if value.State != model.Running && value.State != model.Finalizing {
-		respond(w, nil, store.ErrTransition)
+		respond(w, r, nil, store.ErrTransition)
 		return
 	}
 	err := func() error {
@@ -189,13 +204,13 @@ func (c *Controller) stage(w http.ResponseWriter, r *http.Request) {
 		}
 		return c.options.Store.Transition(r.Context(), job.ID, job.LeaseToken, job.State, value.State, "", c.options.Now())
 	}()
-	respond(w, nil, err)
+	respond(w, r, nil, err)
 }
 
 func (c *Controller) logs(w http.ResponseWriter, r *http.Request) {
 	var value protocol.Log
 	if err := decodeJSON(r.Body, 128<<10, &value); err != nil {
-		respond(w, nil, err)
+		respond(w, r, nil, err)
 		return
 	}
 	err := func() error {
@@ -217,7 +232,7 @@ func (c *Controller) logs(w http.ResponseWriter, r *http.Request) {
 		}
 		return err
 	}()
-	respond(w, nil, err)
+	respond(w, r, nil, err)
 }
 
 func (c *Controller) serveSource(w http.ResponseWriter, r *http.Request) {
@@ -232,24 +247,24 @@ func (c *Controller) serveSource(w http.ResponseWriter, r *http.Request) {
 	}
 	c.mu.Unlock()
 	if err != nil {
-		respond(w, nil, err)
+		respond(w, r, nil, err)
 		return
 	}
 	file, err := os.OpenFile(name, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
-		respond(w, nil, err)
+		respond(w, r, nil, err)
 		return
 	}
 	defer file.Close()
 	info, err := privateRegular(file)
 	if err != nil {
-		respond(w, nil, err)
+		respond(w, r, nil, err)
 		return
 	}
 	// Source ingestion has a larger bounded budget than ordinary RPCs. Override
 	// the per-connection server deadline only for this authenticated transfer.
 	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(c.options.SourceTimeout + c.options.HeartbeatTimeout)); err != nil {
-		respond(w, nil, err)
+		respond(w, r, nil, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/x-tar")
@@ -259,24 +274,24 @@ func (c *Controller) serveSource(w http.ResponseWriter, r *http.Request) {
 func (c *Controller) upload(w http.ResponseWriter, r *http.Request) {
 	job, err := c.requestJob(r, true)
 	if err != nil {
-		respond(w, nil, err)
+		respond(w, r, nil, err)
 		return
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(r.Header.Get(protocol.ArtifactHeader))
 	if err != nil {
-		respond(w, nil, store.ErrInvalid)
+		respond(w, r, nil, store.ErrInvalid)
 		return
 	}
 	var artifact evidence.Artifact
 	if err := decodeJSON(bytes.NewReader(raw), 8192, &artifact); err != nil {
-		respond(w, nil, err)
+		respond(w, r, nil, err)
 		return
 	}
 	if artifact.ID != r.PathValue("artifact") || r.ContentLength != artifact.SizeBytes {
-		respond(w, nil, store.ErrInvalid)
+		respond(w, r, nil, store.ErrInvalid)
 		return
 	}
-	respond(w, nil, c.putArtifact(r.Context(), job, artifact, r.Body))
+	respond(w, r, nil, c.putArtifact(r.Context(), job, artifact, r.Body))
 }
 
 // The caller has already authenticated its public principal and authorized the
