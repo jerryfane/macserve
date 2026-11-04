@@ -63,6 +63,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"sort"
@@ -113,9 +114,10 @@ type Policy struct {
 	Switch map[string]string
 	// Table pins the command table the chosen clause dispatches through.
 	Table *Table
-	// Entry is the only function that may reference a Switch root. Pin its
-	// source (Pinned) so the command word it passes is fixed.
-	Entry string
+	// Entry maps each Switch root to the only function that may reference
+	// it. Pin that function's source (Pinned) so the word it passes is
+	// fixed.
+	Entry map[string]string
 	// Imports are the module packages Package may import.
 	Imports []string
 	// Seams are the module functions outside Package and Roots that
@@ -147,6 +149,12 @@ type Policy struct {
 	// that may import unsafe. Their packages must not depend on Package,
 	// so they cannot name its memory; //go:linkname is refused everywhere.
 	UnsafeFiles []string
+	// EmbedFiles are the module-relative files of linked module packages
+	// that may carry //go:embed. Their packages must not depend on
+	// Package, and each pattern must be a literal path of a regular file
+	// inside the file's package directory (no glob, "..", "all:" or
+	// directory), so only reviewed data is embedded.
+	EmbedFiles []string
 	// Refs maps a package variable of Package to the only functions that
 	// may reference it.
 	Refs map[string][]string
@@ -162,8 +170,10 @@ type listedPackage struct {
 	IgnoredGoFiles []string
 	// Non-Go sources (assembly, C, objects) can define or replace symbols.
 	SFiles, CFiles, CXXFiles, HFiles, MFiles, FFiles, SysoFiles, SwigFiles, SwigCXXFiles []string
-	Module                                                                               *struct{ Path string }
-	Error                                                                                *struct{ Err string }
+	// EmbedFiles are the files //go:embed patterns resolved to.
+	EmbedFiles []string
+	Module     *struct{ Path string }
+	Error      *struct{ Err string }
 }
 
 // Build is a listed darwin/arm64 build of a module.
@@ -199,7 +209,7 @@ func List(root string, patterns ...string) (*Build, error) {
 	if _, err := os.Stat(tool); err != nil {
 		tool = "go"
 	}
-	args := append([]string{"list", "-e", "-export", "-deps", "-json=ImportPath,Dir,Export,Standard,GoFiles,CgoFiles,IgnoredGoFiles,SFiles,CFiles,CXXFiles,HFiles,MFiles,FFiles,SysoFiles,SwigFiles,SwigCXXFiles,Module,Error"}, patterns...)
+	args := append([]string{"list", "-e", "-export", "-deps", "-json=ImportPath,Dir,Export,Standard,GoFiles,CgoFiles,IgnoredGoFiles,SFiles,CFiles,CXXFiles,HFiles,MFiles,FFiles,SysoFiles,SwigFiles,SwigCXXFiles,EmbedFiles,Module,Error"}, patterns...)
 	cmd := exec.Command(tool, args...)
 	cmd.Dir = root
 	cmd.Env = slices.Concat(os.Environ(), buildEnv, []string{"PWD=" + root})
@@ -340,6 +350,7 @@ func (b *Build) Check(policy Policy, overlay map[string][]byte) (Report, error) 
 	}
 	c.checkPins(root)
 	c.checkUnsafeFiles()
+	c.checkEmbedFiles()
 	c.checkTable()
 	sort.Strings(c.problems)
 	return Report{Problems: slices.Compact(c.problems), Reached: slices.Sorted(maps.Keys(c.visited)), Uses: c.counts}, nil
@@ -504,8 +515,8 @@ var allowedDirectives = []string{"//go:build"}
 
 // checkLinkage applies the linkage rules to every linked file of a module
 // package: no cgo or non-Go sources, no "C" import, unsafe only in
-// Policy.UnsafeFiles, no //go: directive outside allowedDirectives and no
-// //export.
+// Policy.UnsafeFiles, no //go: directive outside allowedDirectives
+// (//go:embed also in Policy.EmbedFiles) and no //export.
 func (c *checker) checkLinkage(path string, src *source) {
 	p := c.b.pkgs[path]
 	if nonGo := slices.Concat(p.CgoFiles, p.SFiles, p.CFiles, p.CXXFiles, p.HFiles, p.MFiles, p.FFiles, p.SysoFiles, p.SwigFiles, p.SwigCXXFiles); len(nonGo) > 0 {
@@ -545,9 +556,90 @@ func (c *checker) checkLinkage(path string, src *source) {
 					continue
 				}
 				directive := strings.Fields(text)[0]
+				if directive == embedDirective && slices.Contains(c.policy.EmbedFiles, rel) {
+					continue
+				}
 				if !slices.Contains(allowedDirectives, directive) {
 					c.problem("%s: %s directive in linked module code", c.b.fset.PositionFor(comment.Pos(), false), directive)
 				}
+			}
+		}
+	}
+}
+
+// embedDirective is allowed only in Policy.EmbedFiles.
+const embedDirective = "//go:embed"
+
+// embedPattern is a literal slash-separated relative file name: no glob,
+// quoting, "all:" prefix or empty, "." or ".." element.
+var embedPattern = regexp.MustCompile(`^[A-Za-z0-9_-][A-Za-z0-9_.-]*(/[A-Za-z0-9_-][A-Za-z0-9_.-]*)*$`)
+
+// linkedPackage returns the linked module package that compiles rel.
+func (c *checker) linkedPackage(rel string) *listedPackage {
+	dir := filepath.Join(c.b.root, filepath.Dir(rel))
+	for _, p := range c.b.pkgs {
+		if p.Dir == dir && !p.Standard && slices.Contains(p.GoFiles, filepath.Base(rel)) {
+			return &p
+		}
+	}
+	return nil
+}
+
+// checkEmbedFiles requires every listed embed file to be compiled into a
+// linked package that does not depend on Package, to carry at least one
+// //go:embed, and every pattern to be a literal name of a regular,
+// non-symlink file inside that package's directory; the package embeds
+// exactly those files.
+func (c *checker) checkEmbedFiles() {
+	for _, rel := range c.policy.EmbedFiles {
+		pkg := c.linkedPackage(rel)
+		if pkg == nil {
+			c.problem("embed file %s is not part of a linked module package", rel)
+			continue
+		}
+		if c.dependsOn(pkg.ImportPath, c.policy.Package, map[string]bool{}) {
+			c.problem("embed file %s is in a package that depends on %s", rel, c.policy.Package)
+		}
+		src, err := c.load(pkg.ImportPath)
+		if err != nil {
+			c.problem("embed file %s: %v", rel, err)
+			continue
+		}
+		var named []string
+		for _, f := range src.files {
+			if r, err := c.rel(c.b.fset.PositionFor(f.Pos(), false).Filename); err != nil || r != rel {
+				continue
+			}
+			for _, group := range f.Comments {
+				for _, comment := range group.List {
+					fields := strings.Fields(comment.Text)
+					if len(fields) == 0 || fields[0] != embedDirective {
+						continue
+					}
+					if len(fields) == 1 {
+						c.problem("%s: //go:embed without a pattern", c.b.fset.PositionFor(comment.Pos(), false))
+					}
+					for _, pattern := range fields[1:] {
+						path := filepath.Join(pkg.Dir, filepath.FromSlash(pattern))
+						info, err := os.Lstat(path)
+						switch {
+						case !embedPattern.MatchString(pattern) || slices.Contains(strings.Split(pattern, "/"), ".."):
+							c.problem("%s: //go:embed pattern %q is not a literal file name inside %s", c.b.fset.PositionFor(comment.Pos(), false), pattern, filepath.Dir(rel))
+						case err != nil || !info.Mode().IsRegular():
+							c.problem("%s: //go:embed pattern %q is not a regular file inside %s", c.b.fset.PositionFor(comment.Pos(), false), pattern, filepath.Dir(rel))
+						default:
+							named = append(named, path)
+						}
+					}
+				}
+			}
+		}
+		if len(named) == 0 {
+			c.problem("embed file %s embeds nothing; remove it from the policy", rel)
+		}
+		for _, file := range pkg.EmbedFiles {
+			if !slices.Contains(named, filepath.Join(pkg.Dir, filepath.FromSlash(file))) {
+				c.problem("%s embeds %s, which no listed pattern names", pkg.ImportPath, file)
 			}
 		}
 	}
@@ -1405,8 +1497,8 @@ func (c *checker) use(obj types.Object, caller string, pos token.Pos, call *ast.
 			iface = types.IsInterface(recv.Type())
 		}
 		if c.module(obj.Pkg()) {
-			if _, dispatch := c.policy.Switch[key]; dispatch && caller != c.policy.Entry {
-				c.problem("%s: %s references %s; only %s may call the dispatch", c.b.fset.PositionFor(pos, false), caller, key, c.policy.Entry)
+			if _, dispatch := c.policy.Switch[key]; dispatch && caller != c.policy.Entry[key] {
+				c.problem("%s: %s references %s; only %s may call the dispatch", c.b.fset.PositionFor(pos, false), caller, key, c.policy.Entry[key])
 				return
 			}
 			if iface {

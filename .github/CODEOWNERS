@@ -1,6 +1,7 @@
 # The read-only proof of `macserve setup --plan` (checks/readonly), the code
 # it proves or pins by sha256, the command dispatch it narrows, and the
-# onboarding code that later setup steps build on need the owner's review.
+# onboarding code that later setup steps build on, the setup root helper's
+# wizard and the deploy assets it embeds need the owner's review.
 # This is a merge gate only with "Require review from Code Owners" enabled
 # in branch protection.
 /.github/CODEOWNERS @jerryfane
@@ -10,3 +11,5 @@
 /cmd/macserve/main.go @jerryfane
 /cmd/macserve/onboarding.go @jerryfane
 /cmd/macserve/onboarding_github.go @jerryfane
+/cmd/macserve/onboarding_setup.go @jerryfane
+/assets/ @jerryfane

@@ -78,7 +78,7 @@ func TestUsageListsOnboardingCommands(t *testing.T) {
 // controller.json under sudo) are not read-only and not on that walk.
 func TestInactiveShellsHaveNoRunFunction(t *testing.T) {
 	inactive := map[string]bool{"doctor": true, "build": true, "upgrade": true}
-	active := map[string]bool{"setup": true, "connect-github": true}
+	active := map[string]bool{"setup": true, "connect-github": true, "_setup-root": true, "_fda-check": true}
 	seen := 0
 	for _, c := range onboardingCommands {
 		switch {

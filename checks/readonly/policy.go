@@ -8,7 +8,8 @@ const (
 )
 
 // SetupPlan is the policy for `macserve setup --plan`: main and the
-// dispatch for the word "setup", the onboarding entry points in
+// dispatch for the word "setup", runSetup outside its apply clause, the
+// onboarding entry points in
 // cmd/macserve/onboarding.go, everything in internal/setup/plan, and the
 // package initialisation of every module package in the binary.
 var SetupPlan = Policy{
@@ -18,12 +19,18 @@ var SetupPlan = Policy{
 		mainPkg + ".run",
 		mainPkg + ".onboardingCommand",
 		mainPkg + ".runSetup",
+		mainPkg + ".setupDispatch",
 		mainPkg + ".runSetupWith",
 	},
-	Switch: map[string]string{mainPkg + ".run": "setup"},
+	// setupDispatch is proven for the word "plan": runSetup passes
+	// plan.Mode(args), which is "plan" whenever an argument names the plan
+	// flag, so the apply clause (setup without --plan, which changes the
+	// host) is the only code not walked. runSetup and plan.Mode are pinned.
+	Switch: map[string]string{mainPkg + ".run": "setup", mainPkg + ".setupDispatch": "plan"},
 	// main is the only caller of run; its source is pinned below, so it
-	// passes exactly os.Args[1:].
-	Entry: mainPkg + ".main",
+	// passes exactly os.Args[1:]. runSetup is the only caller of
+	// setupDispatch.
+	Entry: map[string]string{mainPkg + ".run": mainPkg + ".main", mainPkg + ".setupDispatch": mainPkg + ".runSetup"},
 	Table: &Table{
 		Var: mainPkg + ".onboardingCommands", Name: "name", Run: "run", Key: "setup", Root: mainPkg + ".runSetup",
 		Fields: []string{"name", "summary", "help", "run"},
@@ -100,6 +107,9 @@ var SetupPlan = Policy{
 		"internal/worker/login_darwin.go",
 		"internal/worker/respawn_darwin.go",
 	},
+	// The deploy assets setup stages for deploy-install; internal/setup
+	// (apply only) reads them.
+	EmbedFiles: []string{"assets/embed.go"},
 	Refs: map[string][]string{
 		planFunc + "readOnlyCommands": {planFunc + "AllowedCommand"},
 		planFunc + "commandEnv":       {planFunc + "command"},
@@ -117,5 +127,7 @@ var SetupPlan = Policy{
 		planFunc + "runReadOnly":       "7874fa2e1de4400e14b98d7c2689261c45fa1cc67e594aa8369d7b6e71494812",
 		planFunc + "portInUse":         "280ef394e7c9b1098c4068019a427193f2d34cf7f7b3ec9c0fa46c06c3f0d9ee",
 		planFunc + "lstat":             "251be9e0866e8e13a0b1042da3d141584d1f0153d35d63d50564faa7b5948642",
+		mainPkg + ".runSetup":          "221ff686ad5c6933ad8700d238f990c1250e4e55fc74dea4be7e3b736429604f",
+		planFunc + "Mode":              "b559faf6fe2eea5513be2da8d5e85325f69286cdb3b6a5b308bcdbaf78bbb04e",
 	},
 }
