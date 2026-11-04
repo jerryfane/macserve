@@ -1,5 +1,5 @@
-// Package readonly proves that `macserve setup --plan` cannot change host
-// state.
+// Package readonly proves that `macserve setup --plan` and `macserve doctor`
+// (without --live) cannot change host state; see SetupPlan and Doctor.
 //
 // Scope: this is a release-build tripwire for reviewed code, not a sandbox
 // and not a proof against a malicious committer. It checks the darwin/arm64

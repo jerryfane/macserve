@@ -33,7 +33,7 @@ func TestOnboardingCommandsHelpExitZero(t *testing.T) {
 
 // TestOnboardingHelpTakesNoArguments: only a lone --help prints help.
 func TestOnboardingHelpTakesNoArguments(t *testing.T) {
-	for _, name := range []string{"doctor", "build", "upgrade"} {
+	for _, name := range []string{"upgrade"} {
 		var stdout, stderr bytes.Buffer
 		if got := run([]string{name, "--help", "extra"}, &stdout, &stderr); got != 2 || stdout.Len() != 0 {
 			t.Errorf("%s --help extra: exit %d stdout %q", name, got, stdout.String())
@@ -52,7 +52,7 @@ func TestOnboardingNamesDoNotShadowCommands(t *testing.T) {
 }
 
 func TestOnboardingShellsAreNotAvailable(t *testing.T) {
-	for _, name := range []string{"doctor", "build", "upgrade"} {
+	for _, name := range []string{"upgrade"} {
 		var stdout, stderr bytes.Buffer
 		if got := run([]string{name}, &stdout, &stderr); got != 2 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "not available in this release") {
 			t.Errorf("%s: exit %d stdout %q stderr %q", name, got, stdout.String(), stderr.String())
@@ -77,8 +77,8 @@ func TestUsageListsOnboardingCommands(t *testing.T) {
 // commands other than setup (connect-github, which writes the App key and
 // controller.json under sudo) are not read-only and not on that walk.
 func TestInactiveShellsHaveNoRunFunction(t *testing.T) {
-	inactive := map[string]bool{"doctor": true, "build": true, "upgrade": true}
-	active := map[string]bool{"setup": true, "connect-github": true, "_setup-root": true, "_fda-check": true}
+	inactive := map[string]bool{"upgrade": true}
+	active := map[string]bool{"setup": true, "connect-github": true, "doctor": true, "build": true, "_setup-root": true, "_fda-check": true}
 	seen := 0
 	for _, c := range onboardingCommands {
 		switch {
