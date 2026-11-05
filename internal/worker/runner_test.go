@@ -509,7 +509,7 @@ func TestNativeRunnerUnverifiableCleanupFails(t *testing.T) {
 
 func TestNativeRunnerRefusesOwnerGroup(t *testing.T) {
 	runner, _ := helperRunner(t, "hang")
-	err := runner.cleanupGroup("test", syscall.Getpgrp(), os.Geteuid(), func() {}, func() bool { return true }, func() bool { return false })
+	err := runner.cleanupGroup(syscall.Getpgrp(), os.Geteuid(), func() {}, func() bool { return true }, func() bool { return false })
 	if !errors.Is(err, ErrCleanup) {
 		t.Fatalf("owner group not rejected: %v", err)
 	}
@@ -535,7 +535,7 @@ func TestNativeRunnerRejectsForeignUIDGroup(t *testing.T) {
 			{pid: other.Process.Pid, group: other.Process.Pid, uid: os.Geteuid() + 1},
 		}, nil
 	}
-	err := runner.cleanupGroup("test", other.Process.Pid, os.Geteuid(), func() {}, func() bool { return true }, func() bool { return false })
+	err := runner.cleanupGroup(other.Process.Pid, os.Geteuid(), func() {}, func() bool { return true }, func() bool { return false })
 	if !errors.Is(err, ErrCleanup) {
 		t.Fatalf("foreign group was accepted: %v", err)
 	}
@@ -613,7 +613,7 @@ func TestProtectedCleanupRetriesTransientListing(t *testing.T) {
 		return []processSample{trustedGUI()}, nil
 	}
 	r.signalProcess = func(context.Context, processSample, syscall.Signal) error { return nil }
-	if err := r.cleanupProtectedGroup("test", 201, testJobUID, func() {}, func() bool { return true }); err != nil {
+	if err := r.cleanupProtectedGroup(201, testJobUID, func() {}, func() bool { return true }); err != nil {
 		t.Fatalf("one failed listing left cleanup unconfirmed: %v", err)
 	}
 }
@@ -628,7 +628,7 @@ func TestProtectedCleanupPersistentListingFailureFails(t *testing.T) {
 		t.Fatal("signalled without a listing")
 		return nil
 	}
-	if err := r.cleanupProtectedGroup("test", 201, testJobUID, func() {}, func() bool { return true }); !errors.Is(err, ErrCleanup) || !errors.Is(err, listErr) || !strings.Contains(err.Error(), "test: protected cleanup: final listing: ") {
+	if err := r.cleanupProtectedGroup(201, testJobUID, func() {}, func() bool { return true }); !errors.Is(err, ErrCleanup) || !errors.Is(err, listErr) || !strings.Contains(err.Error(), "protected cleanup: final listing: ") {
 		t.Fatalf("persistent listing failure accepted: %v", err)
 	}
 }
@@ -650,8 +650,9 @@ func TestProtectedCleanupGroupLiveAfterWindowIsContamination(t *testing.T) {
 	if !errors.Is(err, ErrCleanup) || !errors.Is(err, ErrContamination) || result.CleanupOK {
 		t.Fatalf("live group after the window was accepted: %+v, %v", result, err)
 	}
-	label := commandLabel(command) + ": protected cleanup: job group still live after the cleanup window"
-	if !strings.Contains(err.Error(), label) || !strings.HasPrefix(diagnostics.String(), "macserve worker: "+commandLabel(command)+": cleanup not confirmed: ") || !strings.Contains(diagnostics.String(), label) {
+	prefix := commandLabel(command) + ": worker process cleanup failed"
+	phase := "protected cleanup: job group still live after the cleanup window"
+	if !strings.Contains(err.Error(), prefix) || !strings.Contains(err.Error(), phase) || !strings.HasPrefix(diagnostics.String(), "macserve worker: "+prefix+"; ") || !strings.Contains(diagnostics.String(), phase) {
 		t.Fatalf("cleanup failure does not name its command and phase: %q / %q", err, diagnostics.String())
 	}
 }

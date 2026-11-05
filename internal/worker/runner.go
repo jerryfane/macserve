@@ -358,12 +358,13 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 		runErr = errors.Join(runErr, ctx.Err())
 	}
 
-	cleanupErr := r.cleanupGroup(label, pid, uid, reap, func() bool { return reaped }, func() bool { return waitFailed })
+	cleanupErr := r.cleanupGroup(pid, uid, reap, func() bool { return reaped }, func() bool { return waitFailed })
 	result.CleanupOK = cleanupErr == nil
 	if cleanupErr != nil {
+		cleanupErr = fmt.Errorf("%s: %w", label, cleanupErr)
 		runErr = errors.Join(runErr, cleanupErr)
 		if r.diagnostics != nil {
-			fmt.Fprintf(r.diagnostics, "macserve worker: %s: cleanup not confirmed: %s\n", label, strings.ReplaceAll(cleanupErr.Error(), "\n", "; "))
+			fmt.Fprintf(r.diagnostics, "macserve worker: %s\n", strings.ReplaceAll(cleanupErr.Error(), "\n", "; "))
 		}
 	}
 	if reaped && (result.ExitCode != 0 || result.Signal != "") {
@@ -417,18 +418,19 @@ func commandLabel(command Command) string {
 
 var labelWord = regexp.MustCompile(`^[a-z][a-z-]{0,23}$`)
 
-// cleanupFailure names the command and cleanup phase of a cleanup failure, so a
-// recurrence explains itself: "xcrun simctl boot: protected cleanup: listing: …".
-func cleanupFailure(label, phase string, errs ...error) error {
-	return fmt.Errorf("%s: %s: %w", label, phase, errors.Join(errs...))
+// cleanupFailure names the cleanup phase of a failure; Run prefixes the
+// command, so a recurrence explains itself ("xcrun simctl boot: worker process
+// cleanup failed; protected cleanup: final listing: …").
+func cleanupFailure(phase string, errs ...error) error {
+	return fmt.Errorf("%s: %w", phase, errors.Join(errs...))
 }
 
-func (r *nativeRunner) cleanupGroup(label string, group, uid int, reap func(), reaped, waitFailed func() bool) error {
+func (r *nativeRunner) cleanupGroup(group, uid int, reap func(), reaped, waitFailed func() bool) error {
 	if r.signalProcess != nil {
-		return r.cleanupProtectedGroup(label, group, uid, reap, reaped)
+		return r.cleanupProtectedGroup(group, uid, reap, reaped)
 	}
 	if group <= 1 || group == syscall.Getpgrp() {
-		return errors.Join(ErrCleanup, cleanupFailure(label, "cleanup", errors.New("refusing to signal the owner process group")))
+		return errors.Join(ErrCleanup, cleanupFailure("cleanup", errors.New("refusing to signal the owner process group")))
 	}
 	var failures, inspectErr error
 	foreignGroup := false
@@ -437,13 +439,13 @@ func (r *nativeRunner) cleanupGroup(label string, group, uid int, reap func(), r
 	inspect := func() (bool, bool) {
 		samples, err := r.snapshot(r.inspect)
 		if err != nil {
-			inspectErr = cleanupFailure(label, "cleanup: inspect process group", err)
+			inspectErr = cleanupFailure("cleanup: inspect process group", err)
 			return true, false
 		}
 		inspectErr = nil
 		live, err := ownedGroup(samples, group, uid)
 		if err != nil {
-			failures = errors.Join(failures, cleanupFailure(label, "cleanup: ownership", err))
+			failures = errors.Join(failures, cleanupFailure("cleanup: ownership", err))
 			foreignGroup = true
 			return true, false
 		}
@@ -461,14 +463,14 @@ func (r *nativeRunner) cleanupGroup(label string, group, uid int, reap func(), r
 			// Never fall back to signalling an unverified process group.
 			if !foreignGroup && !reaped() && !waitFailed() {
 				if err := syscall.Kill(group, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
-					failures = errors.Join(failures, cleanupFailure(label, "cleanup: signal direct child", err))
+					failures = errors.Join(failures, cleanupFailure("cleanup: signal direct child", err))
 				}
 			}
 			return
 		}
 		if live {
 			if err := syscall.Kill(-group, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
-				failures = errors.Join(failures, cleanupFailure(label, "cleanup: signal process group", err))
+				failures = errors.Join(failures, cleanupFailure("cleanup: signal process group", err))
 			}
 		}
 	}
@@ -496,13 +498,13 @@ func (r *nativeRunner) cleanupGroup(label string, group, uid int, reap func(), r
 	}
 	if !clean && failures == nil {
 		if live, inspected := inspect(); inspected && live {
-			return errors.Join(ErrCleanup, ErrContamination, cleanupFailure(label, "cleanup", errors.New("process group still live after the cleanup window")))
+			return errors.Join(ErrCleanup, ErrContamination, cleanupFailure("cleanup", errors.New("process group still live after the cleanup window")))
 		}
 	}
 	if !clean {
 		failures = errors.Join(failures, inspectErr)
 		if failures == nil {
-			failures = cleanupFailure(label, "cleanup", errors.New("direct child not reaped within the cleanup window"))
+			failures = cleanupFailure("cleanup", errors.New("direct child not reaped within the cleanup window"))
 		}
 	}
 	if !clean || failures != nil {
@@ -519,7 +521,7 @@ func (r *nativeRunner) cleanupGroup(label string, group, uid int, reap func(), r
 // followed by one fresh bounded listing. Cleanup is confirmed exactly when that
 // listing shows no live group member and the direct child is reaped; a live
 // member is contamination, and a listing that still fails is unconfirmed.
-func (r *nativeRunner) cleanupProtectedGroup(label string, group, uid int, reap func(), reaped func() bool) error {
+func (r *nativeRunner) cleanupProtectedGroup(group, uid int, reap func(), reaped func() bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), r.termGrace+r.killGrace)
 	defer cancel()
 	termUntil := time.Now().Add(r.termGrace)
@@ -535,11 +537,11 @@ func (r *nativeRunner) cleanupProtectedGroup(label string, group, uid int, reap 
 			}
 			live = true
 			if p.uid != uid {
-				return errors.Join(ErrCleanup, ErrContamination, cleanupFailure(label, "protected cleanup", errors.New("job group contains a foreign UID")))
+				return errors.Join(ErrCleanup, ErrContamination, cleanupFailure("protected cleanup", errors.New("job group contains a foreign UID")))
 			}
 			for _, trusted := range r.scope.baseline.Processes {
 				if trusted.PID == p.pid {
-					return errors.Join(ErrCleanup, ErrContamination, cleanupFailure(label, "protected cleanup", errors.New("refusing to signal a GUI baseline PID")))
+					return errors.Join(ErrCleanup, ErrContamination, cleanupFailure("protected cleanup", errors.New("refusing to signal a GUI baseline PID")))
 				}
 			}
 			sig := syscall.SIGTERM
@@ -548,9 +550,9 @@ func (r *nativeRunner) cleanupProtectedGroup(label string, group, uid int, reap 
 			}
 			if err := r.signalProcess(ctx, p, sig); err != nil {
 				if ctx.Err() == nil {
-					return errors.Join(ErrCleanup, cleanupFailure(label, "protected cleanup: signal", err))
+					return errors.Join(ErrCleanup, cleanupFailure("protected cleanup: signal", err))
 				}
-				listErr = cleanupFailure(label, "protected cleanup: signal", err)
+				listErr = cleanupFailure("protected cleanup: signal", err)
 				break
 			}
 		}
@@ -565,17 +567,17 @@ func (r *nativeRunner) cleanupProtectedGroup(label string, group, uid int, reap 
 	reap()
 	samples, err := r.snapshot(r.scope.sample)
 	if err != nil {
-		return errors.Join(ErrCleanup, cleanupFailure(label, "protected cleanup: final listing", listErr, err))
+		return errors.Join(ErrCleanup, cleanupFailure("protected cleanup: final listing", listErr, err))
 	}
 	live, err := ownedGroup(samples, group, uid)
 	if err != nil {
-		return errors.Join(ErrCleanup, ErrContamination, cleanupFailure(label, "protected cleanup: final listing", err))
+		return errors.Join(ErrCleanup, ErrContamination, cleanupFailure("protected cleanup: final listing", err))
 	}
 	if live {
-		return errors.Join(ErrCleanup, ErrContamination, cleanupFailure(label, "protected cleanup", errors.New("job group still live after the cleanup window")))
+		return errors.Join(ErrCleanup, ErrContamination, cleanupFailure("protected cleanup", errors.New("job group still live after the cleanup window")))
 	}
 	if !reaped() {
-		return errors.Join(ErrCleanup, cleanupFailure(label, "protected cleanup", errors.New("direct child not reaped within the cleanup window"), ctx.Err()))
+		return errors.Join(ErrCleanup, cleanupFailure("protected cleanup", errors.New("direct child not reaped within the cleanup window"), ctx.Err()))
 	}
 	return nil
 }
