@@ -256,6 +256,11 @@ func TestBuildExportsSurviveCleanupUntilAcknowledged(t *testing.T) {
 	if err != nil || result.State != model.Succeeded || !result.CleanupOK || result.Summary != nil || result.ExitCode == nil || *result.ExitCode != 0 || result.PeakMemoryMiB != 123 {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
+	for _, c := range runner.commands {
+		if c.MemoryBaseline != runner.commands[0].MemoryBaseline || c.MemoryBaseline == nil {
+			t.Fatalf("job command %s %v does not share the job's memory baseline", c.Executable, c.Args)
+		}
+	}
 	if _, err := os.Stat(filepath.Join(engine.options.WorkspaceRoot, job.ID)); !os.IsNotExist(err) {
 		t.Fatalf("workspace remains: %v", err)
 	}

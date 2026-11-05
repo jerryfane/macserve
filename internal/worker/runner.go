@@ -18,19 +18,28 @@ import (
 )
 
 var (
-	// ErrMemoryLimit means sampled aggregate worker-UID RSS exceeded the budget.
+	// ErrMemoryLimit means the sampled aggregate phys_footprint of the worker
+	// UID's live processes exceeded the budget.
 	ErrMemoryLimit = errors.New("worker memory budget exceeded")
 	// ErrCleanup means the runner could not prove its process group was cleaned.
 	ErrCleanup = errors.New("worker process cleanup failed")
 )
+
+// sampleFailureTimeouts bounds how long memory may go unobserved: the job
+// fails closed once no sample has succeeded for this many sample timeouts
+// (30 s at the production 5 s), never because one sample was slow or failed.
+const sampleFailureTimeouts = 6
 
 type processSample struct {
 	pid    int
 	group  int
 	uid    int
 	rssKiB int64
-	zombie bool
-	start  string
+	// footprintKiB is the memory the platform charges the process: Darwin's
+	// phys_footprint, which excludes shared clean pages; RSS on Linux.
+	footprintKiB int64
+	zombie       bool
+	start        string
 }
 
 type processSampler func(context.Context) ([]processSample, error)
@@ -55,22 +64,25 @@ type nativeRunner struct {
 	// console refuses admission unless the owner or the login window holds
 	// /dev/console (hostguard.ConsoleAdmissible). Nil refuses.
 	console func() error
+	// diagnostics receives tolerated memory sampling failures; nil discards.
+	diagnostics io.Writer
 }
 
 // newProcessRunner is the process/pipes implementation. Production construction
 // is exclusively through NewNativeRunner, which binds the protected UID scope.
 func newProcessRunner() *nativeRunner {
-	return &nativeRunner{
+	r := &nativeRunner{
 		uid:            os.Geteuid(),
-		sample:         sampleProcesses,
 		inspect:        sampleProcesses,
 		pollInterval:   20 * time.Millisecond,
 		sampleInterval: 250 * time.Millisecond,
-		sampleTimeout:  time.Second,
+		sampleTimeout:  5 * time.Second,
 		termGrace:      500 * time.Millisecond,
 		killGrace:      time.Second,
 		drainTimeout:   250 * time.Millisecond,
 	}
+	r.sample = func(ctx context.Context) ([]processSample, error) { return memoryProcesses(ctx, r.uid) }
+	return r
 }
 
 type pipeResult struct {
@@ -139,6 +151,32 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 	if command.MemoryLimitMiB < 0 {
 		return result, errors.New("worker command memory budget must not be negative")
 	}
+	// The job UID's GUI session is always logged in, and its footprint
+	// (including compressed and swapped memory) is outside the job's control.
+	// A command is charged only for footprint above the job UID's footprint
+	// sampled immediately before its job's first command; without that
+	// baseline it must not start.
+	baseline := command.MemoryBaseline
+	if baseline == nil {
+		baseline = &MemoryBaseline{}
+	}
+	if !baseline.sampled {
+		baselineCtx, cancelBaseline := context.WithTimeout(ctx, r.sampleTimeout)
+		samples, err := r.sample(baselineCtx)
+		cancelBaseline()
+		if err != nil {
+			return result, fmt.Errorf("sample worker memory baseline: %w", err)
+		}
+		kib, err := footprintKiB(samples, r.uid)
+		if err != nil {
+			return result, fmt.Errorf("sample worker memory baseline: %w", err)
+		}
+		*baseline = MemoryBaseline{sampled: true, kib: kib}
+		if command.MemoryBaseline != nil && r.diagnostics != nil {
+			fmt.Fprintf(r.diagnostics, "macserve worker: job memory baseline: job-UID footprint %d MiB\n", kibToMiB(kib))
+		}
+	}
+	baselineKiB := baseline.kib
 	if stdout == nil {
 		stdout = io.Discard
 	}
@@ -204,8 +242,7 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 			return
 		}
 		var status syscall.WaitStatus
-		var usage syscall.Rusage
-		waited, err := syscall.Wait4(pid, &status, syscall.WNOHANG, &usage)
+		waited, err := syscall.Wait4(pid, &status, syscall.WNOHANG, nil)
 		if errors.Is(err, syscall.EINTR) {
 			return
 		}
@@ -222,22 +259,16 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 		if status.Signaled() {
 			result.Signal = status.Signal().String()
 		}
-		result.PeakMemoryMiB = max(result.PeakMemoryMiB, kibToMiB(peakRSSKiB(usage)))
 	}
 	observe := func(samples []processSample) error {
-		var totalKiB int64
-		for _, p := range samples {
-			if p.uid != uid || p.zombie {
-				continue
-			}
-			if p.rssKiB < 0 || p.rssKiB > (1<<63-1)-totalKiB {
-				return errors.New("invalid worker memory sample")
-			}
-			totalKiB += p.rssKiB
+		totalKiB, err := footprintKiB(samples, uid)
+		if err != nil {
+			return err
 		}
-		result.PeakMemoryMiB = max(result.PeakMemoryMiB, kibToMiB(totalKiB))
-		if command.MemoryLimitMiB > 0 && kibToMiB(totalKiB) > int64(command.MemoryLimitMiB) {
-			return fmt.Errorf("%w: sampled %d MiB, budget %d MiB (monitored, not a hard cap)", ErrMemoryLimit, kibToMiB(totalKiB), command.MemoryLimitMiB)
+		charged := kibToMiB(max(0, totalKiB-baselineKiB))
+		result.PeakMemoryMiB = max(result.PeakMemoryMiB, charged)
+		if command.MemoryLimitMiB > 0 && charged > int64(command.MemoryLimitMiB) {
+			return fmt.Errorf("%w: sampled %d MiB above the %d MiB job-UID baseline, budget %d MiB (monitored, not a hard cap)", ErrMemoryLimit, charged, kibToMiB(baselineKiB), command.MemoryLimitMiB)
 		}
 		return nil
 	}
@@ -246,13 +277,54 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 	defer poll.Stop()
 	memory := time.NewTicker(r.sampleInterval)
 	defer memory.Stop()
+	// Sampling runs beside the loop, so a slow sample never delays reaping,
+	// output or cancellation. A failed or timed-out sample is reported and
+	// tolerated; the job fails closed once no sample has succeeded for
+	// sampleFailureTimeouts sample timeouts.
+	type memorySample struct {
+		samples []processSample
+		err     error
+	}
+	sampled := make(chan memorySample, 1)
+	sampling := false
+	samplingCtx, stopSampling := context.WithCancel(context.Background())
 	sampleMemory := func() {
-		samples, err := r.snapshot(r.sample)
-		if err != nil {
-			runErr = errors.Join(runErr, fmt.Errorf("sample worker memory: %w", err))
+		if sampling {
 			return
 		}
-		runErr = errors.Join(runErr, observe(samples))
+		sampling = true
+		go func() {
+			ctx, cancel := context.WithTimeout(samplingCtx, r.sampleTimeout)
+			defer cancel()
+			samples, err := r.sample(ctx)
+			sampled <- memorySample{samples: samples, err: err}
+		}()
+	}
+	observed := time.Now()
+	failures := 0
+	var lastFailure error
+	recordSample := func(s memorySample) {
+		sampling = false
+		if s.err != nil {
+			failures++
+			lastFailure = s.err
+			if r.diagnostics != nil {
+				fmt.Fprintf(r.diagnostics, "macserve worker: memory sample failed (%d consecutive): %v\n", failures, s.err)
+			}
+			return
+		}
+		observed, failures, lastFailure = time.Now(), 0, nil
+		runErr = errors.Join(runErr, observe(s.samples))
+	}
+	checkObserved := func() {
+		unobserved := time.Since(observed)
+		if unobserved <= sampleFailureTimeouts*r.sampleTimeout {
+			return
+		}
+		if lastFailure == nil {
+			lastFailure = errors.New("memory sample did not complete")
+		}
+		runErr = errors.Join(runErr, fmt.Errorf("sample worker memory: no sample succeeded for %s (%d failed): %w", unobserved.Round(time.Millisecond), failures, lastFailure))
 	}
 	sampleMemory()
 	for runErr == nil {
@@ -266,9 +338,18 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 		case p := <-pipes:
 			recordPipe(p)
 		case <-poll.C:
+		case s := <-sampled:
+			recordSample(s)
 		case <-memory.C:
+			checkObserved()
 			sampleMemory()
 		}
+	}
+	// The command has finished or failed; a sample still in flight no longer
+	// decides anything and must not outlive Run.
+	stopSampling()
+	if sampling {
+		<-sampled
 	}
 	if ctx.Err() != nil {
 		runErr = errors.Join(runErr, ctx.Err())
@@ -467,17 +548,25 @@ func kibToMiB(kib int64) int64 {
 	return mib
 }
 
+// footprintKiB sums the footprint of uid's live processes in samples.
+func footprintKiB(samples []processSample, uid int) (int64, error) {
+	var totalKiB int64
+	for _, p := range samples {
+		if p.uid != uid || p.zombie {
+			continue
+		}
+		if p.footprintKiB < 0 || p.footprintKiB > (1<<63-1)-totalKiB {
+			return 0, errors.New("invalid worker memory sample")
+		}
+		totalKiB += p.footprintKiB
+	}
+	return totalKiB, nil
+}
+
 // ps exposes only numeric identity, RSS and state; command lines, paths and
 // environment data are deliberately neither requested nor retained.
 func sampleProcesses(ctx context.Context) ([]processSample, error) {
-	return sampleProcessesAs(ctx, nil)
-}
-
-func sampleProcessesAs(ctx context.Context, credential *syscall.Credential) ([]processSample, error) {
 	cmd := exec.CommandContext(ctx, "/bin/ps", "-axo", "pid=,pgid=,uid=,rss=,stat=")
-	if credential != nil {
-		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: credential}
-	}
 	cmd.Env = []string{"LC_ALL=C"}
 	cmd.Dir = "/"
 	cmd.WaitDelay = 100 * time.Millisecond

@@ -15,11 +15,25 @@ type Command struct {
 	Dir            string
 	Env            []string
 	MemoryLimitMiB int
+	// MemoryBaseline, shared by every command of one job, holds the job-UID
+	// footprint sampled immediately before the job's first command; each
+	// command is charged for footprint above it. Nil samples a baseline
+	// before this command alone.
+	MemoryBaseline *MemoryBaseline
+}
+
+// MemoryBaseline is the job-UID footprint that preceded a job. The runner
+// sets it once, when the job's first command starts.
+type MemoryBaseline struct {
+	sampled bool
+	kib     int64
 }
 
 type ProcessResult struct {
-	ExitCode      int
-	Signal        string
+	ExitCode int
+	Signal   string
+	// PeakMemoryMiB is the charged peak: the highest sampled footprint of the
+	// job UID's live processes above the command's MemoryBaseline.
 	PeakMemoryMiB int64
 	CleanupOK     bool
 }

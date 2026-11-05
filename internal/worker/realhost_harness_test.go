@@ -344,10 +344,10 @@ func (h *rhHarness) jobSample(ctx context.Context) ([]processSample, error) {
 	return samples, ctx.Err()
 }
 
-// memorySample is H5: the production ps sample, restricted to the harness's
-// live job descendants.
+// memorySample is H5: the production memory sample, restricted to the
+// harness's live job descendants.
 func (h *rhHarness) memorySample(ctx context.Context) ([]processSample, error) {
-	rows, err := sampleProcessesAs(ctx, nil)
+	rows, err := memoryProcesses(ctx, h.uid)
 	if err != nil {
 		return nil, err
 	}
@@ -359,11 +359,6 @@ func (h *rhHarness) memorySample(ctx context.Context) ([]processSample, error) {
 		if p := h.procs[id]; live && p != nil && p.Class == "descendant" {
 			out = append(out, r)
 		}
-	}
-	if len(out) == 0 {
-		// parseProcesses never returns an empty snapshot; an idle moment is
-		// one zero-RSS row of the harness user.
-		out = append(out, processSample{pid: h.self, uid: -1})
 	}
 	return out, nil
 }
@@ -493,7 +488,7 @@ func (h *rhHarness) rss(ctx context.Context, done chan<- map[string]any) {
 			return
 		case <-ticker.C:
 		}
-		rows, err := sampleProcessesAs(ctx, nil)
+		rows, err := sampleProcesses(ctx)
 		if err != nil {
 			continue
 		}
