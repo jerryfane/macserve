@@ -441,9 +441,6 @@ func NewNativeRunner(options Options) (Runner, error) {
 func nativeRunnerFor(options Options) *nativeRunner {
 	runner := newProcessRunner()
 	runner.uid = int(options.JobUID)
-	runner.sample = func(ctx context.Context) ([]processSample, error) {
-		return sampleProcessesAs(ctx, &syscall.Credential{Uid: options.JobUID, Gid: options.JobGID, Groups: []uint32{}})
-	}
 	runner.command = func(command Command) *exec.Cmd {
 		args := []string{"asuser", strconv.FormatUint(uint64(options.JobUID), 10), options.HelperPath, "_job-exec", strconv.FormatUint(uint64(options.JobUID), 10), strconv.FormatUint(uint64(options.JobGID), 10), command.Dir, command.Executable}
 		args = append(args, command.Args...)

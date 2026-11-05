@@ -2,7 +2,10 @@
 
 package worker
 
-import "syscall"
+import (
+	"context"
+	"syscall"
+)
 
 func backgroundCommand(executable string, args []string) (string, []string) {
 	wrapped := make([]string, 0, 3+len(args))
@@ -13,4 +16,14 @@ func backgroundCommand(executable string, args []string) (string, []string) {
 
 func peakRSSKiB(usage syscall.Rusage) int64 {
 	return usage.Maxrss
+}
+
+// memoryProcesses charges RSS on Linux, which has no phys_footprint; this
+// development platform reports every UID and observe selects the worker's.
+func memoryProcesses(ctx context.Context, _ int) ([]processSample, error) {
+	samples, err := sampleProcesses(ctx)
+	for i := range samples {
+		samples[i].footprintKiB = samples[i].rssKiB
+	}
+	return samples, err
 }

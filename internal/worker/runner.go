@@ -29,8 +29,11 @@ type processSample struct {
 	group  int
 	uid    int
 	rssKiB int64
-	zombie bool
-	start  string
+	// footprintKiB is the memory the platform charges the process: Darwin's
+	// phys_footprint, which excludes shared clean pages; RSS on Linux.
+	footprintKiB int64
+	zombie       bool
+	start        string
 }
 
 type processSampler func(context.Context) ([]processSample, error)
@@ -60,9 +63,8 @@ type nativeRunner struct {
 // newProcessRunner is the process/pipes implementation. Production construction
 // is exclusively through NewNativeRunner, which binds the protected UID scope.
 func newProcessRunner() *nativeRunner {
-	return &nativeRunner{
+	r := &nativeRunner{
 		uid:            os.Geteuid(),
-		sample:         sampleProcesses,
 		inspect:        sampleProcesses,
 		pollInterval:   20 * time.Millisecond,
 		sampleInterval: 250 * time.Millisecond,
@@ -71,6 +73,8 @@ func newProcessRunner() *nativeRunner {
 		killGrace:      time.Second,
 		drainTimeout:   250 * time.Millisecond,
 	}
+	r.sample = func(ctx context.Context) ([]processSample, error) { return memoryProcesses(ctx, r.uid) }
+	return r
 }
 
 type pipeResult struct {
@@ -470,14 +474,7 @@ func kibToMiB(kib int64) int64 {
 // ps exposes only numeric identity, RSS and state; command lines, paths and
 // environment data are deliberately neither requested nor retained.
 func sampleProcesses(ctx context.Context) ([]processSample, error) {
-	return sampleProcessesAs(ctx, nil)
-}
-
-func sampleProcessesAs(ctx context.Context, credential *syscall.Credential) ([]processSample, error) {
 	cmd := exec.CommandContext(ctx, "/bin/ps", "-axo", "pid=,pgid=,uid=,rss=,stat=")
-	if credential != nil {
-		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: credential}
-	}
 	cmd.Env = []string{"LC_ALL=C"}
 	cmd.Dir = "/"
 	cmd.WaitDelay = 100 * time.Millisecond

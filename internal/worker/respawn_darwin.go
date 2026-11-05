@@ -19,11 +19,48 @@ import (
 )
 
 const (
-	csValid          = 0x00000001
-	csPlatformBinary = 0x04000000
-	procPIDPathInfo  = 11
-	procInfoPIDInfo  = 2
+	csValid           = 0x00000001
+	csPlatformBinary  = 0x04000000
+	procPIDPathInfo   = 11
+	procInfoPIDInfo   = 2
+	procInfoPIDRusage = 9 // PROC_INFO_CALL_PIDRUSAGE, what proc_pid_rusage(3) calls
+	rusageInfoV2      = 2 // RUSAGE_INFO_V2
 )
+
+// rusageInfoV2Data is struct rusage_info_v2 from <sys/resource.h>; the kernel
+// copies out exactly this flavor's size.
+type rusageInfoV2Data struct {
+	uuid                [16]byte
+	userTime            uint64
+	systemTime          uint64
+	pkgIdleWkups        uint64
+	interruptWkups      uint64
+	pageins             uint64
+	wiredSize           uint64
+	residentSize        uint64
+	physFootprint       uint64
+	procStartAbstime    uint64
+	procExitAbstime     uint64
+	childUserTime       uint64
+	childSystemTime     uint64
+	childPkgIdleWkups   uint64
+	childInterruptWkups uint64
+	childPageins        uint64
+	childElapsedAbstime uint64
+	diskioBytesRead     uint64
+	diskioBytesWritten  uint64
+}
+
+// processMemory is proc_pid_rusage(pid, RUSAGE_INFO_V2): the process's resident
+// size and its phys_footprint, both in bytes. The kernel permits it for the
+// caller's own UID and for root.
+func processMemory(pid int) (resident, footprint uint64, err error) {
+	var info rusageInfoV2Data
+	if _, _, errno := unix.Syscall6(unix.SYS_PROC_INFO, procInfoPIDRusage, uintptr(pid), rusageInfoV2, 0, uintptr(unsafe.Pointer(&info)), 0); errno != 0 {
+		return 0, 0, errno
+	}
+	return info.residentSize, info.physFootprint, nil
+}
 
 // nativeAgents reads kernel facts and launchd's own service records as root.
 // It never signals, starts or modifies a service.
