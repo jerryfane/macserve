@@ -578,21 +578,21 @@ func TestProcessSnapshotNormalizesSignedDarwinUID(t *testing.T) {
 	}
 }
 
-// flakyInspector fails (slowly) on its first call, then lists the real host.
-func flakyInspector(delay time.Duration, err error) processSampler {
+// flakyInspector fails (slowly) on its first call, then defers to next.
+func flakyInspector(delay time.Duration, err error, next processSampler) processSampler {
 	var calls atomic.Int32
 	return func(ctx context.Context) ([]processSample, error) {
 		if calls.Add(1) == 1 {
 			time.Sleep(delay)
 			return nil, err
 		}
-		return inspectProcesses(ctx)
+		return next(ctx)
 	}
 }
 
 func TestNativeRunnerCleanupRetriesTransientInspection(t *testing.T) {
 	runner, command := helperRunner(t, "hang")
-	runner.inspect = flakyInspector(20*time.Millisecond, context.DeadlineExceeded)
+	runner.inspect = flakyInspector(20*time.Millisecond, context.DeadlineExceeded, runner.inspect)
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 	result, err := runner.Run(ctx, command, io.Discard, io.Discard)
