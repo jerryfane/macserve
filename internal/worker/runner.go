@@ -32,6 +32,7 @@ const sampleFailureTimeouts = 6
 
 type processSample struct {
 	pid    int
+	parent int
 	group  int
 	uid    int
 	rssKiB int64
@@ -73,7 +74,7 @@ type nativeRunner struct {
 func newProcessRunner() *nativeRunner {
 	r := &nativeRunner{
 		uid:            os.Geteuid(),
-		inspect:        sampleProcesses,
+		inspect:        inspectProcesses,
 		pollInterval:   20 * time.Millisecond,
 		sampleInterval: 250 * time.Millisecond,
 		sampleTimeout:  5 * time.Second,
@@ -402,14 +403,17 @@ func (r *nativeRunner) cleanupGroup(group, uid int, reap func(), reaped, waitFai
 	if group <= 1 || group == syscall.Getpgrp() {
 		return fmt.Errorf("%w: refusing to signal the owner process group", ErrCleanup)
 	}
-	var failures error
+	var failures, inspectErr error
 	foreignGroup := false
+	// A failed inspection is retried within the cleanup window; only one still
+	// failing when the window closes leaves cleanup unconfirmed.
 	inspect := func() (bool, bool) {
 		samples, err := r.snapshot(r.inspect)
 		if err != nil {
-			failures = errors.Join(failures, fmt.Errorf("inspect process group: %w", err))
+			inspectErr = fmt.Errorf("inspect process group: %w", err)
 			return true, false
 		}
+		inspectErr = nil
 		live, err := ownedGroup(samples, group, uid)
 		if err != nil {
 			failures = errors.Join(failures, err)
@@ -418,8 +422,13 @@ func (r *nativeRunner) cleanupGroup(group, uid int, reap func(), reaped, waitFai
 		}
 		return live, true
 	}
-	signal := func(sig syscall.Signal) {
+	signal := func(sig syscall.Signal, grace time.Duration) {
+		deadline := time.Now().Add(grace)
 		live, owned := inspect()
+		for !owned && !foreignGroup && time.Now().Before(deadline) {
+			time.Sleep(min(r.pollInterval, time.Until(deadline)))
+			live, owned = inspect()
+		}
 		if !owned {
 			// A still-unreaped direct child cannot have had its PID reused.
 			// Never fall back to signalling an unverified process group.
@@ -450,16 +459,21 @@ func (r *nativeRunner) cleanupGroup(group, uid int, reap func(), reaped, waitFai
 			time.Sleep(min(r.pollInterval, time.Until(deadline)))
 		}
 	}
-	signal(syscall.SIGTERM)
-	clean := wait(r.termGrace)
+	termUntil := time.Now().Add(r.termGrace)
+	signal(syscall.SIGTERM, r.termGrace)
+	clean := wait(time.Until(termUntil))
 	if !clean {
-		signal(syscall.SIGKILL)
-		clean = wait(r.killGrace)
+		killUntil := time.Now().Add(r.killGrace)
+		signal(syscall.SIGKILL, r.killGrace)
+		clean = wait(time.Until(killUntil))
 	}
 	if !clean && failures == nil {
 		if live, inspected := inspect(); inspected && live {
 			return errors.Join(ErrCleanup, ErrContamination)
 		}
+	}
+	if !clean {
+		failures = errors.Join(failures, inspectErr)
 	}
 	if !clean || failures != nil {
 		return errors.Join(ErrCleanup, failures)
@@ -473,13 +487,14 @@ func (r *nativeRunner) cleanupProtectedGroup(group, uid int, reap func(), reaped
 	ctx, cancel := context.WithTimeout(context.Background(), r.termGrace+r.killGrace)
 	defer cancel()
 	termUntil := time.Now().Add(r.termGrace)
+	// A failed listing is retried until the window closes, and once more after
+	// it; only a listing that keeps failing leaves cleanup unconfirmed.
+	var listErr error
 	for {
 		reap()
 		samples, err := r.scope.sample(ctx)
-		if err != nil {
-			return errors.Join(ErrCleanup, err)
-		}
-		live := false
+		listErr = err
+		live := err != nil
 		for _, p := range samples {
 			if p.group != group || p.zombie {
 				continue
@@ -506,9 +521,10 @@ func (r *nativeRunner) cleanupProtectedGroup(group, uid int, reap func(), reaped
 		}
 		select {
 		case <-ctx.Done():
+			reap()
 			samples, err := r.snapshot(r.scope.sample)
 			if err != nil {
-				return errors.Join(ErrCleanup, err)
+				return errors.Join(ErrCleanup, listErr, err)
 			}
 			live, err := ownedGroup(samples, group, uid)
 			if err != nil {
@@ -516,6 +532,9 @@ func (r *nativeRunner) cleanupProtectedGroup(group, uid int, reap func(), reaped
 			}
 			if live {
 				return errors.Join(ErrCleanup, ErrContamination)
+			}
+			if reaped() {
+				return nil
 			}
 			return errors.Join(ErrCleanup, ctx.Err())
 		case <-time.After(r.pollInterval):

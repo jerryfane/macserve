@@ -20,3 +20,8 @@ func memoryProcesses(ctx context.Context, _ int) ([]processSample, error) {
 	}
 	return samples, err
 }
+
+// inspectProcesses keeps ps on this development platform.
+func inspectProcesses(ctx context.Context) ([]processSample, error) {
+	return sampleProcesses(ctx)
+}

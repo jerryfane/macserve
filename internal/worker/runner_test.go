@@ -577,3 +577,58 @@ func TestProcessSnapshotNormalizesSignedDarwinUID(t *testing.T) {
 		t.Fatalf("incorrect signed UID normalization: %+v", processes)
 	}
 }
+
+// flakyInspector fails (slowly) on its first call, then lists the real host.
+func flakyInspector(delay time.Duration, err error) processSampler {
+	var calls atomic.Int32
+	return func(ctx context.Context) ([]processSample, error) {
+		if calls.Add(1) == 1 {
+			time.Sleep(delay)
+			return nil, err
+		}
+		return inspectProcesses(ctx)
+	}
+}
+
+func TestNativeRunnerCleanupRetriesTransientInspection(t *testing.T) {
+	runner, command := helperRunner(t, "hang")
+	runner.inspect = flakyInspector(20*time.Millisecond, context.DeadlineExceeded)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	result, err := runner.Run(ctx, command, io.Discard, io.Discard)
+	if errors.Is(err, ErrCleanup) || !result.CleanupOK {
+		t.Fatalf("one failed inspection left cleanup unconfirmed: %+v, %v", result, err)
+	}
+}
+
+func TestProtectedCleanupRetriesTransientListing(t *testing.T) {
+	r := newProcessRunner()
+	r.termGrace, r.killGrace, r.pollInterval = 20*time.Millisecond, 20*time.Millisecond, time.Millisecond
+	r.scope = scopeFixture()
+	var calls atomic.Int32
+	r.scope.sample = func(context.Context) ([]processSample, error) {
+		if calls.Add(1) == 1 {
+			return nil, context.DeadlineExceeded
+		}
+		return []processSample{trustedGUI()}, nil
+	}
+	r.signalProcess = func(context.Context, processSample, syscall.Signal) error { return nil }
+	if err := r.cleanupProtectedGroup(201, testJobUID, func() {}, func() bool { return true }); err != nil {
+		t.Fatalf("one failed listing left cleanup unconfirmed: %v", err)
+	}
+}
+
+func TestProtectedCleanupPersistentListingFailureFails(t *testing.T) {
+	r := newProcessRunner()
+	r.termGrace, r.killGrace, r.pollInterval, r.sampleTimeout = 10*time.Millisecond, 10*time.Millisecond, time.Millisecond, 10*time.Millisecond
+	r.scope = scopeFixture()
+	listErr := errors.New("cannot list processes")
+	r.scope.sample = func(context.Context) ([]processSample, error) { return nil, listErr }
+	r.signalProcess = func(context.Context, processSample, syscall.Signal) error {
+		t.Fatal("signalled without a listing")
+		return nil
+	}
+	if err := r.cleanupProtectedGroup(201, testJobUID, func() {}, func() bool { return true }); !errors.Is(err, ErrCleanup) || !errors.Is(err, listErr) {
+		t.Fatalf("persistent listing failure accepted: %v", err)
+	}
+}
