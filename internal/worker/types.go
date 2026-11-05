@@ -33,11 +33,9 @@ type ProcessResult struct {
 	ExitCode int
 	Signal   string
 	// PeakMemoryMiB is the charged peak: the highest sampled footprint of the
-	// job UID's live processes above BaselineFootprintMiB, their footprint
-	// sampled immediately before the command started.
-	PeakMemoryMiB        int64
-	BaselineFootprintMiB int64
-	CleanupOK            bool
+	// job UID's live processes above the command's MemoryBaseline.
+	PeakMemoryMiB int64
+	CleanupOK     bool
 }
 
 // Runner abstracts process execution only; production uses the native runner.

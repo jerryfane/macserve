@@ -172,9 +172,11 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 			return result, fmt.Errorf("sample worker memory baseline: %w", err)
 		}
 		*baseline = MemoryBaseline{sampled: true, kib: kib}
+		if command.MemoryBaseline != nil && r.diagnostics != nil {
+			fmt.Fprintf(r.diagnostics, "macserve worker: job memory baseline: job-UID footprint %d MiB\n", kibToMiB(kib))
+		}
 	}
 	baselineKiB := baseline.kib
-	result.BaselineFootprintMiB = kibToMiB(baselineKiB)
 	if stdout == nil {
 		stdout = io.Discard
 	}
@@ -266,7 +268,7 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 		charged := kibToMiB(max(0, totalKiB-baselineKiB))
 		result.PeakMemoryMiB = max(result.PeakMemoryMiB, charged)
 		if command.MemoryLimitMiB > 0 && charged > int64(command.MemoryLimitMiB) {
-			return fmt.Errorf("%w: sampled %d MiB above the %d MiB job-UID baseline, budget %d MiB (monitored, not a hard cap)", ErrMemoryLimit, charged, result.BaselineFootprintMiB, command.MemoryLimitMiB)
+			return fmt.Errorf("%w: sampled %d MiB above the %d MiB job-UID baseline, budget %d MiB (monitored, not a hard cap)", ErrMemoryLimit, charged, kibToMiB(baselineKiB), command.MemoryLimitMiB)
 		}
 		return nil
 	}

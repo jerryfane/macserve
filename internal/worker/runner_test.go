@@ -386,17 +386,22 @@ func TestNativeRunnerMemoryJobBaselineSpansCommands(t *testing.T) {
 	command.MemoryBaseline = &MemoryBaseline{}
 	footprint := gigabytesOfJobUID(40, 0)
 	runner.sample = func(context.Context) ([]processSample, error) { return footprint, nil }
+	var log bytes.Buffer
+	runner.diagnostics = &log
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if result, err := runner.Run(ctx, command, io.Discard, io.Discard); err != nil || result.BaselineFootprintMiB != 40<<10 {
+	if result, err := runner.Run(ctx, command, io.Discard, io.Discard); err != nil || result.PeakMemoryMiB != 0 {
 		t.Fatalf("first job command: %+v, %v", result, err)
 	}
 	// The first command's simulator is still running when the next starts.
 	footprint = gigabytesOfJobUID(42, 0)
 	command.Env = []string{"MACSERVE_RUNNER_HELPER=hang"}
 	result, err := runner.Run(ctx, command, io.Discard, io.Discard)
-	if !errors.Is(err, ErrMemoryLimit) || result.BaselineFootprintMiB != 40<<10 || result.PeakMemoryMiB != 2048 || !result.CleanupOK {
+	if !errors.Is(err, ErrMemoryLimit) || !strings.Contains(err.Error(), "above the 40960 MiB job-UID baseline") || result.PeakMemoryMiB != 2048 || !result.CleanupOK {
 		t.Fatalf("memory a job left running escaped its budget: %+v, %v", result, err)
+	}
+	if got := log.String(); got != "macserve worker: job memory baseline: job-UID footprint 40960 MiB\n" {
+		t.Fatalf("job memory baseline not logged once at job start: %q", got)
 	}
 }
 

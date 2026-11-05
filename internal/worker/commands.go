@@ -19,10 +19,8 @@ func (e *Engine) run(ctx context.Context, command Command, stdout, stderr io.Wri
 		if args == nil {
 			args = []string{}
 		}
-		if len(e.recording.Commands) == 0 || result.PeakMemoryMiB > e.recording.PeakMemoryMiB {
-			e.recording.PeakMemoryMiB, e.recording.BaselineFootprintMiB = result.PeakMemoryMiB, result.BaselineFootprintMiB
-		}
 		e.recording.Commands = append(e.recording.Commands, ExecutedCommand{Executable: command.Executable, Args: args, StartedAt: started, FinishedAt: e.options.Now().UTC(), ExitCode: result.ExitCode, Signal: result.Signal})
+		e.recording.PeakMemoryMiB = max(e.recording.PeakMemoryMiB, result.PeakMemoryMiB)
 	}
 	return result, err
 }
