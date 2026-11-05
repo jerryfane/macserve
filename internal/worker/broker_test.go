@@ -308,7 +308,7 @@ func TestProtectedGroupNeverSignalsForeignOrBaselinePID(t *testing.T) {
 			t.Fatal("unsafe signal reached kernel seam")
 			return nil
 		}
-		if err := r.cleanupProtectedGroup(201, testJobUID, func() {}, func() bool { return true }); !errors.Is(err, ErrCleanup) {
+		if err := r.cleanupProtectedGroup("test", 201, testJobUID, func() {}, func() bool { return true }); !errors.Is(err, ErrCleanup) {
 			t.Fatalf("unsafe group accepted: %v", err)
 		}
 	}

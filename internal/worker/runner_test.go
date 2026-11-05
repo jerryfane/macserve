@@ -509,7 +509,7 @@ func TestNativeRunnerUnverifiableCleanupFails(t *testing.T) {
 
 func TestNativeRunnerRefusesOwnerGroup(t *testing.T) {
 	runner, _ := helperRunner(t, "hang")
-	err := runner.cleanupGroup(syscall.Getpgrp(), os.Geteuid(), func() {}, func() bool { return true }, func() bool { return false })
+	err := runner.cleanupGroup("test", syscall.Getpgrp(), os.Geteuid(), func() {}, func() bool { return true }, func() bool { return false })
 	if !errors.Is(err, ErrCleanup) {
 		t.Fatalf("owner group not rejected: %v", err)
 	}
@@ -535,7 +535,7 @@ func TestNativeRunnerRejectsForeignUIDGroup(t *testing.T) {
 			{pid: other.Process.Pid, group: other.Process.Pid, uid: os.Geteuid() + 1},
 		}, nil
 	}
-	err := runner.cleanupGroup(other.Process.Pid, os.Geteuid(), func() {}, func() bool { return true }, func() bool { return false })
+	err := runner.cleanupGroup("test", other.Process.Pid, os.Geteuid(), func() {}, func() bool { return true }, func() bool { return false })
 	if !errors.Is(err, ErrCleanup) {
 		t.Fatalf("foreign group was accepted: %v", err)
 	}
@@ -613,7 +613,7 @@ func TestProtectedCleanupRetriesTransientListing(t *testing.T) {
 		return []processSample{trustedGUI()}, nil
 	}
 	r.signalProcess = func(context.Context, processSample, syscall.Signal) error { return nil }
-	if err := r.cleanupProtectedGroup(201, testJobUID, func() {}, func() bool { return true }); err != nil {
+	if err := r.cleanupProtectedGroup("test", 201, testJobUID, func() {}, func() bool { return true }); err != nil {
 		t.Fatalf("one failed listing left cleanup unconfirmed: %v", err)
 	}
 }
@@ -628,7 +628,42 @@ func TestProtectedCleanupPersistentListingFailureFails(t *testing.T) {
 		t.Fatal("signalled without a listing")
 		return nil
 	}
-	if err := r.cleanupProtectedGroup(201, testJobUID, func() {}, func() bool { return true }); !errors.Is(err, ErrCleanup) || !errors.Is(err, listErr) {
+	if err := r.cleanupProtectedGroup("test", 201, testJobUID, func() {}, func() bool { return true }); !errors.Is(err, ErrCleanup) || !errors.Is(err, listErr) || !strings.Contains(err.Error(), "test: protected cleanup: final listing: ") {
 		t.Fatalf("persistent listing failure accepted: %v", err)
+	}
+}
+
+func TestProtectedCleanupGroupLiveAfterWindowIsContamination(t *testing.T) {
+	runner, command := helperRunner(t, "success")
+	var started *exec.Cmd
+	launch := runner.command
+	runner.command = func(c Command) *exec.Cmd { started = launch(c); return started }
+	runner.termGrace, runner.killGrace = 10*time.Millisecond, 10*time.Millisecond
+	runner.scope = scopeFixture()
+	runner.scope.sample = func(context.Context) ([]processSample, error) {
+		return []processSample{{pid: 2147483646, group: started.Process.Pid, uid: runner.uid, start: "stuck"}}, nil
+	}
+	runner.signalProcess = func(context.Context, processSample, syscall.Signal) error { return nil }
+	var diagnostics bytes.Buffer
+	runner.diagnostics = &diagnostics
+	result, err := runner.Run(context.Background(), command, io.Discard, io.Discard)
+	if !errors.Is(err, ErrCleanup) || !errors.Is(err, ErrContamination) || result.CleanupOK {
+		t.Fatalf("live group after the window was accepted: %+v, %v", result, err)
+	}
+	label := commandLabel(command) + ": protected cleanup: job group still live after the cleanup window"
+	if !strings.Contains(err.Error(), label) || !strings.HasPrefix(diagnostics.String(), "macserve worker: "+commandLabel(command)+": cleanup not confirmed: ") || !strings.Contains(diagnostics.String(), label) {
+		t.Fatalf("cleanup failure does not name its command and phase: %q / %q", err, diagnostics.String())
+	}
+}
+
+func TestCommandLabelNamesSubcommandOnly(t *testing.T) {
+	for args, want := range map[string]string{
+		"simctl bootstatus D6C581BE-2B54-4AAB-ABAE-C2F295AB2761 -b": "xcrun simctl bootstatus",
+		"--sdk iphonesimulator --show-sdk-version":                  "xcrun",
+		"simctl list devices --json":                                "xcrun simctl list",
+	} {
+		if got := commandLabel(Command{Executable: "/usr/bin/xcrun", Args: strings.Fields(args)}); got != want {
+			t.Errorf("commandLabel(%q) = %q, want %q", args, got, want)
+		}
 	}
 }
