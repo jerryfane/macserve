@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,6 +33,7 @@ const sampleFailureTimeouts = 6
 
 type processSample struct {
 	pid    int
+	parent int
 	group  int
 	uid    int
 	rssKiB int64
@@ -73,7 +75,7 @@ type nativeRunner struct {
 func newProcessRunner() *nativeRunner {
 	r := &nativeRunner{
 		uid:            os.Geteuid(),
-		inspect:        sampleProcesses,
+		inspect:        inspectProcesses,
 		pollInterval:   20 * time.Millisecond,
 		sampleInterval: 250 * time.Millisecond,
 		sampleTimeout:  5 * time.Second,
@@ -138,6 +140,7 @@ func onlyExitStatus(err error, code int) bool {
 // writer that never returns cannot be interrupted by closing the child pipes.
 func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr io.Writer) (result ProcessResult, runErr error) {
 	result.ExitCode = -1
+	label := commandLabel(command)
 	result.CleanupOK = true // No child exists until Start succeeds.
 	if err := ctx.Err(); err != nil {
 		return result, err
@@ -165,11 +168,11 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 		samples, err := r.sample(baselineCtx)
 		cancelBaseline()
 		if err != nil {
-			return result, fmt.Errorf("sample worker memory baseline: %w", err)
+			return result, fmt.Errorf("%s: sample worker memory baseline: %w", label, err)
 		}
 		kib, err := footprintKiB(samples, r.uid)
 		if err != nil {
-			return result, fmt.Errorf("sample worker memory baseline: %w", err)
+			return result, fmt.Errorf("%s: sample worker memory baseline: %w", label, err)
 		}
 		*baseline = MemoryBaseline{sampled: true, kib: kib}
 		if command.MemoryBaseline != nil && r.diagnostics != nil {
@@ -309,7 +312,7 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 			failures++
 			lastFailure = s.err
 			if r.diagnostics != nil {
-				fmt.Fprintf(r.diagnostics, "macserve worker: memory sample failed (%d consecutive): %v\n", failures, s.err)
+				fmt.Fprintf(r.diagnostics, "macserve worker: %s: memory sample failed (%d consecutive): %v\n", label, failures, s.err)
 			}
 			return
 		}
@@ -324,7 +327,7 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 		if lastFailure == nil {
 			lastFailure = errors.New("memory sample did not complete")
 		}
-		runErr = errors.Join(runErr, fmt.Errorf("sample worker memory: no sample succeeded for %s (%d failed): %w", unobserved.Round(time.Millisecond), failures, lastFailure))
+		runErr = errors.Join(runErr, fmt.Errorf("%s: sample worker memory: no sample succeeded for %s (%d failed): %w", label, unobserved.Round(time.Millisecond), failures, lastFailure))
 	}
 	sampleMemory()
 	for runErr == nil {
@@ -358,7 +361,11 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 	cleanupErr := r.cleanupGroup(pid, uid, reap, func() bool { return reaped }, func() bool { return waitFailed })
 	result.CleanupOK = cleanupErr == nil
 	if cleanupErr != nil {
+		cleanupErr = fmt.Errorf("%s: %w", label, cleanupErr)
 		runErr = errors.Join(runErr, cleanupErr)
+		if r.diagnostics != nil {
+			fmt.Fprintf(r.diagnostics, "macserve worker: %s\n", strings.ReplaceAll(cleanupErr.Error(), "\n", "; "))
+		}
 	}
 	if reaped && (result.ExitCode != 0 || result.Signal != "") {
 		if result.Signal != "" {
@@ -395,44 +402,75 @@ func (r *nativeRunner) snapshot(sample processSampler) ([]processSample, error) 
 	return sample(ctx)
 }
 
+// commandLabel names a command for diagnostics by its executable and leading
+// subcommand words (e.g. "xcrun simctl bootstatus"); operands such as UDIDs,
+// paths and flag values are never included.
+func commandLabel(command Command) string {
+	words := []string{filepath.Base(command.Executable)}
+	for _, arg := range command.Args {
+		if len(words) == 3 || !labelWord.MatchString(arg) {
+			break
+		}
+		words = append(words, arg)
+	}
+	return strings.Join(words, " ")
+}
+
+var labelWord = regexp.MustCompile(`^[a-z][a-z-]{0,23}$`)
+
+// cleanupFailure names the cleanup phase of a failure; Run prefixes the
+// command, so a recurrence explains itself ("xcrun simctl boot: worker process
+// cleanup failed; protected cleanup: final listing: …").
+func cleanupFailure(phase string, errs ...error) error {
+	return fmt.Errorf("%s: %w", phase, errors.Join(errs...))
+}
+
 func (r *nativeRunner) cleanupGroup(group, uid int, reap func(), reaped, waitFailed func() bool) error {
 	if r.signalProcess != nil {
 		return r.cleanupProtectedGroup(group, uid, reap, reaped)
 	}
 	if group <= 1 || group == syscall.Getpgrp() {
-		return fmt.Errorf("%w: refusing to signal the owner process group", ErrCleanup)
+		return errors.Join(ErrCleanup, cleanupFailure("cleanup", errors.New("refusing to signal the owner process group")))
 	}
-	var failures error
+	var failures, inspectErr error
 	foreignGroup := false
+	// A failed inspection is retried within the cleanup window; only one still
+	// failing when the window closes leaves cleanup unconfirmed.
 	inspect := func() (bool, bool) {
 		samples, err := r.snapshot(r.inspect)
 		if err != nil {
-			failures = errors.Join(failures, fmt.Errorf("inspect process group: %w", err))
+			inspectErr = cleanupFailure("cleanup: inspect process group", err)
 			return true, false
 		}
+		inspectErr = nil
 		live, err := ownedGroup(samples, group, uid)
 		if err != nil {
-			failures = errors.Join(failures, err)
+			failures = errors.Join(failures, cleanupFailure("cleanup: ownership", err))
 			foreignGroup = true
 			return true, false
 		}
 		return live, true
 	}
-	signal := func(sig syscall.Signal) {
+	signal := func(sig syscall.Signal, grace time.Duration) {
+		deadline := time.Now().Add(grace)
 		live, owned := inspect()
+		for !owned && !foreignGroup && time.Now().Before(deadline) {
+			time.Sleep(min(r.pollInterval, time.Until(deadline)))
+			live, owned = inspect()
+		}
 		if !owned {
 			// A still-unreaped direct child cannot have had its PID reused.
 			// Never fall back to signalling an unverified process group.
 			if !foreignGroup && !reaped() && !waitFailed() {
 				if err := syscall.Kill(group, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
-					failures = errors.Join(failures, fmt.Errorf("signal direct child: %w", err))
+					failures = errors.Join(failures, cleanupFailure("cleanup: signal direct child", err))
 				}
 			}
 			return
 		}
 		if live {
 			if err := syscall.Kill(-group, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
-				failures = errors.Join(failures, fmt.Errorf("signal worker process group: %w", err))
+				failures = errors.Join(failures, cleanupFailure("cleanup: signal process group", err))
 			}
 		}
 	}
@@ -450,15 +488,23 @@ func (r *nativeRunner) cleanupGroup(group, uid int, reap func(), reaped, waitFai
 			time.Sleep(min(r.pollInterval, time.Until(deadline)))
 		}
 	}
-	signal(syscall.SIGTERM)
-	clean := wait(r.termGrace)
+	termUntil := time.Now().Add(r.termGrace)
+	signal(syscall.SIGTERM, r.termGrace)
+	clean := wait(time.Until(termUntil))
 	if !clean {
-		signal(syscall.SIGKILL)
-		clean = wait(r.killGrace)
+		killUntil := time.Now().Add(r.killGrace)
+		signal(syscall.SIGKILL, r.killGrace)
+		clean = wait(time.Until(killUntil))
 	}
 	if !clean && failures == nil {
 		if live, inspected := inspect(); inspected && live {
-			return errors.Join(ErrCleanup, ErrContamination)
+			return errors.Join(ErrCleanup, ErrContamination, cleanupFailure("cleanup", errors.New("process group still live after the cleanup window")))
+		}
+	}
+	if !clean {
+		failures = errors.Join(failures, inspectErr)
+		if failures == nil {
+			failures = cleanupFailure("cleanup", errors.New("direct child not reaped within the cleanup window"))
 		}
 	}
 	if !clean || failures != nil {
@@ -469,28 +515,33 @@ func (r *nativeRunner) cleanupGroup(group, uid int, reap func(), reaped, waitFai
 
 // No root kill(2) operation is permitted, even after inspecting a group: a
 // member can change UID or a PID can be reused between inspection and signal.
+//
+// The window bounds signalling, not confirmation: a listing or signal that
+// fails because the window closed (or a listing that fails transiently) is
+// followed by one fresh bounded listing. Cleanup is confirmed exactly when that
+// listing shows no live group member and the direct child is reaped; a live
+// member is contamination, and a listing that still fails is unconfirmed.
 func (r *nativeRunner) cleanupProtectedGroup(group, uid int, reap func(), reaped func() bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), r.termGrace+r.killGrace)
 	defer cancel()
 	termUntil := time.Now().Add(r.termGrace)
-	for {
+	var listErr error
+	for ctx.Err() == nil {
 		reap()
 		samples, err := r.scope.sample(ctx)
-		if err != nil {
-			return errors.Join(ErrCleanup, err)
-		}
-		live := false
+		listErr = err
+		live := err != nil
 		for _, p := range samples {
 			if p.group != group || p.zombie {
 				continue
 			}
 			live = true
 			if p.uid != uid {
-				return errors.Join(ErrCleanup, ErrContamination, errors.New("job group contains a foreign UID"))
+				return errors.Join(ErrCleanup, ErrContamination, cleanupFailure("protected cleanup", errors.New("job group contains a foreign UID")))
 			}
 			for _, trusted := range r.scope.baseline.Processes {
 				if trusted.PID == p.pid {
-					return errors.Join(ErrCleanup, ErrContamination, errors.New("refusing to signal a GUI baseline PID"))
+					return errors.Join(ErrCleanup, ErrContamination, cleanupFailure("protected cleanup", errors.New("refusing to signal a GUI baseline PID")))
 				}
 			}
 			sig := syscall.SIGTERM
@@ -498,7 +549,11 @@ func (r *nativeRunner) cleanupProtectedGroup(group, uid int, reap func(), reaped
 				sig = syscall.SIGKILL
 			}
 			if err := r.signalProcess(ctx, p, sig); err != nil {
-				return errors.Join(ErrCleanup, err)
+				if ctx.Err() == nil {
+					return errors.Join(ErrCleanup, cleanupFailure("protected cleanup: signal", err))
+				}
+				listErr = cleanupFailure("protected cleanup: signal", err)
+				break
 			}
 		}
 		if !live && reaped() {
@@ -506,21 +561,25 @@ func (r *nativeRunner) cleanupProtectedGroup(group, uid int, reap func(), reaped
 		}
 		select {
 		case <-ctx.Done():
-			samples, err := r.snapshot(r.scope.sample)
-			if err != nil {
-				return errors.Join(ErrCleanup, err)
-			}
-			live, err := ownedGroup(samples, group, uid)
-			if err != nil {
-				return errors.Join(ErrCleanup, ErrContamination, err)
-			}
-			if live {
-				return errors.Join(ErrCleanup, ErrContamination)
-			}
-			return errors.Join(ErrCleanup, ctx.Err())
 		case <-time.After(r.pollInterval):
 		}
 	}
+	reap()
+	samples, err := r.snapshot(r.scope.sample)
+	if err != nil {
+		return errors.Join(ErrCleanup, cleanupFailure("protected cleanup: final listing", listErr, err))
+	}
+	live, err := ownedGroup(samples, group, uid)
+	if err != nil {
+		return errors.Join(ErrCleanup, ErrContamination, cleanupFailure("protected cleanup: final listing", err))
+	}
+	if live {
+		return errors.Join(ErrCleanup, ErrContamination, cleanupFailure("protected cleanup", errors.New("job group still live after the cleanup window")))
+	}
+	if !reaped() {
+		return errors.Join(ErrCleanup, cleanupFailure("protected cleanup", errors.New("direct child not reaped within the cleanup window"), ctx.Err()))
+	}
+	return nil
 }
 
 func ownedGroup(samples []processSample, group, uid int) (bool, error) {

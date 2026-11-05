@@ -33,7 +33,7 @@ func identityProcesses(ctx context.Context) ([]processSample, error) {
 	samples := make([]processSample, 0, len(rows))
 	for _, row := range rows {
 		p := row.Proc
-		samples = append(samples, processSample{pid: int(p.P_pid), group: int(row.Eproc.Pgid), uid: int(row.Eproc.Ucred.Uid), zombie: p.P_stat == 5, start: startToken(&p)})
+		samples = append(samples, processSample{pid: int(p.P_pid), parent: int(row.Eproc.Ppid), group: int(row.Eproc.Pgid), uid: int(row.Eproc.Ucred.Uid), zombie: p.P_stat == 5, start: startToken(&p)})
 	}
 	return samples, ctx.Err()
 }

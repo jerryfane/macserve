@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -575,5 +576,84 @@ func TestProcessSnapshotNormalizesSignedDarwinUID(t *testing.T) {
 	}
 	if len(processes) != 2 || processes[0].uid != int(uint32(4294967294)) || processes[1].uid != 501 {
 		t.Fatalf("incorrect signed UID normalization: %+v", processes)
+	}
+}
+
+// flakyInspector fails (slowly) on its first call, then defers to next.
+func flakyInspector(delay time.Duration, err error, next processSampler) processSampler {
+	var calls atomic.Int32
+	return func(ctx context.Context) ([]processSample, error) {
+		if calls.Add(1) == 1 {
+			time.Sleep(delay)
+			return nil, err
+		}
+		return next(ctx)
+	}
+}
+
+func TestNativeRunnerCleanupRetriesTransientInspection(t *testing.T) {
+	runner, command := helperRunner(t, "hang")
+	runner.inspect = flakyInspector(20*time.Millisecond, context.DeadlineExceeded, runner.inspect)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	result, err := runner.Run(ctx, command, io.Discard, io.Discard)
+	if errors.Is(err, ErrCleanup) || !result.CleanupOK {
+		t.Fatalf("one failed inspection left cleanup unconfirmed: %+v, %v", result, err)
+	}
+}
+
+func TestProtectedCleanupRetriesTransientListing(t *testing.T) {
+	r := newProcessRunner()
+	r.termGrace, r.killGrace, r.pollInterval = 20*time.Millisecond, 20*time.Millisecond, time.Millisecond
+	r.scope = scopeFixture()
+	var calls atomic.Int32
+	r.scope.sample = func(context.Context) ([]processSample, error) {
+		if calls.Add(1) == 1 {
+			return nil, context.DeadlineExceeded
+		}
+		return []processSample{trustedGUI()}, nil
+	}
+	r.signalProcess = func(context.Context, processSample, syscall.Signal) error { return nil }
+	if err := r.cleanupProtectedGroup(201, testJobUID, func() {}, func() bool { return true }); err != nil {
+		t.Fatalf("one failed listing left cleanup unconfirmed: %v", err)
+	}
+}
+
+func TestProtectedCleanupPersistentListingFailureFails(t *testing.T) {
+	r := newProcessRunner()
+	r.termGrace, r.killGrace, r.pollInterval, r.sampleTimeout = 10*time.Millisecond, 10*time.Millisecond, time.Millisecond, 10*time.Millisecond
+	r.scope = scopeFixture()
+	listErr := errors.New("cannot list processes")
+	r.scope.sample = func(context.Context) ([]processSample, error) { return nil, listErr }
+	r.signalProcess = func(context.Context, processSample, syscall.Signal) error {
+		t.Fatal("signalled without a listing")
+		return nil
+	}
+	if err := r.cleanupProtectedGroup(201, testJobUID, func() {}, func() bool { return true }); !errors.Is(err, ErrCleanup) || !errors.Is(err, listErr) || !strings.Contains(err.Error(), "protected cleanup: final listing: ") {
+		t.Fatalf("persistent listing failure accepted: %v", err)
+	}
+}
+
+func TestProtectedCleanupGroupLiveAfterWindowIsContamination(t *testing.T) {
+	runner, command := helperRunner(t, "success")
+	var started *exec.Cmd
+	launch := runner.command
+	runner.command = func(c Command) *exec.Cmd { started = launch(c); return started }
+	runner.termGrace, runner.killGrace = 10*time.Millisecond, 10*time.Millisecond
+	runner.scope = scopeFixture()
+	runner.scope.sample = func(context.Context) ([]processSample, error) {
+		return []processSample{{pid: 2147483646, group: started.Process.Pid, uid: runner.uid, start: "stuck"}}, nil
+	}
+	runner.signalProcess = func(context.Context, processSample, syscall.Signal) error { return nil }
+	var diagnostics bytes.Buffer
+	runner.diagnostics = &diagnostics
+	result, err := runner.Run(context.Background(), command, io.Discard, io.Discard)
+	if !errors.Is(err, ErrCleanup) || !errors.Is(err, ErrContamination) || result.CleanupOK {
+		t.Fatalf("live group after the window was accepted: %+v, %v", result, err)
+	}
+	prefix := filepath.Base(command.Executable) + ": worker process cleanup failed"
+	phase := "protected cleanup: job group still live after the cleanup window"
+	if !strings.Contains(err.Error(), prefix) || !strings.Contains(err.Error(), phase) || !strings.HasPrefix(diagnostics.String(), "macserve worker: "+prefix+"; ") || !strings.Contains(diagnostics.String(), phase) {
+		t.Fatalf("cleanup failure does not name its command and phase: %q / %q", err, diagnostics.String())
 	}
 }

@@ -55,11 +55,15 @@ func identityProcesses(ctx context.Context) ([]processSample, error) {
 		if len(fields) < 20 {
 			return nil, errors.New("short kernel process stat")
 		}
+		parent, err := strconv.Atoi(fields[1])
+		if err != nil {
+			return nil, err
+		}
 		group, err := strconv.Atoi(fields[2])
 		if err != nil {
 			return nil, err
 		}
-		samples = append(samples, processSample{pid: pid, group: group, uid: int(stat.Uid), zombie: fields[0] == "Z", start: fields[19]})
+		samples = append(samples, processSample{pid: pid, parent: parent, group: group, uid: int(stat.Uid), zombie: fields[0] == "Z", start: fields[19]})
 	}
 	return samples, nil
 }
