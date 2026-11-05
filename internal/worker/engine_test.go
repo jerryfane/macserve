@@ -55,7 +55,7 @@ func (f *fakeRunner) Run(ctx context.Context, c Command, out, stderr io.Writer) 
 			return result, err
 		}
 	}
-	result := ProcessResult{CleanupOK: true, PeakMemoryMiB: 123}
+	result := ProcessResult{CleanupOK: true, PeakMemoryMiB: 123, BaselineFootprintMiB: 456}
 	if err := ctx.Err(); err != nil {
 		result.ExitCode = -1
 		return result, err
@@ -253,8 +253,13 @@ func TestBuildExportsSurviveCleanupUntilAcknowledged(t *testing.T) {
 	source, data := sourceFixture(t)
 	t.Setenv("CONTROLLER_TOKEN", "must-not-leak")
 	result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil)
-	if err != nil || result.State != model.Succeeded || !result.CleanupOK || result.Summary != nil || result.ExitCode == nil || *result.ExitCode != 0 || result.PeakMemoryMiB != 123 {
+	if err != nil || result.State != model.Succeeded || !result.CleanupOK || result.Summary != nil || result.ExitCode == nil || *result.ExitCode != 0 || result.PeakMemoryMiB != 123 || result.BaselineFootprintMiB != 456 {
 		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	for _, c := range runner.commands {
+		if c.MemoryBaseline != runner.commands[0].MemoryBaseline || c.MemoryBaseline == nil {
+			t.Fatalf("job command %s %v does not share the job's memory baseline", c.Executable, c.Args)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(engine.options.WorkspaceRoot, job.ID)); !os.IsNotExist(err) {
 		t.Fatalf("workspace remains: %v", err)

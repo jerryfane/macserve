@@ -39,10 +39,13 @@ PF enforcement may be a separately reviewed future opt-in; it is not implemented
   quiescent worker with a new authenticated epoch; subsequent claims must use that persisted epoch.
 - `internal/worker`: exclusive execution, verified full-tree source extraction, pinned toolchain/runtime checks,
   per-job environments and owned simulators, background scheduling and dedicated-job-UID process cleanup,
-  including descendants that leave their process group/session. The summed `phys_footprint` of the job UID's
-  live processes is monitored, so pages a booting simulator's processes share are not charged once per
-  process; a slow or failed sample is tolerated until memory has gone unobserved for 30 s. This is not
-  a kernel memory cap and excludes the broker and other-UID system daemons.
+  including descendants that leave their process group/session. The memory budget charges the summed
+  `phys_footprint` of the job UID's live processes above the same sum sampled immediately before the job's
+  first command (the always-logged-in GUI session's footprint, which includes compressed and swapped memory),
+  so pages a booting simulator's processes share are not charged once per process. A command whose baseline
+  cannot be sampled does not start; `peak_memory_mib` is the charged peak and `baseline_footprint_mib` its
+  baseline. A slow or failed sample is tolerated until memory has gone unobserved for 30 s. This is not a
+  kernel memory cap and excludes the broker and other-UID system daemons.
 - `internal/evidence`: bounded xcresult test parsing, required-test execution checks, JUnit, deterministic
   artifact archives and content-addressed exports. Missing or incomplete test evidence cannot report success.
   Failed plans, bundles and suites remain explicit `container` diagnostics and JUnit errors even when child

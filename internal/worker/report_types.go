@@ -66,7 +66,12 @@ type Result struct {
 	Artifacts     []evidence.Artifact `json:"artifacts"`
 	LogsTruncated bool                `json:"logs_truncated"`
 	Commands      []ExecutedCommand   `json:"commands"`
-	PeakMemoryMiB int64               `json:"peak_memory_mib"`
+	// PeakMemoryMiB is the highest charged figure of any command: sampled
+	// job-UID footprint above that command's starting baseline.
+	PeakMemoryMiB int64 `json:"peak_memory_mib"`
+	// BaselineFootprintMiB is the job-UID footprint sampled immediately
+	// before the command that reached PeakMemoryMiB started.
+	BaselineFootprintMiB int64 `json:"baseline_footprint_mib"`
 }
 
 type ExecutedCommand struct {

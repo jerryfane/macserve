@@ -151,6 +151,30 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 	if command.MemoryLimitMiB < 0 {
 		return result, errors.New("worker command memory budget must not be negative")
 	}
+	// The job UID's GUI session is always logged in, and its footprint
+	// (including compressed and swapped memory) is outside the job's control.
+	// A command is charged only for footprint above the job UID's footprint
+	// sampled immediately before its job's first command; without that
+	// baseline it must not start.
+	baseline := command.MemoryBaseline
+	if baseline == nil {
+		baseline = &MemoryBaseline{}
+	}
+	if !baseline.sampled {
+		baselineCtx, cancelBaseline := context.WithTimeout(ctx, r.sampleTimeout)
+		samples, err := r.sample(baselineCtx)
+		cancelBaseline()
+		if err != nil {
+			return result, fmt.Errorf("sample worker memory baseline: %w", err)
+		}
+		kib, err := footprintKiB(samples, r.uid)
+		if err != nil {
+			return result, fmt.Errorf("sample worker memory baseline: %w", err)
+		}
+		*baseline = MemoryBaseline{sampled: true, kib: kib}
+	}
+	baselineKiB := baseline.kib
+	result.BaselineFootprintMiB = kibToMiB(baselineKiB)
 	if stdout == nil {
 		stdout = io.Discard
 	}
@@ -216,8 +240,7 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 			return
 		}
 		var status syscall.WaitStatus
-		var usage syscall.Rusage
-		waited, err := syscall.Wait4(pid, &status, syscall.WNOHANG, &usage)
+		waited, err := syscall.Wait4(pid, &status, syscall.WNOHANG, nil)
 		if errors.Is(err, syscall.EINTR) {
 			return
 		}
@@ -234,22 +257,16 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 		if status.Signaled() {
 			result.Signal = status.Signal().String()
 		}
-		result.PeakMemoryMiB = max(result.PeakMemoryMiB, kibToMiB(peakRSSKiB(usage)))
 	}
 	observe := func(samples []processSample) error {
-		var totalKiB int64
-		for _, p := range samples {
-			if p.uid != uid || p.zombie {
-				continue
-			}
-			if p.footprintKiB < 0 || p.footprintKiB > (1<<63-1)-totalKiB {
-				return errors.New("invalid worker memory sample")
-			}
-			totalKiB += p.footprintKiB
+		totalKiB, err := footprintKiB(samples, uid)
+		if err != nil {
+			return err
 		}
-		result.PeakMemoryMiB = max(result.PeakMemoryMiB, kibToMiB(totalKiB))
-		if command.MemoryLimitMiB > 0 && kibToMiB(totalKiB) > int64(command.MemoryLimitMiB) {
-			return fmt.Errorf("%w: sampled %d MiB, budget %d MiB (monitored, not a hard cap)", ErrMemoryLimit, kibToMiB(totalKiB), command.MemoryLimitMiB)
+		charged := kibToMiB(max(0, totalKiB-baselineKiB))
+		result.PeakMemoryMiB = max(result.PeakMemoryMiB, charged)
+		if command.MemoryLimitMiB > 0 && charged > int64(command.MemoryLimitMiB) {
+			return fmt.Errorf("%w: sampled %d MiB above the %d MiB job-UID baseline, budget %d MiB (monitored, not a hard cap)", ErrMemoryLimit, charged, result.BaselineFootprintMiB, command.MemoryLimitMiB)
 		}
 		return nil
 	}
@@ -527,6 +544,21 @@ func kibToMiB(kib int64) int64 {
 		mib++
 	}
 	return mib
+}
+
+// footprintKiB sums the footprint of uid's live processes in samples.
+func footprintKiB(samples []processSample, uid int) (int64, error) {
+	var totalKiB int64
+	for _, p := range samples {
+		if p.uid != uid || p.zombie {
+			continue
+		}
+		if p.footprintKiB < 0 || p.footprintKiB > (1<<63-1)-totalKiB {
+			return 0, errors.New("invalid worker memory sample")
+		}
+		totalKiB += p.footprintKiB
+	}
+	return totalKiB, nil
 }
 
 // ps exposes only numeric identity, RSS and state; command lines, paths and
