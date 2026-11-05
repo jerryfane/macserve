@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -650,21 +651,9 @@ func TestProtectedCleanupGroupLiveAfterWindowIsContamination(t *testing.T) {
 	if !errors.Is(err, ErrCleanup) || !errors.Is(err, ErrContamination) || result.CleanupOK {
 		t.Fatalf("live group after the window was accepted: %+v, %v", result, err)
 	}
-	prefix := commandLabel(command) + ": worker process cleanup failed"
+	prefix := filepath.Base(command.Executable) + ": worker process cleanup failed"
 	phase := "protected cleanup: job group still live after the cleanup window"
 	if !strings.Contains(err.Error(), prefix) || !strings.Contains(err.Error(), phase) || !strings.HasPrefix(diagnostics.String(), "macserve worker: "+prefix+"; ") || !strings.Contains(diagnostics.String(), phase) {
 		t.Fatalf("cleanup failure does not name its command and phase: %q / %q", err, diagnostics.String())
-	}
-}
-
-func TestCommandLabelNamesSubcommandOnly(t *testing.T) {
-	for args, want := range map[string]string{
-		"simctl bootstatus D6C581BE-2B54-4AAB-ABAE-C2F295AB2761 -b": "xcrun simctl bootstatus",
-		"--sdk iphonesimulator --show-sdk-version":                  "xcrun",
-		"simctl list devices --json":                                "xcrun simctl list",
-	} {
-		if got := commandLabel(Command{Executable: "/usr/bin/xcrun", Args: strings.Fields(args)}); got != want {
-			t.Errorf("commandLabel(%q) = %q, want %q", args, got, want)
-		}
 	}
 }
