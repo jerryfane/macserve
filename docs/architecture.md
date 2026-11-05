@@ -39,7 +39,9 @@ PF enforcement may be a separately reviewed future opt-in; it is not implemented
   quiescent worker with a new authenticated epoch; subsequent claims must use that persisted epoch.
 - `internal/worker`: exclusive execution, verified full-tree source extraction, pinned toolchain/runtime checks,
   per-job environments and owned simulators, background scheduling and dedicated-job-UID process cleanup,
-  including descendants that leave their process group/session. Whole-job-UID RSS is monitored; this is not
+  including descendants that leave their process group/session. The summed `phys_footprint` of the job UID's
+  live processes is monitored, so pages a booting simulator's processes share are not charged once per
+  process; a slow or failed sample is tolerated until memory has gone unobserved for 30 s. This is not
   a kernel memory cap and excludes the broker and other-UID system daemons.
 - `internal/evidence`: bounded xcresult test parsing, required-test execution checks, JUnit, deterministic
   artifact archives and content-addressed exports. Missing or incomplete test evidence cannot report success.

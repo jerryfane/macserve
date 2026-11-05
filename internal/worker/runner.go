@@ -18,11 +18,17 @@ import (
 )
 
 var (
-	// ErrMemoryLimit means sampled aggregate worker-UID RSS exceeded the budget.
+	// ErrMemoryLimit means the sampled aggregate phys_footprint of the worker
+	// UID's live processes exceeded the budget.
 	ErrMemoryLimit = errors.New("worker memory budget exceeded")
 	// ErrCleanup means the runner could not prove its process group was cleaned.
 	ErrCleanup = errors.New("worker process cleanup failed")
 )
+
+// sampleFailureTimeouts bounds how long memory may go unobserved: the job
+// fails closed once no sample has succeeded for this many sample timeouts
+// (30 s at the production 5 s), never because one sample was slow or failed.
+const sampleFailureTimeouts = 6
 
 type processSample struct {
 	pid    int
@@ -58,6 +64,8 @@ type nativeRunner struct {
 	// console refuses admission unless the owner or the login window holds
 	// /dev/console (hostguard.ConsoleAdmissible). Nil refuses.
 	console func() error
+	// diagnostics receives tolerated memory sampling failures; nil discards.
+	diagnostics io.Writer
 }
 
 // newProcessRunner is the process/pipes implementation. Production construction
@@ -68,7 +76,7 @@ func newProcessRunner() *nativeRunner {
 		inspect:        sampleProcesses,
 		pollInterval:   20 * time.Millisecond,
 		sampleInterval: 250 * time.Millisecond,
-		sampleTimeout:  time.Second,
+		sampleTimeout:  5 * time.Second,
 		termGrace:      500 * time.Millisecond,
 		killGrace:      time.Second,
 		drainTimeout:   250 * time.Millisecond,
@@ -234,10 +242,10 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 			if p.uid != uid || p.zombie {
 				continue
 			}
-			if p.rssKiB < 0 || p.rssKiB > (1<<63-1)-totalKiB {
+			if p.footprintKiB < 0 || p.footprintKiB > (1<<63-1)-totalKiB {
 				return errors.New("invalid worker memory sample")
 			}
-			totalKiB += p.rssKiB
+			totalKiB += p.footprintKiB
 		}
 		result.PeakMemoryMiB = max(result.PeakMemoryMiB, kibToMiB(totalKiB))
 		if command.MemoryLimitMiB > 0 && kibToMiB(totalKiB) > int64(command.MemoryLimitMiB) {
@@ -250,13 +258,54 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 	defer poll.Stop()
 	memory := time.NewTicker(r.sampleInterval)
 	defer memory.Stop()
+	// Sampling runs beside the loop, so a slow sample never delays reaping,
+	// output or cancellation. A failed or timed-out sample is reported and
+	// tolerated; the job fails closed once no sample has succeeded for
+	// sampleFailureTimeouts sample timeouts.
+	type memorySample struct {
+		samples []processSample
+		err     error
+	}
+	sampled := make(chan memorySample, 1)
+	sampling := false
+	samplingCtx, stopSampling := context.WithCancel(context.Background())
 	sampleMemory := func() {
-		samples, err := r.snapshot(r.sample)
-		if err != nil {
-			runErr = errors.Join(runErr, fmt.Errorf("sample worker memory: %w", err))
+		if sampling {
 			return
 		}
-		runErr = errors.Join(runErr, observe(samples))
+		sampling = true
+		go func() {
+			ctx, cancel := context.WithTimeout(samplingCtx, r.sampleTimeout)
+			defer cancel()
+			samples, err := r.sample(ctx)
+			sampled <- memorySample{samples: samples, err: err}
+		}()
+	}
+	observed := time.Now()
+	failures := 0
+	var lastFailure error
+	recordSample := func(s memorySample) {
+		sampling = false
+		if s.err != nil {
+			failures++
+			lastFailure = s.err
+			if r.diagnostics != nil {
+				fmt.Fprintf(r.diagnostics, "macserve worker: memory sample failed (%d consecutive): %v\n", failures, s.err)
+			}
+			return
+		}
+		observed, failures, lastFailure = time.Now(), 0, nil
+		runErr = errors.Join(runErr, observe(s.samples))
+	}
+	checkObserved := func() {
+		unobserved := time.Since(observed)
+		if unobserved <= sampleFailureTimeouts*r.sampleTimeout {
+			return
+		}
+		if lastFailure == nil {
+			lastFailure = errors.New("memory sample did not complete")
+		}
+		runErr = errors.Join(runErr, fmt.Errorf("sample worker memory: no sample succeeded for %s (%d failed): %w", unobserved.Round(time.Millisecond), failures, lastFailure))
 	}
 	sampleMemory()
 	for runErr == nil {
@@ -270,9 +319,18 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 		case p := <-pipes:
 			recordPipe(p)
 		case <-poll.C:
+		case s := <-sampled:
+			recordSample(s)
 		case <-memory.C:
+			checkObserved()
 			sampleMemory()
 		}
+	}
+	// The command has finished or failed; a sample still in flight no longer
+	// decides anything and must not outlive Run.
+	stopSampling()
+	if sampling {
+		<-sampled
 	}
 	if ctx.Err() != nil {
 		runErr = errors.Join(runErr, ctx.Err())

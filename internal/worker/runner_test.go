@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -37,6 +38,9 @@ func TestNativeRunnerHelper(t *testing.T) {
 		os.Exit(7)
 	case "success":
 		fmt.Fprint(os.Stdout, "complete\n")
+		os.Exit(0)
+	case "linger":
+		time.Sleep(500 * time.Millisecond)
 		os.Exit(0)
 	case "environment":
 		dir, err := os.Getwd()
@@ -278,9 +282,9 @@ func TestNativeRunnerMemoryIncludesOtherWorkerUIDGroups(t *testing.T) {
 	command.MemoryLimitMiB = 150
 	runner.sample = func(context.Context) ([]processSample, error) {
 		return []processSample{
-			{pid: 10, group: 10, uid: os.Geteuid(), rssKiB: 80 * 1024},
-			{pid: 11, group: 11, uid: os.Geteuid(), rssKiB: 80 * 1024},
-			{pid: 12, group: 12, uid: os.Geteuid() + 1, rssKiB: 1000 * 1024},
+			{pid: 10, group: 10, uid: os.Geteuid(), footprintKiB: 80 * 1024},
+			{pid: 11, group: 11, uid: os.Geteuid(), footprintKiB: 80 * 1024},
+			{pid: 12, group: 12, uid: os.Geteuid() + 1, footprintKiB: 1000 * 1024},
 		}, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -292,13 +296,13 @@ func TestNativeRunnerMemoryIncludesOtherWorkerUIDGroups(t *testing.T) {
 }
 
 func TestNativeRunnerMemoryIgnoresOtherUIDAndZombies(t *testing.T) {
-	runner, command := helperRunner(t, "success")
+	runner, command := helperRunner(t, "linger")
 	command.MemoryLimitMiB = 2
 	runner.sample = func(context.Context) ([]processSample, error) {
 		return []processSample{
-			{uid: os.Geteuid(), rssKiB: 2 * 1024},
-			{uid: os.Geteuid(), rssKiB: 100 * 1024, zombie: true},
-			{uid: os.Geteuid() + 1, rssKiB: 100 * 1024},
+			{uid: os.Geteuid(), footprintKiB: 2 * 1024},
+			{uid: os.Geteuid(), footprintKiB: 100 * 1024, zombie: true},
+			{uid: os.Geteuid() + 1, footprintKiB: 100 * 1024},
 		}, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -309,15 +313,62 @@ func TestNativeRunnerMemoryIgnoresOtherUIDAndZombies(t *testing.T) {
 	}
 }
 
-func TestNativeRunnerMemorySampleFailureStopsChild(t *testing.T) {
-	runner, command := helperRunner(t, "hang")
-	sampleErr := errors.New("sampler unavailable")
-	runner.sample = func(context.Context) ([]processSample, error) { return nil, sampleErr }
+// A booting simulator starts hundreds of worker-UID processes that each map
+// the same shared pages; their summed RSS charges those pages once per
+// process. The budget charges each process's footprint instead.
+func TestNativeRunnerMemoryChargesFootprintNotSharedRSS(t *testing.T) {
+	runner, command := helperRunner(t, "linger")
+	command.MemoryLimitMiB = 1024
+	rows := make([]processSample, 100)
+	for i := range rows {
+		rows[i] = processSample{pid: 100 + i, group: 100, uid: os.Geteuid(), rssKiB: 300 * 1024, footprintKiB: 4 * 1024}
+	}
+	runner.sample = func(context.Context) ([]processSample, error) { return rows, nil }
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	result, err := runner.Run(ctx, command, io.Discard, io.Discard)
-	if !errors.Is(err, sampleErr) || errors.Is(err, ErrMemoryLimit) || !result.CleanupOK || result.Signal == "" {
-		t.Fatalf("sampling failure was not fail-closed: %+v, %v", result, err)
+	if err != nil || result.ExitCode != 0 || !result.CleanupOK || result.PeakMemoryMiB < 400 || result.PeakMemoryMiB >= 1024 {
+		t.Fatalf("shared resident pages were charged to the budget: %+v, %v", result, err)
+	}
+}
+
+func TestNativeRunnerMemorySampleTimeoutDoesNotStopChild(t *testing.T) {
+	runner, command := helperRunner(t, "linger")
+	var calls atomic.Int32
+	runner.sample = func(context.Context) ([]processSample, error) {
+		if calls.Add(1) == 1 {
+			// The production ps sample was killed at its deadline while a
+			// simulator booted.
+			time.Sleep(200 * time.Millisecond)
+			return nil, errors.New("read process RSS: signal: killed")
+		}
+		return []processSample{{uid: os.Geteuid()}}, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, err := runner.Run(ctx, command, io.Discard, io.Discard)
+	if err != nil || result.ExitCode != 0 || result.Signal != "" || !result.CleanupOK || calls.Load() < 2 {
+		t.Fatalf("one slow sample stopped the command: %+v, %v, %d samples", result, err, calls.Load())
+	}
+}
+
+func TestNativeRunnerMemorySampleFailureStopsChild(t *testing.T) {
+	runner, command := helperRunner(t, "hang")
+	// Memory goes unobserved for sampleFailureTimeouts of these; cleanup's
+	// group inspection keeps an unhurried ps.
+	runner.sampleTimeout = 20 * time.Millisecond
+	runner.inspect = func(context.Context) ([]processSample, error) { return sampleProcesses(context.Background()) }
+	sampleErr := errors.New("sampler unavailable")
+	var calls atomic.Int32
+	runner.sample = func(context.Context) ([]processSample, error) {
+		calls.Add(1)
+		return nil, sampleErr
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, err := runner.Run(ctx, command, io.Discard, io.Discard)
+	if !errors.Is(err, sampleErr) || errors.Is(err, ErrMemoryLimit) || !result.CleanupOK || result.Signal == "" || calls.Load() < 2 {
+		t.Fatalf("persistent sampling failure was not fail-closed after retries: %+v, %v, %d samples", result, err, calls.Load())
 	}
 }
 
@@ -349,6 +400,7 @@ func TestNativeRunnerUnverifiableCleanupFails(t *testing.T) {
 	runner, command := helperRunner(t, "hang")
 	runner.termGrace = 10 * time.Millisecond
 	runner.killGrace = 30 * time.Millisecond
+	runner.sampleTimeout = 10 * time.Millisecond
 	inspectErr := errors.New("cannot inspect process ownership")
 	runner.inspect = func(context.Context) ([]processSample, error) { return nil, inspectErr }
 	runner.sample = func(context.Context) ([]processSample, error) { return nil, inspectErr }
