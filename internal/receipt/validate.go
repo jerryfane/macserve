@@ -54,7 +54,7 @@ func incomplete(p Payload) []string {
 	require(requestErr == nil && hashBytes(request) == p.RequestDigest, "request digest")
 	require(validSHA(p.Request.SHA) && p.Source.Commit == p.Request.SHA && validSHA(p.Source.Tree) && validDigest(p.Source.SHA256) && p.Source.SizeBytes > 0, "source export")
 	require(p.Request.Profile != "" && p.ProfileVersion > 0 && validDigest(p.ProfileDigest), "recipe identity")
-	require(p.Request.Kind == model.Build || p.Request.Kind == model.UnitTest || p.Request.Kind == model.SimulatorUITest, "job kind")
+	require(p.Request.Kind.Known(), "job kind")
 	require(p.ExitCode != nil && *p.ExitCode == 0 && p.Signal == "", "successful exit")
 	require(!p.CreatedAt.IsZero() && !p.StartedAt.IsZero() && !p.FinishedAt.IsZero() && !p.SealedAt.IsZero() && !p.StartedAt.Before(p.CreatedAt) && !p.FinishedAt.Before(p.StartedAt) && !p.SealedAt.Before(p.FinishedAt) && p.Deadline != nil && !p.Deadline.Before(p.StartedAt) && p.WorkerEpoch != "", "execution timing")
 	// Final evidence extraction and cleanup may finish after the execution deadline.
@@ -66,13 +66,17 @@ func incomplete(p Payload) []string {
 		_, version, _ := strings.Cut(identifier, "-")
 		require(sim.Runtime != "" && sim.RuntimeBuild != "" && sim.DeviceType != "" && o.RuntimeBuild == sim.RuntimeBuild && o.RuntimeVersion == strings.ReplaceAll(version, "-", ".") && o.DeviceUDID != "", "simulator observation")
 	} else {
-		require(p.Request.Kind != model.SimulatorUITest, "simulator pin")
+		require(p.Request.Kind != model.SimulatorUITest && p.Request.Kind != model.SimulatorScript, "simulator pin")
 	}
 	require(!p.LogsTruncated && validLogs(p.Logs), "raw logs")
 	require(p.CommandCount > 0 && p.ArtifactCount >= len(p.Logs) && validDigest(p.Digests.Commands) && validDigest(p.Digests.Artifacts) && validDigest(p.Digests.Generated) && validDigest(p.Digests.Lockfiles) && validDigest(p.Digests.TestCases), "evidence digests")
 	t := p.Tests
-	if p.Request.Kind == model.Build {
-		require(t.Status == "tests_not_run" && t.Tests == 0 && t.Passed == 0 && t.Failed == 0 && t.Skipped == 0 && t.ExpectedFailures == 0 && len(t.Required) == 0 && len(t.ExecutedRequired) == 0, "build-only test scope")
+	if !p.Request.Kind.Tests() {
+		scope := "build-only test scope"
+		if p.Request.Kind == model.SimulatorScript {
+			scope = "script test scope"
+		}
+		require(t.Status == "tests_not_run" && t.Tests == 0 && t.Passed == 0 && t.Failed == 0 && t.Skipped == 0 && t.ExpectedFailures == 0 && len(t.Required) == 0 && len(t.ExecutedRequired) == 0, scope)
 	} else {
 		require(t.Status == "parsed" && t.ParserVersion == "xcresult-tests-0.4.0" && t.Tests > 0 && t.Passed >= 0 && t.Failed == 0 && t.Skipped >= 0 && t.ExpectedFailures >= 0 && t.Passed+t.ExpectedFailures > 0 && t.Tests == t.Passed+t.Failed+t.Skipped+t.ExpectedFailures && validDigest(t.XCResultSHA256) && sameStrings(t.Required, t.ExecutedRequired), "parsed tests and required scope")
 		seen := map[string]bool{}
@@ -117,7 +121,7 @@ func requiredExecuted(c evidence.TestCase, name string) bool {
 }
 func testEvidence(kind model.Kind, required []string, s *evidence.Summary) TestEvidence {
 	t := TestEvidence{Status: "missing", Required: append([]string(nil), required...)}
-	if kind == model.Build {
+	if !kind.Tests() {
 		t.Status = "tests_not_run"
 		return t
 	}
@@ -149,8 +153,8 @@ func validateDetails(p Payload, require func(bool, string)) {
 	snapshotDigest, err := snapshot.SnapshotDigest()
 	require(err == nil && snapshotDigest == p.ProfileDigest && snapshot.ID == p.Request.Profile && snapshot.Version == p.ProfileVersion && snapshot.Repo == p.Request.Repo && snapshot.Kind == p.Request.Kind && snapshot.Xcode == p.Request.Xcode && sameSimulator(snapshot.Simulator, p.Request.Simulator) && snapshot.MemoryLimitMiB == p.Resources.MemoryLimitMiB, "recipe manifest")
 	// A template job's snapshot has no recipe; the executed recipe, and a test
-	// template's required tests (its shard's selectors), are the derivation
-	// from its reported repository configuration.
+	// template's required tests (its shard's selectors; a script template has
+	// none), are the derivation from its reported repository configuration.
 	profile, err := profiles.Effective(snapshot, r.Observation.Recipe)
 	if err != nil {
 		require(false, "template recipe manifest")
@@ -205,8 +209,12 @@ func validateDetails(p Payload, require func(bool, string)) {
 		require(name != "" && validDigest(digest), "lockfile digest")
 	}
 	require(reflect.DeepEqual(testEvidence(p.Request.Kind, profile.RequiredTests, r.Summary), p.Tests), "test predicate")
-	if p.Request.Kind == model.Build {
-		require(r.Summary == nil, "build tests not run")
+	if !p.Request.Kind.Tests() {
+		ran := "build tests not run"
+		if p.Request.Kind == model.SimulatorScript {
+			ran = "script tests not run"
+		}
+		require(r.Summary == nil, ran)
 		return
 	}
 	s := r.Summary

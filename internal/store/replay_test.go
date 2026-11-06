@@ -89,3 +89,34 @@ func TestReplayOmittedSimulatorIsTemplateFirstPin(t *testing.T) {
 	_, err = s.Replay(ctx, "principal", "second", omitted)
 	requireError(t, err, ErrConflict)
 }
+
+// A script template job enqueues like a test template job, simulator and
+// shard included, up to its kind's 7200-second timeout; the queue refuses one
+// without its simulator and other kinds keep the 3600-second cap.
+func TestEnqueueScriptTemplateJob(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newStore(t, Options{})
+	pin := model.Simulator{Runtime: "com.apple.CoreSimulator.SimRuntime.iOS-27-1", RuntimeBuild: "24B100", DeviceType: "com.apple.CoreSimulator.SimDeviceType.iPhone-Duo"}
+	template := model.Template{ID: "org-script-v1", Version: 1, Kind: model.SimulatorScript, Owners: []string{"example-org"}, Xcode: model.Xcode{Version: "27.0", Build: "27A100"}, DeveloperDir: "/Applications/ExampleToolchain.app/Contents/Developer", Simulators: []model.Simulator{pin}, MemoryLimitMiB: 512}
+	registry, err := profiles.New(nil, []model.Template{template})
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission, err := registry.Resolve(model.Request{Repo: "example-org/example-app", SHA: strings.Repeat("a", 40), Kind: model.SimulatorScript, Profile: template.ID, Xcode: template.Xcode, Shard: "duo-screenshots", TimeoutSeconds: 7200})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, _, err := s.Enqueue(ctx, "principal", "script", admission, testNow)
+	if err != nil || job.Request.Kind != model.SimulatorScript || job.Profile.Shard != "duo-screenshots" || *job.Request.Simulator != pin || job.Request.TimeoutSeconds != 7200 {
+		t.Fatalf("script job: %+v %v", job, err)
+	}
+	unpinned := admission
+	unpinned.Request.Simulator, unpinned.Profile.Simulator = nil, nil
+	_, _, err = s.Enqueue(ctx, "principal", "unpinned", unpinned, testNow)
+	requireError(t, err, ErrInvalid)
+	build := admissionFixture()
+	build.Profile.MaxTimeoutSeconds, build.Request.TimeoutSeconds = 7200, 3601
+	setDigest(&build)
+	_, _, err = s.Enqueue(ctx, "principal", "long", build, testNow)
+	requireError(t, err, ErrInvalid)
+}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"path"
 	"regexp"
 	"slices"
 	"strings"
@@ -17,6 +18,12 @@ import (
 const (
 	// RepoConfigFile is the only repository file a template job reads.
 	RepoConfigFile = ".macserve.json"
+	// ScriptOutputDir is the workspace directory a script job writes its
+	// outputs to; its derived recipe requires it as an artifact.
+	ScriptOutputDir = "output"
+	// ScriptCheckoutPrefix starts a script job's run argument; the rest is the
+	// script's checkout-relative path.
+	ScriptCheckoutPrefix = "${CHECKOUT}/"
 	// MaxRepoConfigBytes bounds RepoConfigFile, test shards included.
 	MaxRepoConfigBytes = 16384
 	// XcodeGenPath is the root-installed XcodeGen the xcodegen step runs.
@@ -35,10 +42,15 @@ var (
 	// Target/Class/method, the method optionally spelled with "()". It admits
 	// no ':', '$', ',', whitespace or leading '-'.
 	selectorPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}/[A-Za-z_][A-Za-z0-9_]{0,127}(/[A-Za-z_][A-Za-z0-9_]{0,127}(\(\))?)?$`)
-	repoConfigKeys  = map[string]bool{"version": true, "work_dir": true, "project": true, "workspace": true, "scheme": true, "xcodegen": true, "resolve_packages": true, "ui_test": true, "unit_test": true}
+	repoConfigKeys  = map[string]bool{"version": true, "work_dir": true, "project": true, "workspace": true, "scheme": true, "xcodegen": true, "resolve_packages": true, "ui_test": true, "unit_test": true, "script": true}
+	// testSectionKeys and scriptSectionKeys are the exact object keys
+	// strictJSON admits per depth of a section ("" admits any key, such as a
+	// shard name).
+	testSectionKeys   = []string{"shards"}
+	scriptSectionKeys = []string{"shards", "", "run"}
 )
 
-// Test shard limits, per ui_test or unit_test section.
+// Shard limits, per ui_test, unit_test or script section.
 const (
 	maxShards           = 16
 	maxShardSelectors   = 32
@@ -83,8 +95,12 @@ func ParseRepoConfig(data []byte) (model.RepoConfig, error) {
 		if string(value) == "null" {
 			return config, repoConfigError("field %q is null", key)
 		}
-		if key == "ui_test" || key == "unit_test" {
-			if err := strictJSON(json.NewDecoder(bytes.NewReader(value)), key, 0); err != nil {
+		if key == "ui_test" || key == "unit_test" || key == "script" {
+			keys := testSectionKeys
+			if key == "script" {
+				keys = scriptSectionKeys
+			}
+			if err := strictJSON(json.NewDecoder(bytes.NewReader(value)), key, 0, keys); err != nil {
 				return config, err
 			}
 		}
@@ -106,11 +122,12 @@ func ParseRepoConfig(data []byte) (model.RepoConfig, error) {
 	return config, nil
 }
 
-// strictJSON walks one JSON value of a test section and refuses what the
-// strict struct decode would silently accept: duplicate keys (the last would
-// win), a case-folded "shards" key, nulls (a zero value) and deep nesting.
-// Types and other unknown fields are left to it.
-func strictJSON(decoder *json.Decoder, path string, depth int) error {
+// strictJSON walks one JSON value of a test or script section and refuses what
+// the strict struct decode would silently accept: duplicate keys (the last
+// would win), a key other than the one keys fixes at its depth (a case-folded
+// "shards" or "run"), nulls (a zero value) and deep nesting. Types and other
+// unknown fields are left to it.
+func strictJSON(decoder *json.Decoder, path string, depth int, keys []string) error {
 	token, err := decoder.Token()
 	if err != nil {
 		return repoConfigError("%v", err)
@@ -127,7 +144,7 @@ func strictJSON(decoder *json.Decoder, path string, depth int) error {
 	}
 	if token == json.Delim('[') {
 		for decoder.More() {
-			if err := strictJSON(decoder, path+"[]", depth+1); err != nil {
+			if err := strictJSON(decoder, path+"[]", depth+1, keys); err != nil {
 				return err
 			}
 		}
@@ -143,11 +160,11 @@ func strictJSON(decoder *json.Decoder, path string, depth int) error {
 				return repoConfigError("%s has duplicate key %q", path, key)
 			}
 			// The struct decode matches field names case-insensitively.
-			if depth == 0 && key != "shards" {
+			if depth < len(keys) && keys[depth] != "" && key != keys[depth] {
 				return repoConfigError("%s has unknown field %q", path, key)
 			}
 			seen[key] = true
-			if err := strictJSON(decoder, path+"."+key, depth+1); err != nil {
+			if err := strictJSON(decoder, path+"."+key, depth+1, keys); err != nil {
 				return err
 			}
 		}
@@ -178,7 +195,43 @@ func ValidateRepoConfig(c model.RepoConfig) error {
 	if err := validateShards("ui_test", c.UITest); err != nil {
 		return err
 	}
-	return validateShards("unit_test", c.UnitTest)
+	if err := validateShards("unit_test", c.UnitTest); err != nil {
+		return err
+	}
+	return validateScripts(c.Script)
+}
+
+// validateScripts checks the script section: 1 to 16 shards named by
+// shardPattern, each running a script path relative to work_dir under the
+// work_dir character rules, with no empty or "." component.
+func validateScripts(s *model.ScriptShards) error {
+	if s == nil {
+		return nil
+	}
+	if len(s.Shards) == 0 || len(s.Shards) > maxShards {
+		return repoConfigError("script.shards must name 1 to %d shards", maxShards)
+	}
+	for _, name := range slices.Sorted(maps.Keys(s.Shards)) {
+		if !shardPattern.MatchString(name) {
+			return repoConfigError("script shard name %q must match %s", name, shardPattern)
+		}
+		if !scriptPath(s.Shards[name].Run) {
+			return repoConfigError("script shard %q run must be a relative file path without empty, '.' or '..' components, '$', globs or backslashes", name)
+		}
+	}
+	return nil
+}
+
+func scriptPath(value string) bool {
+	if len(value) > 1024 || !relativePath(value, false, false) {
+		return false
+	}
+	for _, component := range strings.Split(value, "/") {
+		if component == "" || component == "." {
+			return false
+		}
+	}
+	return true
 }
 
 // validateShards checks one test section: 1 to 16 shards named by
@@ -225,13 +278,19 @@ func validateShards(key string, s *model.TestShards) error {
 
 // Derive returns the effective recipe of a template job snapshot for a
 // repository configuration. Only the work directory, the project or workspace,
-// the scheme, the two optional fixed steps and a test template's shard
-// selectors come from the repository; the executables, flags, destination and
-// environment are fixed here and by the worker.
+// the scheme, the two optional fixed steps, a test template's shard selectors
+// and a script template's shard script path come from the repository; the
+// executables, flags, destination and environment are fixed here and by the
+// worker.
 //
 // A test template builds for testing on the job's own simulator in prepare and
 // runs test-without-building on it, both restricted to the snapshot shard's
 // selectors, which become the job's required tests.
+//
+// A script template builds the scheme for the job's own simulator in prepare
+// and runs the snapshot shard's script with /bin/bash; it has no required
+// tests, and its one required artifact is the workspace output directory
+// (exported as output.tar.gz).
 func Derive(snapshot model.Profile, c model.RepoConfig) (model.Profile, error) {
 	if snapshot.Template == nil {
 		return model.Profile{}, fmt.Errorf("%w: not a template job snapshot", ErrInvalid)
@@ -284,6 +343,20 @@ func Derive(snapshot model.Profile, c model.RepoConfig) (model.Profile, error) {
 		p.Prepare = append(p.Prepare, xcodebuild(append(append(slices.Clone(test), "CODE_SIGNING_ALLOWED=NO", "build-for-testing"), only...)...))
 		p.Run = xcodebuild(append(append(slices.Clone(test), "-resultBundlePath", "${RESULT_BUNDLE}", "CODE_SIGNING_ALLOWED=NO", "test-without-building"), only...)...)
 		p.RequiredTests = slices.Clone(selectors)
+	case model.SimulatorScript:
+		if !shardPattern.MatchString(snapshot.Shard) || snapshot.Simulator == nil {
+			return model.Profile{}, fmt.Errorf("%w: script template snapshot lacks its shard or simulator", ErrInvalid)
+		}
+		var script model.ScriptShard
+		if c.Script != nil {
+			script = c.Script.Shards[snapshot.Shard]
+		}
+		if script.Run == "" {
+			return model.Profile{}, repoConfigError("script.shards has no shard %q", snapshot.Shard)
+		}
+		p.Prepare = append(p.Prepare, xcodebuild("-scheme", c.Scheme, "-configuration", "Debug", "-sdk", "iphonesimulator", "-destination", "id=${SIMULATOR_ID}", "-derivedDataPath", "${DERIVED_DATA}", "build"))
+		p.Run = model.Command{Executable: "/bin/bash", Args: []string{ScriptCheckoutPrefix + path.Join(c.WorkDir, script.Run)}}
+		p.Artifacts = []model.ArtifactRule{{Path: ScriptOutputDir, Required: true}}
 	default:
 		return model.Profile{}, fmt.Errorf("%w: template job kind", ErrUnsupported)
 	}

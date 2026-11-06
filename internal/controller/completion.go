@@ -218,7 +218,7 @@ func (c *Controller) verifyResult(ctx context.Context, job model.Job, result wor
 	if recipeErr != nil {
 		profile = job.Profile
 	}
-	if job.Request.Kind != model.Build {
+	if job.Request.Kind.Tests() {
 		tests, hasTests := names["evidence/tests.json"]
 		archive, hasArchive := names["results.xcresult.tar.gz"]
 		if !hasTests || !hasArchive {

@@ -19,6 +19,7 @@ import (
 	"github.com/jerryfane/macserve/internal/evidence"
 	"github.com/jerryfane/macserve/internal/hostguard"
 	"github.com/jerryfane/macserve/internal/model"
+	"github.com/jerryfane/macserve/internal/profiles"
 	"golang.org/x/sys/unix"
 )
 
@@ -172,7 +173,7 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 		}
 		if quietErr == nil && evidenceErr == nil && x.root != nil {
 			returned = errors.Join(returned, x.checkLockfiles(finalCtx))
-			if x.ranRecipe && job.Request.Kind != model.Build {
+			if x.ranRecipe && job.Request.Kind.Tests() {
 				returned = errors.Join(returned, x.testEvidence(finalCtx))
 			}
 		}
@@ -238,7 +239,12 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 	if err != nil {
 		return result, err
 	}
-	for _, dir := range []string{"checkout", "home", "tmp", "caches", "derived-data"} {
+	dirs := []string{"checkout", "home", "tmp", "caches", "derived-data"}
+	if job.Request.Kind == model.SimulatorScript {
+		// Created before prepare's workspace pass makes it job-owned.
+		dirs = append(dirs, profiles.ScriptOutputDir)
+	}
+	for _, dir := range dirs {
 		if err := x.root.Mkdir(dir, 0700); err != nil {
 			return result, err
 		}
@@ -330,13 +336,61 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 		}
 	}
 	x.ranRecipe = true
-	returned = x.recipe(ctx, x.job.Profile.Run)
+	if job.Request.Kind == model.SimulatorScript {
+		if err := x.checkScript(); err != nil {
+			return result, err
+		}
+	}
+	returned = x.recipe(ctx, x.job.Profile.Run, x.runEnvironment()...)
 	return result, returned
 }
 
+// checkScript requires a script job's script to be a regular source file
+// reached without any symlink under the checkout, immediately before it runs.
+func (x *execution) checkScript() error {
+	run := x.job.Profile.Run
+	relative, ok := strings.CutPrefix(strings.Join(run.Args, " "), profiles.ScriptCheckoutPrefix)
+	if run.Executable != "/bin/bash" || len(run.Args) != 1 || !ok || !safeRelative(relative) {
+		return errors.New("script recipe is not a checkout script")
+	}
+	name := "checkout/" + relative
+	if err := noSymlinkPath(x.root, name); err != nil {
+		return fmt.Errorf("script %s: %w", relative, err)
+	}
+	file, err := x.root.OpenFile(name, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return fmt.Errorf("script %s: %w", relative, err)
+	}
+	info, err := file.Stat()
+	closeErr := file.Close()
+	if err = errors.Join(err, closeErr); err != nil {
+		return fmt.Errorf("script %s: %w", relative, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("script %s is not a regular file", relative)
+	}
+	return nil
+}
+
+// runEnvironment is what a script job's run command adds to environment: the
+// products directory of its prepare build, its booted simulator, the output
+// directory it exports and the job ID. Other kinds add nothing.
+func (x *execution) runEnvironment() []string {
+	if x.job.Request.Kind != model.SimulatorScript {
+		return nil
+	}
+	return []string{
+		"MACSERVE_APP_DIR=" + filepath.Join(x.workspace, "derived-data", "Build", "Products", "Debug-iphonesimulator"),
+		"MACSERVE_SIMULATOR_ID=" + x.manifest.DeviceUDID,
+		"MACSERVE_OUTPUT=" + filepath.Join(x.workspace, profiles.ScriptOutputDir),
+		"MACSERVE_JOB_ID=" + x.job.ID,
+	}
+}
+
 // prepareBudget bounds source extraction, the simulator and every prepare
-// command, always within the job deadline. A test job's prepare may include a
-// template's build-for-testing, so test kinds get 30 minutes; builds keep 10.
+// command, always within the job deadline. A test or script job's prepare may
+// include a template's build-for-testing or build, so those kinds get 30
+// minutes; builds keep 10.
 func prepareBudget(kind model.Kind) time.Duration {
 	if kind == model.Build {
 		return 10 * time.Minute
@@ -459,7 +513,9 @@ func (x *execution) observe(ctx context.Context) error {
 	return err
 }
 
-func (x *execution) recipe(ctx context.Context, recipe model.Command) error {
+// recipe runs one recipe command in the work directory with the job
+// environment plus env.
+func (x *execution) recipe(ctx context.Context, recipe model.Command, env ...string) error {
 	replacement := strings.NewReplacer("${CHECKOUT}", filepath.Join(x.workspace, "checkout"), "${WORKSPACE}", x.workspace, "${DERIVED_DATA}", filepath.Join(x.workspace, "derived-data"), "${RESULT_BUNDLE}", filepath.Join(x.workspace, "results.xcresult"), "${SIMULATOR_ID}", x.manifest.DeviceUDID, "${JOB_ID}", x.job.ID, "${DEVELOPER_DIR}", x.job.Profile.DeveloperDir)
 	args := make([]string, len(recipe.Args))
 	for i, arg := range recipe.Args {
@@ -483,7 +539,7 @@ func (x *execution) recipe(ctx context.Context, recipe model.Command) error {
 	}
 	if isXcode {
 		filtered := make([]string, 0, len(args)+8)
-		testing := x.job.Request.Kind != model.Build
+		testing := x.job.Request.Kind.Tests()
 		for i := 0; i < len(args); i++ {
 			arg := args[i]
 			if arg == "test" || arg == "test-without-building" {
@@ -518,6 +574,7 @@ func (x *execution) recipe(ctx context.Context, recipe model.Command) error {
 		return errors.New("recipe working directory does not exist")
 	}
 	command := x.command(executable, args)
+	command.Env = append(command.Env, env...)
 	command.Dir = filepath.Join(x.workspace, filepath.FromSlash(work))
 	outcome, err := x.invoke(ctx, command, x.stdout, x.stderr)
 	x.result.ExitCode = &outcome.ExitCode
@@ -750,7 +807,8 @@ func (x *execution) collect(ctx context.Context) error {
 		failures = append(failures, err, x.writeEvidence("junit.xml", junit))
 		collect(protectedEvidence, []model.ArtifactRule{{Path: "evidence/tests.json", Required: true}, {Path: "evidence/summary.json", Required: true}, {Path: "evidence/junit.xml", Required: true}})
 	}
-	// Artifact rules are workspace-relative, including explicit checkout/... paths.
+	// Artifact rules are workspace-relative, including explicit checkout/... paths
+	// and a script job's output directory.
 	if len(x.job.Profile.Artifacts) > 0 {
 		collect(x.workspace, x.job.Profile.Artifacts)
 	}

@@ -1,6 +1,8 @@
 package qualification
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -16,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jerryfane/macserve/internal/evidence"
 	"github.com/jerryfane/macserve/internal/hostguard"
 	"github.com/jerryfane/macserve/internal/maintenance"
 	"github.com/jerryfane/macserve/internal/model"
@@ -51,8 +54,8 @@ type SourcePins struct {
 // SourcePin pins one profile's or template's source: a git archive stored
 // root-owned at sourcesDir/<sha256>.tar. A template pin also names the
 // repository the archive came from (its owner must be a template owner); the
-// archive must contain a valid .macserve.json. A test template pin also names
-// the .macserve.json shard the run executes; other pins must not.
+// archive must contain a valid .macserve.json. A test or script template pin
+// also names the .macserve.json shard the run executes; other pins must not.
 type SourcePin struct {
 	Profile   string `json:"profile"`
 	Repo      string `json:"repo,omitempty"`
@@ -175,7 +178,7 @@ func loadSourcePins(list []model.Profile) (SourcePins, string, error) {
 		}
 		if p.Template != nil {
 			if _, err := pinRequest(p, pin, 0); err != nil {
-				return pins, "", fmt.Errorf("qualification source pin for template %s must name a repository of a template owner, and a shard exactly when it is a test template: %w", p.ID, err)
+				return pins, "", fmt.Errorf("qualification source pin for template %s must name a repository of a template owner, and a shard exactly when it is a test or script template: %w", p.ID, err)
 			}
 		} else if pin.Shard != "" {
 			return pins, "", fmt.Errorf("qualification source pin for profile %s must not name a shard", p.ID)
@@ -185,7 +188,8 @@ func loadSourcePins(list []model.Profile) (SourcePins, string, error) {
 }
 
 // pinRequest is the admission request that runs a recipe on its pinned source.
-// A test template runs the pin's shard on the template's first simulator.
+// A test or script template runs the pin's shard on the template's first
+// simulator.
 func pinRequest(p model.Profile, pin SourcePin, timeoutSeconds int) (model.Admission, error) {
 	registry, err := profiles.ForSnapshot(p)
 	if err != nil {
@@ -356,7 +360,60 @@ func runProfile(ctx context.Context, engine *worker.Engine, c Challenge, p model
 			return fileTail(path, stderrTailBytes)
 		})
 	}
+	if err == nil && result.State == model.Succeeded && p.Kind == model.SimulatorScript {
+		err = scriptOutput(result, func(id string) (string, error) { return engine.ArtifactPath(job.ID, id) })
+	}
 	return run, errors.Join(err, engine.RemoveExport(job.ID))
+}
+
+// scriptOutputArchive is the export of a script job's output directory.
+const scriptOutputArchive = "output.tar.gz"
+
+// scriptOutput requires a script run's output archive to contain at least
+// one regular file; artifactPath locates an exported artifact by ID.
+func scriptOutput(result worker.Result, artifactPath func(string) (string, error)) error {
+	for _, artifact := range result.Artifacts {
+		if artifact.Name != scriptOutputArchive {
+			continue
+		}
+		name, err := artifactPath(artifact.ID)
+		if err != nil {
+			return err
+		}
+		f, err := os.Open(name)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		gz, err := gzip.NewReader(f)
+		if err != nil {
+			return err
+		}
+		archive := tar.NewReader(gz)
+		for {
+			header, err := archive.Next()
+			if err == io.EOF {
+				return errors.New("script run wrote no output files")
+			}
+			if err != nil {
+				return err
+			}
+			if header.Typeflag == tar.TypeReg {
+				return nil
+			}
+		}
+	}
+	return errors.New("script run exported no output archive")
+}
+
+// scriptRunPasses is the script-template part of a run's tool evidence: the
+// script exited 0 and exported a non-empty output archive; no xcresult is
+// required. Other recipes pass trivially.
+func scriptRunPasses(p model.Profile, r worker.Result) bool {
+	if p.Kind != model.SimulatorScript {
+		return true
+	}
+	return r.ExitCode != nil && *r.ExitCode == 0 && r.Signal == "" && slices.ContainsFunc(r.Artifacts, func(a evidence.Artifact) bool { return a.Name == scriptOutputArchive && a.SizeBytes > 0 })
 }
 
 // toolEvidencePasses checks the root-written evidence for every profile.
@@ -378,7 +435,7 @@ func toolEvidencePasses(dir string, c Challenge, raw []byte) ([]byte, bool, stri
 		for _, run := range t.Runs {
 			// A template run must also report the recipe it derived from the
 			// pinned source's .macserve.json.
-			if run.Profile == p.ID && run.Error == "" && run.ProfileDigest == c.Observation.Profiles[p.ID] && run.Result.State == model.Succeeded && run.Result.CleanupOK && run.Result.Observation.Xcode == p.Xcode && (p.Template == nil) == (run.Result.Observation.Recipe == nil) {
+			if run.Profile == p.ID && run.Error == "" && run.ProfileDigest == c.Observation.Profiles[p.ID] && run.Result.State == model.Succeeded && run.Result.CleanupOK && run.Result.Observation.Xcode == p.Xcode && (p.Template == nil) == (run.Result.Observation.Recipe == nil) && scriptRunPasses(p, run.Result) {
 				ok = true
 			}
 		}
