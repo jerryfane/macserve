@@ -71,5 +71,10 @@ type Options struct {
 	CleanupTimeout    time.Duration
 	MaxWorkspaceBytes int64
 	MaxArtifactBytes  int64
-	Now               func() time.Time
+	// PlistJSON converts property list bytes to JSON for an ios_archive
+	// job's root-side signing manifest (bundle Info.plist and requested
+	// entitlements). New defaults it to /usr/bin/plutil run by the worker
+	// itself, never by the job runner (see plutilJSON).
+	PlistJSON PlistDecoder
+	Now       func() time.Time
 }

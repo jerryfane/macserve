@@ -14,14 +14,17 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/jerryfane/macserve/internal/model"
+	"github.com/jerryfane/macserve/internal/profiles"
 	"github.com/jerryfane/macserve/internal/protocol"
 	"github.com/jerryfane/macserve/internal/source"
 	"github.com/jerryfane/macserve/internal/store"
+	"github.com/jerryfane/macserve/internal/worker"
 )
 
 func lifecycleRequest(t *testing.T, c *Controller, lease protocol.Lease, route string, value any) int {
@@ -131,6 +134,49 @@ func TestFinalizingHeartbeatsCannotExtendBound(t *testing.T) {
 	service, stateErr := f.db.ServiceState(context.Background())
 	if err != nil || stateErr != nil || job.State != model.Interrupted || !service.Quarantined {
 		t.Fatalf("finalization extended forever: %+v %+v %v %v", job, service, err, stateErr)
+	}
+}
+
+// An ios_archive job's worker seals and exports its archive in its own
+// window after the job has stopped, so its finalizing lease outlives the
+// cleanup and delivery bound by worker.ArchiveEvidenceTimeout, and no more.
+func TestArchiveFinalizingIncludesArchiveEvidenceWindow(t *testing.T) {
+	f := newRuntime(t)
+	c := f.controller
+	c.options.CleanupTimeout = time.Second
+	c.options.DeliveryTimeout = time.Second
+	c.options.HeartbeatTimeout = 100 * time.Millisecond
+	template := model.Template{ID: "org-archive-v1", Version: 1, Kind: model.IOSArchive, Owners: []string{"example-org"}, Xcode: model.Xcode{Version: "27.0", Build: "27A100"}, DeveloperDir: "/Applications/ExampleToolchain.app/Contents/Developer", MemoryLimitMiB: 512}
+	registry, err := profiles.New(nil, []model.Template{template})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha := strings.Repeat("a", 40)
+	admission, err := registry.Resolve(model.Request{Repo: "example-org/example-app", SHA: sha, Kind: model.IOSArchive, Profile: template.ID, Xcode: template.Xcode, Release: &model.ReleaseRequest{BuildName: "1.0", BuildNumber: "1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission.ReleaseProvenance = &model.ReleaseProvenance{RepositoryID: 1, DefaultBranch: "main", HeadSHA: sha, ResolvedAt: f.now.UTC(), Source: model.ProvenanceGitHubApp}
+	if _, _, err := f.db.Enqueue(context.Background(), "owner", "archive", admission, f.now); err != nil {
+		t.Fatal(err)
+	}
+	lease := f.dispatch(t)
+	bound := 2100*time.Millisecond + worker.ArchiveEvidenceTimeout
+	for _, elapsed := range []time.Duration{0, bound, bound + time.Millisecond} {
+		f.offset.Store(int64(elapsed))
+		if elapsed == 0 {
+			if status := lifecycleRequest(t, c, lease, "/stage", protocol.Stage{State: model.Finalizing}); status != http.StatusNoContent {
+				t.Fatalf("stage status %d", status)
+			}
+		}
+		c.checkActive(context.Background())
+		job, err := f.db.Get(context.Background(), lease.Job.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if interrupted := job.State == model.Interrupted; interrupted != (elapsed > bound) {
+			t.Fatalf("after %s: %s", elapsed, job.State)
+		}
 	}
 }
 

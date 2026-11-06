@@ -26,15 +26,18 @@ import (
 const maxLogBytes = 256 << 20
 
 type execution struct {
-	engine         *Engine
-	job            model.Job
-	result         *Result
-	manifest       manifest
-	workspace      string
-	root           *os.Root
-	sink           Sink
-	evidenceRoot   *os.Root
-	ranRecipe      bool
+	engine       *Engine
+	job          model.Job
+	result       *Result
+	manifest     manifest
+	workspace    string
+	root         *os.Root
+	sink         Sink
+	evidenceRoot *os.Root
+	ranRecipe    bool
+	// archiveSealed records that archiveEvidence wrote an ios_archive job's
+	// sealed archive and signing manifest into the protected evidence root.
+	archiveSealed  bool
 	stdout, stderr *logWriter
 	cancel         context.CancelFunc
 	logs           *logState
@@ -163,7 +166,16 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 	}
 	defer func() {
 		finalCtx, finalCancel := context.WithTimeout(context.Background(), e.options.CleanupTimeout)
-		defer finalCancel()
+		defer func() { finalCancel() }()
+		// An ios_archive job's archive evidence and its collection run in
+		// their own ArchiveEvidenceTimeout window; time spent there is not
+		// charged to the cleanup budget.
+		var archiveCtx context.Context
+		uncharge := func(spent time.Duration) {
+			deadline, _ := finalCtx.Deadline()
+			finalCancel()
+			finalCtx, finalCancel = context.WithDeadline(context.Background(), deadline.Add(spent))
+		}
 		if sink != nil {
 			returned = errors.Join(returned, sink.Stage(model.Finalizing))
 		}
@@ -181,6 +193,14 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 			if x.ranRecipe && job.Request.Kind.Tests() {
 				returned = errors.Join(returned, x.testEvidence(finalCtx))
 			}
+			if x.ranRecipe && job.Request.Kind == model.IOSArchive && returned == nil {
+				var archiveCancel context.CancelFunc
+				archiveCtx, archiveCancel = context.WithTimeout(context.Background(), ArchiveEvidenceTimeout)
+				defer archiveCancel()
+				start := time.Now()
+				returned = errors.Join(returned, x.archiveEvidence(archiveCtx))
+				uncharge(time.Since(start))
+			}
 		}
 		if x.stdout != nil {
 			returned = errors.Join(returned, x.stdout.file.Close(), x.stderr.file.Close())
@@ -191,7 +211,9 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 		x.logs.mu.Unlock()
 		if x.root != nil {
 			if quietErr == nil && evidenceErr == nil {
-				returned = errors.Join(returned, x.collect(finalCtx))
+				spent, err := x.collect(finalCtx, archiveCtx)
+				returned = errors.Join(returned, err)
+				uncharge(spent)
 			}
 			returned = errors.Join(returned, x.root.Close())
 		}
@@ -783,17 +805,23 @@ func (x *execution) writeEvidence(name string, data []byte) error {
 	return errors.Join(writeErr, file.Close())
 }
 
-func (x *execution) collect(ctx context.Context) error {
+// collect exports the job's logs, test evidence and artifacts under ctx and
+// writes the export manifest. An ios_archive job's artifacts are its sealed
+// archive and signing manifest, which archiveEvidence wrote into the
+// protected evidence root; they are exported from there, never from the
+// workspace, under archiveCtx, and collect returns the time that took so the
+// caller does not charge it to ctx's cleanup budget.
+func (x *execution) collect(ctx, archiveCtx context.Context) (time.Duration, error) {
 	if err := x.engine.options.Runner.Quiesce(ctx); err != nil {
-		return x.engine.quarantine(err)
+		return 0, x.engine.quarantine(err)
 	}
 	if err := x.engine.workspacePass(ctx, x.job.ID, false, false); err != nil {
-		return err
+		return 0, err
 	}
 	dest := filepath.Join(x.engine.options.ExportRoot, x.job.ID)
 	remaining := x.engine.options.MaxArtifactBytes
 	var failures []error
-	collect := func(source string, rules []model.ArtifactRule) {
+	collect := func(ctx context.Context, source string, rules []model.ArtifactRule) {
 		if remaining <= 0 {
 			failures = append(failures, errors.New("artifact budget exhausted"))
 			return
@@ -810,9 +838,9 @@ func (x *execution) collect(ctx context.Context) error {
 	}
 	// Preserve raw logs even when required test or profile evidence is missing.
 	protectedEvidence := filepath.Join(x.engine.options.Root, "evidence", x.job.ID)
-	collect(protectedEvidence, []model.ArtifactRule{{Path: "evidence/stdout.log", Required: true}, {Path: "evidence/stderr.log", Required: true}})
+	collect(ctx, protectedEvidence, []model.ArtifactRule{{Path: "evidence/stdout.log", Required: true}, {Path: "evidence/stderr.log", Required: true}})
 	if x.result.Summary != nil {
-		collect(x.workspace, []model.ArtifactRule{{Path: "results.xcresult", Required: true}})
+		collect(ctx, x.workspace, []model.ArtifactRule{{Path: "results.xcresult", Required: true}})
 		for _, artifact := range x.result.Artifacts {
 			if artifact.Name == "results.xcresult.tar.gz" {
 				x.result.Summary.XCResultSHA256 = artifact.SHA256
@@ -825,12 +853,22 @@ func (x *execution) collect(ctx context.Context) error {
 		failures = append(failures, err, x.writeEvidence("summary.json", normalized))
 		junit, err := evidence.JUnit(*x.result.Summary)
 		failures = append(failures, err, x.writeEvidence("junit.xml", junit))
-		collect(protectedEvidence, []model.ArtifactRule{{Path: "evidence/tests.json", Required: true}, {Path: "evidence/summary.json", Required: true}, {Path: "evidence/junit.xml", Required: true}})
+		collect(ctx, protectedEvidence, []model.ArtifactRule{{Path: "evidence/tests.json", Required: true}, {Path: "evidence/summary.json", Required: true}, {Path: "evidence/junit.xml", Required: true}})
 	}
-	// Artifact rules are workspace-relative, including explicit checkout/... paths
-	// and a script job's output directory.
-	if len(x.job.Profile.Artifacts) > 0 {
-		collect(x.workspace, x.job.Profile.Artifacts)
+	var spent time.Duration
+	switch {
+	case x.job.Request.Kind == model.IOSArchive:
+		// Without a sealed archive the job has already failed; nothing the
+		// job left in its workspace is exported in its place.
+		if x.archiveSealed {
+			start := time.Now()
+			collect(archiveCtx, protectedEvidence, []model.ArtifactRule{{Path: profiles.ArchiveArtifact, Required: true}, {Path: profiles.SigningManifestArtifact, Required: true}})
+			spent = time.Since(start)
+		}
+	case len(x.job.Profile.Artifacts) > 0:
+		// Artifact rules are workspace-relative, including explicit
+		// checkout/... paths and a script job's output directory.
+		collect(ctx, x.workspace, x.job.Profile.Artifacts)
 	}
 	if len(x.result.Artifacts) > 0 {
 		data, err := json.Marshal(exportManifest{Artifacts: x.result.Artifacts})
@@ -839,5 +877,5 @@ func (x *execution) collect(ctx context.Context) error {
 			failures = append(failures, durableFile(x.engine.exports, x.job.ID+"/manifest.json", data))
 		}
 	}
-	return errors.Join(failures...)
+	return spent, errors.Join(failures...)
 }
