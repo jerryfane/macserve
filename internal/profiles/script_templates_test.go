@@ -19,7 +19,7 @@ const scriptTemplate = `{"id":"org-ios-sim-script-v1","version":1,"kind":"simula
 
 var duo = model.Simulator{Runtime: "com.apple.CoreSimulator.SimRuntime.iOS-27-1", RuntimeBuild: "24B100", DeviceType: "com.apple.CoreSimulator.SimDeviceType.iPhone-Duo"}
 
-const duoConfig = `{"version":1,"work_dir":".","project":"Herdr.xcodeproj","scheme":"Herdr","xcodegen":true,"resolve_packages":true,"script":{"shards":{"duo":{"run":"Tools/ci/duo-screenshots.sh"}}}}`
+const duoConfig = `{"version":1,"work_dir":".","project":"Herdr.xcodeproj","scheme":"Herdr","xcodegen":true,"resolve_packages":true,"script":{"shards":{"duo-screenshots":{"run":"Tools/ci/duo-screenshots.sh"}}}}`
 
 func scriptRequest(t *testing.T, shard string) model.Request {
 	return decode[model.Request](t, `{"repo":"themartianapp/herdrup","sha":"`+strings.Repeat("ab", 20)+`","kind":"simulator_script","profile":"org-ios-sim-script-v1","xcode":{"version":"27.1","build":"27A9275"},"shard":"`+shard+`"}`)
@@ -82,14 +82,14 @@ func TestExplicitProfilesCannotBeScriptJobs(t *testing.T) {
 
 func TestResolveScriptTemplateRequiresShardAndDefaultsSimulator(t *testing.T) {
 	r := templatesFile(t, buildTemplate+","+scriptTemplate)
-	a, err := r.Resolve(scriptRequest(t, "duo"))
+	a, err := r.Resolve(scriptRequest(t, "duo-screenshots"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.Request.Simulator == nil || *a.Request.Simulator != duo || member(t, a.Request, "shard") != `"duo"` || a.Request.TimeoutSeconds != 3600 {
+	if a.Request.Simulator == nil || *a.Request.Simulator != duo || member(t, a.Request, "shard") != `"duo-screenshots"` || a.Request.TimeoutSeconds != 3600 {
 		t.Fatalf("request not normalized: %+v", a.Request)
 	}
-	if a.Profile.Simulator == nil || *a.Profile.Simulator != duo || member(t, a.Profile, "shard") != `"duo"` || member(t, a.Profile, "kind") != `"simulator_script"` || a.ProfileDigest != r.Digests()[a.Profile.ID] {
+	if a.Profile.Simulator == nil || *a.Profile.Simulator != duo || member(t, a.Profile, "shard") != `"duo-screenshots"` || member(t, a.Profile, "kind") != `"simulator_script"` || a.ProfileDigest != r.Digests()[a.Profile.ID] {
 		t.Fatalf("snapshot: %+v", a.Profile)
 	}
 	single, err := profiles.ForSnapshot(a.Profile)
@@ -100,7 +100,7 @@ func TestResolveScriptTemplateRequiresShardAndDefaultsSimulator(t *testing.T) {
 		t.Fatalf("snapshot does not re-admit identically: %+v %v", again, err)
 	}
 	// The kind's 7200-second maximum admits; one second more does not.
-	long := scriptRequest(t, "duo")
+	long := scriptRequest(t, "duo-screenshots")
 	long.TimeoutSeconds = 7200
 	if b, err := r.Resolve(long); err != nil || b.Request.TimeoutSeconds != 7200 {
 		t.Fatalf("7200-second script job: %+v %v", b.Request, err)
@@ -117,10 +117,10 @@ func TestResolveScriptTemplateRequiresShardAndDefaultsSimulator(t *testing.T) {
 	}{
 		"missing shard":      {scriptRequest(t, ""), profiles.ErrInvalid},
 		"bad shard":          {scriptRequest(t, "Duo"), profiles.ErrInvalid},
-		"unlisted simulator": {edit(t, scriptRequest(t, "duo"), func(m map[string]any) { m["simulator"] = unlisted }), profiles.ErrUnsupported},
-		"wrong kind":         {edit(t, scriptRequest(t, "duo"), func(m map[string]any) { m["kind"] = "simulator_ui_test" }), profiles.ErrUnsupported},
+		"unlisted simulator": {edit(t, scriptRequest(t, "duo-screenshots"), func(m map[string]any) { m["simulator"] = unlisted }), profiles.ErrUnsupported},
+		"wrong kind":         {edit(t, scriptRequest(t, "duo-screenshots"), func(m map[string]any) { m["kind"] = "simulator_ui_test" }), profiles.ErrUnsupported},
 		"kind on build":      {edit(t, templateRequest("themartianapp/herdrup"), func(m map[string]any) { m["kind"] = "simulator_script" }), profiles.ErrUnsupported},
-		"unknown kind":       {edit(t, scriptRequest(t, "duo"), func(m map[string]any) { m["kind"] = "script" }), profiles.ErrUnsupported},
+		"unknown kind":       {edit(t, scriptRequest(t, "duo-screenshots"), func(m map[string]any) { m["kind"] = "script" }), profiles.ErrUnsupported},
 	}
 	for name, tc := range refused {
 		t.Run(name, func(t *testing.T) {
@@ -133,7 +133,7 @@ func TestResolveScriptTemplateRequiresShardAndDefaultsSimulator(t *testing.T) {
 
 func TestParseRepoConfigScriptGrammar(t *testing.T) {
 	got := parseConfig(t, duoConfig)
-	if member(t, got, "script") != `{"shards":{"duo":{"run":"Tools/ci/duo-screenshots.sh"}}}` {
+	if member(t, got, "script") != `{"shards":{"duo-screenshots":{"run":"Tools/ci/duo-screenshots.sh"}}}` {
 		t.Fatalf("script section: %s", member(t, got, "script"))
 	}
 	// A configuration without a script section keeps its JSON shape.
@@ -193,7 +193,7 @@ func TestParseRepoConfigScriptGrammar(t *testing.T) {
 
 func TestDeriveScriptArgvGolden(t *testing.T) {
 	r := templatesFile(t, buildTemplate+","+scriptTemplate)
-	a, err := r.Resolve(scriptRequest(t, "duo"))
+	a, err := r.Resolve(scriptRequest(t, "duo-screenshots"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,16 +207,16 @@ func TestDeriveScriptArgvGolden(t *testing.T) {
 		{Executable: "/usr/bin/xcrun", Args: []string{"xcodebuild", "-project", "Herdr.xcodeproj", "-scheme", "Herdr", "-configuration", "Debug", "-sdk", "iphonesimulator", "-destination", "id=${SIMULATOR_ID}", "-derivedDataPath", "${DERIVED_DATA}", "build"}},
 	}
 	wantRun := model.Command{Executable: "/bin/bash", Args: []string{"${CHECKOUT}/Tools/ci/duo-screenshots.sh"}}
-	if derived.WorkDir != "." || !reflect.DeepEqual(derived.Prepare, wantPrepare) || !reflect.DeepEqual(derived.Run, wantRun) || len(derived.RequiredTests) != 0 || len(derived.Artifacts) != 0 {
+	if derived.WorkDir != "." || !reflect.DeepEqual(derived.Prepare, wantPrepare) || !reflect.DeepEqual(derived.Run, wantRun) || len(derived.RequiredTests) != 0 || !reflect.DeepEqual(derived.Artifacts, []model.ArtifactRule{{Path: "output", Required: true}}) {
 		t.Fatalf("derived %q\nprepare %q\nrun %q\nrequired %q", derived.WorkDir, derived.Prepare, derived.Run, derived.RequiredTests)
 	}
-	derived.WorkDir, derived.Prepare, derived.Run = "", nil, model.Command{}
+	derived.WorkDir, derived.Prepare, derived.Run, derived.Artifacts = "", nil, model.Command{}, nil
 	if !reflect.DeepEqual(derived, a.Profile) {
 		t.Fatalf("derivation changed the snapshot: %+v", derived)
 	}
 	// The script path is resolved against work_dir; without the optional
 	// steps prepare is the simulator build alone.
-	minimal := parseConfig(t, `{"version":1,"work_dir":"ios/app","workspace":"W.xcworkspace","scheme":"S","script":{"shards":{"duo":{"run":"ci/shots.sh"}}}}`)
+	minimal := parseConfig(t, `{"version":1,"work_dir":"ios/app","workspace":"W.xcworkspace","scheme":"S","script":{"shards":{"duo-screenshots":{"run":"ci/shots.sh"}}}}`)
 	got, err := profiles.Derive(a.Profile, minimal)
 	if err != nil || got.WorkDir != "ios/app" || !reflect.DeepEqual(got.Run, model.Command{Executable: "/bin/bash", Args: []string{"${CHECKOUT}/ios/app/ci/shots.sh"}}) ||
 		!reflect.DeepEqual(got.Prepare, []model.Command{{Executable: "/usr/bin/xcrun", Args: []string{"xcodebuild", "-workspace", "W.xcworkspace", "-scheme", "S", "-configuration", "Debug", "-sdk", "iphonesimulator", "-destination", "id=${SIMULATOR_ID}", "-derivedDataPath", "${DERIVED_DATA}", "build"}}}) {
@@ -226,7 +226,7 @@ func TestDeriveScriptArgvGolden(t *testing.T) {
 		"no script section":    `{"version":1,"work_dir":".","project":"A.xcodeproj","scheme":"A"}`,
 		"test sections only":   herdrupConfig,
 		"shard not configured": `{"version":1,"work_dir":".","project":"A.xcodeproj","scheme":"A","script":{"shards":{"other":{"run":"x.sh"}}}}`,
-		"unparsed bad path":    `{"version":1,"work_dir":".","project":"A.xcodeproj","scheme":"A","script":{"shards":{"duo":{"run":"../x.sh"}}}}`,
+		"unparsed bad path":    `{"version":1,"work_dir":".","project":"A.xcodeproj","scheme":"A","script":{"shards":{"duo-screenshots":{"run":"../x.sh"}}}}`,
 	} {
 		if _, err := profiles.Derive(a.Profile, decode[model.RepoConfig](t, c)); !errors.Is(err, profiles.ErrRepoConfig) {
 			t.Fatalf("%s: got %v, want a .macserve.json refusal", name, err)
@@ -255,7 +255,7 @@ func TestDeriveScriptArgvGolden(t *testing.T) {
 func TestEffectiveScriptRecipe(t *testing.T) {
 	config := parseConfig(t, duoConfig)
 	r := templatesFile(t, scriptTemplate)
-	a, err := r.Resolve(scriptRequest(t, "duo"))
+	a, err := r.Resolve(scriptRequest(t, "duo-screenshots"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +263,7 @@ func TestEffectiveScriptRecipe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	recipe := map[string]any{"config_sha256": strings.Repeat("0", 64), "config": config, "work_dir": derived.WorkDir, "prepare": derived.Prepare, "run": derived.Run, "shard": "duo"}
+	recipe := map[string]any{"config_sha256": strings.Repeat("0", 64), "config": config, "work_dir": derived.WorkDir, "prepare": derived.Prepare, "run": derived.Run, "shard": "duo-screenshots"}
 	reported := func(change func(map[string]any)) *model.RepoRecipe {
 		r := edit(t, model.RepoRecipe{}, func(m map[string]any) {
 			for k, v := range recipe {

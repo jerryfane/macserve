@@ -18,6 +18,12 @@ import (
 const (
 	// RepoConfigFile is the only repository file a template job reads.
 	RepoConfigFile = ".macserve.json"
+	// ScriptOutputDir is the workspace directory a script job writes its
+	// outputs to; its derived recipe requires it as an artifact.
+	ScriptOutputDir = "output"
+	// ScriptCheckoutPrefix starts a script job's run argument; the rest is the
+	// script's checkout-relative path.
+	ScriptCheckoutPrefix = "${CHECKOUT}/"
 	// MaxRepoConfigBytes bounds RepoConfigFile, test shards included.
 	MaxRepoConfigBytes = 16384
 	// XcodeGenPath is the root-installed XcodeGen the xcodegen step runs.
@@ -283,7 +289,8 @@ func validateShards(key string, s *model.TestShards) error {
 //
 // A script template builds the scheme for the job's own simulator in prepare
 // and runs the snapshot shard's script with /bin/bash; it has no required
-// tests.
+// tests, and its one required artifact is the workspace output directory
+// (exported as output.tar.gz).
 func Derive(snapshot model.Profile, c model.RepoConfig) (model.Profile, error) {
 	if snapshot.Template == nil {
 		return model.Profile{}, fmt.Errorf("%w: not a template job snapshot", ErrInvalid)
@@ -348,7 +355,8 @@ func Derive(snapshot model.Profile, c model.RepoConfig) (model.Profile, error) {
 			return model.Profile{}, repoConfigError("script.shards has no shard %q", snapshot.Shard)
 		}
 		p.Prepare = append(p.Prepare, xcodebuild("-scheme", c.Scheme, "-configuration", "Debug", "-sdk", "iphonesimulator", "-destination", "id=${SIMULATOR_ID}", "-derivedDataPath", "${DERIVED_DATA}", "build"))
-		p.Run = model.Command{Executable: "/bin/bash", Args: []string{"${CHECKOUT}/" + path.Join(c.WorkDir, script.Run)}}
+		p.Run = model.Command{Executable: "/bin/bash", Args: []string{ScriptCheckoutPrefix + path.Join(c.WorkDir, script.Run)}}
+		p.Artifacts = []model.ArtifactRule{{Path: ScriptOutputDir, Required: true}}
 	default:
 		return model.Profile{}, fmt.Errorf("%w: template job kind", ErrUnsupported)
 	}

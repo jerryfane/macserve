@@ -532,7 +532,7 @@ func (c *artifactCollector) collect(candidate artifactCandidate, now time.Time) 
 // Collect exports only approved path.Match selections. Both source bytes and
 // sealed bytes are independently bounded. On any failure every export created
 // by this call is removed; pre-existing content-addressed exports are untouched.
-func Collect(ctx context.Context, root string, rules []model.ArtifactRule, dest string, limits Limits, now time.Time) ([]Artifact, error) {
+func Collect(ctx context.Context, root string, rules []model.ArtifactRule, dest string, limits Limits, now time.Time) (artifacts []Artifact, resultErr error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -545,101 +545,6 @@ func Collect(ctx context.Context, root string, rules []model.ArtifactRule, dest 
 			return nil, artifactError("invalid pattern %q", rule.Path)
 		}
 	}
-	return collectSelected(ctx, root, dest, limits, now, func(source *os.File, candidates map[string]artifactCandidate) error {
-		seen := make(map[string]bool)
-		for _, rule := range rules {
-			count, err := matchArtifacts(ctx, source, "", strings.Split(rule.Path, "/"), candidates, seen, limits.MaxEntries)
-			if err != nil {
-				return err
-			}
-			if count == 0 && rule.Required {
-				return artifactError("required pattern %q did not match", rule.Path)
-			}
-		}
-		return nil
-	})
-}
-
-// CollectTree exports every regular file under the root-relative directory dir
-// as one artifact named by its root-relative path, like Collect and within the
-// same limits. A file may lie at most maxDepth path components below dir.
-// Symlinks are skipped, never followed; special files and mount points
-// refuse. A missing dir exports nothing.
-func CollectTree(ctx context.Context, root, dir string, maxDepth int, dest string, limits Limits, now time.Time) ([]Artifact, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	limits, err := normalizeLimits(limits)
-	if err != nil {
-		return nil, err
-	}
-	if !validArtifactPattern(dir) || strings.ContainsAny(dir, "*?[") || maxDepth < 1 {
-		return nil, artifactError("invalid tree %q", dir)
-	}
-	return collectSelected(ctx, root, dest, limits, now, func(source *os.File, candidates map[string]artifactCandidate) error {
-		// A probe only: the open below never follows a symlink.
-		var stat unix.Stat_t
-		if err := unix.Fstatat(int(source.Fd()), dir, &stat, unix.AT_SYMLINK_NOFOLLOW); errors.Is(err, unix.ENOENT) {
-			return nil
-		}
-		top, info, err := openArtifactPath(source, dir)
-		if err != nil {
-			return err
-		}
-		defer top.Close()
-		if !info.IsDir() {
-			return artifactError("%q is not a directory", dir)
-		}
-		return selectTree(ctx, top, dir, 1, maxDepth, limits.MaxEntries, candidates)
-	})
-}
-
-// selectTree adds the regular files of dir, whose entries lie depth
-// components below the tree root, and of its subdirectories to candidates.
-func selectTree(ctx context.Context, dir *os.File, prefix string, depth, maxDepth, limit int, candidates map[string]artifactCandidate) error {
-	names, err := directoryNames(dir, limit)
-	if err != nil {
-		return err
-	}
-	if len(names) > 0 && depth > maxDepth {
-		return fmt.Errorf("%w: %s nests entries more than %d levels deep", ErrArtifactLimit, prefix, maxDepth)
-	}
-	for _, name := range names {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		var stat unix.Stat_t
-		if err := unix.Fstatat(int(dir.Fd()), name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-			return err
-		}
-		if stat.Mode&unix.S_IFMT == unix.S_IFLNK {
-			continue
-		}
-		file, info, err := openArtifactAt(dir, name)
-		if err != nil {
-			return err
-		}
-		relative := prefix + "/" + name
-		if info.IsDir() {
-			err = selectTree(ctx, file, relative, depth+1, maxDepth, limit, candidates)
-			file.Close()
-			if err != nil {
-				return err
-			}
-			continue
-		}
-		file.Close()
-		if len(candidates) >= limit {
-			return fmt.Errorf("%w: matching entry count", ErrArtifactLimit)
-		}
-		candidates[relative] = artifactCandidate{name: relative, info: info}
-	}
-	return nil
-}
-
-// collectSelected exports the candidates selection picks from the opened
-// source root, in name order, under normalized limits.
-func collectSelected(ctx context.Context, root, dest string, limits Limits, now time.Time, selection func(source *os.File, candidates map[string]artifactCandidate) error) (artifacts []Artifact, resultErr error) {
 	rootPath, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		return nil, err
@@ -687,8 +592,15 @@ func collectSelected(ctx context.Context, root, dest string, limits Limits, now 
 		}
 	}()
 	candidates := make(map[string]artifactCandidate)
-	if err := selection(source, candidates); err != nil {
-		return nil, err
+	seen := make(map[string]bool)
+	for _, rule := range rules {
+		count, err := matchArtifacts(ctx, source, "", strings.Split(rule.Path, "/"), candidates, seen, limits.MaxEntries)
+		if err != nil {
+			return nil, err
+		}
+		if count == 0 && rule.Required {
+			return nil, artifactError("required pattern %q did not match", rule.Path)
+		}
 	}
 	names := make([]string, 0, len(candidates))
 	for name := range candidates {

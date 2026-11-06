@@ -30,11 +30,12 @@ high-entropy bearer credentials belong in the caller's private credential storag
 
 Job kinds are `build`, `unit_test`, `simulator_ui_test` and `simulator_script`; the last runs only from an org
 template. A `simulator_script` request names a `shard` of the repository's `.macserve.json` `script` section,
-`{"script": {"shards": {"duo": {"run": "Tools/ci/duo-screenshots.sh"}}}}`, where `run` is a relative path
+`{"script": {"shards": {"duo-screenshots": {"run": "Tools/ci/duo-screenshots.sh"}}}}`, where `run` is a relative path
 (no absolute path, `..`, empty or `.` component) resolved against `work_dir`; an omitted simulator is the
 template's first pin. The worker builds the scheme for that simulator
 (`xcrun xcodebuild … -destination id=${SIMULATOR_ID} -derivedDataPath ${DERIVED_DATA} build`) and then runs
-`/bin/bash <work_dir>/<run>` in `work_dir` with `PATH` unchanged and exactly these additions:
+`/bin/bash <work_dir>/<run>` in `work_dir` (the script must be a regular checkout file reached without a
+symlink, checked just before launch) with `PATH` unchanged and exactly these additions:
 
 | Variable | Value |
 | --- | --- |
@@ -43,10 +44,11 @@ template's first pin. The worker builds the scheme for that simulator
 | `MACSERVE_OUTPUT` | `<workspace>/output`, created job-writable before the run |
 | `MACSERVE_JOB_ID` | the job ID |
 
-Exit 0 is success. Every regular file the script leaves under `MACSERVE_OUTPUT`, at most 8 levels deep, is
-listed by `/artifacts` as `output/<path>` and downloaded from `/artifacts/{artifact_id}`; symlinks are skipped,
-and the usual artifact count and size budgets apply. Script jobs have no `/results` test evidence. They default
-to a 3600-second timeout with a 7200-second maximum and a 30-minute preparation budget. The full
+Exit 0 is success. The `MACSERVE_OUTPUT` directory is the job's required artifact: `/artifacts` lists it as
+`output.tar.gz`, downloaded from `/artifacts/{artifact_id}`, within the usual artifact count and size budgets; a
+symlink or special file under it fails the job. Script jobs have no `/results` test evidence. The request's
+`timeout_seconds` is admitted against the template cap (default 3600 seconds, maximum 7200); there are no
+per-shard timeouts. Preparation has a 30-minute budget. The full
 `.macserve.json` rules are in [install.md](install.md#onboarding-a-repository).
 
 The controller requires schema-3 root-owned health attestation bound to job UID and qualified profile

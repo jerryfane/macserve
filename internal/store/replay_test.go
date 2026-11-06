@@ -102,12 +102,12 @@ func TestEnqueueScriptTemplateJob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	admission, err := registry.Resolve(model.Request{Repo: "example-org/example-app", SHA: strings.Repeat("a", 40), Kind: model.SimulatorScript, Profile: template.ID, Xcode: template.Xcode, Shard: "duo", TimeoutSeconds: 7200})
+	admission, err := registry.Resolve(model.Request{Repo: "example-org/example-app", SHA: strings.Repeat("a", 40), Kind: model.SimulatorScript, Profile: template.ID, Xcode: template.Xcode, Shard: "duo-screenshots", TimeoutSeconds: 7200})
 	if err != nil {
 		t.Fatal(err)
 	}
 	job, _, err := s.Enqueue(ctx, "principal", "script", admission, testNow)
-	if err != nil || job.Request.Kind != model.SimulatorScript || job.Profile.Shard != "duo" || *job.Request.Simulator != pin || job.Request.TimeoutSeconds != 7200 {
+	if err != nil || job.Request.Kind != model.SimulatorScript || job.Profile.Shard != "duo-screenshots" || *job.Request.Simulator != pin || job.Request.TimeoutSeconds != 7200 {
 		t.Fatalf("script job: %+v %v", job, err)
 	}
 	unpinned := admission

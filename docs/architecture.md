@@ -48,8 +48,7 @@ PF enforcement may be a separately reviewed future opt-in; it is not implemented
   broker log at job start and to budget failures. A slow or failed sample is tolerated until memory has gone
   unobserved for 30 s. This is not a kernel memory cap and excludes the broker and other-UID system daemons.
 - `internal/evidence`: bounded xcresult test parsing, required-test execution checks, JUnit, deterministic
-  artifact archives and content-addressed exports, including a script job's `output/` tree (regular files only,
-  at most 8 levels, symlinks skipped). Missing or incomplete test evidence cannot report success.
+  artifact archives and content-addressed exports, including a script job's required `output.tar.gz`. Missing or incomplete test evidence cannot report success.
   Failed plans, bundles and suites remain explicit `container` diagnostics and JUnit errors even when child
   tests pass. Diagnostics cannot satisfy required-test selection or count as execution; aggregate record counts
   include them, while elapsed execution time excludes them. Ancestor failure messages are retained without

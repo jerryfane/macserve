@@ -19,6 +19,7 @@ import (
 	"github.com/jerryfane/macserve/internal/evidence"
 	"github.com/jerryfane/macserve/internal/hostguard"
 	"github.com/jerryfane/macserve/internal/model"
+	"github.com/jerryfane/macserve/internal/profiles"
 	"golang.org/x/sys/unix"
 )
 
@@ -241,7 +242,7 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 	dirs := []string{"checkout", "home", "tmp", "caches", "derived-data"}
 	if job.Request.Kind == model.SimulatorScript {
 		// Created before prepare's workspace pass makes it job-owned.
-		dirs = append(dirs, outputDir)
+		dirs = append(dirs, profiles.ScriptOutputDir)
 	}
 	for _, dir := range dirs {
 		if err := x.root.Mkdir(dir, 0700); err != nil {
@@ -335,16 +336,41 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 		}
 	}
 	x.ranRecipe = true
+	if job.Request.Kind == model.SimulatorScript {
+		if err := x.checkScript(); err != nil {
+			return result, err
+		}
+	}
 	returned = x.recipe(ctx, x.job.Profile.Run, x.runEnvironment()...)
 	return result, returned
 }
 
-// outputDir is the workspace directory whose files a script job exports, at
-// most maxOutputDepth path components below it.
-const (
-	outputDir      = "output"
-	maxOutputDepth = 8
-)
+// checkScript requires a script job's script to be a regular source file
+// reached without any symlink under the checkout, immediately before it runs.
+func (x *execution) checkScript() error {
+	run := x.job.Profile.Run
+	relative, ok := strings.CutPrefix(strings.Join(run.Args, " "), profiles.ScriptCheckoutPrefix)
+	if run.Executable != "/bin/bash" || len(run.Args) != 1 || !ok || !safeRelative(relative) {
+		return errors.New("script recipe is not a checkout script")
+	}
+	name := "checkout/" + relative
+	if err := noSymlinkPath(x.root, name); err != nil {
+		return fmt.Errorf("script %s: %w", relative, err)
+	}
+	file, err := x.root.OpenFile(name, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return fmt.Errorf("script %s: %w", relative, err)
+	}
+	info, err := file.Stat()
+	closeErr := file.Close()
+	if err = errors.Join(err, closeErr); err != nil {
+		return fmt.Errorf("script %s: %w", relative, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("script %s is not a regular file", relative)
+	}
+	return nil
+}
 
 // runEnvironment is what a script job's run command adds to environment: the
 // products directory of its prepare build, its booted simulator, the output
@@ -356,7 +382,7 @@ func (x *execution) runEnvironment() []string {
 	return []string{
 		"MACSERVE_APP_DIR=" + filepath.Join(x.workspace, "derived-data", "Build", "Products", "Debug-iphonesimulator"),
 		"MACSERVE_SIMULATOR_ID=" + x.manifest.DeviceUDID,
-		"MACSERVE_OUTPUT=" + filepath.Join(x.workspace, outputDir),
+		"MACSERVE_OUTPUT=" + filepath.Join(x.workspace, profiles.ScriptOutputDir),
 		"MACSERVE_JOB_ID=" + x.job.ID,
 	}
 }
@@ -747,12 +773,12 @@ func (x *execution) collect(ctx context.Context) error {
 	dest := filepath.Join(x.engine.options.ExportRoot, x.job.ID)
 	remaining := x.engine.options.MaxArtifactBytes
 	var failures []error
-	export := func(selection func(evidence.Limits) ([]evidence.Artifact, error)) {
+	collect := func(source string, rules []model.ArtifactRule) {
 		if remaining <= 0 {
 			failures = append(failures, errors.New("artifact budget exhausted"))
 			return
 		}
-		artifacts, err := selection(evidence.Limits{MaxTotalBytes: remaining, MaxFileBytes: remaining, MaxEntries: maxArchiveEntries})
+		artifacts, err := evidence.Collect(ctx, source, rules, dest, evidence.Limits{MaxTotalBytes: remaining, MaxFileBytes: remaining, MaxEntries: maxArchiveEntries}, x.engine.options.Now())
 		if err != nil {
 			failures = append(failures, err)
 			return
@@ -761,11 +787,6 @@ func (x *execution) collect(ctx context.Context) error {
 			remaining -= artifact.SizeBytes
 		}
 		x.result.Artifacts = append(x.result.Artifacts, artifacts...)
-	}
-	collect := func(source string, rules []model.ArtifactRule) {
-		export(func(limits evidence.Limits) ([]evidence.Artifact, error) {
-			return evidence.Collect(ctx, source, rules, dest, limits, x.engine.options.Now())
-		})
 	}
 	// Preserve raw logs even when required test or profile evidence is missing.
 	protectedEvidence := filepath.Join(x.engine.options.Root, "evidence", x.job.ID)
@@ -786,13 +807,8 @@ func (x *execution) collect(ctx context.Context) error {
 		failures = append(failures, err, x.writeEvidence("junit.xml", junit))
 		collect(protectedEvidence, []model.ArtifactRule{{Path: "evidence/tests.json", Required: true}, {Path: "evidence/summary.json", Required: true}, {Path: "evidence/junit.xml", Required: true}})
 	}
-	// A script job's outputs are every regular file it left under output/.
-	if x.job.Request.Kind == model.SimulatorScript {
-		export(func(limits evidence.Limits) ([]evidence.Artifact, error) {
-			return evidence.CollectTree(ctx, x.workspace, outputDir, maxOutputDepth, dest, limits, x.engine.options.Now())
-		})
-	}
-	// Artifact rules are workspace-relative, including explicit checkout/... paths.
+	// Artifact rules are workspace-relative, including explicit checkout/... paths
+	// and a script job's output directory.
 	if len(x.job.Profile.Artifacts) > 0 {
 		collect(x.workspace, x.job.Profile.Artifacts)
 	}

@@ -15,8 +15,9 @@ import (
 )
 
 // scriptTemplateFixture is a successful org script-template job for the shard
-// "duo": the worker reports the recipe derived from .macserve.json, the
-// script ran on the job's simulator, and its outputs are artifacts. It has no
+// "duo-screenshots": the worker reports the recipe derived from .macserve.json, the
+// script ran on the job's simulator, and its output directory is the
+// output.tar.gz artifact. It has no
 // test summary or test artifacts.
 func scriptTemplateFixture(t *testing.T) (Options, model.Job, worker.Result, Expected) {
 	t.Helper()
@@ -26,7 +27,7 @@ func scriptTemplateFixture(t *testing.T) (Options, model.Job, worker.Result, Exp
 	if err != nil {
 		t.Fatal(err)
 	}
-	admission, err := registry.Resolve(model.Request{Repo: job.Request.Repo, SHA: job.Request.SHA, Kind: model.SimulatorScript, Profile: template.ID, Xcode: template.Xcode, Shard: "duo", TimeoutSeconds: 300})
+	admission, err := registry.Resolve(model.Request{Repo: job.Request.Repo, SHA: job.Request.SHA, Kind: model.SimulatorScript, Profile: template.ID, Xcode: template.Xcode, Shard: "duo-screenshots", TimeoutSeconds: 300})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +37,7 @@ func scriptTemplateFixture(t *testing.T) (Options, model.Job, worker.Result, Exp
 		t.Fatal(err)
 	}
 	job.RequestDigest = hashBytes(request)
-	config := model.RepoConfig{Version: 1, WorkDir: ".", Project: "Herdr.xcodeproj", Scheme: "Herdr", Script: &model.ScriptShards{Shards: map[string]model.ScriptShard{"duo": {Run: "Tools/ci/duo-screenshots.sh"}}}}
+	config := model.RepoConfig{Version: 1, WorkDir: ".", Project: "Herdr.xcodeproj", Scheme: "Herdr", Script: &model.ScriptShards{Shards: map[string]model.ScriptShard{"duo-screenshots": {Run: "Tools/ci/duo-screenshots.sh"}}}}
 	derived, err := profiles.Derive(job.Profile, config)
 	if err != nil {
 		t.Fatal(err)
@@ -47,8 +48,7 @@ func scriptTemplateFixture(t *testing.T) (Options, model.Job, worker.Result, Exp
 	logs := result.Artifacts[:2]
 	expires := logs[0].ExpiresAt
 	result.Artifacts = append(slices.Clone(logs),
-		evidence.Artifact{ID: "portrait", Name: "output/duo/portrait.png", MediaType: "image/png", SizeBytes: 100, SHA256: hashBytes([]byte("portrait")), ExpiresAt: expires},
-		evidence.Artifact{ID: "summary", Name: "output/summary.md", MediaType: "text/markdown", SizeBytes: 10, SHA256: hashBytes([]byte("summary")), ExpiresAt: expires},
+		evidence.Artifact{ID: "output", Name: "output.tar.gz", MediaType: "application/gzip", SizeBytes: 100, SHA256: hashBytes([]byte("output")), ExpiresAt: expires},
 	)
 	expected.Profile, expected.ProfileDigest, expected.Kind, expected.Simulator, expected.RequiredTests = template.ID, admission.ProfileDigest, model.SimulatorScript, admission.Request.Simulator, nil
 	return options, job, result, expected
@@ -64,7 +64,7 @@ func TestTemplateScriptReceiptValidates(t *testing.T) {
 	if err := ValidateSuccess(p, expected); err != nil {
 		t.Fatal(err)
 	}
-	if p.Tests.Status != "tests_not_run" || len(p.Tests.Required) != 0 || p.Tests.Tests != 0 || p.Request.Kind != model.SimulatorScript || p.Request.Shard != "duo" || p.ArtifactCount != 4 {
+	if p.Tests.Status != "tests_not_run" || len(p.Tests.Required) != 0 || p.Tests.Tests != 0 || p.Request.Kind != model.SimulatorScript || p.Request.Shard != "duo-screenshots" || p.ArtifactCount != 3 {
 		t.Fatalf("sealed script evidence %+v", p)
 	}
 	unpinned := p
@@ -87,6 +87,7 @@ func TestTemplateScriptReceiptValidates(t *testing.T) {
 		"simulator build dropped": func(r *worker.Result) { r.Observation.Recipe.Prepare = nil },
 		"simulator not observed":  func(r *worker.Result) { r.Observation.DeviceUDID = "" },
 		"recipe missing":          func(r *worker.Result) { r.Observation.Recipe = nil },
+		"output archive missing":  func(r *worker.Result) { r.Artifacts = r.Artifacts[:2] },
 	} {
 		t.Run(name, func(t *testing.T) {
 			options, job, result, _ := scriptTemplateFixture(t)

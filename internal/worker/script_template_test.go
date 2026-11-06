@@ -1,10 +1,11 @@
 package worker
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -12,11 +13,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/macserve/internal/evidence"
 	"github.com/jerryfane/macserve/internal/model"
 )
 
-const scriptConfig = `{"version":1,"work_dir":".","project":"Herdr.xcodeproj","scheme":"Herdr","script":{"shards":{"duo":{"run":"Tools/ci/duo-screenshots.sh"}}}}`
+const (
+	scriptShard  = "duo-screenshots"
+	scriptConfig = `{"version":1,"work_dir":".","project":"Herdr.xcodeproj","scheme":"Herdr","script":{"shards":{"duo-screenshots":{"run":"Tools/ci/duo-screenshots.sh"}}}}`
+)
 
 // scriptHook plays the shard's script: it writes files below
 // MACSERVE_OUTPUT and records the script command.
@@ -49,24 +52,31 @@ func scriptHook(t *testing.T, files map[string]string, script *Command) func(con
 	}
 }
 
+func runScriptJob(t *testing.T, runner *fakeRunner, checkout map[string]string) (*Engine, model.Job, Result, error) {
+	t.Helper()
+	engine := engineFixture(t, runner)
+	source, data := checkoutFixture(t, checkout)
+	job := testTemplateJob(t, model.SimulatorScript, scriptShard)
+	result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil)
+	return engine, job, result, err
+}
+
+var scriptCheckout = map[string]string{".macserve.json": scriptConfig, "Tools/ci/duo-screenshots.sh": "#!/bin/bash\n"}
+
 // A script template job builds the scheme for its own booted simulator in
-// prepare, runs the shard's script with /bin/bash in work_dir with the four
-// MACSERVE_ variables, and exports every regular file the script left under
-// output/ (nested, symlinks skipped) with no test evidence.
-func TestTemplateScriptJobExportsOutputTree(t *testing.T) {
+// prepare, runs the shard's script with /bin/bash in work_dir with exactly the
+// four MACSERVE_ variables added, and exports the output directory, nested
+// files included, as the required output.tar.gz with no test evidence.
+func TestTemplateScriptJobExportsOutputArchive(t *testing.T) {
 	files := map[string]string{
 		"summary.md":                "# Duo\n",
 		"duo/portrait.png":          "\x89PNG portrait",
 		"duo/landscape/folded.json": `{"posture":"folded"}`,
-		"1/2/3/4/5/6/7/deepest.txt": "eight levels",
 	}
 	var script Command
 	runner := &fakeRunner{}
 	runner.hook = scriptHook(t, files, &script)
-	engine := engineFixture(t, runner)
-	source, data := checkoutFixture(t, map[string]string{".macserve.json": scriptConfig, "Tools/ci/duo-screenshots.sh": "#!/bin/bash\n"})
-	job := testTemplateJob(t, model.SimulatorScript, "duo")
-	result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil)
+	engine, job, result, err := runScriptJob(t, runner, scriptCheckout)
 	if err != nil || result.State != model.Succeeded || !result.CleanupOK {
 		t.Fatalf("script job failed: %+v %v", result, err)
 	}
@@ -104,61 +114,111 @@ func TestTemplateScriptJobExportsOutputTree(t *testing.T) {
 	if result.Summary != nil {
 		t.Fatalf("script job has test evidence: %+v", result.Summary)
 	}
-	if recipe := result.Observation.Recipe; recipe == nil || recipe.Shard != "duo" || len(recipe.RequiredTests) != 0 || recipe.Run.Executable != "/bin/bash" {
+	if recipe := result.Observation.Recipe; recipe == nil || recipe.Shard != scriptShard || len(recipe.RequiredTests) != 0 || recipe.Run.Executable != "/bin/bash" {
 		t.Fatalf("recipe evidence: %+v", recipe)
 	}
-	exported := map[string]string{}
+	names := []string{}
+	archived := map[string]string{}
 	for _, artifact := range result.Artifacts {
-		exported[artifact.Name] = artifact.SHA256
-	}
-	for name, content := range files {
-		sum := sha256.Sum256([]byte(content))
-		if exported["output/"+name] != hex.EncodeToString(sum[:]) {
-			t.Fatalf("output/%s not exported intact: %v", name, exported)
+		names = append(names, artifact.Name)
+		if artifact.Name != "output.tar.gz" {
+			continue
+		}
+		path, err := engine.ArtifactPath(job.ID, artifact.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		gz, err := gzip.NewReader(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		archive := tar.NewReader(gz)
+		for {
+			header, err := archive.Next()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if header.Typeflag == tar.TypeReg {
+				content, err := io.ReadAll(archive)
+				if err != nil {
+					t.Fatal(err)
+				}
+				archived[header.Name] = string(content)
+			}
 		}
 	}
-	if len(exported) != len(files)+2 || exported["evidence/stdout.log"] == "" || exported["evidence/stderr.log"] == "" {
-		t.Fatalf("exports: %v", exported)
+	slices.Sort(names)
+	if !slices.Equal(names, []string{"evidence/stderr.log", "evidence/stdout.log", "output.tar.gz"}) {
+		t.Fatalf("exports: %q", names)
+	}
+	for name, content := range files {
+		if archived["output/"+name] != content {
+			t.Fatalf("output/%s not archived intact: %q", name, archived)
+		}
+	}
+	if len(archived) != len(files) {
+		t.Fatalf("archive entries: %q", archived)
 	}
 }
 
-// Script outputs follow the artifact rules: a symlink is skipped, never
-// followed; a file nested more than eight levels below output/ fails the job.
-func TestTemplateScriptJobOutputLimits(t *testing.T) {
+// The script must be a regular checkout file reached without a symlink; the
+// job fails before the script launches otherwise. A symlink the script leaves
+// in output/ is never followed: the export, and so the job, fails.
+func TestTemplateScriptJobRefusesUnsafeScriptsAndOutputs(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		files   map[string]string
-		link    string
-		succeed bool
+		name     string
+		checkout map[string]string
+		link     string // made before the script runs, relative to checkout
+		target   string
+		output   bool // symlink in output/ after the script ran
+		launches bool
 	}{
-		{name: "symlink skipped", files: map[string]string{"shot.png": "png"}, link: "leak.json", succeed: true},
-		{name: "too deep", files: map[string]string{"1/2/3/4/5/6/7/8/deep.txt": "nine levels"}},
+		{name: "missing script", checkout: map[string]string{".macserve.json": scriptConfig}},
+		{name: "script is a directory", checkout: map[string]string{".macserve.json": scriptConfig, "Tools/ci/duo-screenshots.sh/": ""}},
+		{name: "script is a symlink", checkout: map[string]string{".macserve.json": scriptConfig, "Tools/ci/real.sh": "#!/bin/bash\n"}, link: "Tools/ci/duo-screenshots.sh", target: "real.sh"},
+		{name: "script directory is a symlink", checkout: map[string]string{".macserve.json": scriptConfig, "Other/duo-screenshots.sh": "#!/bin/bash\n"}, link: "Tools/ci", target: "../Other"},
+		{name: "symlink in output", checkout: scriptCheckout, output: true, launches: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var script Command
 			runner := &fakeRunner{}
-			play := scriptHook(t, tc.files, &script)
+			play := scriptHook(t, map[string]string{"shot.png": "png"}, &script)
 			runner.hook = func(ctx context.Context, c Command, out, stderr io.Writer) (bool, ProcessResult, error) {
+				if tc.link != "" && filepath.Base(c.Executable) == "xcrun" && slices.Contains(c.Args, "build") {
+					link := filepath.Join(c.Dir, filepath.FromSlash(tc.link))
+					if err := os.MkdirAll(filepath.Dir(link), 0700); err != nil {
+						return true, ProcessResult{}, err
+					}
+					if err := os.Symlink(tc.target, link); err != nil {
+						return true, ProcessResult{}, err
+					}
+				}
 				handled, result, err := play(ctx, c, out, stderr)
-				if handled && tc.link != "" {
-					output := filepath.Join(filepath.Dir(c.Dir), "output")
-					err = os.Symlink(filepath.Join(c.Dir, ".macserve.json"), filepath.Join(output, tc.link))
+				if handled && tc.output {
+					err = os.Symlink(filepath.Join(c.Dir, ".macserve.json"), filepath.Join(filepath.Dir(c.Dir), "output", "leak.json"))
 				}
 				return handled, result, err
 			}
-			engine := engineFixture(t, runner)
-			source, data := checkoutFixture(t, map[string]string{".macserve.json": scriptConfig, "Tools/ci/duo-screenshots.sh": "#!/bin/bash\n"})
-			result, err := engine.Execute(context.Background(), testTemplateJob(t, model.SimulatorScript, "duo"), source, bytes.NewReader(data), nil)
-			if tc.succeed != (err == nil && result.State == model.Succeeded) || !result.CleanupOK {
-				t.Fatalf("result=%+v err=%v", result, err)
+			_, _, result, err := runScriptJob(t, runner, tc.checkout)
+			if err == nil || result.State == model.Succeeded || !result.CleanupOK {
+				t.Fatalf("unsafe script job succeeded: %+v %v", result, err)
 			}
+			if (script.Executable != "") != tc.launches {
+				t.Fatalf("script launched=%v, want %v (%v)", script.Executable != "", tc.launches, err)
+			}
+			// An output symlink refuses the whole archive.
 			for _, artifact := range result.Artifacts {
-				if strings.HasPrefix(artifact.Name, "output/") && !tc.succeed || artifact.Name == "output/"+tc.link {
-					t.Fatalf("unexpected export %s", artifact.Name)
+				if tc.output && artifact.Name == "output.tar.gz" {
+					t.Fatal("output with a symlink was exported")
 				}
-			}
-			if tc.succeed && !slices.ContainsFunc(result.Artifacts, func(a evidence.Artifact) bool { return a.Name == "output/shot.png" }) {
-				t.Fatalf("output/shot.png not exported: %+v", result.Artifacts)
 			}
 		})
 	}
