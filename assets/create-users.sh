@@ -5,7 +5,7 @@ export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 umask 077
 fail() { printf 'REFUSED: %s\n' "$*" >&2; exit 1; }
 usage() {
-    printf '%s\n' 'Usage: /bin/bash assets/create-users.sh --controller-user NAME --controller-uid UID --controller-gid GID --job-user NAME [--job-real-name NAME] --job-uid UID --job-gid GID --owner-user NAME --owner-uid UID [--apply]'
+    printf '%s\n' 'Usage: /bin/bash assets/create-users.sh --controller-user NAME --controller-uid UID --controller-gid GID --job-user NAME [--job-real-name NAME] --job-uid UID --job-gid GID --owner-user NAME --owner-uid UID [--signer-uid UID --signer-gid GID --signrpc-gid GID [--signer-only]] [--apply]' '--signer-only adds the signer account, groups and directories to an existing installation of the same named accounts.'
 }
 # Pure membership check, also usable by callers that already resolved group IDs.
 validate_account_groups() {
@@ -83,9 +83,67 @@ validate_created_accounts() {
     done <<< "$hidden_records"
     [ "$found" = true ] || fail 'cannot find job login visibility'
 }
+# The signer is a hidden nonlogin system account with its own primary group;
+# the RPC group admits exactly the controller and the signer to the socket
+# and inbox directories. The job account belongs to neither group.
+create_signer() {
+    create_identity "$signer_user" "$signer_uid" "$signer_gid" /usr/bin/false "$prefix/var/signer"
+    /usr/bin/dscl . -create "/Users/$signer_user" Password '*'
+    /usr/bin/dscl . -create "/Users/$signer_user" IsHidden 1
+    create_group "$signrpc_group" "$signrpc_gid"
+    /usr/sbin/dseditgroup -o edit -a "$controller_user" -t user "$signrpc_group"
+    /usr/sbin/dseditgroup -o edit -a "$signer_user" -t user "$signrpc_group"
+}
+validate_signer_accounts() {
+    local record actual gid has_rpc memberships group members found=false
+    [ "$(/usr/bin/id -u "$signer_user")" = "$signer_uid" ] || fail "incorrect UID for $signer_user"
+    [ "$(/usr/bin/id -g "$signer_user")" = "$signer_gid" ] || fail "incorrect primary group for $signer_user"
+    record=$(/usr/bin/dscl . -read "/Users/$signer_user" UserShell) || fail 'cannot read signer shell'
+    [ "$record" = 'UserShell: /usr/bin/false' ] || fail 'incorrect signer shell record'
+    record=$(/usr/bin/dscl . -read "/Users/$signer_user" NFSHomeDirectory) || fail 'cannot read signer home'
+    [ "$record" = "NFSHomeDirectory: $prefix/var/signer" ] || fail 'incorrect signer home record'
+    actual=$(/usr/bin/id -G "$signer_user") || fail "cannot resolve groups for $signer_user"
+    has_rpc=false
+    for gid in $actual; do
+        case "$gid" in 0|20|80|"$job_gid"|"$controller_gid") fail "privileged/shared supplementary group for $signer_user; keep services disabled and reconcile manually" ;; esac
+        if [ "$gid" = "$signrpc_gid" ]; then has_rpc=true; fi
+    done
+    [ "$has_rpc" = true ] || fail "$signer_user is not a member of $signrpc_group"
+    actual=$(/usr/bin/id -G "$controller_user") || fail "cannot resolve groups for $controller_user"
+    has_rpc=false
+    for gid in $actual; do
+        [ "$gid" != "$signer_gid" ] || fail "$controller_user must not belong to $signer_user"
+        if [ "$gid" = "$signrpc_gid" ]; then has_rpc=true; fi
+    done
+    [ "$has_rpc" = true ] || fail "$controller_user is not a member of $signrpc_group"
+    actual=$(/usr/bin/id -G "$job_user") || fail "cannot resolve groups for $job_user"
+    for gid in $actual; do
+        case "$gid" in "$signer_gid"|"$signrpc_gid") fail "job user belongs to a signer group; keep services disabled and reconcile manually" ;; esac
+    done
+    # Exact recorded membership: the controller and the signer, nobody else.
+    memberships=$(/usr/bin/dscl . -list /Groups GroupMembership) || fail 'cannot enumerate signer group membership'
+    while read -r group members; do
+        if [ "$group" = "$signrpc_group" ]; then
+            [ "$found" = false ] || fail "ambiguous $signrpc_group membership"
+            found=true
+            [ "$members" = "$controller_user $signer_user" ] || fail "unexpected $signrpc_group membership"
+        elif [ "$group" = "$signer_user" ] && [ -n "$members" ]; then
+            fail "unexpected $signer_user group membership"
+        fi
+    done <<< "$memberships"
+    [ "$found" = true ] || fail "cannot find $signrpc_group membership"
+}
+provision_signer_directories() {
+    /usr/bin/install -d -o root -g wheel -m 0755 "$prefix/signer-profiles"
+    /usr/bin/install -d -o "$signer_uid" -g "$signer_gid" -m 0700 "$prefix/var/signer" "$prefix/var/signer/keychain" "$prefix/var/signer/key" "$prefix/var/signer/work" "$prefix/var/signer/log"
+    /usr/bin/install -d -o "$signer_uid" -g "$signrpc_gid" -m 0750 "$prefix/var/signer-run"
+    /usr/bin/install -d -o "$controller_uid" -g "$signrpc_gid" -m 0750 "$prefix/var/signer-inbox"
+}
 main() {
-apply=false
+apply=false signer_only=false
 controller_user='' controller_uid='' controller_gid='' job_user='' job_uid='' job_gid='' owner_user='' owner_uid=''
+signer_uid='' signer_gid='' signrpc_gid=''
+signer_user=_macserve_sign signrpc_group=_macserve_signrpc
 job_real_name='macserve build'
 seen=' '
 while [ "$#" -gt 0 ]; do
@@ -93,7 +151,8 @@ while [ "$#" -gt 0 ]; do
     case "$flag" in
         --help) usage; exit 0 ;;
         --apply) [ "$apply" = false ] || fail 'duplicate --apply'; apply=true; continue ;;
-        --controller-user|--controller-uid|--controller-gid|--job-user|--job-real-name|--job-uid|--job-gid|--owner-user|--owner-uid) ;;
+        --signer-only) [ "$signer_only" = false ] || fail 'duplicate --signer-only'; signer_only=true; continue ;;
+        --controller-user|--controller-uid|--controller-gid|--job-user|--job-real-name|--job-uid|--job-gid|--owner-user|--owner-uid|--signer-uid|--signer-gid|--signrpc-gid) ;;
         *) fail "unknown option: $flag" ;;
     esac
     case "$seen" in *" $flag "*) fail "duplicate option: $flag" ;; esac
@@ -106,6 +165,7 @@ while [ "$#" -gt 0 ]; do
         --job-uid) job_uid=$value ;; --job-gid) job_gid=$value ;;
         --owner-user) owner_user=$value ;; --owner-uid) owner_uid=$value ;;
         --job-real-name) job_real_name=$value ;;
+        --signer-uid) signer_uid=$value ;; --signer-gid) signer_gid=$value ;; --signrpc-gid) signrpc_gid=$value ;;
     esac
 done
 [ -n "$job_real_name" ] || fail 'job real name must not be empty'
@@ -125,13 +185,45 @@ if [ "$controller_uid" = "$job_uid" ] || [ "$controller_uid" = "$owner_uid" ] ||
     fail 'account UIDs must differ'
 fi
 [ "$controller_gid" != "$job_gid" ] || fail 'dedicated primary GIDs must differ'
+# The signer is all-or-nothing: three system IDs, or none and no --signer-only.
+signer=false
+if [ -n "$signer_uid$signer_gid$signrpc_gid" ]; then
+    for number in "$signer_uid" "$signer_gid" "$signrpc_gid"; do
+        [[ "$number" =~ ^[2-4][0-9]{2}$ ]] || fail 'signer IDs must be canonical decimal system IDs 200..499'
+    done
+    [ "$signer_gid" != "$signrpc_gid" ] || fail 'signer and signer RPC GIDs must differ'
+    signer=true
+fi
+if [ "$signer_only" = true ] && [ "$signer" = false ]; then
+    fail '--signer-only requires --signer-uid, --signer-gid and --signrpc-gid'
+fi
 prefix=/Library/macserve
 home=/Users/$job_user
-printf 'PLAN ONLY until explicit --apply: controller %s uid=%s primary-group=%s gid=%s (nonlogin); job %s uid=%s primary-group=%s gid=%s; existing owner %s uid=%s\n' "$controller_user" "$controller_uid" "$controller_user" "$controller_gid" "$job_user" "$job_uid" "$job_user" "$job_gid" "$owner_user" "$owner_uid"
-printf '%s\n' 'Create root:wheel 0755 /Library/macserve, bin and config; root:wheel 0711 var.' 'Create controller-owned 0700 var/controller, var/controller/secrets, var/controller/run, var/controller/log.' 'Create root:wheel 0700 var/broker, var/broker/log, var/exports; root:wheel 0711 var/workspaces; root:wheel 0755 health.' "Create job-owned 0700 $home. Controller password disabled; job display name: $job_real_name." 'Create the job account with sysadminctl and enter its password interactively; remove any inherited staff membership and verify identity, groups and login visibility before directory provisioning.' 'No services, PF, owner ACLs, FileVault, auto-login, or GUI login changed. Plan performs no account/home/service inspection.'
+# Names and numbers this run creates; every one must be unused.
+if [ "$signer_only" = true ]; then
+    new_names='' new_uids='' new_gids=''
+else
+    new_names="$controller_user $job_user" new_uids="$controller_uid $job_uid" new_gids="$controller_gid $job_gid"
+fi
+if [ "$signer" = true ]; then
+    new_names="$new_names $signer_user $signrpc_group" new_uids="$new_uids $signer_uid" new_gids="$new_gids $signer_gid $signrpc_gid"
+fi
+if [ "$signer_only" = true ]; then
+    printf 'PLAN ONLY until explicit --apply: add the signer to the existing installation of controller %s uid=%s gid=%s, job %s uid=%s gid=%s, owner %s uid=%s\n' "$controller_user" "$controller_uid" "$controller_gid" "$job_user" "$job_uid" "$job_gid" "$owner_user" "$owner_uid"
+else
+    printf 'PLAN ONLY until explicit --apply: controller %s uid=%s primary-group=%s gid=%s (nonlogin); job %s uid=%s primary-group=%s gid=%s; existing owner %s uid=%s\n' "$controller_user" "$controller_uid" "$controller_user" "$controller_gid" "$job_user" "$job_uid" "$job_user" "$job_gid" "$owner_user" "$owner_uid"
+    printf '%s\n' 'Create root:wheel 0755 /Library/macserve, bin and config; root:wheel 0711 var.' 'Create controller-owned 0700 var/controller, var/controller/secrets, var/controller/run, var/controller/log.' 'Create root:wheel 0700 var/broker, var/broker/log, var/exports; root:wheel 0711 var/workspaces; root:wheel 0755 health.' "Create job-owned 0700 $home. Controller password disabled; job display name: $job_real_name." 'Create the job account with sysadminctl and enter its password interactively; remove any inherited staff membership and verify identity, groups and login visibility before directory provisioning.'
+fi
+if [ "$signer" = true ]; then
+    printf 'Create signer %s uid=%s primary-group=%s gid=%s (hidden, nonlogin, password disabled); RPC group %s gid=%s with members %s and %s only; the job account joins neither group.\n' "$signer_user" "$signer_uid" "$signer_user" "$signer_gid" "$signrpc_group" "$signrpc_gid" "$controller_user" "$signer_user"
+    printf '%s\n' 'Create root:wheel 0755 signer-profiles; signer-owned 0700 var/signer, var/signer/keychain, var/signer/key, var/signer/work, var/signer/log.' "Create $signer_user:$signrpc_group 0750 var/signer-run and $controller_user:$signrpc_group 0750 var/signer-inbox."
+fi
+printf '%s\n' 'No services, PF, owner ACLs, FileVault, auto-login, or GUI login changed. Plan performs no account/home/service inspection.'
 [ "$apply" = true ] || return 0
 # Gate BEFORE any host account or filesystem inspection.
-[ -t 0 ] || fail '--apply requires interactive stdin for the sysadminctl password prompt'
+if [ "$signer_only" = false ]; then
+    [ -t 0 ] || fail '--apply requires interactive stdin for the sysadminctl password prompt'
+fi
 [ "$(/usr/bin/uname -s)" = Darwin ] || fail '--apply requires Darwin'
 [ "$EUID" -eq 0 ] || fail '--apply requires root'
 for tool in /usr/bin/dscl /usr/sbin/sysadminctl /usr/sbin/dseditgroup /usr/bin/dscacheutil /usr/bin/id /usr/bin/stat /usr/bin/install /bin/ls; do
@@ -143,33 +235,30 @@ groups=$(/usr/bin/dscl /Search -list /Groups PrimaryGroupID) || fail 'cannot enu
 local_users=$(/usr/bin/dscl . -list /Users UniqueID) || fail 'cannot enumerate local users'
 local_groups=$(/usr/bin/dscl . -list /Groups PrimaryGroupID) || fail 'cannot enumerate local groups'
 check_records() {
-    local records=$1 name id extra
+    local records=$1 name id extra ids=$new_gids
+    [ "$2" = group ] || ids=$new_uids
     while read -r name id extra; do
         [ -n "$name" ] || continue
         if [ -n "$extra" ] || ! [[ "$id" =~ ^-?[0-9]+$ ]]; then
             fail 'ambiguous directory record; review manually'
         fi
-        if [ "$name" = "$controller_user" ] || [ "$name" = "$job_user" ]; then
-            fail "account/group name collision: $name"
-        fi
-        case "$2:$id" in "user:$controller_uid"|"user:$job_uid"|"group:$controller_gid"|"group:$job_gid") fail "numeric $2 collision: $id" ;; esac
+        case " $new_names " in *" $name "*) fail "account/group name collision: $name" ;; esac
+        case " $ids " in *" $id "*) fail "numeric $2 collision: $id" ;; esac
     done <<< "$records"
 }
 check_records "$users" user; check_records "$local_users" user
 check_records "$groups" group; check_records "$local_groups" group
-# Reject dangling supplementary memberships before creating either name.
+# Reject dangling supplementary memberships before creating any name.
 for node in /Search .; do
     memberships=$(/usr/bin/dscl "$node" -list /Groups GroupMembership) || fail 'cannot enumerate supplementary group membership'
     while read -r group members; do
         for member in $members; do
-            if [ "$member" = "$controller_user" ] || [ "$member" = "$job_user" ]; then
-                fail "preexisting supplementary membership in $group"
-            fi
+            case " $new_names " in *" $member "*) fail "preexisting supplementary membership in $group" ;; esac
         done
     done <<< "$memberships"
 done
 # dscacheutil catches aliases/search-policy records not represented by canonical names.
-for name in "$controller_user" "$job_user"; do
+for name in $new_names; do
     cached=$(/usr/bin/dscacheutil -q user -a name "$name") || fail 'cannot query cached users'
     [ -z "$cached" ] || fail "cached user collision: $name"
     cached=$(/usr/bin/dscacheutil -q group -a name "$name") || fail 'cannot query cached groups'
@@ -178,9 +267,7 @@ done
 [ "$(/usr/bin/id -u "$owner_user")" = "$owner_uid" ] || fail 'owner identity mismatch'
 owner_groups=$(/usr/bin/id -G "$owner_user") || fail 'cannot resolve owner groups'
 for gid in $owner_groups; do
-    if [ "$gid" = "$controller_gid" ] || [ "$gid" = "$job_gid" ]; then
-        fail 'primary group shared with owner'
-    fi
+    case " $new_gids " in *" $gid "*) fail 'primary group shared with owner' ;; esac
 done
 # Existing records must not already reference the proposed unallocated primary groups.
 primary_groups=$(/usr/bin/dscl /Search -list /Users PrimaryGroupID) || fail 'cannot enumerate primary groups'
@@ -192,11 +279,10 @@ while read -r name gid extra; do
     if [ -n "$extra" ] || ! [[ "$gid" =~ ^-?[0-9]+$ ]]; then
         fail 'ambiguous primary group record'
     fi
-    if [ "$gid" = "$controller_gid" ] || [ "$gid" = "$job_gid" ]; then
-        fail 'proposed primary group referenced by existing user'
-    fi
+    case " $new_gids " in *" $gid "*) fail 'proposed primary group referenced by existing user' ;; esac
 done <<< "$primary_groups"
-for path in /Library /Users; do
+check_parent() {
+    local path=$1 mode acl first entry
     if [ ! -d "$path" ] || [ -L "$path" ]; then
         fail "unsafe parent: $path"
     fi
@@ -210,8 +296,23 @@ for path in /Library /Users; do
         if [ "$first" = true ]; then first=false; continue; fi
         case "$entry" in *" deny "*) ;; *) fail "parent ACL requires separate manual review: $path" ;; esac
     done <<< "$acl"
-done
-for path in "$prefix" "$home"; do
+}
+if [ "$signer_only" = true ]; then
+    # The existing installation and its named accounts are the reviewed ones.
+    for path in /Library "$prefix" "$prefix/var"; do check_parent "$path"; done
+    [ "$(/usr/bin/id -u "$controller_user")" = "$controller_uid" ] || fail 'controller identity mismatch'
+    [ "$(/usr/bin/id -g "$controller_user")" = "$controller_gid" ] || fail 'controller primary group mismatch'
+    [ "$(/usr/bin/id -u "$job_user")" = "$job_uid" ] || fail 'job identity mismatch'
+    [ "$(/usr/bin/id -g "$job_user")" = "$job_gid" ] || fail 'job primary group mismatch'
+    targets=''
+else
+    for path in /Library /Users; do check_parent "$path"; done
+    targets="$prefix $home"
+fi
+if [ "$signer" = true ]; then
+    targets="$targets $prefix/signer-profiles $prefix/var/signer $prefix/var/signer-run $prefix/var/signer-inbox"
+fi
+for path in $targets; do
     if [ -e "$path" ] || [ -L "$path" ]; then
         fail "existing path: $path"
     fi
@@ -224,15 +325,24 @@ report_partial_failure() {
     fi
 }
 trap 'report_partial_failure "$?"' EXIT
-create_accounts
-validate_created_accounts
-/usr/bin/install -d -o root -g wheel -m 0755 "$prefix" "$prefix/bin" "$prefix/health"
-/usr/bin/install -d -o root -g wheel -m 0755 "$prefix/config"
-/usr/bin/install -d -o root -g wheel -m 0711 "$prefix/var" "$prefix/var/workspaces"
-/usr/bin/install -d -o "$controller_uid" -g "$controller_gid" -m 0700 "$prefix/var/controller" "$prefix/var/controller/secrets" "$prefix/var/controller/run" "$prefix/var/controller/log"
-/usr/bin/install -d -o root -g wheel -m 0700 "$prefix/var/broker" "$prefix/var/broker/log" "$prefix/var/exports"
-/usr/bin/install -d -o "$job_uid" -g "$job_gid" -m 0700 "$home"
-printf '%s\n' 'Created accounts and empty protected directories only. Controller password remains disabled; the job password was entered interactively during sysadminctl creation. Verified dedicated primary groups, no prohibited supplementary groups, and no job IsHidden attribute.' 'Install reviewed inputs separately and qualify before enabling anything.'
+if [ "$signer_only" = false ]; then
+    create_accounts
+    validate_created_accounts
+    /usr/bin/install -d -o root -g wheel -m 0755 "$prefix" "$prefix/bin" "$prefix/health"
+    /usr/bin/install -d -o root -g wheel -m 0755 "$prefix/config"
+    /usr/bin/install -d -o root -g wheel -m 0711 "$prefix/var" "$prefix/var/workspaces"
+    /usr/bin/install -d -o "$controller_uid" -g "$controller_gid" -m 0700 "$prefix/var/controller" "$prefix/var/controller/secrets" "$prefix/var/controller/run" "$prefix/var/controller/log"
+    /usr/bin/install -d -o root -g wheel -m 0700 "$prefix/var/broker" "$prefix/var/broker/log" "$prefix/var/exports"
+    /usr/bin/install -d -o "$job_uid" -g "$job_gid" -m 0700 "$home"
+    printf '%s\n' 'Created accounts and empty protected directories only. Controller password remains disabled; the job password was entered interactively during sysadminctl creation. Verified dedicated primary groups, no prohibited supplementary groups, and no job IsHidden attribute.'
+fi
+if [ "$signer" = true ]; then
+    create_signer
+    validate_signer_accounts
+    provision_signer_directories
+    printf '%s\n' "Created hidden nonlogin $signer_user, its group and $signrpc_group (members $controller_user and $signer_user only) and empty signer directories. Verified the job account belongs to neither group."
+fi
+printf '%s\n' 'Install reviewed inputs separately and qualify before enabling anything.'
 }
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
     main "$@"

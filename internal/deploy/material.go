@@ -32,7 +32,7 @@ import (
 
 const Prefix = "/Library/macserve"
 
-var assetNames = []string{"create-users.sh", "qualify.sh", "launchd/org.macserve.controller.plist.tmpl", "launchd/org.macserve.worker.plist.tmpl", "launchd/org.macserve.maintenance.plist.tmpl"}
+var assetNames = []string{"create-users.sh", "qualify.sh", "launchd/org.macserve.controller.plist.tmpl", "launchd/org.macserve.worker.plist.tmpl", "launchd/org.macserve.maintenance.plist.tmpl", "launchd/org.macserve.signer.plist.tmpl"}
 
 type File struct {
 	Path     string
@@ -270,7 +270,11 @@ func makeMaterial(e Environment, envData []byte, rendered map[string][]byte, now
 	add(Prefix+"/config/tls-cert.pem", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0644, 0, 0)
 	add(Prefix+"/config/deploy.env", envData, 0644, 0, 0)
 	add(Prefix+"/config/profiles.json", []byte("{\"profiles\":[]}\n"), 0644, 0, 0)
-	for _, service := range []string{"controller", "worker", "maintenance"} {
+	services := []string{"controller", "worker", "maintenance"}
+	if e.Signer() {
+		services = append(services, "signer")
+	}
+	for _, service := range services {
 		name := "org.macserve." + service + ".plist"
 		add("/Library/LaunchDaemons/"+name, rendered["launchd/"+name+".tmpl"], 0644, 0, 0)
 	}
@@ -287,6 +291,11 @@ func makeMaterial(e Environment, envData []byte, rendered map[string][]byte, now
 		value any
 	}{{"controller.json", c}, {"worker.json", w}, {"maintenance.json", maintenanceConfig}, {"deployment-pins.json", map[string]string{"receipt_key_id": keyID, "receipt_public_key": m.ReceiptPublicKey, "tls_certificate_sha256": m.TLSFingerprint, "service_id": serviceID, "host_id": hostID}}} {
 		if err := jsonFile(Prefix+"/config/"+item.name, item.value); err != nil {
+			return m, err
+		}
+	}
+	if e.Signer() {
+		if err := jsonFile(SignerConfigPath, signerConfig(e, hostID, keyID, m.ReceiptPublicKey)); err != nil {
 			return m, err
 		}
 	}

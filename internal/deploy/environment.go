@@ -34,6 +34,10 @@ type Environment struct {
 	Repositories                 map[string]int64
 	CoexistingAnchors            []string
 	CoexistingServices           []string
+	// SignerUID, SignerGID and SignRPCGID are the optional code signer's
+	// system account, its dedicated primary group and the RPC group shared
+	// only with the controller. All three are zero when no signer is deployed.
+	SignerUID, SignerGID, SignRPCGID uint32
 }
 
 var accountName = regexp.MustCompile(`^[a-z][a-z0-9_]{0,30}$`)
@@ -53,7 +57,7 @@ func ParseEnvironment(data []byte) (Environment, error) {
 	for _, k := range keys {
 		allowed[k] = true
 	}
-	for _, k := range strings.Fields("COEXISTING_ANCHORS COEXISTING_SERVICES JOB_REAL_NAME") {
+	for _, k := range strings.Fields("COEXISTING_ANCHORS COEXISTING_SERVICES JOB_REAL_NAME SIGNER_UID SIGNER_GID SIGNRPC_GID") {
 		allowed[k] = true
 	}
 	for n, line := range strings.Split(string(data), "\n") {
@@ -103,6 +107,9 @@ func ParseEnvironment(data []byte) (Environment, error) {
 	}
 	if e.ControllerUID == e.JobUID || e.ControllerUID == e.OwnerUID || e.JobUID == e.OwnerUID || e.ControllerGID == e.JobGID {
 		return e, errors.New("identity IDs conflict")
+	}
+	if err := parseSigner(&e, values); err != nil {
+		return e, err
 	}
 	ip, err := canonicalAddress(values["TAILNET_IP"])
 	if err != nil || !(netip.MustParsePrefix("100.64.0.0/10").Contains(ip) || netip.MustParsePrefix("fd7a:115c:a1e0::/48").Contains(ip)) {
@@ -169,6 +176,47 @@ func ParseEnvironment(data []byte) (Environment, error) {
 	}
 	e.CoexistingAnchors, e.CoexistingServices = coexistence.CoexistingAnchors, coexistence.CoexistingServices
 	return e, nil
+}
+
+// parseSigner reads the optional SIGNER_UID, SIGNER_GID and SIGNRPC_GID:
+// all three or none. They are system IDs (200..499), so never a service,
+// job or owner ID, and the signer's two groups differ from each other.
+func parseSigner(e *Environment, values map[string]string) error {
+	keys := []string{"SIGNER_UID", "SIGNER_GID", "SIGNRPC_GID"}
+	present := 0
+	for _, k := range keys {
+		if _, ok := values[k]; ok {
+			present++
+		}
+	}
+	if present == 0 {
+		return nil
+	}
+	if present != len(keys) {
+		return errors.New("SIGNER_UID, SIGNER_GID and SIGNRPC_GID are required together")
+	}
+	ids := []*uint32{&e.SignerUID, &e.SignerGID, &e.SignRPCGID}
+	for i, k := range keys {
+		n, err := canonicalNumber(values[k], SignerMaxID)
+		if err != nil || n < SignerMinID {
+			return fmt.Errorf("invalid %s: signer IDs are system IDs %d..%d", k, SignerMinID, SignerMaxID)
+		}
+		*ids[i] = uint32(n)
+	}
+	for _, uid := range []uint32{e.ControllerUID, e.JobUID, e.OwnerUID} {
+		if e.SignerUID == uid {
+			return errors.New("SIGNER_UID must differ from the controller, job and owner UIDs")
+		}
+	}
+	for _, gid := range []uint32{e.ControllerGID, e.JobGID} {
+		if e.SignerGID == gid || e.SignRPCGID == gid {
+			return errors.New("signer GIDs must differ from the controller and job GIDs")
+		}
+	}
+	if e.SignerGID == e.SignRPCGID {
+		return errors.New("SIGNER_GID and SIGNRPC_GID must differ")
+	}
+	return nil
 }
 func canonicalNumber(s string, max uint64) (uint64, error) {
 	n, err := strconv.ParseUint(s, 10, 64)
