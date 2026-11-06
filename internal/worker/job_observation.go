@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"runtime"
 	"strings"
@@ -131,5 +132,48 @@ func observeToolchain(ctx context.Context, pins toolchainPins, probeJob func(con
 		}
 	}
 	observed.Architecture = runtime.GOARCH
+	return observed, nil
+}
+
+// observeFlutterToolchain runs `flutter --version --machine` on the job's SDK
+// clone (flutter, run with /bin/bash), `ruby -v` and `pod --version` as the
+// job with the Flutter environment, and requires the framework and CocoaPods
+// versions to equal the template's pin exactly. It returns what it observed,
+// including the part observed before a failure.
+func observeFlutterToolchain(ctx context.Context, pin model.FlutterPin, flutter, ruby, pod string, capture func(context.Context, string, ...string) ([]byte, error)) (*FlutterObservation, error) {
+	observed := &FlutterObservation{}
+	output, err := capture(ctx, "/bin/bash", flutter, "--version", "--machine")
+	if err != nil {
+		return observed, err
+	}
+	var version struct {
+		FrameworkVersion string `json:"frameworkVersion"`
+		DartSDKVersion   string `json:"dartSdkVersion"`
+	}
+	text := string(output)
+	start, end := strings.Index(text, "{"), strings.LastIndex(text, "}")
+	if start < 0 || end < start || json.Unmarshal([]byte(text[start:end+1]), &version) != nil {
+		return observed, errors.New("flutter --version --machine printed no version document")
+	}
+	observed.FrameworkVersion, observed.DartSDKVersion = clip(version.FrameworkVersion, 128), clip(version.DartSDKVersion, 128)
+	if version.FrameworkVersion != pin.Version || version.DartSDKVersion == "" {
+		return observed, errors.New("installed Flutter does not match the exact template pin")
+	}
+	output, err = capture(ctx, ruby, "-v")
+	if err != nil {
+		return observed, err
+	}
+	line, _, _ := strings.Cut(strings.TrimSpace(string(output)), "\n")
+	if observed.Ruby = clip(strings.TrimSpace(line), 256); observed.Ruby == "" {
+		return observed, errors.New("pinned Ruby printed no version")
+	}
+	output, err = capture(ctx, pod, "--version")
+	if err != nil {
+		return observed, err
+	}
+	observed.CocoaPods = clip(strings.TrimSpace(string(output)), 128)
+	if observed.CocoaPods != pin.CocoaPodsVersion {
+		return observed, errors.New("installed CocoaPods does not match the exact template pin")
+	}
 	return observed, nil
 }

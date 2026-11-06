@@ -85,7 +85,7 @@ func TestWorkspaceBudgetAndLockfilesRefuseRealMount(t *testing.T) {
 	if err := workspaceBudget(root, 1<<40); !errors.Is(err, errWorkspaceMount) {
 		t.Fatalf("budget walk with a nested mount: %v", err)
 	}
-	if digests, err := lockfiles(context.Background(), root, uint32(os.Geteuid())); !errors.Is(err, errWorkspaceMount) {
+	if digests, err := lockfiles(context.Background(), root, uint32(os.Geteuid()), false); !errors.Is(err, errWorkspaceMount) {
 		t.Fatalf("lockfile walk with a nested mount: %v %v", digests, err)
 	}
 }

@@ -283,12 +283,7 @@ func checkCarryJobProbe(job Report, c Challenge, hash string, approved Challenge
 	if ok, _ := rows(job, "owner_home_denial", homeTargets(c), 1); !ok {
 		return errors.New("carry job probe: owner_home_denial not denied on every path")
 	}
-	dirs := []string{c.Environment.DeveloperDir}
-	for _, p := range c.recipes() {
-		dirs = append(dirs, p.DeveloperDir)
-	}
-	slices.Sort(dirs)
-	if ok, _ := rows(job, "tool_profiles", slices.Compact(dirs), 1); !ok {
+	if ok, _ := rows(job, "tool_profiles", c.toolProfileTargets(), 1); !ok {
 		return errors.New("carry job probe: tool inspection failed")
 	}
 	return nil

@@ -41,6 +41,19 @@ type Observation struct {
 	// Recipe is set for template jobs only: the .macserve.json digest, its
 	// parsed form and the commands derived from it.
 	Recipe *model.RepoRecipe `json:"recipe,omitempty"`
+	// Flutter is set for Flutter template jobs only; see
+	// observeFlutterToolchain.
+	Flutter *FlutterObservation `json:"flutter,omitempty"`
+}
+
+// FlutterObservation is a Flutter job's observed toolchain: the framework and
+// Dart SDK versions `flutter --version --machine` reported for its SDK clone,
+// the first line of `ruby -v` and `pod --version`.
+type FlutterObservation struct {
+	FrameworkVersion string `json:"framework_version"`
+	DartSDKVersion   string `json:"dart_sdk_version"`
+	Ruby             string `json:"ruby"`
+	CocoaPods        string `json:"cocoapods"`
 }
 
 // MetalToolchain records the per-job Metal toolchain probe. Status and

@@ -28,6 +28,9 @@ func requestBytes(request model.Request) ([]byte, string, error) {
 	if request.Shard != "" && !validOpaque(request.Shard, 32) {
 		return nil, "", ErrInvalid
 	}
+	if f := request.Flutter; f != nil && !validOpaque(f.Version, 128) {
+		return nil, "", ErrInvalid
+	}
 	if sim := request.Simulator; sim != nil && (!validOpaque(sim.Runtime, 256) || !validOpaque(sim.RuntimeBuild, 128) || !validOpaque(sim.DeviceType, 256)) {
 		return nil, "", ErrInvalid
 	}
@@ -86,6 +89,10 @@ func profileBytes(admission model.Admission) ([]byte, error) {
 		if t.ID != profile.ID || t.Version != profile.Version || t.Kind != profile.Kind || t.Xcode != profile.Xcode || t.DeveloperDir != profile.DeveloperDir || t.DefaultTimeoutSeconds != profile.DefaultTimeoutSeconds || t.MaxTimeoutSeconds != profile.MaxTimeoutSeconds || t.MemoryLimitMiB != profile.MemoryLimitMiB || !slices.Contains(t.Owners, owner) || profile.WorkDir != "" || len(profile.Prepare) != 0 || profile.Run.Executable != "" || len(profile.Run.Args) != 0 || len(profile.GeneratedFiles) != 0 || len(profile.Artifacts) != 0 || len(profile.RequiredTests) != 0 || profile.Shard != request.Shard {
 			return nil, ErrInvalid
 		}
+		// A Flutter template's request names its pinned version exactly.
+		if (t.Flutter == nil) != (request.Flutter == nil) || t.Flutter != nil && request.Flutter.Version != t.Flutter.Version {
+			return nil, ErrInvalid
+		}
 		if !t.Kind.UsesSimulator() {
 			if profile.Simulator != nil || profile.Shard != "" {
 				return nil, ErrInvalid
@@ -93,7 +100,7 @@ func profileBytes(admission model.Admission) ([]byte, error) {
 		} else if profile.Simulator == nil || !slices.Contains(t.Simulators, *profile.Simulator) || profile.Shard == "" {
 			return nil, ErrInvalid
 		}
-	} else if !validOpaque(profile.Run.Executable, 4096) || profile.Shard != "" || request.Shard != "" || profile.Kind == model.SimulatorScript {
+	} else if !validOpaque(profile.Run.Executable, 4096) || profile.Shard != "" || request.Shard != "" || request.Flutter != nil || profile.Kind == model.SimulatorScript {
 		return nil, ErrInvalid
 	}
 	if (request.Simulator == nil) != (profile.Simulator == nil) || request.Simulator != nil && *request.Simulator != *profile.Simulator {

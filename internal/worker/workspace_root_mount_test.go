@@ -93,7 +93,7 @@ func TestWorkspaceWalksRefuseMountAfterOpen(t *testing.T) {
 	if err := workspaceBudget(root, 1<<40); !errors.Is(err, errWorkspaceMount) {
 		t.Fatalf("budget walk = %v, want post-open mount refusal", err)
 	}
-	if digests, err := lockfiles(context.Background(), root, uint32(os.Geteuid())); !errors.Is(err, errWorkspaceMount) {
+	if digests, err := lockfiles(context.Background(), root, uint32(os.Geteuid()), false); !errors.Is(err, errWorkspaceMount) {
 		t.Fatalf("lockfile walk = %v %v, want post-open mount refusal", digests, err)
 	}
 }

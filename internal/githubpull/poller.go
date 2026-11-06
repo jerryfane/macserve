@@ -230,7 +230,7 @@ func (p *Poller) admission(policy Policy, pull githubapi.PullRequest, profileID 
 	if !ok || !slices.Contains(policy.Profiles, profileID) {
 		return store.GitHubAdmission{}, ErrIneligible
 	}
-	admission, err := p.options.Profiles.Resolve(model.Request{Repo: policy.Repository, SHA: pull.HeadSHA, Kind: profile.Kind, Profile: profile.ID, Xcode: profile.Xcode, Simulator: profile.Simulator, Context: model.RequestContext{PullRequest: pull.Number}})
+	admission, err := p.options.Profiles.Resolve(model.Request{Repo: policy.Repository, SHA: pull.HeadSHA, Kind: profile.Kind, Profile: profile.ID, Xcode: profile.Xcode, Simulator: profile.Simulator, Flutter: profiles.RequestFlutter(profile), Context: model.RequestContext{PullRequest: pull.Number}})
 	if err != nil {
 		return store.GitHubAdmission{}, err
 	}

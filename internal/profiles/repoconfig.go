@@ -42,12 +42,13 @@ var (
 	// Target/Class/method, the method optionally spelled with "()". It admits
 	// no ':', '$', ',', whitespace or leading '-'.
 	selectorPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}/[A-Za-z_][A-Za-z0-9_]{0,127}(/[A-Za-z_][A-Za-z0-9_]{0,127}(\(\))?)?$`)
-	repoConfigKeys  = map[string]bool{"version": true, "work_dir": true, "project": true, "workspace": true, "scheme": true, "xcodegen": true, "resolve_packages": true, "ui_test": true, "unit_test": true, "script": true}
-	// testSectionKeys and scriptSectionKeys are the exact object keys
-	// strictJSON admits per depth of a section ("" admits any key, such as a
-	// shard name).
-	testSectionKeys   = []string{"shards"}
-	scriptSectionKeys = []string{"shards", "", "run"}
+	repoConfigKeys  = map[string]bool{"version": true, "work_dir": true, "project": true, "workspace": true, "scheme": true, "xcodegen": true, "resolve_packages": true, "ui_test": true, "unit_test": true, "script": true, "flutter": true}
+	// testSectionKeys, scriptSectionKeys and flutterSectionKeys are the exact
+	// object keys strictJSON admits per depth of a section (nil admits any
+	// key, such as a shard name).
+	testSectionKeys    = [][]string{{"shards"}}
+	scriptSectionKeys  = [][]string{{"shards"}, nil, {"run"}}
+	flutterSectionKeys = [][]string{{"app_dir", "prepare_ruby"}}
 )
 
 // Shard limits, per ui_test, unit_test or script section.
@@ -95,10 +96,13 @@ func ParseRepoConfig(data []byte) (model.RepoConfig, error) {
 		if string(value) == "null" {
 			return config, repoConfigError("field %q is null", key)
 		}
-		if key == "ui_test" || key == "unit_test" || key == "script" {
+		if key == "ui_test" || key == "unit_test" || key == "script" || key == "flutter" {
 			keys := testSectionKeys
-			if key == "script" {
+			switch key {
+			case "script":
 				keys = scriptSectionKeys
+			case "flutter":
+				keys = flutterSectionKeys
 			}
 			if err := strictJSON(json.NewDecoder(bytes.NewReader(value)), key, 0, keys); err != nil {
 				return config, err
@@ -122,12 +126,12 @@ func ParseRepoConfig(data []byte) (model.RepoConfig, error) {
 	return config, nil
 }
 
-// strictJSON walks one JSON value of a test or script section and refuses what
-// the strict struct decode would silently accept: duplicate keys (the last
-// would win), a key other than the one keys fixes at its depth (a case-folded
-// "shards" or "run"), nulls (a zero value) and deep nesting. Types and other
-// unknown fields are left to it.
-func strictJSON(decoder *json.Decoder, path string, depth int, keys []string) error {
+// strictJSON walks one JSON value of a test, script or flutter section and
+// refuses what the strict struct decode would silently accept: duplicate keys
+// (the last would win), a key other than those keys fixes at its depth (a
+// case-folded "shards" or "run"), nulls (a zero value) and deep nesting.
+// Types and other unknown fields are left to it.
+func strictJSON(decoder *json.Decoder, path string, depth int, keys [][]string) error {
 	token, err := decoder.Token()
 	if err != nil {
 		return repoConfigError("%v", err)
@@ -160,7 +164,7 @@ func strictJSON(decoder *json.Decoder, path string, depth int, keys []string) er
 				return repoConfigError("%s has duplicate key %q", path, key)
 			}
 			// The struct decode matches field names case-insensitively.
-			if depth < len(keys) && keys[depth] != "" && key != keys[depth] {
+			if depth < len(keys) && keys[depth] != nil && !slices.Contains(keys[depth], key) {
 				return repoConfigError("%s has unknown field %q", path, key)
 			}
 			seen[key] = true
@@ -198,7 +202,10 @@ func ValidateRepoConfig(c model.RepoConfig) error {
 	if err := validateShards("unit_test", c.UnitTest); err != nil {
 		return err
 	}
-	return validateScripts(c.Script)
+	if err := validateScripts(c.Script); err != nil {
+		return err
+	}
+	return validateFlutter(c)
 }
 
 // validateScripts checks the script section: 1 to 16 shards named by
@@ -278,8 +285,9 @@ func validateShards(key string, s *model.TestShards) error {
 
 // Derive returns the effective recipe of a template job snapshot for a
 // repository configuration. Only the work directory, the project or workspace,
-// the scheme, the two optional fixed steps, a test template's shard selectors
-// and a script template's shard script path come from the repository; the
+// the scheme, the two optional fixed steps, a test template's shard selectors,
+// a script template's shard script path and a Flutter template's app
+// directory and prepare_ruby script paths come from the repository; the
 // executables, flags, destination and environment are fixed here and by the
 // worker.
 //
@@ -291,6 +299,13 @@ func validateShards(key string, s *model.TestShards) error {
 // and runs the snapshot shard's script with /bin/bash; it has no required
 // tests, and its one required artifact is the workspace output directory
 // (exported as output.tar.gz).
+//
+// A Flutter template (one with a Flutter pin) serves only a configuration
+// with a flutter section, and a flutter section only a Flutter template. Its
+// recipe runs in app_dir: the fixed Flutter prepare (see flutterPrepare),
+// then a build template's run is the simulator build above on
+// ios/Runner.xcworkspace with ARCHS=arm64, and a test template's Xcode steps
+// are the ones above on ios/Runner.xcworkspace.
 func Derive(snapshot model.Profile, c model.RepoConfig) (model.Profile, error) {
 	if snapshot.Template == nil {
 		return model.Profile{}, fmt.Errorf("%w: not a template job snapshot", ErrInvalid)
@@ -298,16 +313,31 @@ func Derive(snapshot model.Profile, c model.RepoConfig) (model.Profile, error) {
 	if err := ValidateRepoConfig(c); err != nil {
 		return model.Profile{}, err
 	}
+	flutter := snapshot.Template.Flutter
+	switch {
+	case flutter != nil && c.Flutter == nil:
+		return model.Profile{}, fmt.Errorf("%w: template %s is a Flutter template and serves only a .macserve.json with a flutter section", ErrUnsupported, snapshot.Template.ID)
+	case flutter == nil && c.Flutter != nil:
+		return model.Profile{}, fmt.Errorf("%w: .macserve.json has a flutter section but template %s has no Flutter pin", ErrUnsupported, snapshot.Template.ID)
+	case flutter != nil && (!validFlutterPin(*flutter) || snapshot.Kind == model.SimulatorScript):
+		return model.Profile{}, fmt.Errorf("%w: invalid Flutter template snapshot", ErrInvalid)
+	}
 	container := []string{"-project", c.Project}
 	if c.Workspace != "" {
 		container = []string{"-workspace", c.Workspace}
 	}
-	xcodebuild := func(args ...string) model.Command {
-		return model.Command{Executable: "/usr/bin/xcrun", Args: append(append([]string{"xcodebuild"}, container...), args...)}
-	}
 	p := cloneProfile(snapshot)
 	p.WorkDir = c.WorkDir
 	p.Prepare = nil
+	if flutter != nil {
+		// Flutter commands run in app_dir, so Xcode names ios/<workspace>.
+		container = []string{"-workspace", path.Join("ios", c.Workspace)}
+		p.WorkDir = c.Flutter.AppDir
+		p.Prepare = flutterPrepare(*flutter, *c.Flutter)
+	}
+	xcodebuild := func(args ...string) model.Command {
+		return model.Command{Executable: "/usr/bin/xcrun", Args: append(append([]string{"xcodebuild"}, container...), args...)}
+	}
 	if c.XcodeGen {
 		p.Prepare = append(p.Prepare, model.Command{Executable: XcodeGenPath, Args: []string{"generate", "--spec", "project.yml"}})
 	}
@@ -319,7 +349,14 @@ func Derive(snapshot model.Profile, c model.RepoConfig) (model.Profile, error) {
 		if snapshot.Shard != "" {
 			return model.Profile{}, fmt.Errorf("%w: build template snapshot has a shard", ErrInvalid)
 		}
-		p.Run = xcodebuild("-scheme", c.Scheme, "-configuration", "Debug", "-sdk", "iphonesimulator", "-destination", "generic/platform=iOS Simulator", "-derivedDataPath", "${DERIVED_DATA}", "CODE_SIGNING_ALLOWED=NO", "build")
+		build := []string{"-scheme", c.Scheme, "-configuration", "Debug", "-sdk", "iphonesimulator", "-destination", "generic/platform=iOS Simulator", "-derivedDataPath", "${DERIVED_DATA}", "CODE_SIGNING_ALLOWED=NO", "build"}
+		if flutter != nil {
+			// Flutter's debug_unpack_ios verifies a universal simulator build
+			// with `lipo -verify_arch arm64 x86_64`, which Xcode 27.1's lipo
+			// refuses; the Studio is Apple silicon, so build arm64 only.
+			build = slices.Insert(build, len(build)-1, "ARCHS=arm64")
+		}
+		p.Run = xcodebuild(build...)
 	case model.UnitTest, model.SimulatorUITest:
 		key, section := "ui_test", c.UITest
 		if snapshot.Kind == model.UnitTest {

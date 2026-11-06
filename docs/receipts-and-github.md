@@ -18,6 +18,11 @@ it proves the derived script exited 0 on the pinned, observed simulator, and its
 hashed artifact. A script receipt without its simulator pin or with test evidence is refused.
 An org-template job's admitted snapshot carries no recipe; its success is checked against the recipe derived
 from the reported `.macserve.json`, which must equal the reported recipe and whose executable must have exited 0.
+A Flutter template job's receipt has `request.flutter.version` equal to the template's pin and
+`observation.flutter` with the `framework_version` and `dart_sdk_version` the job's SDK clone reported
+(`flutter --version --machine`), the first line of `ruby -v` (`ruby`) and `pod --version` (`cocoapods`). Success
+requires `framework_version` and `cocoapods` to equal the pin and the other two to be non-empty. Receipts of other
+jobs have no `flutter` key, and a receipt for a non-Flutter recipe with a Flutter request or observation is refused.
 The controller logs a refused or failed worker request with its method, route and job ID; a receipt refusal
 returns HTTP 422.
 Submodules and Git LFS are unsupported and rejected, not silently omitted.

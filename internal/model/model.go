@@ -103,15 +103,18 @@ type RequestContext struct {
 }
 
 type Request struct {
-	Repo           string         `json:"repo"`
-	SHA            string         `json:"sha"`
-	Kind           Kind           `json:"kind"`
-	Profile        string         `json:"profile"`
-	Xcode          Xcode          `json:"xcode"`
-	Simulator      *Simulator     `json:"simulator,omitempty"`
-	Shard          string         `json:"shard,omitempty"` // test and script templates only: the .macserve.json shard to run
-	TimeoutSeconds int            `json:"timeout_seconds,omitempty"`
-	Context        RequestContext `json:"context,omitempty"`
+	Repo      string     `json:"repo"`
+	SHA       string     `json:"sha"`
+	Kind      Kind       `json:"kind"`
+	Profile   string     `json:"profile"`
+	Xcode     Xcode      `json:"xcode"`
+	Simulator *Simulator `json:"simulator,omitempty"`
+	Shard     string     `json:"shard,omitempty"` // test and script templates only: the .macserve.json shard to run
+	// Flutter names a Flutter template job's Flutter version: it must equal
+	// the template's pin exactly and is refused for any other recipe.
+	Flutter        *FlutterRequest `json:"flutter,omitempty"`
+	TimeoutSeconds int             `json:"timeout_seconds,omitempty"`
+	Context        RequestContext  `json:"context,omitempty"`
 }
 
 // Command is trusted configuration, never a client-supplied command or shell string.
@@ -162,7 +165,8 @@ type Profile struct {
 // listed GitHub account may use it by declaring its Xcode project or workspace
 // and scheme, and for a test or script template its shards, in .macserve.json;
 // the command line is fixed in code. A test or script template pins one to
-// four simulators; a build template pins none.
+// four simulators; a build template pins none. A template with a Flutter pin
+// serves only repositories with a flutter section, and only those.
 type Template struct {
 	ID                    string      `json:"id"`
 	Version               int         `json:"version"`
@@ -174,22 +178,52 @@ type Template struct {
 	DefaultTimeoutSeconds int         `json:"default_timeout_seconds"`
 	MaxTimeoutSeconds     int         `json:"max_timeout_seconds"`
 	MemoryLimitMiB        int         `json:"memory_limit_mib"`
+	Flutter               *FlutterPin `json:"flutter,omitempty"`
+}
+
+// FlutterPin is a Flutter template's exact tool identity: the Flutter SDK
+// version and its release archive's sha256, the portable Ruby archive's
+// sha256, the CocoaPods version every Podfile.lock must name and the sha256
+// of the gem lockfile its gem tree was installed from. The root-owned tool
+// paths derive from it (profiles.FlutterToolPaths).
+type FlutterPin struct {
+	Version          string `json:"version"`
+	SDKSHA256        string `json:"sdk_sha256"`
+	RubySHA256       string `json:"ruby_sha256"`
+	CocoaPodsVersion string `json:"cocoapods_version"`
+	GemsSHA256       string `json:"gems_sha256"`
+}
+
+// FlutterRequest is a job request's Flutter selection.
+type FlutterRequest struct {
+	Version string `json:"version"`
 }
 
 // RepoConfig is the parsed repository-root .macserve.json. It may only name
 // the work directory, project or workspace, scheme, two fixed steps, the test
-// shards of the test templates and the script shards of script templates.
+// shards of the test templates, the script shards of script templates and
+// the Flutter app of Flutter templates.
 type RepoConfig struct {
-	Version         int           `json:"version"`
-	WorkDir         string        `json:"work_dir"`
-	Project         string        `json:"project,omitempty"`
-	Workspace       string        `json:"workspace,omitempty"`
-	Scheme          string        `json:"scheme"`
-	XcodeGen        bool          `json:"xcodegen,omitempty"`
-	ResolvePackages bool          `json:"resolve_packages,omitempty"`
-	UITest          *TestShards   `json:"ui_test,omitempty"`
-	UnitTest        *TestShards   `json:"unit_test,omitempty"`
-	Script          *ScriptShards `json:"script,omitempty"`
+	Version         int            `json:"version"`
+	WorkDir         string         `json:"work_dir"`
+	Project         string         `json:"project,omitempty"`
+	Workspace       string         `json:"workspace,omitempty"`
+	Scheme          string         `json:"scheme"`
+	XcodeGen        bool           `json:"xcodegen,omitempty"`
+	ResolvePackages bool           `json:"resolve_packages,omitempty"`
+	UITest          *TestShards    `json:"ui_test,omitempty"`
+	UnitTest        *TestShards    `json:"unit_test,omitempty"`
+	Script          *ScriptShards  `json:"script,omitempty"`
+	Flutter         *FlutterConfig `json:"flutter,omitempty"`
+}
+
+// FlutterConfig names a Flutter repository's app directory, relative to the
+// checkout root, whose ios/ directory is the work directory, and up to eight
+// Ruby scripts, relative to the checkout root, that prepare runs with the
+// pinned Ruby after the Flutter iOS configuration.
+type FlutterConfig struct {
+	AppDir      string   `json:"app_dir"`
+	PrepareRuby []string `json:"prepare_ruby,omitempty"`
 }
 
 // TestShards maps each shard name to its -only-testing selectors,

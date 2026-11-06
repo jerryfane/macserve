@@ -14,7 +14,8 @@ import (
 )
 
 // templateRecipe reads the extracted checkout's .macserve.json for a template
-// job and derives its recipe. It runs before any toolchain or recipe command.
+// job, derives its recipe and preflights a Flutter job's lockfiles. It runs
+// before any toolchain or recipe command.
 func templateRecipe(checkout *os.Root, snapshot model.Profile) (model.Profile, *model.RepoRecipe, error) {
 	data, err := readRepoConfig(checkout)
 	if err != nil {
@@ -27,6 +28,11 @@ func templateRecipe(checkout *os.Root, snapshot model.Profile) (model.Profile, *
 	derived, err := profiles.Derive(snapshot, config)
 	if err != nil {
 		return model.Profile{}, nil, err
+	}
+	if pin := flutterPin(derived); pin != nil {
+		if err := flutterPreflight(checkout, *config.Flutter, *pin); err != nil {
+			return model.Profile{}, nil, err
+		}
 	}
 	sum := sha256.Sum256(data)
 	return derived, &model.RepoRecipe{ConfigSHA256: hex.EncodeToString(sum[:]), Config: config, WorkDir: derived.WorkDir, Prepare: derived.Prepare, Run: derived.Run, Shard: derived.Shard, RequiredTests: derived.RequiredTests}, nil
