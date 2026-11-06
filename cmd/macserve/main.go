@@ -63,6 +63,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runWorker(args[1:], stdout, stderr)
 	case "controller":
 		return runController(args[1:], stdout, stderr)
+	case "signer":
+		return runSigner(args[1:], stdout, stderr)
+	case "signer-init":
+		return runSignerInit(args[1:], stdout, stderr)
 	case "maintenance":
 		return runMaintenance(args[1:], stdout, stderr, false)
 	case "maintenance-observe":
@@ -91,6 +95,8 @@ func usage(w io.Writer) {
 Commands:
   controller  Private API, durable queue and worker coordination
   worker      Protected root execution broker via the private controller socket
+  signer      Sign succeeded ios_archive jobs for the controller as _macserve_sign
+  signer-init Create the signer receipt key, keychain secret and empty keychain
   worker-reset  Reset job-user persistence and record audited GUI baseline PIDs
   worker-persistence Inspect private registration candidates or accept an exact reviewed digest
   worker-quiescent Read-only: fail on any job process outside the audited GUI baseline

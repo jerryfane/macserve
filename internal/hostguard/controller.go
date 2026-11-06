@@ -53,12 +53,19 @@ func Controller(configPath string) error {
 	if err := RootConfig(configPath); err != nil {
 		return err
 	}
+	_, err := nonLoginAccount("controller")
+	return err
+}
+
+// nonLoginAccount returns the current account, which must have a non-login
+// shell.
+func nonLoginAccount(role string) (*user.User, error) {
 	current, err := user.Current()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if strings.ContainsAny(current.Username, "/\x00\r\n") {
-		return errors.New("invalid controller account name")
+		return nil, fmt.Errorf("invalid %s account name", role)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -66,13 +73,13 @@ func Controller(configPath string) error {
 	cmd.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LANG=C", "LC_ALL=C"}
 	data, err := cmd.Output()
 	if err != nil {
-		return fmt.Errorf("read controller account shell: %w", err)
+		return nil, fmt.Errorf("read %s account shell: %w", role, err)
 	}
 	shell := strings.Fields(string(data))
 	if len(shell) != 2 || shell[0] != "UserShell:" || (shell[1] != "/usr/bin/false" && shell[1] != "/usr/sbin/nologin") {
-		return errors.New("controller requires a non-login account")
+		return nil, fmt.Errorf("%s requires a non-login account", role)
 	}
-	return nil
+	return current, nil
 }
 
 // PrivateFile protects controller secrets independently of public root config.
