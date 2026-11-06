@@ -45,6 +45,11 @@ func canonical(raw []byte) ([]byte, error) {
 	return out, nil
 }
 
+// Canonical returns the RFC 8785 form of raw under the receipt protocol's
+// restrictions (I-JSON integers, depth, valid UTF-8). Other signed macserve
+// documents, such as signer receipts, use the same canonical form.
+func Canonical(raw []byte) ([]byte, error) { return canonical(raw) }
+
 func jsonValue(d *json.Decoder, depth int) error {
 	if depth > 128 {
 		return ErrInvalid
