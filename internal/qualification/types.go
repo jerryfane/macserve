@@ -80,6 +80,10 @@ type Challenge struct {
 	// CarryBinarySHA256 is the installed bin/macserve a carry sitting
 	// measures; begin, tool evidence and the commit all run as that binary.
 	CarryBinarySHA256 string `json:"carry_binary_sha256,omitempty"`
+	// Signer marks a deployment with the code signer (signer.json installed
+	// or a controller "signer" section): the job probe then also reports
+	// signer_denial rows, which unix_socket_boundary requires.
+	Signer bool `json:"signer,omitempty"`
 }
 
 // recipes returns one qualification unit per enabled profile and template, in
