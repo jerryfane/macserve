@@ -120,7 +120,8 @@ team and configured certificate (no `ProvisionedDevices`/`ProvisionsAllDevices`,
 `application-identifier`, `get-task-allow` false). Each app and app extension is signed with the requested
 entitlements the profile allows (`aps-environment` takes the profile's value; `$(AppIdentifierPrefix)` and
 `$(TeamIdentifierPrefix)` resolve to `<team>.`) plus `application-identifier`, the team identifier,
-`get-task-allow` false and, if not requested, `keychain-access-groups` `[<team>.<bundle id>]`; frameworks and
+`get-task-allow` false, `beta-reports-active` true (TestFlight; from the App Store profile, whatever the build
+requested) and, if not requested, `keychain-access-groups` `[<team>.<bundle id>]`; frameworks and
 dylibs are signed without entitlements. Signing is inside-out (dylibs, frameworks, app extensions and nested apps,
 root app) with `codesign --force --sign <SHA-1> --keychain <kc> [--entitlements <plist>] --timestamp`, each node
 verified with `codesign --verify --strict`. The ipa is a deterministic zip (`Payload/<App>.app`, byte-ordered

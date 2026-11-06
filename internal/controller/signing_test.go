@@ -12,8 +12,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jerryfane/macserve/internal/evidence"
 	"github.com/jerryfane/macserve/internal/model"
@@ -218,5 +220,147 @@ func TestControllerSignWithoutSignerIsUnavailable(t *testing.T) {
 	f := newRuntime(t)
 	if _, err := f.controller.Sign(context.Background(), "job"); !errors.Is(err, ErrSigningUnavailable) {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+// trimPool never evicts a job whose signing is in progress, under any pool
+// pressure; once the signing is terminal the job is evictable again.
+func TestTrimPoolKeepsInProgressSigning(t *testing.T) {
+	f, client, _ := signingFixture(t)
+	job := signableJob(t, f, client)
+	ctx := context.Background()
+	if _, started, err := f.db.BeginSigning(ctx, job.ID, f.now); err != nil || !started {
+		t.Fatalf("begin: %v %v", started, err)
+	}
+	dir := filepath.Join(f.controller.options.Root, "artifacts", job.ID)
+	f.controller.evidenceMu.Lock()
+	err := f.controller.trimPool(ctx, 0, 1)
+	f.controller.evidenceMu.Unlock()
+	if !errors.Is(err, evidence.ErrArtifactLimit) {
+		t.Fatalf("trim under pressure: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, hexSum(client.archive))); err != nil {
+		t.Fatalf("in-progress signing's archive evicted: %v", err)
+	}
+	if err := f.db.FinishSigning(ctx, job.ID, store.SignFailed, "done", nil, f.now); err != nil {
+		t.Fatal(err)
+	}
+	f.controller.evidenceMu.Lock()
+	err = f.controller.trimPool(ctx, 0, 1)
+	f.controller.evidenceMu.Unlock()
+	if err != nil {
+		t.Fatalf("trim after signing: %v", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("terminal job kept: %v", err)
+	}
+}
+
+// errorSignClient fails every signing with err.
+type errorSignClient struct{ err error }
+
+func (e errorSignClient) Sign(context.Context, signer.Request, io.Writer) (signer.Result, error) {
+	return signer.Result{}, e.err
+}
+
+// A signer error longer than the store's reason bound (and not valid
+// UTF-8) still ends the signing as sign_failed with a bounded reason, and a
+// new request retries.
+func TestControllerSignBoundsLongFailureReason(t *testing.T) {
+	f, client, _ := signingFixture(t)
+	job := signableJob(t, f, client)
+	long := strings.Repeat("x", 5499) + "\xff"
+	f.controller.options.Signer.Client = errorSignClient{err: errors.New(long)}
+	if _, err := f.controller.Sign(context.Background(), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	record := waitSigning(t, f, job.ID)
+	if record.Status != store.SignFailed || len(record.Reason) > store.MaxReasonBytes || !strings.HasSuffix(record.Reason, "[truncated]") || !strings.HasPrefix(record.Reason, "xxxx") {
+		t.Fatalf("record status %s, reason %d bytes", record.Status, len(record.Reason))
+	}
+	again, err := f.controller.Sign(context.Background(), job.ID)
+	if err != nil || again.Status != store.Signing {
+		t.Fatalf("retry: %+v %v", again, err)
+	}
+	waitSigning(t, f, job.ID)
+}
+
+// An outcome the store refuses is replaced by sign_failed with a fixed
+// reason rather than leaving the signing in progress.
+func TestFinishSigningFallsBackWhenOutcomeIsRefused(t *testing.T) {
+	f, client, _ := signingFixture(t)
+	job := signableJob(t, f, client)
+	if _, _, err := f.db.BeginSigning(context.Background(), job.ID, f.now); err != nil {
+		t.Fatal(err)
+	}
+	// signed without artifacts is invalid for the store.
+	f.controller.finishSigning(job.ID, store.Signed, "", nil)
+	record, err := f.db.GetSigning(context.Background(), job.ID)
+	if err != nil || record.Status != store.SignFailed || record.Reason != signingFallbackReason {
+		t.Fatalf("record %+v %v", record, err)
+	}
+}
+
+func TestSigningReasonIsBoundedUTF8(t *testing.T) {
+	if got := signingReason("short"); got != "short" {
+		t.Fatalf("short reason %q", got)
+	}
+	for _, reason := range []string{strings.Repeat("é", 3000), strings.Repeat("a", 5000) + "\xc3", "bad\xffbyte"} {
+		got := signingReason(reason)
+		if len(got) > store.MaxReasonBytes || !utf8.ValidString(got) {
+			t.Fatalf("reason of %d bytes -> %d bytes, valid %v", len(reason), len(got), utf8.ValidString(got))
+		}
+	}
+}
+
+// A sign request arriving while trimPool is between its eviction snapshot
+// and deletion waits for the eviction, then is refused because the job's
+// inputs are gone; no signing starts and the signer is never called.
+func TestSignWaitsForEvictionInProgress(t *testing.T) {
+	f, client, _ := signingFixture(t)
+	job := signableJob(t, f, client)
+	ctx := context.Background()
+	paused, release := make(chan struct{}), make(chan struct{})
+	// Released before the fixture closes, so a regression fails, not hangs.
+	unpause := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(unpause)
+	f.controller.afterEvictionSnapshot = func() {
+		close(paused)
+		<-release
+	}
+	trimmed := make(chan error, 1)
+	go func() {
+		f.controller.evidenceMu.Lock()
+		defer f.controller.evidenceMu.Unlock()
+		trimmed <- f.controller.trimPool(ctx, 0, 1)
+	}()
+	<-paused
+	type outcome struct {
+		record store.SigningRecord
+		err    error
+	}
+	signed := make(chan outcome, 1)
+	go func() {
+		record, err := f.controller.Sign(ctx, job.ID)
+		signed <- outcome{record, err}
+	}()
+	select {
+	case o := <-signed:
+		t.Fatalf("sign ran during eviction: %+v %v", o.record, o.err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	unpause()
+	if err := <-trimmed; err != nil {
+		t.Fatalf("trim: %v", err)
+	}
+	o := <-signed
+	if !errors.Is(o.err, ErrSigningInputs) || !errors.Is(o.err, ErrExpired) {
+		t.Fatalf("sign after eviction: %+v %v", o.record, o.err)
+	}
+	if _, err := f.db.GetSigning(ctx, job.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("signing recorded for evicted job: %v", err)
+	}
+	if client.got.JobID != "" {
+		t.Fatal("signer called for an evicted job")
 	}
 }

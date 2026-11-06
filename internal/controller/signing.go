@@ -11,7 +11,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jerryfane/macserve/internal/evidence"
 	"github.com/jerryfane/macserve/internal/model"
@@ -40,9 +42,26 @@ type SignerOptions struct {
 	Keys map[string]ed25519.PublicKey
 }
 
+// ErrSigningInputs refuses to start signing a job whose archive or signing
+// manifest is no longer stored (expired or evicted); it is an ErrExpired.
+var ErrSigningInputs error = signingInputsError{}
+
+type signingInputsError struct{}
+
+func (signingInputsError) Error() string {
+	return "evidence bytes expired: the job's archive or signing manifest is no longer stored"
+}
+func (signingInputsError) Is(target error) bool { return target == ErrExpired }
+
 // Sign starts signing a succeeded ios_archive job, or returns its signing
 // in progress or done (idempotent). A started signing runs in the
 // background; its record moves to signed or sign_failed.
+//
+// A signing starts under evidenceMu, which trimPool holds from its
+// eviction snapshot through deletion: either the snapshot already sees the
+// signing and keeps the job, or eviction finishes first and the input check
+// here refuses the job with ErrSigningInputs. Lock order is evidenceMu, then
+// mu, then store writes.
 func (c *Controller) Sign(ctx context.Context, id string) (store.SigningRecord, error) {
 	if c.options.Signer == nil {
 		return store.SigningRecord{}, ErrSigningUnavailable
@@ -50,18 +69,35 @@ func (c *Controller) Sign(ctx context.Context, id string) (store.SigningRecord, 
 	if !safeID(id) {
 		return store.SigningRecord{}, store.ErrNotFound
 	}
+	c.evidenceMu.Lock()
+	defer c.evidenceMu.Unlock()
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.closed {
-		c.mu.Unlock()
 		return store.SigningRecord{}, errors.New("controller closed")
+	}
+	existing, err := c.options.Store.GetSigning(ctx, id)
+	if err == nil && existing.Status != store.SignFailed {
+		return existing, nil
+	}
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return store.SigningRecord{}, err
+	}
+	job, err := c.options.Store.Get(ctx, id)
+	if err != nil {
+		return store.SigningRecord{}, err
+	}
+	if job.Request.Kind != model.IOSArchive || job.State != model.Succeeded {
+		return store.SigningRecord{}, store.ErrTransition
+	}
+	if _, err := c.signingInputs(ctx, job, true); err != nil {
+		return store.SigningRecord{}, err
 	}
 	record, started, err := c.options.Store.BeginSigning(ctx, id, c.options.Now())
 	if err != nil || !started {
-		c.mu.Unlock()
 		return record, err
 	}
 	c.background.Add(1)
-	c.mu.Unlock()
 	go func() {
 		defer c.background.Done()
 		status, reason := store.Signed, ""
@@ -69,11 +105,87 @@ func (c *Controller) Sign(ctx context.Context, id string) (store.SigningRecord, 
 		if err != nil {
 			status, reason, artifacts = store.SignFailed, err.Error(), nil
 		}
-		// Recorded even during shutdown, so a restart does not see it in
-		// progress.
-		_ = c.options.Store.FinishSigning(context.Background(), id, status, reason, artifacts, c.options.Now())
+		c.finishSigning(id, status, reason, artifacts)
 	}()
 	return record, nil
+}
+
+// signingInput is a succeeded ios_archive job's receipt and its archive and
+// signing manifest artifacts.
+type signingInput struct {
+	receipt           json.RawMessage
+	archive, manifest evidence.Artifact
+}
+
+// signingInputs returns a job's signing inputs; with stored, the archive
+// and manifest must still be in the artifact store, unexpired and of their
+// recorded size.
+func (c *Controller) signingInputs(ctx context.Context, job model.Job, stored bool) (signingInput, error) {
+	var in signingInput
+	var completion Completion
+	if err := json.Unmarshal(job.Result, &completion); err != nil {
+		return in, err
+	}
+	if len(completion.Receipt) == 0 {
+		return in, ErrNotReady
+	}
+	in.receipt = completion.Receipt
+	for _, a := range completion.Result.Artifacts {
+		switch a.Name {
+		case profiles.ArchiveArtifact:
+			in.archive = a
+		case profiles.SigningManifestArtifact:
+			in.manifest = a
+		}
+	}
+	if in.archive.ID == "" || in.manifest.ID == "" {
+		return in, errors.New("job has no archive and signing manifest artifacts")
+	}
+	if stored {
+		for _, a := range []evidence.Artifact{in.archive, in.manifest} {
+			file, _, err := c.Artifact(ctx, job.ID, a.ID)
+			if errors.Is(err, ErrExpired) || errors.Is(err, store.ErrNotFound) || errors.Is(err, evidence.ErrArtifact) {
+				return in, ErrSigningInputs
+			}
+			if err != nil {
+				return in, err
+			}
+			file.Close()
+		}
+	}
+	return in, nil
+}
+
+// signingFallbackReason replaces an outcome the store refused to record.
+const signingFallbackReason = "signing outcome could not be recorded"
+
+// finishSigning records a signing's outcome, even during shutdown, so no
+// finished signing stays in progress: the reason is bounded valid UTF-8,
+// and an outcome the store refuses is replaced by sign_failed with a fixed
+// reason, retried briefly. A restart fails anything still in progress.
+func (c *Controller) finishSigning(id string, status store.SigningStatus, reason string, artifacts []evidence.Artifact) {
+	err := c.options.Store.FinishSigning(context.Background(), id, status, signingReason(reason), artifacts, c.options.Now())
+	for attempt := 1; err != nil && !errors.Is(err, store.ErrTransition) && attempt <= 3; attempt++ {
+		err = c.options.Store.FinishSigning(context.Background(), id, store.SignFailed, signingFallbackReason, nil, c.options.Now())
+		if err != nil {
+			time.Sleep(time.Duration(attempt) * 100 * time.Millisecond)
+		}
+	}
+}
+
+// signingReason is reason as valid UTF-8 within store.MaxReasonBytes,
+// truncated at a rune boundary with a marker.
+func signingReason(reason string) string {
+	const marker = " [truncated]"
+	reason = strings.ToValidUTF8(reason, "\uFFFD")
+	if len(reason) <= store.MaxReasonBytes {
+		return reason
+	}
+	cut := store.MaxReasonBytes - len(marker)
+	for cut > 0 && !utf8.RuneStart(reason[cut]) {
+		cut--
+	}
+	return reason[:cut] + marker
 }
 
 // SigningStatus returns a job's signing record.
@@ -93,25 +205,11 @@ func (c *Controller) sign(ctx context.Context, id string) ([]evidence.Artifact, 
 	if job.Request.Kind != model.IOSArchive || job.State != model.Succeeded {
 		return nil, store.ErrTransition
 	}
-	var completion Completion
-	if err := json.Unmarshal(job.Result, &completion); err != nil {
+	in, err := c.signingInputs(ctx, job, false)
+	if err != nil {
 		return nil, err
 	}
-	if len(completion.Receipt) == 0 {
-		return nil, ErrNotReady
-	}
-	var archive, manifest evidence.Artifact
-	for _, a := range completion.Result.Artifacts {
-		switch a.Name {
-		case profiles.ArchiveArtifact:
-			archive = a
-		case profiles.SigningManifestArtifact:
-			manifest = a
-		}
-	}
-	if archive.ID == "" || manifest.ID == "" {
-		return nil, errors.New("job has no archive and signing manifest artifacts")
-	}
+	archive, manifest := in.archive, in.manifest
 	archivePath, manifestPath := signer.RequestPaths(options.Inbox, id)
 	inbox := filepath.Dir(archivePath)
 	if err := os.RemoveAll(inbox); err != nil {
@@ -143,7 +241,7 @@ func (c *Controller) sign(ctx context.Context, id string) ([]evidence.Artifact, 
 		return nil, err
 	}
 	defer c.root.Remove(temporary)
-	result, signErr := options.Client.Sign(ctx, signer.Request{JobID: id, Receipt: completion.Receipt, ArchivePath: archivePath, ManifestPath: manifestPath}, ipa)
+	result, signErr := options.Client.Sign(ctx, signer.Request{JobID: id, Receipt: in.receipt, ArchivePath: archivePath, ManifestPath: manifestPath}, ipa)
 	if signErr == nil {
 		signErr = ipa.Sync()
 	}
@@ -154,7 +252,7 @@ func (c *Controller) sign(ctx context.Context, id string) ([]evidence.Artifact, 
 	if err != nil {
 		return nil, err
 	}
-	receiptDigest := sha256.Sum256(completion.Receipt)
+	receiptDigest := sha256.Sum256(in.receipt)
 	if payload.JobID != id || payload.IPA.SHA256 != result.IPASHA256 || payload.IPA.SizeBytes != result.IPASize || payload.Archive.SHA256 != archive.SHA256 || payload.Archive.SizeBytes != archive.SizeBytes || payload.SigningManifestSHA256 != manifest.SHA256 || payload.JobReceiptSHA256 != hex.EncodeToString(receiptDigest[:]) {
 		return nil, errors.New("signer receipt does not match the job, its artifacts or the received ipa")
 	}

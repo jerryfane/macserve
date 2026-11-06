@@ -72,6 +72,7 @@ func TestFinalEntitlementsDerivesProfileIdentifiers(t *testing.T) {
 		"application-identifier":                 fixtureTeam + "." + appID,
 		"com.apple.developer.team-identifier":    fixtureTeam,
 		"get-task-allow":                         false,
+		"beta-reports-active":                    true,
 		"aps-environment":                        "production",
 		"com.apple.developer.associated-domains": []any{"applinks:example.com"},
 		"keychain-access-groups":                 []any{fixtureTeam + ".com.example.shared"},
