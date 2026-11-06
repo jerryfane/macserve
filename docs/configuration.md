@@ -63,11 +63,16 @@ latter naming the pinned `COCOAPODS:` version); both are tracked, and a lockfile
 The worker clones the root-owned SDK (`/Library/macserve/tools/flutter/<version>/flutter`) into
 `${WORKSPACE}/flutter-sdk`, runs `flutter pub get --enforce-lockfile`, `flutter build ios --config-only --simulator
 --debug`, each script with Ruby (`/Library/macserve/tools/ruby/<ruby_sha256[:12]>/bin/ruby`, gems from
-`/Library/macserve/tools/cocoapods/<cocoapods_version>/gems`), then `flutter build ios --simulator --debug
---no-codesign` or the usual test steps on `ios/Runner.xcworkspace`, all in `app_dir` with `FLUTTER_ROOT`,
+`/Library/macserve/tools/cocoapods/<cocoapods_version>/gems`), then the simulator build `xcrun xcodebuild -workspace
+ios/Runner.xcworkspace -scheme Runner -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS
+Simulator' ... CODE_SIGNING_ALLOWED=NO ARCHS=arm64 build` (not `flutter build ios --simulator`: its universal-arch
+`lipo -verify_arch arm64 x86_64` check fails with Xcode 27.1's lipo) or the usual test steps on
+`ios/Runner.xcworkspace`, all in `app_dir` with `FLUTTER_ROOT`,
 `PUB_CACHE`, `CP_HOME_DIR`, `GEM_HOME`/`GEM_PATH`, `FLUTTER_SUPPRESS_ANALYTICS=true`, `CI=true` and the Flutter, Ruby
 and gem `bin` directories first on `PATH`. Preparation has a 30-minute budget; the observed Flutter, Dart, Ruby and
-CocoaPods versions are in the job observation and the receipt's `observation.flutter`.
+CocoaPods versions are in the job observation and the receipt's `observation.flutter`. Xcode 27.1 rejects the
+Flutter pod's default deployment target 13.0: the repository's `ios/Podfile` must raise every pod's
+`IPHONEOS_DEPLOYMENT_TARGET` to at least 15.0 in `post_install`.
 
 The controller requires schema-3 root-owned health attestation bound to job UID and qualified profile
 digests, not interface inventory or PF policy/rules. VM bridge/address churn does not invalidate health

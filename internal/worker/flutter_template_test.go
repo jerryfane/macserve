@@ -94,10 +94,10 @@ func envValue(env []string, key string) string {
 	return ""
 }
 
-// A Flutter build job runs the derived prepare and `flutter build ios` in
-// app_dir with the Flutter environment on every job command, observes the
-// pinned Flutter, Ruby and CocoaPods after the SDK clone and tracks
-// pubspec.lock.
+// A Flutter build job runs the derived prepare and the arm64 simulator
+// xcodebuild in app_dir (the worker keeps ARCHS=arm64) with the Flutter
+// environment on every job command, observes the pinned Flutter, Ruby and
+// CocoaPods after the SDK clone and tracks pubspec.lock.
 func TestFlutterBuildJobRunsDerivedRecipeWithFlutterEnvironment(t *testing.T) {
 	runner := &fakeRunner{}
 	runner.hook = flutterHook("3.41.9", nil)
@@ -117,7 +117,7 @@ func TestFlutterBuildJobRunsDerivedRecipeWithFlutterEnvironment(t *testing.T) {
 		{"/bin/bash", flutter, "pub", "get", "--enforce-lockfile", "--suppress-analytics"},
 		{"/bin/bash", flutter, "build", "ios", "--config-only", "--simulator", "--debug", "--suppress-analytics"},
 		{tools.Ruby, filepath.Join(workspace, "checkout", "scripts", "add_call_directory_target.rb")},
-		{"/bin/bash", flutter, "build", "ios", "--simulator", "--debug", "--no-codesign", "--suppress-analytics"},
+		{"/usr/bin/xcrun", "xcodebuild", "-workspace", "ios/Runner.xcworkspace", "-scheme", "Runner", "-configuration", "Debug", "-sdk", "iphonesimulator", "-destination", "generic/platform=iOS Simulator", "-derivedDataPath", filepath.Join(workspace, "derived-data"), "ARCHS=arm64", "build", "-jobs", "4", "CODE_SIGNING_ALLOWED=NO"},
 	}
 	for i, c := range commands {
 		if got := append([]string{c.Executable}, c.Args...); !slices.Equal(got, want[i]) || c.Dir != filepath.Join(workspace, "checkout", "apps", "mobile") {

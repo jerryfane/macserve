@@ -169,8 +169,3 @@ func flutterPrepare(pin model.FlutterPin, f model.FlutterConfig) []model.Command
 	}
 	return commands
 }
-
-// flutterBuild is a Flutter build job's run.
-func flutterBuild() model.Command {
-	return flutterCommand("build", "ios", "--simulator", "--debug", "--no-codesign", "--suppress-analytics")
-}

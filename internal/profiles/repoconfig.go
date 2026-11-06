@@ -303,8 +303,9 @@ func validateShards(key string, s *model.TestShards) error {
 // A Flutter template (one with a Flutter pin) serves only a configuration
 // with a flutter section, and a flutter section only a Flutter template. Its
 // recipe runs in app_dir: the fixed Flutter prepare (see flutterPrepare),
-// then a build template's run is `flutter build ios` for the simulator and a
-// test template's Xcode steps are the ones above on ios/Runner.xcworkspace.
+// then a build template's run is the simulator build above on
+// ios/Runner.xcworkspace with ARCHS=arm64, and a test template's Xcode steps
+// are the ones above on ios/Runner.xcworkspace.
 func Derive(snapshot model.Profile, c model.RepoConfig) (model.Profile, error) {
 	if snapshot.Template == nil {
 		return model.Profile{}, fmt.Errorf("%w: not a template job snapshot", ErrInvalid)
@@ -348,10 +349,14 @@ func Derive(snapshot model.Profile, c model.RepoConfig) (model.Profile, error) {
 		if snapshot.Shard != "" {
 			return model.Profile{}, fmt.Errorf("%w: build template snapshot has a shard", ErrInvalid)
 		}
-		p.Run = xcodebuild("-scheme", c.Scheme, "-configuration", "Debug", "-sdk", "iphonesimulator", "-destination", "generic/platform=iOS Simulator", "-derivedDataPath", "${DERIVED_DATA}", "CODE_SIGNING_ALLOWED=NO", "build")
+		build := []string{"-scheme", c.Scheme, "-configuration", "Debug", "-sdk", "iphonesimulator", "-destination", "generic/platform=iOS Simulator", "-derivedDataPath", "${DERIVED_DATA}", "CODE_SIGNING_ALLOWED=NO", "build"}
 		if flutter != nil {
-			p.Run = flutterBuild()
+			// Flutter's debug_unpack_ios verifies a universal simulator build
+			// with `lipo -verify_arch arm64 x86_64`, which Xcode 27.1's lipo
+			// refuses; the Studio is Apple silicon, so build arm64 only.
+			build = slices.Insert(build, len(build)-1, "ARCHS=arm64")
 		}
+		p.Run = xcodebuild(build...)
 	case model.UnitTest, model.SimulatorUITest:
 		key, section := "ui_test", c.UITest
 		if snapshot.Kind == model.UnitTest {

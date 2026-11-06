@@ -183,7 +183,8 @@ func TestFlutterDeriveExactCommands(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if build.WorkDir != "apps/mobile" || !reflect.DeepEqual(build.Prepare, prepare) || !reflect.DeepEqual(build.Run, model.Command{Executable: "/bin/bash", Args: []string{flutter, "build", "ios", "--simulator", "--debug", "--no-codesign", "--suppress-analytics"}}) || len(build.RequiredTests) != 0 {
+	wantBuild := model.Command{Executable: "/usr/bin/xcrun", Args: []string{"xcodebuild", "-workspace", "ios/Runner.xcworkspace", "-scheme", "Runner", "-configuration", "Debug", "-sdk", "iphonesimulator", "-destination", "generic/platform=iOS Simulator", "-derivedDataPath", "${DERIVED_DATA}", "CODE_SIGNING_ALLOWED=NO", "ARCHS=arm64", "build"}}
+	if build.WorkDir != "apps/mobile" || !reflect.DeepEqual(build.Prepare, prepare) || !reflect.DeepEqual(build.Run, wantBuild) || len(build.RequiredTests) != 0 {
 		t.Fatalf("flutter build recipe: %+v", build)
 	}
 	unit, err := profiles.Derive(admitFlutter(t, model.UnitTest).Profile, config)
