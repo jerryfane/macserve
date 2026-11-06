@@ -48,6 +48,8 @@ type Options struct {
 	Now              func() time.Time
 	Seal             func(context.Context, model.Job, worker.Result) (json.RawMessage, error)
 	PruneReceipts    func(context.Context) error
+	// Signer signs succeeded ios_archive jobs; nil refuses signing.
+	Signer *SignerOptions
 }
 type Completion struct {
 	InputDigest string          `json:"input_digest"`

@@ -151,11 +151,17 @@ func (h *handler) job(w http.ResponseWriter, r *http.Request, p store.Principal)
 		h.renderJob(w, r, status, job)
 		return
 	}
+	if suffix == "sign" && r.Method == http.MethodPost {
+		h.sign(w, r, p, job)
+		return
+	}
 	if r.Method != http.MethodGet {
 		writeError(w, store.ErrNotFound)
 		return
 	}
 	switch {
+	case suffix == "signing":
+		h.signing(w, r, job)
 	case suffix == "":
 		h.renderJob(w, r, 200, job)
 	case suffix == "logs":
@@ -241,6 +247,10 @@ func (h *handler) capabilities(w http.ResponseWriter, r *http.Request, p store.P
 	if templates != nil {
 		body["templates"] = templates
 	}
+	// Agents pin this key to verify signer receipts.
+	if h.SignerKey != nil {
+		body["signer"] = h.SignerKey
+	}
 	writeJSON(w, 200, body)
 }
 
@@ -266,6 +276,18 @@ func (h *handler) renderJob(w http.ResponseWriter, r *http.Request, status int, 
 	view := jobView(job)
 	if job.State == model.Queued {
 		view["blocked_by"] = h.blocked(r)
+	}
+	// A signing sub-status beside, never instead of, the job state.
+	if job.Request.Kind == model.IOSArchive {
+		record, err := h.Store.GetSigning(r.Context(), job.ID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			writeError(w, err)
+			return
+		}
+		if err == nil {
+			view["signing"] = signingView(job.ID, record)
+		}
+		view["links"].(map[string]string)["signing"] = "/v1/jobs/" + job.ID + "/signing"
 	}
 	writeJSON(w, status, view)
 }

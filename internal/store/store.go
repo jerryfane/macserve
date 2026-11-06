@@ -156,7 +156,7 @@ func (s *Store) initialize(ctx context.Context) error {
 	if err := tx.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version > 4 {
+	if version > 5 {
 		return fmt.Errorf("unsupported store schema version %d", version)
 	}
 	if version == 0 {
@@ -176,6 +176,11 @@ func (s *Store) initialize(ctx context.Context) error {
 	}
 	if version < 4 {
 		if _, err := tx.ExecContext(ctx, releaseSchema); err != nil {
+			return err
+		}
+	}
+	if version < 5 {
+		if _, err := tx.ExecContext(ctx, signingSchema); err != nil {
 			return err
 		}
 	}

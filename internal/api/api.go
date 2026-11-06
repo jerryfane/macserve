@@ -35,7 +35,19 @@ type Options struct {
 	// BranchHeads is the controller's GitHub App; nil refuses ios_archive
 	// admission.
 	BranchHeads BranchHeads
-	Now         func() time.Time
+	// Sign starts or returns a succeeded ios_archive job's signing
+	// (controller.Sign); nil refuses signing. SignerKey is the signer
+	// receipt key it publishes in capabilities.
+	Sign      func(context.Context, string) (store.SigningRecord, error)
+	SignerKey *SignerKey
+	Now       func() time.Time
+}
+
+// SignerKey is the signer receipt verification key: its key ID and base64
+// Ed25519 public key.
+type SignerKey struct {
+	KeyID     string `json:"key_id"`
+	PublicKey string `json:"public_key"`
 }
 type handler struct{ Options }
 
@@ -145,6 +157,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		scope = "jobs:submit"
 	} else if strings.HasSuffix(path, "/cancel") {
 		scope = "jobs:cancel"
+	} else if strings.HasSuffix(path, "/sign") && r.Method == http.MethodPost {
+		scope = "release:sign"
 	}
 	if !p.HasScope(scope) {
 		writeError(w, ErrForbidden)
@@ -213,6 +227,8 @@ func writeError(w http.ResponseWriter, err error) {
 		status, code, message = 403, "forbidden", "permission denied"
 	case errors.Is(err, ErrNoGitHubApp):
 		status, code, message = 422, "unsupported_request", ErrNoGitHubApp.Error()
+	case errors.Is(err, controller.ErrSigningUnavailable):
+		status, code, message = 422, "unsupported_request", controller.ErrSigningUnavailable.Error()
 	case errors.As(err, new(*HeadMismatchError)):
 		status, code, message = 409, "not_default_branch_head", err.Error()
 	case errors.Is(err, errHeadUnavailable):

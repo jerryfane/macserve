@@ -28,6 +28,7 @@ type Config struct {
 	OwnerUID        uint32            `json:"owner_uid"`
 	Receipt         ReceiptConfig     `json:"receipt"`
 	GitHub          *GitHubConfig     `json:"github,omitempty"`
+	Signer          *SignerConfig     `json:"signer,omitempty"`
 }
 
 func LoadConfig(path string) (Config, error) {

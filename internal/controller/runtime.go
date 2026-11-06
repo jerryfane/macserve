@@ -148,6 +148,10 @@ func New(options Options) (*Controller, error) {
 	if err := options.Store.Recover(context.Background(), options.Now()); err != nil {
 		return fail(err)
 	}
+	// No signing survives its controller process; a new request retries.
+	if err := options.Store.InterruptSignings(context.Background(), options.Now()); err != nil {
+		return fail(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &Controller{options: options, root: root, lock: lock, ctx: ctx, cancel: cancel, requestTimeout: 2 * time.Minute}
 	service, serviceErr := options.Store.ServiceState(ctx)

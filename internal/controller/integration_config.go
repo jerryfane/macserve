@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"errors"
 	"regexp"
 	"slices"
@@ -78,5 +80,30 @@ func (c *Config) validateIntegrations() error {
 			}
 		}
 	}
+	if s := c.Signer; s != nil {
+		raw, err := base64.StdEncoding.Strict().DecodeString(s.PublicKey)
+		if !cleanAbsolute(s.Socket) || !cleanAbsolute(s.Inbox) || s.UID == 0 || s.UID == c.JobUID || s.UID == c.OwnerUID || s.RPCGID == 0 || s.RPCGID == 20 || s.KeyID == "" || len(s.KeyID) > 128 || err != nil || len(raw) != ed25519.PublicKeySize {
+			return errors.New("signer requires socket and inbox paths, a dedicated UID and RPC group, and its pinned key")
+		}
+	}
 	return nil
+}
+
+// SignerConfig connects the controller to the signer daemon: its socket
+// and account UID (checked on every connection), the RPC group and inbox
+// directory for request inputs, and the pinned signer receipt key that
+// signer-init printed.
+type SignerConfig struct {
+	Socket    string `json:"socket"`
+	UID       uint32 `json:"uid"`
+	RPCGID    uint32 `json:"rpc_gid"`
+	Inbox     string `json:"inbox"`
+	KeyID     string `json:"key_id"`
+	PublicKey string `json:"public_key"`
+}
+
+// PublicKeyBytes is the pinned signer receipt key.
+func (s SignerConfig) PublicKeyBytes() ed25519.PublicKey {
+	raw, _ := base64.StdEncoding.Strict().DecodeString(s.PublicKey)
+	return ed25519.PublicKey(raw)
 }
