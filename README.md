@@ -35,7 +35,7 @@ needs network credentials for your private network. No VM required.
 
 | Feature | What you get |
 | --- | --- |
-| **Exact commits** | `build`, `unit_test`, `simulator_ui_test` and template-only `simulator_script` jobs for a repository at an exact 40-character commit SHA. |
+| **Exact commits** | `build`, `unit_test`, `simulator_ui_test` and template-only `simulator_script` and `ios_archive` (unsigned release archive; no signing or upload) jobs for a repository at an exact 40-character commit SHA. |
 | **Pinned toolchains** | The Xcode version and build, and the simulator runtime, are pinned per job. |
 | **Zero-config onboarding** | Org-level templates: any repository of an approved GitHub owner builds, and runs sharded unit or UI tests on a pinned simulator, by committing a small `.macserve.json`. |
 | **No command injection** | Controller-owned, versioned profiles and templates fix the xcodebuild command line; clients cannot inject shell commands, environment variables or paths. |

@@ -30,8 +30,8 @@ PF enforcement may be a separately reviewed future opt-in; it is not implemented
 
 ## Implemented packages
 
-- `internal/model`: job states, the four job kinds (`build`, `unit_test`, `simulator_ui_test` and the
-  template-only `simulator_script`), exact toolchain pins and controller-owned argv recipes.
+- `internal/model`: job states, the five job kinds (`build`, `unit_test`, `simulator_ui_test` and the
+  template-only `simulator_script` and `ios_archive`), exact toolchain pins and controller-owned argv recipes.
 - `internal/profiles`: strict JSON loading (`{"profiles": [...]}`), immutable recipe snapshots, exact-SHA
   admission, pinned Xcode/runtime matching, timeout limits and SHA-256 recipe digests. Relative paths cannot
   contain `..`; command placeholders are limited to `CHECKOUT`, `WORKSPACE`, `DERIVED_DATA`, `RESULT_BUNDLE`,

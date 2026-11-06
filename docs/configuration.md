@@ -15,7 +15,7 @@ The TLS 1.3 listener requires a literal assigned tailnet address and port. Allow
 `100.64.0.0/10` and `fd7a:115c:a1e0::/48`; configuration can narrow these ranges, not enable LAN/public,
 wildcard or loopback listeners. Client authorization is independent of network membership.
 Each principal has `id`, `token_sha256`, `repositories`, `scopes`, and optional `revoked`. Scopes are
-`jobs:submit`, `jobs:read`, `jobs:cancel`, `service:admin`. Only SHA-256 digests are persisted; plaintext
+`jobs:submit`, `jobs:read`, `jobs:cancel`, `release:archive`, `service:admin`. Only SHA-256 digests are persisted; plaintext
 high-entropy bearer credentials belong in the caller's private credential storage.
 
 - `POST /v1/jobs` requires `Idempotency-Key` and a profile-matching exact-SHA request.
@@ -28,8 +28,8 @@ high-entropy bearer credentials belong in the caller's private credential storag
   Poll `GET /v1/admin/state` until `quiescent=true` before benchmarking; acceptance of pause is not quiescence.
   `DELETE /v1/admin/pause` clears only manual pause. An optional owner-controlled pause marker also blocks dispatch.
 
-Job kinds are `build`, `unit_test`, `simulator_ui_test` and `simulator_script`; the last runs only from an org
-template. A `simulator_script` request names a `shard` of the repository's `.macserve.json` `script` section,
+Job kinds are `build`, `unit_test`, `simulator_ui_test`, `simulator_script` and `ios_archive`; the last two run only
+from an org template. A `simulator_script` request names a `shard` of the repository's `.macserve.json` `script` section,
 `{"script": {"shards": {"duo-screenshots": {"run": "Tools/ci/duo-screenshots.sh"}}}}`, where `run` is a relative path
 (no absolute path, `..`, empty or `.` component) resolved against `work_dir`; an omitted simulator is the
 template's first pin. The worker builds the scheme for that simulator
@@ -52,7 +52,7 @@ per-shard timeouts. Preparation has a 30-minute budget. The full
 `.macserve.json` rules are in [install.md](install.md#onboarding-a-repository).
 
 A Flutter template (one with a `flutter` pin: `version`, `sdk_sha256`, `ruby_sha256`, `cocoapods_version`,
-`gems_sha256`) runs `build`, `unit_test` or `simulator_ui_test` jobs for repositories whose `.macserve.json` has a
+`gems_sha256`) runs `build`, `unit_test`, `simulator_ui_test` or `ios_archive` jobs for repositories whose `.macserve.json` has a
 `flutter` section, `{"app_dir": "apps/mobile", "prepare_ruby": ["scripts/add_call_directory_target.rb"]}` (at most 8
 checkout-relative `.rb` scripts), with `work_dir` `<app_dir>/ios`, `workspace` `Runner.xcworkspace`, `scheme`
 `Runner` (Flutter flavors and custom schemes are not supported), no `project`, `xcodegen` or `resolve_packages`;
@@ -73,6 +73,54 @@ and gem `bin` directories first on `PATH`. Preparation has a 30-minute budget; t
 CocoaPods versions are in the job observation and the receipt's `observation.flutter`. Xcode 27.1 rejects the
 Flutter pod's default deployment target 13.0: the repository's `ios/Podfile` must raise every pod's
 `IPHONEOS_DEPLOYMENT_TARGET` to at least 15.0 in `post_install`.
+
+An `ios_archive` template (native, or Flutter with a `flutter` pin) builds an unsigned App Store release archive of
+the repository's scheme. It pins no simulator; its timeout defaults to 3600 seconds (maximum 5400) and its
+preparation has a 30-minute budget. The request needs both `jobs:submit` and `release:archive` and a `release`:
+
+```json
+{"kind": "ios_archive", "release": {"build_name": "1.4.0", "build_number": "42",
+ "dart_defines": {"REVENUECAT_PUBLIC_KEY": "appl_xxx"}}}
+```
+
+`build_name` is one to three dot-separated numbers of one to four digits; `build_number` is one to nine digits
+without a leading zero. `dart_defines` is for Flutter templates only (other archive templates refuse it): at most 32
+entries, keys matching `^[A-Z][A-Z0-9_]{0,63}$`, values of at most 1024 printable ASCII characters without `$`, at
+most 4096 key and value bytes in all. Dart defines are non-secret app configuration: they are stored in the job
+record and the signed receipt. Every other kind refuses `release`, and configured profiles cannot be `ios_archive`.
+
+Admission binds the archive to the repository's default branch: the controller's GitHub App reads the numeric
+repository ID, the default branch and that branch's head commit (`GET /repos/<repo>` and
+`GET /repos/<repo>/git/ref/heads/<branch>`, which must name exactly `refs/heads/<branch>` and a commit), and the
+request `sha` must equal that head. A token without `release:archive` gets `403` (also on idempotent replay), a
+controller without a GitHub App `422`, a commit other than the head `409` naming both SHAs and the branch, and a
+failed lookup `503`. The resolved facts are stored with the job and signed in the receipt's `release_provenance`;
+a later push does not affect a job already admitted, and an idempotent replay returns the admitted job without a
+new lookup. Pull-mode GitHub policies cannot select `ios_archive` templates, `macserve build` never chooses one
+and `macserve wait` refuses the kind.
+
+The native run is `xcrun xcodebuild (-project P | -workspace W) -scheme S -configuration Release -sdk iphoneos
+-destination generic/platform=iOS -archivePath ${WORKSPACE}/App.xcarchive -derivedDataPath ${DERIVED_DATA}
+CODE_SIGNING_ALLOWED=NO MARKETING_VERSION=<build_name> CURRENT_PROJECT_VERSION=<build_number> archive` (with the
+worker's `-jobs 4 CODE_SIGNING_ALLOWED=NO`), after the optional XcodeGen and package steps. A Flutter archive
+writes the iOS configuration with `flutter build ios --config-only --release --no-codesign --build-name <build_name>
+--build-number <build_number> [--dart-define KEY=VALUE ...]` (one `--dart-define` per key, sorted) instead of the
+simulator debug configuration, then runs the same archive on `ios/Runner.xcworkspace`. `--no-codesign` keeps Flutter
+from looking for a signing identity: nothing in this kind signs.
+
+After the run, once every job process has stopped, the worker (as root, never as the job user) reads the archive
+descriptor-relative and refuses symlinks, hard links, special files and mount crossings. It builds the signing
+manifest: exactly one `Products/Applications/*.app`, and below each listed bundle every `PlugIns`/`Extensions`
+`.appex`, `Frameworks` `.framework` and `Watch` `.app`, each with its `Info.plist` bundle identifier, executable,
+package type and version (decoded with `/usr/bin/plutil`), and the entitlements the build requested (from the
+`.xcent` files in derived data, `{}` if none). Apps and app extensions must carry `build_name` and
+`build_number` (frameworks are exempt); a duplicate bundle identifier, a Mach-O file under `Products` that is not
+a listed executable or a `Frameworks` `.dylib`, or a missing executable fails the job. It then seals the archive as
+a deterministic tar (sorted entries, owner 0, mtime 0, directories 0755, files 0755 if executable else 0644, every
+0755 path listed in the manifest). The two required artifacts, `App.xcarchive.tar` and `signing-manifest.json`, are
+written to the protected evidence directory and exported from there, never from the job-writable workspace.
+Sealing and export have their own 15-minute bound, and the controller's finalizing window grows by it for this
+kind; the request's `timeout_seconds` must still leave room for them. Signing and upload are not part of this kind.
 
 The controller requires schema-3 root-owned health attestation bound to job UID and qualified profile
 digests, not interface inventory or PF policy/rules. VM bridge/address churn does not invalidate health
