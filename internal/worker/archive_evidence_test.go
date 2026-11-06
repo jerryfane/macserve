@@ -362,6 +362,12 @@ func TestArchiveManifestRefusesUnsignableArchives(t *testing.T) {
 				files[name] = f
 			}
 			dir, workspace := archiveWorkspace(t, files)
+			if tc.name == "case collision" && caseInsensitive(t, dir) {
+				// Default APFS (macOS CI, the Studio) folds case: the second name
+				// replaces the first, so no colliding pair can exist there. The
+				// refusal guards case-sensitive volumes.
+				t.Skip("case-insensitive filesystem cannot hold colliding names")
+			}
 			for _, s := range tc.special {
 				s(t, dir)
 			}
@@ -378,6 +384,18 @@ func TestArchiveManifestRefusesUnsignableArchives(t *testing.T) {
 			}
 		})
 	}
+}
+
+// caseInsensitive reports whether dir's filesystem folds ASCII case.
+func caseInsensitive(t *testing.T, dir string) bool {
+	t.Helper()
+	probe := filepath.Join(dir, "CaseProbe")
+	if err := os.WriteFile(probe, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(probe)
+	_, err := os.Lstat(filepath.Join(dir, "caseprobe"))
+	return err == nil
 }
 
 // The sealed tar may not exceed its byte budget, and a file that changes
