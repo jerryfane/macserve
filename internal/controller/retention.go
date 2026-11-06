@@ -86,6 +86,11 @@ func (c *Controller) trimPool(ctx context.Context, reservation, limit int64) err
 		}
 		return terminal[i].finished.Before(terminal[j].finished)
 	})
+	// Candidates stay valid until deletion only because every signing
+	// starts under evidenceMu (Sign), which the caller holds.
+	if c.afterEvictionSnapshot != nil {
+		c.afterEvictionSnapshot()
+	}
 	for _, old := range terminal {
 		if total <= limit-reservation {
 			return nil

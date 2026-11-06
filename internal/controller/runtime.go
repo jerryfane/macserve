@@ -52,6 +52,9 @@ type Controller struct {
 	requestTimeout time.Duration
 	closeOnce      sync.Once
 	closeErr       error
+	// afterEvictionSnapshot runs in trimPool between candidate selection
+	// and deletion; tests use it to interleave a signing request.
+	afterEvictionSnapshot func()
 }
 
 func New(options Options) (*Controller, error) {

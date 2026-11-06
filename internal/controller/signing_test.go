@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -309,5 +310,57 @@ func TestSigningReasonIsBoundedUTF8(t *testing.T) {
 		if len(got) > store.MaxReasonBytes || !utf8.ValidString(got) {
 			t.Fatalf("reason of %d bytes -> %d bytes, valid %v", len(reason), len(got), utf8.ValidString(got))
 		}
+	}
+}
+
+// A sign request arriving while trimPool is between its eviction snapshot
+// and deletion waits for the eviction, then is refused because the job's
+// inputs are gone; no signing starts and the signer is never called.
+func TestSignWaitsForEvictionInProgress(t *testing.T) {
+	f, client, _ := signingFixture(t)
+	job := signableJob(t, f, client)
+	ctx := context.Background()
+	paused, release := make(chan struct{}), make(chan struct{})
+	// Released before the fixture closes, so a regression fails, not hangs.
+	unpause := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(unpause)
+	f.controller.afterEvictionSnapshot = func() {
+		close(paused)
+		<-release
+	}
+	trimmed := make(chan error, 1)
+	go func() {
+		f.controller.evidenceMu.Lock()
+		defer f.controller.evidenceMu.Unlock()
+		trimmed <- f.controller.trimPool(ctx, 0, 1)
+	}()
+	<-paused
+	type outcome struct {
+		record store.SigningRecord
+		err    error
+	}
+	signed := make(chan outcome, 1)
+	go func() {
+		record, err := f.controller.Sign(ctx, job.ID)
+		signed <- outcome{record, err}
+	}()
+	select {
+	case o := <-signed:
+		t.Fatalf("sign ran during eviction: %+v %v", o.record, o.err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	unpause()
+	if err := <-trimmed; err != nil {
+		t.Fatalf("trim: %v", err)
+	}
+	o := <-signed
+	if !errors.Is(o.err, ErrSigningInputs) || !errors.Is(o.err, ErrExpired) {
+		t.Fatalf("sign after eviction: %+v %v", o.record, o.err)
+	}
+	if _, err := f.db.GetSigning(ctx, job.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("signing recorded for evicted job: %v", err)
+	}
+	if client.got.JobID != "" {
+		t.Fatal("signer called for an evicted job")
 	}
 }
