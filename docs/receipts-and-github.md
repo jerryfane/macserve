@@ -100,6 +100,56 @@ Existing cursors are not reset after long downtime. Requests older than the init
 GitHub offset pagination is not a snapshot: historical edits/deletions during a prolonged scan can shift offsets;
 the overlap mitigates recent churn but does not guarantee replay under adversarial historical mutation.
 
+## Signer receipts
+
+`POST /v1/jobs/<id>/sign` (see [install](install.md#code-signer-optional-signed-testflight)) has the controller
+send the signer one JSON line over its socket, `{"job_id","receipt" (base64 of the exact job receipt envelope),
+"archive_path","manifest_path"}`, with the two paths fixed to `<inbox>/<job id>/App.xcarchive.tar` and
+`<inbox>/<job id>/signing-manifest.json`. The signer answers one JSON line `{"ok":true,"receipt","ipa_sha256",
+"ipa_size"}` followed by the ipa bytes, or `{"ok":false,"error":"<reason>"}`. Each side checks the other's peer UID.
+
+Before it opens archive bytes the signer requires: the job receipt's Ed25519 signature under a key pinned in
+`signer.json`; complete succeeded `ios_archive` evidence (`ValidateSuccess` against the receipt's own identity,
+including cleanup, release and GitHub App default-branch provenance consistent with the repository and commit);
+the request's job ID; and `signing_manifest_sha256` equal to the manifest file. It then copies the archive
+privately, requires the manifest's size and SHA-256, and extracts the copy refusing anything but root-owned
+`0755` directories and `0755`/`0644` regular files below `App.xcarchive/`, traversal, duplicate or case-colliding
+names, and any `0755` set other than the manifest's executables. It refuses an existing `embedded.mobileprovision`,
+a bundle the admin policy does not list, and a profile that is not this bundle's unexpired App Store profile for the
+team and configured certificate (no `ProvisionedDevices`/`ProvisionsAllDevices`, `beta-reports-active` true, exact
+`application-identifier`, `get-task-allow` false). Each app and app extension is signed with the requested
+entitlements the profile allows (`aps-environment` takes the profile's value; `$(AppIdentifierPrefix)` and
+`$(TeamIdentifierPrefix)` resolve to `<team>.`) plus `application-identifier`, the team identifier,
+`get-task-allow` false and, if not requested, `keychain-access-groups` `[<team>.<bundle id>]`; frameworks and
+dylibs are signed without entitlements. Signing is inside-out (dylibs, frameworks, app extensions and nested apps,
+root app) with `codesign --force --sign <SHA-1> --keychain <kc> [--entitlements <plist>] --timestamp`, each node
+verified with `codesign --verify --strict`. The ipa is a deterministic zip (`Payload/<App>.app`, byte-ordered
+entries, 1980-01-01 timestamps, modes `0755`/`0644`), re-extracted and re-verified: every node verifies, every app
+and app extension embeds its exact profile bytes and carries exactly the planned entitlements
+(`codesign -d --entitlements :-`).
+
+The signer receipt is an Ed25519 envelope in the job receipt's canonical form, signed by the key `signer-init`
+generated; the controller pins it (`signer.key_id`/`public_key`) and checks the job, archive, manifest, job
+receipt and ipa digests before storing `App.ipa` and `signer-receipt.json`. Capabilities publish the key.
+
+```json
+{"payload":{"archive":{"name":"App.xcarchive.tar","sha256":"850b…ca2c","size_bytes":13312},
+ "build_name":"2.0.1","build_number":"17",
+ "bundles":[{"bundle_id":"com.example.app","entitlements_sha256":"1a83…8223","path":"Products/Applications/Example.app","profile_sha256":"d44a…0a0c","profile_uuid":"8A464E05-BF03-7AF2-4322-00C8687455FC"},
+  {"bundle_id":"com.example.lib","path":"Products/Applications/Example.app/Frameworks/Lib.framework"},
+  {"bundle_id":"com.example.app.widget","entitlements_sha256":"dde2…93d0","path":"Products/Applications/Example.app/PlugIns/Widget.appex","profile_sha256":"3ffa…d071","profile_uuid":"690502AA-80A5-AE7D-0E87-DC99CFCED750"}],
+ "commit":"cccc…cccc","dylibs":["Products/Applications/Example.app/Frameworks/libswiftCore.dylib"],
+ "identity_sha1":"1B19192636BDFF18B441495C549D46DD3102084A",
+ "ipa":{"name":"App.ipa","sha256":"b1b7…1ddf","size_bytes":6721},
+ "job_id":"job-1","job_receipt_sha256":"3dc8…1338","repository":{"id":77,"name":"example-org/example-app"},
+ "schema":1,"signed_at":"2026-11-06T12:00:00Z","signer":{"key_id":"macserve-signer-studio"},
+ "signing_manifest_sha256":"d9ac…a00d","team_id":"ABCDE12345"},
+ "signature":{"algorithm":"Ed25519","encoding":"base64","key_id":"macserve-signer-studio","value":"…"}}
+```
+
+`entitlements_sha256` is the SHA-256 of the exact entitlements plist passed to codesign. Uploading (part 3) verifies
+this receipt with the published key before using the ipa.
+
 ## Linux workflow waiter
 
 Install a reviewed, checksummed `macserve` binary and trusted pins without checking out PR code. Give the

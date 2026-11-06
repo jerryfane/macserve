@@ -179,3 +179,27 @@ and trusted GUI services do not provide VM reset isolation. Root/GUI deployment,
 background UI operation still require separate host qualification before enrollment.
 
 The reviewed registration (persistence) policy is described in [persistence-policy.md](persistence-policy.md).
+
+## Code signer boundary
+
+The optional `signer` daemon (`org.macserve.signer`, account `_macserve_sign`) is a separate privilege domain
+from the controller, the worker and the job account. It alone holds the Apple Distribution identity (in its own
+keychain under `/Library/macserve/var/signer/keychain`), the keychain secret and its Ed25519 signer receipt key,
+all in `_macserve_sign`-owned `0700` directories. The controller reaches it only through
+`/Library/macserve/var/signer-run/signer.sock` (`0660` in a `0750` directory) and hands archive and manifest copies
+through `/Library/macserve/var/signer-inbox` (`0750`); both are group `_macserve_signrpc`, whose only members are
+the controller and the signer. The job account is in neither signer group, so a compromised build cannot reach
+the identity, the socket or the inbox. The signer verifies the controller's job receipt (pinned in `signer.json`),
+applies only the root-owned admin policy (`signer-policy.json`: identity, allowed bundle IDs, team, profiles and
+required entitlements) and signs its result with its own receipt key, which the controller pins.
+
+**New qualification category `signer_denial`.** When the deployment has a signer (`SIGNER_*` in `deploy.env`,
+an installed `config/signer.json`, or a controller `signer` section) the challenge sets `signer`, and the job probe
+(`_qualify-job-probe`, run as the job account by the root launcher) adds `signer_denial` rows proving the job
+cannot list or traverse `var/signer`, `var/signer/keychain`, `var/signer-run` and `var/signer-inbox`, cannot connect
+to `signer.sock`, and cannot open `signing.keychain-db` or `keychain.secret`. Only a permission error
+(EACCES/EPERM) passes a row; success, absence or any other error fails it. `signer_denial` is a job report
+category, not a schema-4 record category: the maintenance record's categories and digests are unchanged, and with a
+signer the `unix_socket_boundary` category passes only if every `signer_denial` row passes too (qualify carry
+requires the same). The owner report never carries `signer_denial` rows, and a challenge without a signer refuses
+them. An installed `org.macserve.signer.plist` is bound into the activation anchor.

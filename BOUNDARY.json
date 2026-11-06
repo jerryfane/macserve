@@ -32,6 +32,7 @@
       "internal/qualification/**",
       "internal/receipt/**",
       "internal/setup/**",
+      "internal/signer/**",
       "internal/source/**",
       "internal/store/**",
       "internal/waiter/**",

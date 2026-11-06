@@ -388,6 +388,11 @@ All ancestors of protected policy, executable and control-state paths must be ro
 | `var/workspaces` | root-owned `0711`; only individual job workspace ownership is transferred |
 | `health` / `health/current.json` | root-owned `0755` directory / atomically published `0644` file |
 | `/Users/<job_user>` | dedicated job-owned `0700` home; entire home, including `Library`, is accounted |
+| `config/signer.json`, `config/signer-policy.json` | optional code signer configuration and admin signing policy; root:wheel `0644`, no secrets |
+| `signer-profiles/` | App Store provisioning profiles for the signer; root:wheel `0755` directory, root `0644` files |
+| `var/signer` and its `keychain`, `key`, `work`, `log` | `_macserve_sign:_macserve_sign` `0700`; signing keychain, keychain secret and signer receipt key are `0600` |
+| `var/signer-run` / `signer.sock` | `_macserve_sign:_macserve_signrpc` `0750` directory / `0660` socket created by the signer |
+| `var/signer-inbox` | `<controller>:_macserve_signrpc` `0750`; the controller hands archive and manifest copies to the signer |
 
 `assets/create-users.sh` remains the narrow account/directory helper; `assets/install.sh` verifies the prebuilt binary and adds rendered assets, matching configurations and generated keys without activation. `sysadminctl` creates the GUI job account and may populate its home with normal macOS initial content; the helper enforces job ownership and `0700` on that home. The account helper creates controller-owned `0700` `var/controller/run` and `var/controller/log`, and root-owned `0700` `var/broker/log`. Controller stdout/stderr go to `var/controller/log/controller.{out,err}.log`; worker/maintenance logs go to `var/broker/log/{worker,maintenance}.{out,err}.log`. Keep these logs private and accounted. The controller uses `/usr/bin/false` and is hidden; the job uses `/bin/zsh`. Account/directory creation is nontransactional: use an exclusive approved administration window.
 
@@ -399,7 +404,7 @@ Keep the owner's home at **0700**, or **0750 with an owner-private group that is
 
 ### Disabled launchd templates
 
-`assets/install.sh` calls the verified prebuilt binary's `deploy-install` command to render the reviewed `assets/launchd/org.macserve.{controller,worker,maintenance}.plist.tmpl` files. Rendering is literal substitution of recognized markers only; unknown or unresolved `{{`/`}}` markers refuse. Apply runs `/usr/bin/plutil -lint` on all three rendered plists before installing them root-owned under `/Library/LaunchDaemons`. No PF template or policy file is rendered or installed.
+`assets/install.sh` calls the verified prebuilt binary's `deploy-install` command to render the reviewed `assets/launchd/org.macserve.{controller,worker,maintenance}.plist.tmpl` files, plus `org.macserve.signer.plist.tmpl` when `deploy.env` declares the code signer (see [Code signer](#code-signer-optional-signed-testflight)). Rendering is literal substitution of recognized markers only; unknown or unresolved `{{`/`}}` markers refuse. Apply runs `/usr/bin/plutil -lint` on every rendered plist before installing it root-owned under `/Library/LaunchDaemons`. No PF template or policy file is rendered or installed.
 
 No deployment Go toolchain or separate JSON/template renderer is needed. Rendering requires unique `Disabled=true` and `RunAtLoad=false` booleans in the plist's root dictionary; nested fields cannot supply or override those activation flags. Inspect the generated files: plist syntax acceptance does not qualify launchd behavior or grant permission to start services.
 
@@ -770,6 +775,83 @@ Allocate the 80 GiB mutable pool as **30 GiB workspaces + 15 GiB caches + 15 GiB
 The retained evidence split reserves 1 GiB for store log rows and 14 GiB for artifacts. Raw logs/artifacts expire after seven days or oldest-terminal pressure eviction; metadata and full manifests persist 90 days. Expired reads return `410`, not fabricated empty success. Do not move mutable data outside accounted roots to avoid the budget.
 
 For benchmarks or owner work, authenticated API `PUT /v1/admin/pause` accepts `{"reason":"owner maintenance","mode":"drain"}` or mode `cancel_active`. Poll `GET /v1/admin/state` until **`quiescent=true`**. An accepted pause only blocks new work; it is not proof of stopped tools, finalization or cleanup. Drain permits current work to finish; cancel_active requests cancellation and its cleanup barrier. Do not benchmark or manually clean while ownership is uncertain. Automatic retention/GC does not run through manual/owner pause or unqualified security readiness. `DELETE /v1/admin/pause` clears manual pause only, not an owner marker, quarantine or a failed health gate.
+
+## Code signer (optional, signed TestFlight)
+
+An `ios_archive` job produces an **unsigned** App Store archive. The optional code signer (`macserve signer`, launchd label `org.macserve.signer`) signs it with the owner's Apple Distribution identity in a separate account, so no job, controller or owner process ever holds the signing key. The controller reaches it only through a Unix socket that the job account cannot open.
+
+### Accounts and directories
+
+| Identity | Definition |
+| --- | --- |
+| `_macserve_sign` | hidden non-login system account (UID 200–499), shell `/usr/bin/false`, password disabled, home `/Library/macserve/var/signer`, primary group `_macserve_sign` (its own GID); never in `staff`, `admin` or `wheel` |
+| `_macserve_signrpc` | RPC group with its own GID; members exactly the controller user and `_macserve_sign` |
+| job account | member of neither group; `create-users.sh` refuses if it is |
+
+The signer paths, owners and modes are listed in the [installation layout](#installation-layout). Every ancestor is root-owned and not group/world writable.
+
+**New installation.** Add the three system IDs to `deploy.env` (all three or none; canonical decimals 200–499, the two GIDs distinct and different from the controller/job GIDs):
+
+```sh
+SIGNER_UID=<unused system UID>
+SIGNER_GID=<unused system GID>
+SIGNRPC_GID=<unused system GID>
+```
+
+`deploy-install --apply` then passes `--signer-uid`, `--signer-gid` and `--signrpc-gid` to `create-users.sh`, which creates the account, both groups and the directories after the same collision checks as the service accounts, and verifies shell, home, groups and the exact `_macserve_signrpc` membership. It installs root:wheel `0644` `config/signer.json` (pinning the controller's job receipt key) and the disabled `org.macserve.signer.plist`, and finally runs, as the signer account,
+
+```sh
+sudo -u _macserve_sign /Library/macserve/bin/macserve signer-init --config /Library/macserve/config/signer.json
+```
+
+which creates (if absent) the Ed25519 signer receipt key, the keychain secret and the **empty** keychain and prints one JSON line `{"key_id":"...","public_key":"..."}`. `deploy-install` prints the matching controller.json `signer` section; add it to `/Library/macserve/config/controller.json` (see [configuration](configuration.md#code-signer)).
+
+**Existing installation.** From the reviewed release's `assets` directory, plan and then (as root, in an approved window) apply only the signer part; no terminal password prompt is involved:
+
+```sh
+bash assets/create-users.sh \
+  --controller-user "$CONTROLLER_USER" --controller-uid "$CONTROLLER_UID" --controller-gid "$CONTROLLER_GID" \
+  --job-user "$JOB_USER" --job-uid "$JOB_UID" --job-gid "$JOB_GID" \
+  --owner-user "$OWNER_USER" --owner-uid "$OWNER_UID" \
+  --signer-uid "$SIGNER_UID" --signer-gid "$SIGNER_GID" --signrpc-gid "$SIGNRPC_GID" --signer-only [--apply]
+```
+
+`--signer-only` checks that the named controller and job accounts are the installed ones and refuses existing signer paths. Then install, root:wheel `0644`, the reviewed `assets/launchd/org.macserve.signer.plist.tmpl` as `/Library/LaunchDaemons/org.macserve.signer.plist` (it has no markers) and write `/Library/macserve/config/signer.json` as described in [configuration](configuration.md#code-signer), with `receipt_keys` pinning `receipt_key_id`/`receipt_public_key` from `config/deployment-pins.json` and `key_id` `macserve-signer-<host_id>`. Run `signer-init` as above. Do not add `SIGNER_*` keys to the installed `deploy.env` of a `macserve setup` installation: setup verifies that file against the digest it recorded. Qualification detects the signer from `signer.json` or the controller `signer` section either way.
+
+### Importing the Apple Distribution identity (owner, interactive)
+
+The owner imports the `.p12` once, at the console, into the signer's keychain. The keychain password is the content of `keychain.secret`; read it with `sudo cat /Library/macserve/var/signer/keychain/keychain.secret` when prompted.
+
+```sh
+sudo -u _macserve_sign /usr/bin/security unlock-keychain /Library/macserve/var/signer/keychain/signing.keychain-db
+sudo -u _macserve_sign /usr/bin/security import /path/AppleDistribution.p12 -k /Library/macserve/var/signer/keychain/signing.keychain-db -f pkcs12 -T /usr/bin/codesign
+sudo -u _macserve_sign /usr/bin/security set-key-partition-list -S apple-tool:,apple: -s -k "$(sudo cat /Library/macserve/var/signer/keychain/keychain.secret)" /Library/macserve/var/signer/keychain/signing.keychain-db
+sudo -u _macserve_sign /usr/bin/security find-identity -v -p codesigning /Library/macserve/var/signer/keychain/signing.keychain-db
+```
+
+`import` prompts for the `.p12` password. `set-key-partition-list` puts the keychain secret in that command's argv for the duration of the call, visible to process listings on the host: this is an owner-only interactive step, run it only in an approved sitting with no other users or jobs active (keep services paused), and delete the `.p12` copy afterwards. `find-identity` must list the identity; its 40-hex SHA-1 goes into `signer-policy.json` `identity_sha1`.
+
+**Reboot behavior.** At every start the signer unlocks its keychain from `keychain.secret`, passing the secret to `security -i` on stdin, never in argv, and refuses to start if the configured `identity_sha1` is not in the keychain. A reboot therefore needs no owner action; a missing or replaced identity keeps the signer down until the owner re-imports it.
+
+### Admin policy and provisioning profiles
+
+`/Library/macserve/config/signer-policy.json` (root-owned, `0644`) is the only authority on what may be signed:
+
+```json
+{"identity_sha1": "<40 hex>",
+ "apps": {"com.example.app": {"profile_path": "/Library/macserve/signer-profiles/example.mobileprovision",
+                              "team_id": "ABCDE12345", "required_entitlements": ["aps-environment"]}}}
+```
+
+Place each App Store provisioning profile under `/Library/macserve/signer-profiles/` as a root `0644` file. An archive whose bundle ID is not in `apps`, whose team differs, or whose profile lacks a required entitlement is refused.
+
+### Requesting a signature
+
+Grant `release:sign` to the principal (in `principals[].scopes` of `controller.json`). For a succeeded `ios_archive` job, a caller holding `release:sign` that is the job's own principal or also holds `service:admin` calls `POST /v1/jobs/<id>/sign` (no body): `202` while signing (also when signing was already started), `200` once signed; a failed signing is retried by calling it again. Without `release:sign` the call is `403`; a job that has not finished is `409 result_not_ready`; a controller without a `signer` section answers `422`. The job's `state` never changes; the job view and `GET /v1/jobs/<id>/signing` carry `signing: {status: signing|signed|sign_failed, reason?, started_at, updated_at, artifacts?}`, where a signed job's `App.ipa` and `signer-receipt.json` are listed with their `/v1/jobs/<id>/artifacts/<sha256>` download links. `GET /v1/capabilities` publishes the signer receipt key as `signer: {key_id, public_key}`.
+
+### Enabling
+
+Enable `org.macserve.signer` only after `signer-init`, the identity import, `signer-policy.json` and the controller `signer` section are in place and a fresh qualification (which now includes the job probe's [`signer_denial`](architecture.md#code-signer-boundary) rows) has been approved. Adding the signer changes the anchored configuration (`config/` files and the signer plist), so the owner approves again.
 
 ## 7. Reboot, recovery and evidence-preserving cleanup
 
