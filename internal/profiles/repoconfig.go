@@ -300,12 +300,21 @@ func validateShards(key string, s *model.TestShards) error {
 // tests, and its one required artifact is the workspace output directory
 // (exported as output.tar.gz).
 //
+// An archive template's run is the unsigned Release xcodebuild archive for
+// any iOS device (see archiveRun) into ${WORKSPACE}/App.xcarchive at the
+// snapshot release's MARKETING_VERSION and CURRENT_PROJECT_VERSION. It has no
+// required tests; its required artifacts are App.xcarchive.tar and
+// signing-manifest.json, which the worker's trusted sealing step writes from
+// the archive after the job has stopped (nothing the job writes is exported
+// under those names).
+//
 // A Flutter template (one with a Flutter pin) serves only a configuration
 // with a flutter section, and a flutter section only a Flutter template. Its
-// recipe runs in app_dir: the fixed Flutter prepare (see flutterPrepare),
-// then a build template's run is the simulator build above on
-// ios/Runner.xcworkspace with ARCHS=arm64, and a test template's Xcode steps
-// are the ones above on ios/Runner.xcworkspace.
+// recipe runs in app_dir: the fixed Flutter prepare (see flutterPrepare; an
+// archive job's configuration step is the unsigned release one), then a
+// build template's run is the simulator build above on
+// ios/Runner.xcworkspace with ARCHS=arm64, and a test or archive template's
+// Xcode steps are the ones above on ios/Runner.xcworkspace.
 func Derive(snapshot model.Profile, c model.RepoConfig) (model.Profile, error) {
 	if snapshot.Template == nil {
 		return model.Profile{}, fmt.Errorf("%w: not a template job snapshot", ErrInvalid)
@@ -333,7 +342,7 @@ func Derive(snapshot model.Profile, c model.RepoConfig) (model.Profile, error) {
 		// Flutter commands run in app_dir, so Xcode names ios/<workspace>.
 		container = []string{"-workspace", path.Join("ios", c.Workspace)}
 		p.WorkDir = c.Flutter.AppDir
-		p.Prepare = flutterPrepare(*flutter, *c.Flutter)
+		p.Prepare = flutterPrepare(*flutter, *c.Flutter, snapshot.Release)
 	}
 	xcodebuild := func(args ...string) model.Command {
 		return model.Command{Executable: "/usr/bin/xcrun", Args: append(append([]string{"xcodebuild"}, container...), args...)}
@@ -345,6 +354,12 @@ func Derive(snapshot model.Profile, c model.RepoConfig) (model.Profile, error) {
 		p.Prepare = append(p.Prepare, xcodebuild("-scheme", c.Scheme, "-resolvePackageDependencies"))
 	}
 	switch snapshot.Kind {
+	case model.IOSArchive:
+		if snapshot.Shard != "" || snapshot.Simulator != nil || snapshot.Release == nil || ValidateRelease(*snapshot.Release, flutter != nil) != nil {
+			return model.Profile{}, fmt.Errorf("%w: ios_archive template snapshot lacks a valid release or has a shard or simulator", ErrInvalid)
+		}
+		p.Run = xcodebuild(archiveRun(c.Scheme, *snapshot.Release)...)
+		p.Artifacts = []model.ArtifactRule{{Path: ArchiveArtifact, Required: true}, {Path: SigningManifestArtifact, Required: true}}
 	case model.Build:
 		if snapshot.Shard != "" {
 			return model.Profile{}, fmt.Errorf("%w: build template snapshot has a shard", ErrInvalid)
