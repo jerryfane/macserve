@@ -77,6 +77,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runQualify(args[1:], stdout, stderr)
 	case "wait":
 		return runWait(args[1:], stdout, stderr)
+	case "testflight-upload":
+		return runTestflightUpload(args[1:], stdout, stderr)
 	default:
 		// Onboarding commands are listed in onboarding.go only, so adding
 		// or changing one never edits this dispatch again.
@@ -101,6 +103,7 @@ Commands:
   worker-persistence Inspect private registration candidates or accept an exact reviewed digest
   worker-quiescent Read-only: fail on any job process outside the audited GUI baseline
   wait        Request exact-head GitHub evidence and verify pinned receipts
+  testflight-upload Verify a signed ios_archive job's App.ipa and upload it to App Store Connect
   maintenance Observe qualified host boundaries and publish fail-closed health
   maintenance-observe Collect live qualification inputs without approving them
   deploy-install Plan or install reviewed disabled deployment assets
