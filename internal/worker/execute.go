@@ -172,7 +172,7 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 		}
 		if quietErr == nil && evidenceErr == nil && x.root != nil {
 			returned = errors.Join(returned, x.checkLockfiles(finalCtx))
-			if x.ranRecipe && job.Request.Kind != model.Build {
+			if x.ranRecipe && job.Request.Kind.Tests() {
 				returned = errors.Join(returned, x.testEvidence(finalCtx))
 			}
 		}
@@ -238,7 +238,12 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 	if err != nil {
 		return result, err
 	}
-	for _, dir := range []string{"checkout", "home", "tmp", "caches", "derived-data"} {
+	dirs := []string{"checkout", "home", "tmp", "caches", "derived-data"}
+	if job.Request.Kind == model.SimulatorScript {
+		// Created before prepare's workspace pass makes it job-owned.
+		dirs = append(dirs, outputDir)
+	}
+	for _, dir := range dirs {
 		if err := x.root.Mkdir(dir, 0700); err != nil {
 			return result, err
 		}
@@ -330,13 +335,36 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 		}
 	}
 	x.ranRecipe = true
-	returned = x.recipe(ctx, x.job.Profile.Run)
+	returned = x.recipe(ctx, x.job.Profile.Run, x.runEnvironment()...)
 	return result, returned
 }
 
+// outputDir is the workspace directory whose files a script job exports, at
+// most maxOutputDepth path components below it.
+const (
+	outputDir      = "output"
+	maxOutputDepth = 8
+)
+
+// runEnvironment is what a script job's run command adds to environment: the
+// products directory of its prepare build, its booted simulator, the output
+// directory it exports and the job ID. Other kinds add nothing.
+func (x *execution) runEnvironment() []string {
+	if x.job.Request.Kind != model.SimulatorScript {
+		return nil
+	}
+	return []string{
+		"MACSERVE_APP_DIR=" + filepath.Join(x.workspace, "derived-data", "Build", "Products", "Debug-iphonesimulator"),
+		"MACSERVE_SIMULATOR_ID=" + x.manifest.DeviceUDID,
+		"MACSERVE_OUTPUT=" + filepath.Join(x.workspace, outputDir),
+		"MACSERVE_JOB_ID=" + x.job.ID,
+	}
+}
+
 // prepareBudget bounds source extraction, the simulator and every prepare
-// command, always within the job deadline. A test job's prepare may include a
-// template's build-for-testing, so test kinds get 30 minutes; builds keep 10.
+// command, always within the job deadline. A test or script job's prepare may
+// include a template's build-for-testing or build, so those kinds get 30
+// minutes; builds keep 10.
 func prepareBudget(kind model.Kind) time.Duration {
 	if kind == model.Build {
 		return 10 * time.Minute
@@ -459,7 +487,9 @@ func (x *execution) observe(ctx context.Context) error {
 	return err
 }
 
-func (x *execution) recipe(ctx context.Context, recipe model.Command) error {
+// recipe runs one recipe command in the work directory with the job
+// environment plus env.
+func (x *execution) recipe(ctx context.Context, recipe model.Command, env ...string) error {
 	replacement := strings.NewReplacer("${CHECKOUT}", filepath.Join(x.workspace, "checkout"), "${WORKSPACE}", x.workspace, "${DERIVED_DATA}", filepath.Join(x.workspace, "derived-data"), "${RESULT_BUNDLE}", filepath.Join(x.workspace, "results.xcresult"), "${SIMULATOR_ID}", x.manifest.DeviceUDID, "${JOB_ID}", x.job.ID, "${DEVELOPER_DIR}", x.job.Profile.DeveloperDir)
 	args := make([]string, len(recipe.Args))
 	for i, arg := range recipe.Args {
@@ -483,7 +513,7 @@ func (x *execution) recipe(ctx context.Context, recipe model.Command) error {
 	}
 	if isXcode {
 		filtered := make([]string, 0, len(args)+8)
-		testing := x.job.Request.Kind != model.Build
+		testing := x.job.Request.Kind.Tests()
 		for i := 0; i < len(args); i++ {
 			arg := args[i]
 			if arg == "test" || arg == "test-without-building" {
@@ -518,6 +548,7 @@ func (x *execution) recipe(ctx context.Context, recipe model.Command) error {
 		return errors.New("recipe working directory does not exist")
 	}
 	command := x.command(executable, args)
+	command.Env = append(command.Env, env...)
 	command.Dir = filepath.Join(x.workspace, filepath.FromSlash(work))
 	outcome, err := x.invoke(ctx, command, x.stdout, x.stderr)
 	x.result.ExitCode = &outcome.ExitCode
@@ -716,12 +747,12 @@ func (x *execution) collect(ctx context.Context) error {
 	dest := filepath.Join(x.engine.options.ExportRoot, x.job.ID)
 	remaining := x.engine.options.MaxArtifactBytes
 	var failures []error
-	collect := func(source string, rules []model.ArtifactRule) {
+	export := func(selection func(evidence.Limits) ([]evidence.Artifact, error)) {
 		if remaining <= 0 {
 			failures = append(failures, errors.New("artifact budget exhausted"))
 			return
 		}
-		artifacts, err := evidence.Collect(ctx, source, rules, dest, evidence.Limits{MaxTotalBytes: remaining, MaxFileBytes: remaining, MaxEntries: maxArchiveEntries}, x.engine.options.Now())
+		artifacts, err := selection(evidence.Limits{MaxTotalBytes: remaining, MaxFileBytes: remaining, MaxEntries: maxArchiveEntries})
 		if err != nil {
 			failures = append(failures, err)
 			return
@@ -730,6 +761,11 @@ func (x *execution) collect(ctx context.Context) error {
 			remaining -= artifact.SizeBytes
 		}
 		x.result.Artifacts = append(x.result.Artifacts, artifacts...)
+	}
+	collect := func(source string, rules []model.ArtifactRule) {
+		export(func(limits evidence.Limits) ([]evidence.Artifact, error) {
+			return evidence.Collect(ctx, source, rules, dest, limits, x.engine.options.Now())
+		})
 	}
 	// Preserve raw logs even when required test or profile evidence is missing.
 	protectedEvidence := filepath.Join(x.engine.options.Root, "evidence", x.job.ID)
@@ -749,6 +785,12 @@ func (x *execution) collect(ctx context.Context) error {
 		junit, err := evidence.JUnit(*x.result.Summary)
 		failures = append(failures, err, x.writeEvidence("junit.xml", junit))
 		collect(protectedEvidence, []model.ArtifactRule{{Path: "evidence/tests.json", Required: true}, {Path: "evidence/summary.json", Required: true}, {Path: "evidence/junit.xml", Required: true}})
+	}
+	// A script job's outputs are every regular file it left under output/.
+	if x.job.Request.Kind == model.SimulatorScript {
+		export(func(limits evidence.Limits) ([]evidence.Artifact, error) {
+			return evidence.CollectTree(ctx, x.workspace, outputDir, maxOutputDepth, dest, limits, x.engine.options.Now())
+		})
 	}
 	// Artifact rules are workspace-relative, including explicit checkout/... paths.
 	if len(x.job.Profile.Artifacts) > 0 {

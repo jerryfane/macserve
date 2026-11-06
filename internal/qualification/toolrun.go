@@ -51,8 +51,8 @@ type SourcePins struct {
 // SourcePin pins one profile's or template's source: a git archive stored
 // root-owned at sourcesDir/<sha256>.tar. A template pin also names the
 // repository the archive came from (its owner must be a template owner); the
-// archive must contain a valid .macserve.json. A test template pin also names
-// the .macserve.json shard the run executes; other pins must not.
+// archive must contain a valid .macserve.json. A test or script template pin
+// also names the .macserve.json shard the run executes; other pins must not.
 type SourcePin struct {
 	Profile   string `json:"profile"`
 	Repo      string `json:"repo,omitempty"`
@@ -175,7 +175,7 @@ func loadSourcePins(list []model.Profile) (SourcePins, string, error) {
 		}
 		if p.Template != nil {
 			if _, err := pinRequest(p, pin, 0); err != nil {
-				return pins, "", fmt.Errorf("qualification source pin for template %s must name a repository of a template owner, and a shard exactly when it is a test template: %w", p.ID, err)
+				return pins, "", fmt.Errorf("qualification source pin for template %s must name a repository of a template owner, and a shard exactly when it is a test or script template: %w", p.ID, err)
 			}
 		} else if pin.Shard != "" {
 			return pins, "", fmt.Errorf("qualification source pin for profile %s must not name a shard", p.ID)
@@ -185,7 +185,8 @@ func loadSourcePins(list []model.Profile) (SourcePins, string, error) {
 }
 
 // pinRequest is the admission request that runs a recipe on its pinned source.
-// A test template runs the pin's shard on the template's first simulator.
+// A test or script template runs the pin's shard on the template's first
+// simulator.
 func pinRequest(p model.Profile, pin SourcePin, timeoutSeconds int) (model.Admission, error) {
 	registry, err := profiles.ForSnapshot(p)
 	if err != nil {

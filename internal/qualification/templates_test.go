@@ -96,3 +96,31 @@ func TestTestTemplateSourcePinRunsItsShard(t *testing.T) {
 		t.Fatal("test template pin without a shard admitted")
 	}
 }
+
+// A script template's source pin also names its shard: the tool-evidence run
+// executes that script on the template's first simulator, whose pins tool
+// inspection checks; a pin without a shard does not admit.
+func TestScriptTemplateSourcePinRunsItsShard(t *testing.T) {
+	template := uiTemplate()
+	template.ID, template.Kind, template.DefaultTimeoutSeconds, template.MaxTimeoutSeconds = "org-ios-sim-script-v1", model.SimulatorScript, 3600, 7200
+	registry, err := profiles.New(nil, []model.Template{template})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := Challenge{Templates: registry.Templates(), Observation: maintenance.Observation{Profiles: registry.Digests()}}
+	recipe := c.recipes()[0]
+	pin := SourcePin{Profile: recipe.ID, Repo: "themartianapp/herdrup", Shard: "duo", Commit: strings.Repeat("a", 40), Tree: strings.Repeat("b", 40), SHA256: strings.Repeat("c", 64), SizeBytes: 1}
+	admission, err := pinRequest(recipe, pin, 3600)
+	if err != nil || admission.Request.Kind != model.SimulatorScript || admission.Request.Shard != "duo" || admission.Request.Simulator == nil || *admission.Request.Simulator != template.Simulators[0] || admission.Profile.Shard != "duo" || admission.ProfileDigest != c.Observation.Profiles[recipe.ID] {
+		t.Fatalf("script template pin admission %+v %v", admission, err)
+	}
+	unsharded := pin
+	unsharded.Shard = ""
+	if _, err := pinRequest(recipe, unsharded, 3600); err == nil {
+		t.Fatal("script template pin without a shard admitted")
+	}
+	pins, _ := simulatorPins(c, template.DeveloperDir)
+	if len(pins) != len(template.Simulators) || pins[0] != template.Simulators[0] {
+		t.Fatalf("script template simulator pins not inspected: %+v", pins)
+	}
+}

@@ -57,9 +57,9 @@ type Registry struct {
 }
 
 // New validates and normalizes copies of controller-approved profiles and
-// templates. Missing timeouts default to 1800 seconds (2400 for UI tests), with
-// a 3600-second maximum; missing memory budgets default to 32768 MiB. It does
-// not probe installed tools.
+// templates. Missing timeouts default to 1800 seconds (2400 for UI tests, 3600
+// for scripts), with a 3600-second maximum (7200 for scripts); missing memory
+// budgets default to 32768 MiB. It does not probe installed tools.
 func New(profiles []model.Profile, templates []model.Template) (*Registry, error) {
 	r := &Registry{entries: make([]entry, 0, len(profiles)), byID: make(map[string]int, len(profiles)), byTmplID: make(map[string]int, len(templates))}
 	for _, original := range profiles {
@@ -147,7 +147,7 @@ func Load(filename string) (*Registry, error) {
 // A template ID admits any repository of a template owner that has no
 // explicit profile of the same kind: explicit profiles keep precedence.
 func (r *Registry) Resolve(request model.Request) (model.Admission, error) {
-	if !supportedKind(request.Kind) {
+	if !request.Kind.Known() {
 		return model.Admission{}, fmt.Errorf("%w: job kind", ErrUnsupported)
 	}
 	if !validRepo(request.Repo) || !shaPattern.MatchString(request.SHA) || !idPattern.MatchString(request.Profile) || request.TimeoutSeconds < 0 {
@@ -168,7 +168,7 @@ func (r *Registry) Resolve(request model.Request) (model.Admission, error) {
 		return model.Admission{}, fmt.Errorf("%w: repository, kind or toolchain pins", ErrUnsupported)
 	}
 	if request.Shard != "" {
-		return model.Admission{}, fmt.Errorf("%w: only test templates accept a shard", ErrUnsupported)
+		return model.Admission{}, fmt.Errorf("%w: only test and script templates accept a shard", ErrUnsupported)
 	}
 	if request.TimeoutSeconds == 0 {
 		request.TimeoutSeconds = p.DefaultTimeoutSeconds
@@ -194,16 +194,16 @@ func (r *Registry) resolveTemplate(request model.Request) (model.Admission, erro
 	if request.Kind != t.Kind || request.Xcode != t.Xcode {
 		return model.Admission{}, fmt.Errorf("%w: repository, kind or toolchain pins", ErrUnsupported)
 	}
-	if t.Kind == model.Build {
+	if !t.Kind.UsesSimulator() {
 		if request.Simulator != nil {
 			return model.Admission{}, fmt.Errorf("%w: repository, kind or toolchain pins", ErrUnsupported)
 		}
 		if request.Shard != "" {
-			return model.Admission{}, fmt.Errorf("%w: only test templates accept a shard", ErrUnsupported)
+			return model.Admission{}, fmt.Errorf("%w: only test and script templates accept a shard", ErrUnsupported)
 		}
 	} else {
 		if request.Shard == "" {
-			return model.Admission{}, fmt.Errorf("%w: test templates require a shard", ErrInvalid)
+			return model.Admission{}, fmt.Errorf("%w: test and script templates require a shard", ErrInvalid)
 		}
 		// The device is fixed at admission: an omitted simulator is the
 		// template's first pin, any other must be one of its pins.
@@ -232,8 +232,8 @@ func (r *Registry) resolveTemplate(request model.Request) (model.Admission, erro
 
 // TemplateSnapshot is the admitted recipe snapshot of a template job for repo:
 // the template's identity, pins and budgets with no recipe commands, which the
-// worker derives from the repository's .macserve.json. Admission of a test
-// template job adds the request's simulator and shard.
+// worker derives from the repository's .macserve.json. Admission of a test or
+// script template job adds the request's simulator and shard.
 func TemplateSnapshot(t model.Template, repo string) model.Profile {
 	snapshot := cloneTemplate(t)
 	return model.Profile{ID: t.ID, Version: t.Version, Repo: repo, Kind: t.Kind, Xcode: t.Xcode, DeveloperDir: t.DeveloperDir, DefaultTimeoutSeconds: t.DefaultTimeoutSeconds, MaxTimeoutSeconds: t.MaxTimeoutSeconds, MemoryLimitMiB: t.MemoryLimitMiB, Template: &snapshot}
@@ -278,9 +278,9 @@ func normalizeTemplate(t *model.Template) error {
 		if len(t.Simulators) != 0 {
 			return fmt.Errorf("%w: build templates pin no simulator", ErrInvalid)
 		}
-	case model.UnitTest, model.SimulatorUITest:
+	case model.UnitTest, model.SimulatorUITest, model.SimulatorScript:
 		if len(t.Simulators) == 0 || len(t.Simulators) > 4 {
-			return fmt.Errorf("%w: test templates pin one to four simulators", ErrInvalid)
+			return fmt.Errorf("%w: test and script templates pin one to four simulators", ErrInvalid)
 		}
 		for i, s := range t.Simulators {
 			if !validSimulator(s) || slices.Contains(t.Simulators[:i], s) {
@@ -288,7 +288,7 @@ func normalizeTemplate(t *model.Template) error {
 			}
 		}
 	default:
-		return fmt.Errorf("%w: templates support only build, unit_test and simulator_ui_test jobs", ErrUnsupported)
+		return fmt.Errorf("%w: templates support only build, unit_test, simulator_ui_test and simulator_script jobs", ErrUnsupported)
 	}
 	if len(t.Owners) == 0 {
 		return fmt.Errorf("%w: at least one owner is required", ErrInvalid)
@@ -315,8 +315,11 @@ func normalizeProfile(p *model.Profile) error {
 		return fmt.Errorf("%w: ID, version or repository", ErrInvalid)
 	}
 	p.Repo = strings.ToLower(p.Repo)
-	if !supportedKind(p.Kind) {
+	if !p.Kind.Known() {
 		return fmt.Errorf("%w: job kind", ErrUnsupported)
+	}
+	if p.Kind == model.SimulatorScript {
+		return fmt.Errorf("%w: simulator_script jobs run only from templates", ErrUnsupported)
 	}
 	if !versionPattern.MatchString(p.Xcode.Version) || !buildPattern.MatchString(p.Xcode.Build) {
 		return fmt.Errorf("%w: exact Xcode version and build required", ErrInvalid)
@@ -327,7 +330,7 @@ func normalizeProfile(p *model.Profile) error {
 	if p.Simulator != nil && !validSimulator(*p.Simulator) {
 		return fmt.Errorf("%w: exact simulator runtime, build and device type required", ErrInvalid)
 	}
-	if p.Kind != model.Build && (p.Simulator == nil || len(p.RequiredTests) == 0) {
+	if p.Kind.Tests() && (p.Simulator == nil || len(p.RequiredTests) == 0) {
 		return fmt.Errorf("%w: test jobs require a simulator and required tests", ErrInvalid)
 	}
 	for _, test := range p.RequiredTests {
@@ -359,14 +362,17 @@ func normalizeProfile(p *model.Profile) error {
 func normalizeBudgets(kind model.Kind, defaultTimeout, maxTimeout, memory *int) error {
 	if *defaultTimeout == 0 {
 		*defaultTimeout = 1800
-		if kind == model.SimulatorUITest {
+		switch kind {
+		case model.SimulatorUITest:
 			*defaultTimeout = 2400
+		case model.SimulatorScript:
+			*defaultTimeout = 3600
 		}
 	}
 	if *maxTimeout == 0 {
-		*maxTimeout = 3600
+		*maxTimeout = kind.MaxTimeoutSeconds()
 	}
-	if *defaultTimeout < 1 || *maxTimeout < 1 || *maxTimeout > 3600 || *defaultTimeout > *maxTimeout {
+	if *defaultTimeout < 1 || *maxTimeout < 1 || *maxTimeout > kind.MaxTimeoutSeconds() || *defaultTimeout > *maxTimeout {
 		return fmt.Errorf("%w: timeout limits", ErrInvalid)
 	}
 	if *memory == 0 {
@@ -376,10 +382,6 @@ func normalizeBudgets(kind model.Kind, defaultTimeout, maxTimeout, memory *int) 
 		return fmt.Errorf("%w: memory limit", ErrInvalid)
 	}
 	return nil
-}
-
-func supportedKind(kind model.Kind) bool {
-	return kind == model.Build || kind == model.UnitTest || kind == model.SimulatorUITest
 }
 
 func validSimulator(s model.Simulator) bool {

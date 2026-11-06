@@ -47,9 +47,9 @@ func inspectTools(ctx context.Context, c Challenge, developer string) (bool, str
 }
 
 // simulatorPins returns the simulator pins of the recipes that use developer:
-// each explicit profile's, and every pin of each test template (a job may
-// select any of them at admission); and the SDKs to inspect for them, always
-// with macosx, sorted and unique.
+// each explicit profile's, and every pin of each test or script template (a
+// job may select any of them at admission); and the SDKs to inspect for them,
+// always with macosx, sorted and unique.
 func simulatorPins(c Challenge, developer string) ([]model.Simulator, []string) {
 	var pins []model.Simulator
 	for _, p := range c.Profiles {

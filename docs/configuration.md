@@ -28,6 +28,27 @@ high-entropy bearer credentials belong in the caller's private credential storag
   Poll `GET /v1/admin/state` until `quiescent=true` before benchmarking; acceptance of pause is not quiescence.
   `DELETE /v1/admin/pause` clears only manual pause. An optional owner-controlled pause marker also blocks dispatch.
 
+Job kinds are `build`, `unit_test`, `simulator_ui_test` and `simulator_script`; the last runs only from an org
+template. A `simulator_script` request names a `shard` of the repository's `.macserve.json` `script` section,
+`{"script": {"shards": {"duo": {"run": "Tools/ci/duo-screenshots.sh"}}}}`, where `run` is a relative path
+(no absolute path, `..`, empty or `.` component) resolved against `work_dir`; an omitted simulator is the
+template's first pin. The worker builds the scheme for that simulator
+(`xcrun xcodebuild … -destination id=${SIMULATOR_ID} -derivedDataPath ${DERIVED_DATA} build`) and then runs
+`/bin/bash <work_dir>/<run>` in `work_dir` with `PATH` unchanged and exactly these additions:
+
+| Variable | Value |
+| --- | --- |
+| `MACSERVE_APP_DIR` | `${DERIVED_DATA}/Build/Products/Debug-iphonesimulator` |
+| `MACSERVE_SIMULATOR_ID` | UDID of the job's booted simulator |
+| `MACSERVE_OUTPUT` | `<workspace>/output`, created job-writable before the run |
+| `MACSERVE_JOB_ID` | the job ID |
+
+Exit 0 is success. Every regular file the script leaves under `MACSERVE_OUTPUT`, at most 8 levels deep, is
+listed by `/artifacts` as `output/<path>` and downloaded from `/artifacts/{artifact_id}`; symlinks are skipped,
+and the usual artifact count and size budgets apply. Script jobs have no `/results` test evidence. They default
+to a 3600-second timeout with a 7200-second maximum and a 30-minute preparation budget. The full
+`.macserve.json` rules are in [install.md](install.md#onboarding-a-repository).
+
 The controller requires schema-3 root-owned health attestation bound to job UID and qualified profile
 digests, not interface inventory or PF policy/rules. VM bridge/address churn does not invalidate health
 or cancel work. Health expires within 45 seconds; missing, stale or changed non-network host/tool

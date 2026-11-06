@@ -16,15 +16,13 @@ import (
 )
 
 func requestBytes(request model.Request) ([]byte, string, error) {
-	if !validSHA(request.SHA) || !validRepo(request.Repo) || !validOpaque(request.Profile, 256) || !validOpaque(request.Xcode.Version, 128) || !validOpaque(request.Xcode.Build, 128) || request.TimeoutSeconds <= 0 || request.TimeoutSeconds > 3600 || request.Context.PullRequest < 0 {
+	if !validSHA(request.SHA) || !validRepo(request.Repo) || !validOpaque(request.Profile, 256) || !validOpaque(request.Xcode.Version, 128) || !validOpaque(request.Xcode.Build, 128) || request.TimeoutSeconds <= 0 || request.TimeoutSeconds > request.Kind.MaxTimeoutSeconds() || request.Context.PullRequest < 0 {
 		return nil, "", ErrInvalid
 	}
-	switch request.Kind {
-	case model.Build, model.UnitTest, model.SimulatorUITest:
-	default:
+	if !request.Kind.Known() {
 		return nil, "", ErrInvalid
 	}
-	if request.Kind != model.Build && request.Simulator == nil {
+	if request.Kind.UsesSimulator() && request.Simulator == nil {
 		return nil, "", ErrInvalid
 	}
 	if request.Shard != "" && !validOpaque(request.Shard, 32) {
@@ -76,25 +74,26 @@ func validRepo(repo string) bool {
 
 func profileBytes(admission model.Admission) ([]byte, error) {
 	request, profile := admission.Request, admission.Profile
-	if profile.ID != request.Profile || profile.Repo != request.Repo || profile.Kind != request.Kind || profile.Xcode != request.Xcode || profile.Version <= 0 || profile.DefaultTimeoutSeconds <= 0 || profile.MaxTimeoutSeconds < profile.DefaultTimeoutSeconds || profile.MaxTimeoutSeconds > 3600 || request.TimeoutSeconds > profile.MaxTimeoutSeconds || profile.MemoryLimitMiB <= 0 || !validOpaque(profile.DeveloperDir, 4096) {
+	if profile.ID != request.Profile || profile.Repo != request.Repo || profile.Kind != request.Kind || profile.Xcode != request.Xcode || profile.Version <= 0 || profile.DefaultTimeoutSeconds <= 0 || profile.MaxTimeoutSeconds < profile.DefaultTimeoutSeconds || profile.MaxTimeoutSeconds > profile.Kind.MaxTimeoutSeconds() || request.TimeoutSeconds > profile.MaxTimeoutSeconds || profile.MemoryLimitMiB <= 0 || !validOpaque(profile.DeveloperDir, 4096) {
 		return nil, ErrInvalid
 	}
 	if t := profile.Template; t != nil {
 		// A template snapshot carries no recipe: the worker derives it from the
 		// repository's .macserve.json. Everything else must come from the
-		// template, and a test template's simulator and shard from the request.
+		// template, and a test or script template's simulator and shard from the
+		// request.
 		owner, _, _ := strings.Cut(request.Repo, "/")
 		if t.ID != profile.ID || t.Version != profile.Version || t.Kind != profile.Kind || t.Xcode != profile.Xcode || t.DeveloperDir != profile.DeveloperDir || t.DefaultTimeoutSeconds != profile.DefaultTimeoutSeconds || t.MaxTimeoutSeconds != profile.MaxTimeoutSeconds || t.MemoryLimitMiB != profile.MemoryLimitMiB || !slices.Contains(t.Owners, owner) || profile.WorkDir != "" || len(profile.Prepare) != 0 || profile.Run.Executable != "" || len(profile.Run.Args) != 0 || len(profile.GeneratedFiles) != 0 || len(profile.Artifacts) != 0 || len(profile.RequiredTests) != 0 || profile.Shard != request.Shard {
 			return nil, ErrInvalid
 		}
-		if t.Kind == model.Build {
+		if !t.Kind.UsesSimulator() {
 			if profile.Simulator != nil || profile.Shard != "" {
 				return nil, ErrInvalid
 			}
 		} else if profile.Simulator == nil || !slices.Contains(t.Simulators, *profile.Simulator) || profile.Shard == "" {
 			return nil, ErrInvalid
 		}
-	} else if !validOpaque(profile.Run.Executable, 4096) || profile.Shard != "" || request.Shard != "" {
+	} else if !validOpaque(profile.Run.Executable, 4096) || profile.Shard != "" || request.Shard != "" || profile.Kind == model.SimulatorScript {
 		return nil, ErrInvalid
 	}
 	if (request.Simulator == nil) != (profile.Simulator == nil) || request.Simulator != nil && *request.Simulator != *profile.Simulator {

@@ -93,9 +93,9 @@ func prepare(o *Options) error {
 	}
 	switch o.Expected.Kind {
 	case model.Build, model.UnitTest:
-	case model.SimulatorUITest:
+	case model.SimulatorUITest, model.SimulatorScript:
 		if o.Expected.Simulator == nil {
-			return errors.New("UI evidence requires pinned simulator identity")
+			return errors.New("UI and script evidence requires pinned simulator identity")
 		}
 	default:
 		return errors.New("waiter requires a pinned job kind")

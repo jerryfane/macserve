@@ -14,7 +14,35 @@ const (
 	Build           Kind = "build"
 	UnitTest        Kind = "unit_test"
 	SimulatorUITest Kind = "simulator_ui_test"
+	// SimulatorScript builds the scheme for the job's simulator and runs one
+	// repository script on it; the files it writes under the job's output
+	// directory are its artifacts. It has no test evidence.
+	SimulatorScript Kind = "simulator_script"
 )
+
+// Known reports whether k is one of the four job kinds.
+func (k Kind) Known() bool {
+	return k == Build || k.UsesSimulator()
+}
+
+// Tests reports whether jobs of kind k run xcodebuild tests: they carry
+// xcresult test evidence and required tests.
+func (k Kind) Tests() bool {
+	return k == UnitTest || k == SimulatorUITest
+}
+
+// UsesSimulator reports whether jobs of kind k run on a pinned simulator.
+func (k Kind) UsesSimulator() bool {
+	return k.Tests() || k == SimulatorScript
+}
+
+// MaxTimeoutSeconds is the largest job timeout a recipe of kind k may allow.
+func (k Kind) MaxTimeoutSeconds() int {
+	if k == SimulatorScript {
+		return 7200
+	}
+	return 3600
+}
 
 type State string
 
@@ -81,7 +109,7 @@ type Request struct {
 	Profile        string         `json:"profile"`
 	Xcode          Xcode          `json:"xcode"`
 	Simulator      *Simulator     `json:"simulator,omitempty"`
-	Shard          string         `json:"shard,omitempty"` // test templates only: the .macserve.json shard to run
+	Shard          string         `json:"shard,omitempty"` // test and script templates only: the .macserve.json shard to run
 	TimeoutSeconds int            `json:"timeout_seconds,omitempty"`
 	Context        RequestContext `json:"context,omitempty"`
 }
@@ -125,16 +153,16 @@ type Profile struct {
 	// the template and the repository's .macserve.json; configured profiles
 	// never carry it.
 	Template *Template `json:"template,omitempty"`
-	// Shard is the admitted request's shard on a test template job snapshot;
-	// configured profiles never carry it.
+	// Shard is the admitted request's shard on a test or script template job
+	// snapshot; configured profiles never carry it.
 	Shard string `json:"shard,omitempty"`
 }
 
 // Template is a controller-owned, owner-scoped recipe. Every repository of a
 // listed GitHub account may use it by declaring its Xcode project or workspace
-// and scheme, and for a test template its test shards, in .macserve.json; the
-// command line is fixed in code. A test template pins one to four simulators;
-// a build template pins none.
+// and scheme, and for a test or script template its shards, in .macserve.json;
+// the command line is fixed in code. A test or script template pins one to
+// four simulators; a build template pins none.
 type Template struct {
 	ID                    string      `json:"id"`
 	Version               int         `json:"version"`
@@ -149,18 +177,19 @@ type Template struct {
 }
 
 // RepoConfig is the parsed repository-root .macserve.json. It may only name
-// the work directory, project or workspace, scheme, two fixed steps and the
-// test shards of the test templates.
+// the work directory, project or workspace, scheme, two fixed steps, the test
+// shards of the test templates and the script shards of script templates.
 type RepoConfig struct {
-	Version         int         `json:"version"`
-	WorkDir         string      `json:"work_dir"`
-	Project         string      `json:"project,omitempty"`
-	Workspace       string      `json:"workspace,omitempty"`
-	Scheme          string      `json:"scheme"`
-	XcodeGen        bool        `json:"xcodegen,omitempty"`
-	ResolvePackages bool        `json:"resolve_packages,omitempty"`
-	UITest          *TestShards `json:"ui_test,omitempty"`
-	UnitTest        *TestShards `json:"unit_test,omitempty"`
+	Version         int           `json:"version"`
+	WorkDir         string        `json:"work_dir"`
+	Project         string        `json:"project,omitempty"`
+	Workspace       string        `json:"workspace,omitempty"`
+	Scheme          string        `json:"scheme"`
+	XcodeGen        bool          `json:"xcodegen,omitempty"`
+	ResolvePackages bool          `json:"resolve_packages,omitempty"`
+	UITest          *TestShards   `json:"ui_test,omitempty"`
+	UnitTest        *TestShards   `json:"unit_test,omitempty"`
+	Script          *ScriptShards `json:"script,omitempty"`
 }
 
 // TestShards maps each shard name to its -only-testing selectors,
@@ -169,9 +198,22 @@ type TestShards struct {
 	Shards map[string][]string `json:"shards"`
 }
 
+// ScriptShards maps each shard name of a script template to the script it
+// runs. Other kinds ignore them.
+type ScriptShards struct {
+	Shards map[string]ScriptShard `json:"shards"`
+}
+
+// ScriptShard names a script by its path relative to the work directory; the
+// worker runs it with /bin/bash.
+type ScriptShard struct {
+	Run string `json:"run"`
+}
+
 // RepoRecipe is the worker's evidence of what a template job ran: the digest of
 // the exact .macserve.json bytes, their parsed form, the derived commands and,
-// for a test template, the shard and its required tests.
+// for a test or script template, the shard (and a test template's required
+// tests).
 type RepoRecipe struct {
 	ConfigSHA256  string     `json:"config_sha256"`
 	Config        RepoConfig `json:"config"`
