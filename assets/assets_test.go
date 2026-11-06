@@ -455,3 +455,215 @@ func TestQualificationWrapperRejectsRawCommandsBeforeBinary(t *testing.T) {
 		}
 	}
 }
+
+func TestSignerLaunchDaemon(t *testing.T) {
+	data := render(t, "launchd/org.macserve.signer.plist.tmpl")
+	var root plistNode
+	if err := xml.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	if root.XMLName.Local != "plist" || len(root.Children) != 1 {
+		t.Fatal("invalid plist root")
+	}
+	fields := dictionary(t, root.Children[0])
+	if fields["Disabled"].XMLName.Local != "true" || fields["RunAtLoad"].XMLName.Local != "false" {
+		t.Fatal("signer must remain disabled")
+	}
+	keepAlive := dictionary(t, fields["KeepAlive"])
+	if len(keepAlive) != 1 || keepAlive["SuccessfulExit"].XMLName.Local != "false" {
+		t.Fatal("signer restarts only after a failed exit")
+	}
+	state := "/Library/macserve/var/signer"
+	for key, want := range map[string]string{
+		"Label": "org.macserve.signer", "UserName": "_macserve_sign", "GroupName": "_macserve_sign",
+		"WorkingDirectory": state, "ProcessType": "Background",
+		"StandardOutPath": state + "/log/signer.out.log", "StandardErrorPath": state + "/log/signer.err.log",
+	} {
+		if fields[key].XMLName.Local != "string" || fields[key].Text != want {
+			t.Fatalf("%s = %+v, want %s", key, fields[key], want)
+		}
+	}
+	args := fields["ProgramArguments"]
+	want := []string{"/Library/macserve/bin/macserve", "signer", "--config", "/Library/macserve/config/signer.json"}
+	if args.XMLName.Local != "array" || len(args.Children) != len(want) {
+		t.Fatal("invalid signer arguments")
+	}
+	for i, arg := range args.Children {
+		if arg.XMLName.Local != "string" || arg.Text != want[i] {
+			t.Fatalf("argument %d = %+v", i, arg)
+		}
+	}
+	if n, err := strconv.Atoi(fields["Umask"].Text); err != nil || fields["Umask"].XMLName.Local != "integer" || n != 63 {
+		t.Fatalf("unsafe Umask: %+v", fields["Umask"])
+	}
+	env := dictionary(t, fields["EnvironmentVariables"])
+	if len(env) != 2 || env["PATH"].Text != "/usr/bin:/bin:/usr/sbin:/sbin" || env["HOME"].Text != state {
+		t.Fatal("unsafe signer environment")
+	}
+}
+
+func signerArgs() []string {
+	return append(scriptArgs(), "--signer-uid", "401", "--signer-gid", "401", "--signrpc-gid", "402")
+}
+
+func TestSignerPlanAndInputRefusals(t *testing.T) {
+	for _, args := range [][]string{signerArgs(), append(signerArgs(), "--signer-only")} {
+		output, err := runScript(t, args)
+		if err != nil {
+			t.Fatalf("signer plan refused: %v: %s", err, output)
+		}
+		for _, want := range []string{"_macserve_sign uid=401", "_macserve_signrpc gid=402", "members servicecontrol and _macserve_sign only", "var/signer-run", "var/signer-inbox"} {
+			if !strings.Contains(output, want) {
+				t.Fatalf("plan lacks %q: %s", want, output)
+			}
+		}
+	}
+	if output, err := runScript(t, scriptArgs()); err != nil || strings.Contains(output, "_macserve_sign") {
+		t.Fatalf("plan without signer IDs mentions the signer: %v: %s", err, output)
+	}
+	base := scriptArgs()
+	for name, args := range map[string][]string{
+		"partial":           append(base, "--signer-uid", "401", "--signer-gid", "401"),
+		"only-without-ids":  append(base, "--signer-only"),
+		"duplicate-only":    append(signerArgs(), "--signer-only", "--signer-only"),
+		"shared-groups":     append(base, "--signer-uid", "401", "--signer-gid", "402", "--signrpc-gid", "402"),
+		"below-range":       append(base, "--signer-uid", "199", "--signer-gid", "401", "--signrpc-gid", "402"),
+		"service-range":     append(base, "--signer-uid", "501", "--signer-gid", "401", "--signrpc-gid", "402"),
+		"leading-zero":      append(base, "--signer-uid", "0401", "--signer-gid", "401", "--signrpc-gid", "402"),
+		"injected":          append(base, "--signer-uid", "401;id", "--signer-gid", "401", "--signrpc-gid", "402"),
+		"duplicate-rpc-gid": append(signerArgs(), "--signrpc-gid", "403"),
+	} {
+		if output, err := runScript(t, args); err == nil {
+			t.Fatalf("%s: unsafe signer input accepted: %s", name, output)
+		}
+	}
+}
+
+// The fixture models directory records like accountDirectoryFixture; the
+// controller and job accounts already exist, as in --signer-only.
+const signerDirectoryFixture = `
+source "$1"; shift
+scenario=$1; shift
+put_record() { printf '%s\n' "$3" > "${1//\//_}.$2"; }
+get_record() { local value; IFS= read -r value < "${1//\//_}.$2" || return 1; printf '%s\n' "$value"; }
+function /usr/bin/dscl() {
+    [ "$1" = . ] || return 91
+    case "$2" in
+        -create)
+            case "$#" in
+                3) put_record "$3" exists yes ;;
+                5)
+                    if [ "$scenario" = wrong-shell ] && [ "$4" = UserShell ]; then put_record "$3" "$4" /bin/zsh; else put_record "$3" "$4" "$5"; fi ;;
+                *) return 93 ;;
+            esac ;;
+        -read)
+            local value
+            value=$(get_record "$3" "$4") || return 95
+            printf '%s: %s\n' "$4" "$value" ;;
+        -list)
+            [ "$3 $4" = '/Groups GroupMembership' ] || return 96
+            local members=''
+            members=$(get_record /Groups/_macserve_signrpc members) || members=''
+            [ "$scenario" != extra-member ] || members="$members intruder"
+            printf '%s\n' 'staff root servicejob_neighbor' "_macserve_signrpc $members"
+            [ "$scenario" != signer-group-member ] || printf '%s\n' '_macserve_sign servicejob' ;;
+        *) return 98 ;;
+    esac
+}
+function /usr/sbin/dseditgroup() {
+    [ "$#" -eq 7 ] && [ "$1 $2 $3 $5 $6" = '-o edit -a -t user' ] || return 61
+    [ "$scenario" != add-error ] || return 62
+    local current=''
+    current=$(get_record "/Groups/$7" members) || current=''
+    put_record "/Groups/$7" members "${current:+$current }$4"
+}
+function /usr/bin/id() {
+    local gids members
+    case "$1" in
+        -u) get_record "/Users/$2" UniqueID ;;
+        -g) get_record "/Users/$2" PrimaryGroupID ;;
+        -G)
+            gids=$(get_record "/Users/$2" PrimaryGroupID) || return 71
+            members=$(get_record /Groups/_macserve_signrpc members) || members=''
+            case " $members " in *" $2 "*) gids="$gids 402" ;; esac
+            case "$scenario:$2" in
+                job-in-rpc:servicejob) gids="$gids 402" ;;
+                job-in-signer:servicejob) gids="$gids 401" ;;
+                signer-staff:_macserve_sign) gids="$gids 20" ;;
+                signer-job-group:_macserve_sign) gids="$gids 1602" ;;
+                controller-in-signer:servicecontrol) gids="$gids 401" ;;
+            esac
+            printf '%s\n' "$gids" ;;
+        *) return 72 ;;
+    esac
+}
+main "$@" >/dev/null
+put_record /Users/servicecontrol PrimaryGroupID 1601
+put_record /Users/servicejob PrimaryGroupID 1602
+create_signer
+# Hidden, password-disabled, nonlogin, with its own primary group.
+[ "$(get_record /Users/_macserve_sign Password)" = '*' ]
+[ "$(get_record /Users/_macserve_sign IsHidden)" = 1 ]
+[ "$(get_record /Users/_macserve_sign UniqueID)" = 401 ]
+[ "$(get_record /Groups/_macserve_sign PrimaryGroupID)" = 401 ]
+[ "$(get_record /Groups/_macserve_signrpc PrimaryGroupID)" = 402 ]
+[ "$(get_record /Groups/_macserve_signrpc Password)" = '*' ]
+validate_signer_accounts
+printf verified > signer-ready
+`
+
+func TestCreatedSignerAccounts(t *testing.T) {
+	script, err := filepath.Abs("create-users.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		scenario string
+		refuse   bool
+	}{
+		{"normal", false},
+		{"wrong-shell", true},
+		{"job-in-rpc", true},
+		{"job-in-signer", true},
+		{"signer-staff", true},
+		{"signer-job-group", true},
+		{"controller-in-signer", true},
+		{"extra-member", true},
+		{"signer-group-member", true},
+		{"add-error", true},
+	} {
+		t.Run(tc.scenario, func(t *testing.T) {
+			args := append([]string{"-c", signerDirectoryFixture, "signer-test", script, tc.scenario}, append(signerArgs(), "--signer-only")...)
+			cmd := exec.Command("/bin/bash", args...)
+			cmd.Dir = t.TempDir()
+			cmd.Env = []string{"PATH=/nonexistent", "HOME=" + cmd.Dir}
+			out, err := cmd.CombinedOutput()
+			if (err != nil) != tc.refuse {
+				t.Fatalf("refuse=%v, err=%v: %s", tc.refuse, err, out)
+			}
+			if _, readyErr := os.Stat(filepath.Join(cmd.Dir, "signer-ready")); (readyErr == nil) == tc.refuse {
+				t.Fatalf("provisioning gate did not match refusal: %v", readyErr)
+			}
+		})
+	}
+}
+
+func TestSignerOnlyApplyNeedsNoTerminalButRefusesOffDarwin(t *testing.T) {
+	script, err := filepath.Abs("create-users.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	program := `source "$1"; shift
+function /usr/bin/uname() { printf queried > host-inspected; printf 'Linux\n'; }
+main "$@"`
+	args := append([]string{"-c", program, "signer-only-test", script}, append(signerArgs(), "--signer-only", "--apply")...)
+	cmd := exec.Command("/bin/bash", args...)
+	cmd.Dir = t.TempDir()
+	cmd.Env = []string{"PATH=/nonexistent", "HOME=" + cmd.Dir}
+	if out, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(out), "requires Darwin") {
+		t.Fatalf("signer-only apply off Darwin: err=%v output=%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(cmd.Dir, "host-inspected")); err != nil {
+		t.Fatalf("signer-only apply should reach the Darwin gate without a terminal: %v", err)
+	}
+}

@@ -256,6 +256,9 @@ func Begin(ctx context.Context, o BeginOptions) error {
 	if c.BootSession, e = bootSession(); e != nil {
 		return e
 	}
+	if c.Signer, e = signerDeployed(env, cc.Signer != nil, deploy.SignerConfigPath); e != nil {
+		return e
+	}
 	if len(c.recipes()) > 0 {
 		if _, err := os.Lstat(sourcesPinsPath); err == nil {
 			if _, c.SourcesSHA256, e = loadSourcePins(c.recipes()); e != nil {
@@ -393,7 +396,7 @@ func checkReport(r Report, c Challenge, hash, role string) error {
 	}
 	nonces := map[string]bool{}
 	for _, row := range r.Results {
-		if !slices.Contains([]string{"network_reachability", "unix_socket_boundary", "owner_home_denial", "tool_profiles"}, row.Category) || (role == "owner" && (row.Category == "tool_profiles" || row.Category == "unix_socket_boundary")) || len(row.Detail) > 1<<20 {
+		if !slices.Contains([]string{"network_reachability", "unix_socket_boundary", "owner_home_denial", "tool_profiles", signerDenialCategory}, row.Category) || (role == "owner" && (row.Category == "tool_profiles" || row.Category == "unix_socket_boundary" || row.Category == signerDenialCategory)) || (row.Category == signerDenialCategory && !c.Signer) || len(row.Detail) > 1<<20 {
 			return errors.New("unexpected report category or oversized diagnostic")
 		}
 		if row.Nonce != "" {
@@ -644,7 +647,15 @@ func aggregate(c Challenge, j, o Report, receipts []Receipts, facts sittingFacts
 	out["network_reachability"] = network
 	paths := append([]string{c.Socket}, c.PrivatePaths...)
 	unix, xc := rows(j, "unix_socket_boundary", paths, 1)
-	set("unix_socket_boundary", unix, xc, 0, "permission denial required; protected ancestor denial does not claim a live worker socket/service was exercised")
+	reason := "permission denial required; protected ancestor denial does not claim a live worker socket/service was exercised"
+	// A deployed code signer is a unix socket boundary too: the job must be
+	// denied its state, keychain, RPC socket and inbox (signer_denial rows).
+	if c.Signer {
+		signerOK, sc := rows(j, signerDenialCategory, signerDenialTargets(), 1)
+		unix, xc = unix && signerOK, xc+sc
+		reason += "; signer_denial: the job is denied the signer state, keychain, RPC socket and inbox"
+	}
+	set("unix_socket_boundary", unix, xc, 0, reason)
 	homes := homeTargets(c)
 	home, hc := rows(j, "owner_home_denial", homes, 1)
 	homeOwner, hoc := rows(o, "owner_home_denial", homes, 1)

@@ -40,6 +40,19 @@ func ValidateSuccess(p Payload, e Expected) error {
 	return nil
 }
 
+// ValidateRelease must only be called on the Payload returned by Verify. It
+// accepts a receipt only as complete evidence of a succeeded ios_archive job:
+// ValidateSuccess against the receipt's own identity (the signer has no
+// independent job record), which for this kind requires the admitted
+// release, its GitHub App default-branch provenance consistent with the
+// repository and commit, and the signing manifest digest.
+func ValidateRelease(p Payload) error {
+	if p.Request.Kind != model.IOSArchive || p.Release == nil || p.ReleaseProvenance == nil {
+		return fmt.Errorf("%w: not an ios_archive release receipt", ErrInvalid)
+	}
+	return ValidateSuccess(p, expectedFor(p))
+}
+
 func incomplete(p Payload) []string {
 	missing := []string{}
 	require := func(ok bool, field string) {

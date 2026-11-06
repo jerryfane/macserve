@@ -122,13 +122,13 @@ func TestReleaseMigrationKeepsVersion3Jobs(t *testing.T) {
 	ctx := context.Background()
 	s, path := newStore(t, Options{})
 	old := enqueueJob(t, s, "principal", "old", testNow)
-	_, err := s.db.ExecContext(ctx, "ALTER TABLE jobs DROP COLUMN release_provenance; PRAGMA user_version=3;")
+	_, err := s.db.ExecContext(ctx, "DROP TABLE signings; ALTER TABLE jobs DROP COLUMN release_provenance; PRAGMA user_version=3;")
 	requireError(t, err, nil)
 	requireError(t, s.Close(), nil)
 	s = openStore(t, path, Options{})
 	var version int
 	requireError(t, s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version), nil)
-	if version != 4 {
+	if version != 5 {
 		t.Fatalf("user_version = %d", version)
 	}
 	if got := getJob(t, s, old.ID); got.ReleaseProvenance != nil || !reflect.DeepEqual(got, old) {
@@ -138,16 +138,17 @@ func TestReleaseMigrationKeepsVersion3Jobs(t *testing.T) {
 	if err != nil || job.ReleaseProvenance == nil || job.ReleaseProvenance.RepositoryID != 12345 {
 		t.Fatalf("archive after migration: %+v %v", job, err)
 	}
-	if _, err := s.db.ExecContext(ctx, "PRAGMA user_version=5"); err != nil {
+	if _, err := s.db.ExecContext(ctx, "PRAGMA user_version=6"); err != nil {
 		t.Fatal(err)
 	}
 	requireError(t, s.Close(), nil)
-	if _, err := Open(path, Options{}); err == nil || !strings.Contains(err.Error(), "unsupported store schema version 5") {
+	if _, err := Open(path, Options{}); err == nil || !strings.Contains(err.Error(), "unsupported store schema version 6") {
 		t.Fatalf("future schema opened: %v", err)
 	}
 }
 
-// release:archive is a grantable scope; an unknown release scope is not.
+// release:archive and release:sign are grantable scopes; an unknown release
+// scope is not.
 func TestPrincipalsAcceptReleaseArchiveScope(t *testing.T) {
 	ctx := context.Background()
 	s, _ := newStore(t, Options{})
@@ -156,10 +157,16 @@ func TestPrincipalsAcceptReleaseArchiveScope(t *testing.T) {
 	releaser := Principal{ID: "releaser", TokenSHA256: hex.EncodeToString(digest[:]), Repositories: []string{"example-org/*"}, Scopes: []string{"jobs:submit", "release:archive"}}
 	requireError(t, s.ReplacePrincipals(ctx, []Principal{releaser}), nil)
 	got, err := s.Authenticate(ctx, token)
-	if err != nil || !got.HasScope("release:archive") || !got.HasScope("jobs:submit") || got.HasScope("service:admin") {
+	if err != nil || !got.HasScope("release:archive") || !got.HasScope("jobs:submit") || got.HasScope("service:admin") || got.HasScope("release:sign") {
 		t.Fatalf("releaser = %+v, %v", got, err)
 	}
 	signer := releaser
 	signer.Scopes = []string{"release:sign"}
-	requireError(t, s.ReplacePrincipals(ctx, []Principal{signer}), ErrInvalid)
+	requireError(t, s.ReplacePrincipals(ctx, []Principal{signer}), nil)
+	if got, err := s.Authenticate(ctx, token); err != nil || !got.HasScope("release:sign") || got.HasScope("release:archive") {
+		t.Fatalf("signer = %+v, %v", got, err)
+	}
+	unknown := releaser
+	unknown.Scopes = []string{"release:upload"}
+	requireError(t, s.ReplacePrincipals(ctx, []Principal{unknown}), ErrInvalid)
 }

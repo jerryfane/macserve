@@ -15,8 +15,9 @@ The TLS 1.3 listener requires a literal assigned tailnet address and port. Allow
 `100.64.0.0/10` and `fd7a:115c:a1e0::/48`; configuration can narrow these ranges, not enable LAN/public,
 wildcard or loopback listeners. Client authorization is independent of network membership.
 Each principal has `id`, `token_sha256`, `repositories`, `scopes`, and optional `revoked`. Scopes are
-`jobs:submit`, `jobs:read`, `jobs:cancel`, `release:archive`, `service:admin`. Only SHA-256 digests are persisted; plaintext
+`jobs:submit`, `jobs:read`, `jobs:cancel`, `release:archive`, `release:sign`, `service:admin`. Only SHA-256 digests are persisted; plaintext
 high-entropy bearer credentials belong in the caller's private credential storage.
+Optional `signer` connects the controller to the [code signer](#code-signer).
 
 - `POST /v1/jobs` requires `Idempotency-Key` and a profile-matching exact-SHA request.
 - `GET /v1/capabilities` and `/v1/jobs` expose authorized profiles and jobs without controller recipes or paths.
@@ -27,6 +28,9 @@ high-entropy bearer credentials belong in the caller's private credential storag
 - `PUT /v1/admin/pause` accepts `{"reason":"benchmark","mode":"drain"}` or `cancel_active`.
   Poll `GET /v1/admin/state` until `quiescent=true` before benchmarking; acceptance of pause is not quiescence.
   `DELETE /v1/admin/pause` clears only manual pause. An optional owner-controlled pause marker also blocks dispatch.
+- `POST /v1/jobs/{id}/sign` (scope `release:sign`; the job's own principal or `service:admin`) signs a succeeded
+  `ios_archive` job through the code signer: `202` while signing, `200` once signed, a failed signing is retried.
+  `GET /v1/jobs/{id}/signing` reports the signing sub-status.
 
 Job kinds are `build`, `unit_test`, `simulator_ui_test`, `simulator_script` and `ios_archive`; the last two run only
 from an org template. A `simulator_script` request names a `shard` of the repository's `.macserve.json` `script` section,
@@ -150,3 +154,42 @@ Existing idempotent submissions replay read-only even when admission is unavaila
 a new submission and must pass current readiness and profiles. JSON field names are case-exact.
 Private API callers must independently approve repository-history membership of a SHA: exact-object fetch
 proves identity, not reachability from the allowlisted repository's own heads or tags.
+
+## Code signer
+
+The optional code signer (`macserve signer --config /Library/macserve/config/signer.json`, account `_macserve_sign`)
+signs `ios_archive` results; see [install.md](install.md#code-signer-optional-signed-testflight). Its configuration,
+the admin policy and the controller section are root-owned `0644` files with unknown fields rejected.
+
+`signer.json` (written by `deploy-install` when `deploy.env` sets `SIGNER_UID`, `SIGNER_GID` and `SIGNRPC_GID`):
+
+| Key | Value |
+| --- | --- |
+| `signer_uid`, `signer_gid` | the `_macserve_sign` UID and its dedicated primary GID |
+| `rpc_gid` | the `_macserve_signrpc` GID (members: controller and signer only) |
+| `controller_uid` | the only peer UID the signer socket serves |
+| `job_uid`, `job_gid` | the job account, which must never share a signer group |
+| `state_dir` | `/Library/macserve/var/signer` |
+| `socket` | `/Library/macserve/var/signer-run/signer.sock` |
+| `inbox` | `/Library/macserve/var/signer-inbox` |
+| `keychain` | `/Library/macserve/var/signer/keychain/signing.keychain-db` |
+| `keychain_secret_file` | `/Library/macserve/var/signer/keychain/keychain.secret` |
+| `key_file` | `/Library/macserve/var/signer/key/signer-receipt.key` (Ed25519 seed PEM, created by `signer-init`) |
+| `key_id` | signer receipt key ID, `macserve-signer-<host_id>` |
+| `receipt_keys` | `{"<controller receipt key_id>": "<base64 Ed25519 public key>"}`: the controller job receipt keys whose receipts the signer accepts |
+| `policy_file` | `/Library/macserve/config/signer-policy.json` |
+
+`signer-policy.json` (written by the owner):
+
+| Key | Value |
+| --- | --- |
+| `identity_sha1` | SHA-1 of the Apple Distribution identity in the signer keychain (40 hex digits, either case) |
+| `apps` | object keyed by the bundle ID of the app and of each app extension it embeds |
+| `apps.<bundle_id>.profile_path` | absolute path of the App Store provisioning profile, kept in `/Library/macserve/signer-profiles/` |
+| `apps.<bundle_id>.team_id` | the 10-character Apple team ID the profile and identity must match |
+| `apps.<bundle_id>.required_entitlements` | entitlement keys the profile must grant, for example `aps-environment` |
+
+Controller `signer` section (printed by `deploy-install` from `signer-init`'s `{"key_id","public_key"}` line):
+`{"signer":{"socket":"/Library/macserve/var/signer-run/signer.sock","uid":<signer UID>,"rpc_gid":<_macserve_signrpc GID>,"inbox":"/Library/macserve/var/signer-inbox","key_id":"<signer key_id>","public_key":"<base64>"}}`.
+The controller checks the socket peer is `uid` on every connection and pins the signer receipt key. Without the
+section, `POST /v1/jobs/{id}/sign` reports signing unavailable.

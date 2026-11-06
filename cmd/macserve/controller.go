@@ -96,7 +96,12 @@ func serveController(parent context.Context, config controller.Config) error {
 		return err
 	}
 	defer exporter.Close()
-	runtime, err := controller.New(controller.Options{Root: config.Root, Socket: config.Socket, BrokerUID: 0, Store: db, Source: exporter, Gate: guard.Check, BeforeDispatch: integrations.beforeDispatch, Seal: integrations.signer.Seal, PruneReceipts: integrations.pruneReceipts})
+	controllerOptions := controller.Options{Root: config.Root, Socket: config.Socket, BrokerUID: 0, Store: db, Source: exporter, Gate: guard.Check, BeforeDispatch: integrations.beforeDispatch, Seal: integrations.signer.Seal, PruneReceipts: integrations.pruneReceipts}
+	signerKey, err := signerOptions(config, &controllerOptions)
+	if err != nil {
+		return err
+	}
+	runtime, err := controller.New(controllerOptions)
 	if err != nil {
 		return err
 	}
@@ -109,6 +114,9 @@ func serveController(parent context.Context, config controller.Config) error {
 	// job must build; without one, archive admission is refused.
 	if integrations.app != nil {
 		apiOptions.BranchHeads = integrations.app
+	}
+	if signerKey != nil {
+		apiOptions.Sign, apiOptions.SignerKey = runtime.Sign, signerKey
 	}
 	handler, err := api.New(apiOptions)
 	if err != nil {

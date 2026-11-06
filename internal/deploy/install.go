@@ -21,6 +21,7 @@ import (
 	"github.com/jerryfane/macserve/internal/hostguard"
 	"github.com/jerryfane/macserve/internal/maintenance"
 	"github.com/jerryfane/macserve/internal/profiles"
+	"github.com/jerryfane/macserve/internal/signer"
 	"github.com/jerryfane/macserve/internal/workerclient"
 )
 
@@ -85,7 +86,10 @@ func Install(o Options, stdout, stderr io.Writer) error {
 		return err
 	}
 	if !o.Apply {
-		_, err := fmt.Fprintf(stdout, "PLAN ONLY: verified binary SHA256 %s.\nController: %s uid=%d gid=%d\nJob GUI: %s uid=%d gid=%d real-name=%q\nOwner: %s uid=%d\nTLS listener: %s port=%d\nInformational probe ports: %v\nInformational host addresses: %v\nDeveloper directory: %s\nRepository numeric pins: %v\nWould preflight root-controlled inputs and absent targets, preserve read-only coexistence before any deployment mutation and after (including failures), run create-users --apply, install /Library/macserve, generate TLS/receipt keys and a hash-only API credential, and install three disabled launchd plists.\nProfiles remain empty; qualification/health absent; owner.pause set. Network isolation is not enforced in phase 1. No accounts, owner homes, services, PF, ACLs, passwords or GUI sessions inspected or changed. Apply requires an exclusive reviewed administration window.\n", o.SHA256, e.ControllerUser, e.ControllerUID, e.ControllerGID, e.JobUser, e.JobUID, e.JobGID, e.JobRealName, e.OwnerUser, e.OwnerUID, e.TailnetIP, e.Port, e.ProtectedPorts, e.HostAddresses, e.DeveloperDir, e.Repositories)
+		_, err := fmt.Fprintf(stdout, "PLAN ONLY: verified binary SHA256 %s.\nController: %s uid=%d gid=%d\nJob GUI: %s uid=%d gid=%d real-name=%q\nOwner: %s uid=%d\nTLS listener: %s port=%d\nInformational probe ports: %v\nInformational host addresses: %v\nDeveloper directory: %s\nRepository numeric pins: %v\nWould preflight root-controlled inputs and absent targets, preserve read-only coexistence before any deployment mutation and after (including failures), run create-users --apply, install /Library/macserve, generate TLS/receipt keys and a hash-only API credential, and install the disabled launchd plists.\nProfiles remain empty; qualification/health absent; owner.pause set. Network isolation is not enforced in phase 1. No accounts, owner homes, services, PF, ACLs, passwords or GUI sessions inspected or changed. Apply requires an exclusive reviewed administration window.\n", o.SHA256, e.ControllerUser, e.ControllerUID, e.ControllerGID, e.JobUser, e.JobUID, e.JobGID, e.JobRealName, e.OwnerUser, e.OwnerUID, e.TailnetIP, e.Port, e.ProtectedPorts, e.HostAddresses, e.DeveloperDir, e.Repositories)
+		if err == nil && e.Signer() {
+			_, err = fmt.Fprintf(stdout, "Code signer: %s uid=%d gid=%d; RPC group %s gid=%d (members %s and %s only).\nWould create the signer account, groups and directories, install %s and a disabled %s, and run signer-init as %s; it prints the controller.json \"signer\" section. The owner writes %s and imports the Apple Distribution identity separately.\n", SignerAccount, e.SignerUID, e.SignerGID, SignRPCGroup, e.SignRPCGID, e.ControllerUser, SignerAccount, SignerConfigPath, SignerPlist, SignerAccount, SignerPolicyPath)
+		}
 		return err
 	}
 	return apply(o, e, envData, assets, rendered, stdout, stderr)
@@ -149,6 +153,9 @@ func requireAbsent(paths []string) error {
 }
 func apply(o Options, e Environment, envData []byte, assets, rendered map[string][]byte, stdout, stderr io.Writer) (result error) {
 	targets := []string{Prefix, "/Users/" + e.JobUser, "/Library/LaunchDaemons/org.macserve.controller.plist", "/Library/LaunchDaemons/org.macserve.worker.plist", "/Library/LaunchDaemons/org.macserve.maintenance.plist"}
+	if e.Signer() {
+		targets = append(targets, SignerPlist)
+	}
 	for _, dir := range []string{"/Library", "/Library/LaunchDaemons", "/Users", "/private/var/root"} {
 		if err := hostguard.CheckProtectedPath(dir, true); err != nil {
 			return err
@@ -247,6 +254,10 @@ func apply(o Options, e Environment, envData []byte, assets, rendered map[string
 			if _, err := maintenance.LoadConfig(path); err != nil {
 				return err
 			}
+		case "signer.json":
+			if _, err := signer.LoadConfig(path); err != nil {
+				return err
+			}
 		case "profiles.json":
 			if _, err := profiles.Load(path); err != nil {
 				return err
@@ -273,10 +284,11 @@ func apply(o Options, e Environment, envData []byte, assets, rendered map[string
 			if tokenDelivery {
 				credential = "one-time API token delivery failed; treat any partially delivered credential as sensitive and rotate it through reviewed configuration"
 			}
-			result = fmt.Errorf("PARTIAL FAILURE: %w; no rollback attempted; do not rerun. Keep services disabled and manually reconcile the named accounts, job home, /Library/macserve and three launchd plists. %s", result, credential)
+			result = fmt.Errorf("PARTIAL FAILURE: %w; no rollback attempted; do not rerun. Keep services disabled and manually reconcile the named accounts, job home, /Library/macserve and the macserve launchd plists. %s", result, credential)
 		}
 	}()
-	args := []string{script, "--controller-user", e.ControllerUser, "--controller-uid", strconv.FormatUint(uint64(e.ControllerUID), 10), "--controller-gid", strconv.FormatUint(uint64(e.ControllerGID), 10), "--job-user", e.JobUser, "--job-real-name", e.JobRealName, "--job-uid", strconv.FormatUint(uint64(e.JobUID), 10), "--job-gid", strconv.FormatUint(uint64(e.JobGID), 10), "--owner-user", e.OwnerUser, "--owner-uid", strconv.FormatUint(uint64(e.OwnerUID), 10), "--apply"}
+	args := []string{script, "--controller-user", e.ControllerUser, "--controller-uid", strconv.FormatUint(uint64(e.ControllerUID), 10), "--controller-gid", strconv.FormatUint(uint64(e.ControllerGID), 10), "--job-user", e.JobUser, "--job-real-name", e.JobRealName, "--job-uid", strconv.FormatUint(uint64(e.JobUID), 10), "--job-gid", strconv.FormatUint(uint64(e.JobGID), 10), "--owner-user", e.OwnerUser, "--owner-uid", strconv.FormatUint(uint64(e.OwnerUID), 10)}
+	args = append(append(args, signerArgs(e)...), "--apply")
 	if err := nativeCommand(2*time.Minute, stderr, "/bin/bash", args...); err != nil {
 		return err
 	}
@@ -291,11 +303,23 @@ func apply(o Options, e Environment, envData []byte, assets, rendered map[string
 			return err
 		}
 	}
+	// signer-init needs the installed binary, signer.json and directories.
+	var controllerSection []byte
+	if e.Signer() {
+		if controllerSection, err = runSignerInit(stderr, e); err != nil {
+			return err
+		}
+	}
 	if err := finish(); err != nil {
 		return fmt.Errorf("post-install coexistence: %w", err)
 	}
 	if _, err := fmt.Fprintf(stdout, "Installed with every service disabled; no PF writes; network isolation not enforced in phase 1. Empty profiles and owner.pause require reviewed qualification. Read-only coexistence evidence: %s\nPublic verification pins: %s/config/deployment-pins.json\n", evidenceDir, Prefix); err != nil {
 		return err
+	}
+	if controllerSection != nil {
+		if _, err := fmt.Fprintf(stdout, "Signer initialised (empty keychain, receipt key). Add this section to %s/config/controller.json, write %s and import the Apple Distribution identity (docs/install.md) before enabling org.macserve.signer:\n%s\n", Prefix, SignerPolicyPath, controllerSection); err != nil {
+			return err
+		}
 	}
 	// This is the sole token emission. No persistent file ever contains it.
 	tokenDelivery = true

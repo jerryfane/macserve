@@ -7,11 +7,12 @@ import "embed"
 // Deploy holds the assets deploy-install reads from its --assets
 // directory, at the same relative paths.
 //
-//go:embed create-users.sh qualify.sh launchd/org.macserve.controller.plist.tmpl launchd/org.macserve.worker.plist.tmpl launchd/org.macserve.maintenance.plist.tmpl
+//go:embed create-users.sh qualify.sh launchd/org.macserve.controller.plist.tmpl launchd/org.macserve.worker.plist.tmpl launchd/org.macserve.maintenance.plist.tmpl launchd/org.macserve.signer.plist.tmpl
 var Deploy embed.FS
 
 // DeployNames are the files in Deploy, in deploy-install's order.
 var DeployNames = []string{
 	"create-users.sh", "qualify.sh",
 	"launchd/org.macserve.controller.plist.tmpl", "launchd/org.macserve.worker.plist.tmpl", "launchd/org.macserve.maintenance.plist.tmpl",
+	"launchd/org.macserve.signer.plist.tmpl",
 }

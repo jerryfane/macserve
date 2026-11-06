@@ -156,7 +156,7 @@ func (s *Store) initialize(ctx context.Context) error {
 	if err := tx.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version > 4 {
+	if version > 5 {
 		return fmt.Errorf("unsupported store schema version %d", version)
 	}
 	if version == 0 {
@@ -176,6 +176,11 @@ func (s *Store) initialize(ctx context.Context) error {
 	}
 	if version < 4 {
 		if _, err := tx.ExecContext(ctx, releaseSchema); err != nil {
+			return err
+		}
+	}
+	if version < 5 {
+		if _, err := tx.ExecContext(ctx, signingSchema); err != nil {
 			return err
 		}
 	}
@@ -374,8 +379,13 @@ func validOpaque(value string, max int) bool {
 	return value != "" && len(value) <= max && utf8.ValidString(value) && strings.TrimSpace(value) == value && strings.IndexFunc(value, unicode.IsControl) < 0
 }
 
-func validReason(value string) bool { return len(value) <= 4096 && utf8.ValidString(value) }
-func validTime(now time.Time) bool  { return !now.IsZero() && now.Equal(time.Unix(0, now.UnixNano())) }
+// MaxReasonBytes bounds a stored state or signing reason, valid UTF-8.
+const MaxReasonBytes = 4096
+
+func validReason(value string) bool {
+	return len(value) <= MaxReasonBytes && utf8.ValidString(value)
+}
+func validTime(now time.Time) bool { return !now.IsZero() && now.Equal(time.Unix(0, now.UnixNano())) }
 
 func contention(err error) bool {
 	var sqliteErr *sqlite.Error

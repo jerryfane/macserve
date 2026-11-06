@@ -381,6 +381,11 @@ func probeReport(ctx context.Context, c Challenge, raw []byte, role string) (Rep
 			ok, detail := deniedRead(p, isDir)
 			add("unix_socket_boundary", p, 1, ok, detail, "")
 		}
+		if c.Signer {
+			for _, row := range signerDenial(installedSignerPaths, liveSignerOps(ctx)) {
+				add(signerDenialCategory, row.target, 1, row.ok, row.detail, "")
+			}
+		}
 	}
 	for _, p := range homeTargets(c) {
 		list := p != c.OwnerCanary

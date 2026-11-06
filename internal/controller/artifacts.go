@@ -297,7 +297,15 @@ func (c *Controller) Artifact(ctx context.Context, id, artifactID string) (*os.F
 	if err := json.Unmarshal(job.Result, &completion); err != nil {
 		return nil, evidence.Artifact{}, err
 	}
-	for _, artifact := range completion.Result.Artifacts {
+	artifacts := completion.Result.Artifacts
+	// A signed job's App.ipa and signer-receipt.json are stored beside its
+	// receipt-bound artifacts, named only by its signing record.
+	if signing, err := c.options.Store.GetSigning(ctx, id); err == nil && signing.Status == store.Signed {
+		artifacts = append(append([]evidence.Artifact{}, artifacts...), signing.Artifacts...)
+	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return nil, evidence.Artifact{}, err
+	}
+	for _, artifact := range artifacts {
 		if artifact.ID != artifactID {
 			continue
 		}

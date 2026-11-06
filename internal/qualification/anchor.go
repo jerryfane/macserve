@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"time"
 
+	"github.com/jerryfane/macserve/internal/deploy"
 	"github.com/jerryfane/macserve/internal/maintenance"
 	"github.com/jerryfane/macserve/internal/workerclient"
 )
@@ -110,6 +112,13 @@ func currentBindings() (map[string]string, error) {
 			return nil, fmt.Errorf("%s: %w", path, err)
 		}
 		out[path] = d
+	}
+	// The optional signer daemon is configuration identity once installed:
+	// its plist fixes the account the signer runs as.
+	if d, err := fileDigest(deploy.SignerPlist); err == nil {
+		out[deploy.SignerPlist] = d
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("%s: %w", deploy.SignerPlist, err)
 	}
 	mc, err := maintenance.LoadConfig(maintenancePath)
 	if err != nil {

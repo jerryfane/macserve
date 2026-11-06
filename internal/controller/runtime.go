@@ -52,6 +52,9 @@ type Controller struct {
 	requestTimeout time.Duration
 	closeOnce      sync.Once
 	closeErr       error
+	// afterEvictionSnapshot runs in trimPool between candidate selection
+	// and deletion; tests use it to interleave a signing request.
+	afterEvictionSnapshot func()
 }
 
 func New(options Options) (*Controller, error) {
@@ -146,6 +149,10 @@ func New(options Options) (*Controller, error) {
 		}
 	}
 	if err := options.Store.Recover(context.Background(), options.Now()); err != nil {
+		return fail(err)
+	}
+	// No signing survives its controller process; a new request retries.
+	if err := options.Store.InterruptSignings(context.Background(), options.Now()); err != nil {
 		return fail(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())

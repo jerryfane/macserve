@@ -280,6 +280,11 @@ func checkCarryJobProbe(job Report, c Challenge, hash string, approved Challenge
 	if ok, _ := rows(job, "unix_socket_boundary", append([]string{c.Socket}, c.PrivatePaths...), 1); !ok {
 		return errors.New("carry job probe: unix_socket_boundary not denied on every path")
 	}
+	if c.Signer {
+		if ok, _ := rows(job, signerDenialCategory, signerDenialTargets(), 1); !ok {
+			return errors.New("carry job probe: signer_denial not denied on every path")
+		}
+	}
 	if ok, _ := rows(job, "owner_home_denial", homeTargets(c), 1); !ok {
 		return errors.New("carry job probe: owner_home_denial not denied on every path")
 	}
