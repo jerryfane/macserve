@@ -56,6 +56,8 @@ type SourcePins struct {
 // repository the archive came from (its owner must be a template owner); the
 // archive must contain a valid .macserve.json. A test or script template pin
 // also names the .macserve.json shard the run executes; other pins must not.
+// An ios_archive template pin names the release the archive is built at;
+// other pins must not.
 type SourcePin struct {
 	Profile   string `json:"profile"`
 	Repo      string `json:"repo,omitempty"`
@@ -64,6 +66,9 @@ type SourcePin struct {
 	Tree      string `json:"tree"`
 	SHA256    string `json:"sha256"`
 	SizeBytes int64  `json:"size_bytes"`
+	// Release is an ios_archive template pin's build name, build number and,
+	// for a Flutter template, Dart defines.
+	Release *model.ReleaseRequest `json:"release,omitempty"`
 }
 
 type ToolRun struct {
@@ -157,8 +162,7 @@ type ToolEvidence struct {
 	ExecutableSHA256 string `json:"executable_sha256,omitempty"`
 }
 
-// loadSourcePins reads the protected pins and requires one pin per profile or
-// template; a template pin must name a repository of one of its owners.
+// loadSourcePins reads the protected pins and checks them (checkSourcePins).
 func loadSourcePins(list []model.Profile) (SourcePins, string, error) {
 	var pins SourcePins
 	b, err := protectedRead(sourcesPinsPath)
@@ -168,23 +172,34 @@ func loadSourcePins(list []model.Profile) (SourcePins, string, error) {
 	if err = decode(b, &pins); err != nil {
 		return pins, "", err
 	}
+	if err = checkSourcePins(pins, list); err != nil {
+		return pins, "", err
+	}
+	return pins, digest(b), nil
+}
+
+// checkSourcePins requires one pin per profile or template; a template pin
+// must admit (a repository of one of its owners, a shard exactly for a test
+// or script template and a release exactly for an ios_archive template), and
+// a profile pin names neither shard nor release.
+func checkSourcePins(pins SourcePins, list []model.Profile) error {
 	if pins.Schema != 1 {
-		return pins, "", errors.New("unsupported qualification source pins")
+		return errors.New("unsupported qualification source pins")
 	}
 	for _, p := range list {
 		pin, ok := sourcePin(pins, p.ID)
 		if !ok || !sha40.MatchString(pin.Commit) || !sha40.MatchString(pin.Tree) || !sha64.MatchString(pin.SHA256) || pin.SizeBytes <= 0 {
-			return pins, "", fmt.Errorf("qualification source pin missing or invalid for profile %s", p.ID)
+			return fmt.Errorf("qualification source pin missing or invalid for profile %s", p.ID)
 		}
 		if p.Template != nil {
 			if _, err := pinRequest(p, pin, 0); err != nil {
-				return pins, "", fmt.Errorf("qualification source pin for template %s must name a repository of a template owner, and a shard exactly when it is a test or script template: %w", p.ID, err)
+				return fmt.Errorf("qualification source pin for template %s must name a repository of a template owner, a shard exactly when it is a test or script template and a release exactly when it is an ios_archive template: %w", p.ID, err)
 			}
-		} else if pin.Shard != "" {
-			return pins, "", fmt.Errorf("qualification source pin for profile %s must not name a shard", p.ID)
+		} else if pin.Shard != "" || pin.Release != nil {
+			return fmt.Errorf("qualification source pin for profile %s must not name a shard or release", p.ID)
 		}
 	}
-	return pins, digest(b), nil
+	return nil
 }
 
 // pinRequest is the admission request that runs a recipe on its pinned source.
@@ -199,7 +214,7 @@ func pinRequest(p model.Profile, pin SourcePin, timeoutSeconds int) (model.Admis
 	if p.Template != nil {
 		repo = pin.Repo
 	}
-	return registry.Resolve(model.Request{Repo: repo, SHA: pin.Commit, Kind: p.Kind, Profile: p.ID, Xcode: p.Xcode, Simulator: p.Simulator, Shard: pin.Shard, Flutter: profiles.RequestFlutter(p), TimeoutSeconds: timeoutSeconds})
+	return registry.Resolve(model.Request{Repo: repo, SHA: pin.Commit, Kind: p.Kind, Profile: p.ID, Xcode: p.Xcode, Simulator: p.Simulator, Shard: pin.Shard, Flutter: profiles.RequestFlutter(p), Release: pin.Release, TimeoutSeconds: timeoutSeconds})
 }
 
 func sourcePin(pins SourcePins, profile string) (SourcePin, bool) {
@@ -340,6 +355,11 @@ func runProfile(ctx context.Context, engine *worker.Engine, c Challenge, p model
 	}
 	now := time.Now().UTC()
 	job := model.Job{ID: fmt.Sprintf("qualify-%s-%d", c.ID[:16], index), Principal: "qualification", Request: admission.Request, Profile: admission.Profile, ProfileDigest: admission.ProfileDigest, RequestDigest: hex.EncodeToString(requestDigest[:]), State: model.Preparing, CreatedAt: now, UpdatedAt: now, Deadline: &deadline, WorkerEpoch: "qualify-" + c.ID[:16], LeaseToken: hex.EncodeToString(token)}
+	if p.Kind == model.IOSArchive {
+		// The pinned source stands in for the default-branch head the GitHub
+		// App resolves at admission; a qualification run seals no receipt.
+		job.ReleaseProvenance = &model.ReleaseProvenance{HeadSHA: pin.Commit, ResolvedAt: now, Source: model.ProvenanceQualification}
+	}
 	archive := filepath.Join(sourcesDir, pin.SHA256+".tar")
 	if err = hostguard.RootConfig(archive); err != nil {
 		return run, err
@@ -362,6 +382,9 @@ func runProfile(ctx context.Context, engine *worker.Engine, c Challenge, p model
 	}
 	if err == nil && result.State == model.Succeeded && p.Kind == model.SimulatorScript {
 		err = scriptOutput(result, func(id string) (string, error) { return engine.ArtifactPath(job.ID, id) })
+	}
+	if err == nil && result.State == model.Succeeded && p.Kind == model.IOSArchive {
+		err = archiveOutput(result, *admission.Request.Release, func(id string) (string, error) { return engine.ArtifactPath(job.ID, id) })
 	}
 	return run, errors.Join(err, engine.RemoveExport(job.ID))
 }
@@ -416,6 +439,76 @@ func scriptRunPasses(p model.Profile, r worker.Result) bool {
 	return r.ExitCode != nil && *r.ExitCode == 0 && r.Signal == "" && slices.ContainsFunc(r.Artifacts, func(a evidence.Artifact) bool { return a.Name == scriptOutputArchive && a.SizeBytes > 0 })
 }
 
+// maxSigningManifestRead bounds the signing manifest bytes a run reads; the
+// manifest parser refuses anything larger.
+const maxSigningManifestRead = 4 << 20
+
+// archiveOutput requires a succeeded archive run to export exactly one
+// sealed archive tar and one signing manifest whose bytes are the artifact's
+// (SHA-256 and size), parse as a canonical manifest of the pinned release,
+// and name exactly the exported tar's SHA-256 and size; artifactPath locates
+// an exported artifact by ID.
+func archiveOutput(result worker.Result, release model.ReleaseRequest, artifactPath func(string) (string, error)) error {
+	archive, manifest, ok := archiveArtifacts(result)
+	if !ok {
+		return fmt.Errorf("archive run must export exactly one %s and one %s", profiles.ArchiveArtifact, profiles.SigningManifestArtifact)
+	}
+	name, err := artifactPath(manifest.ID)
+	if err != nil {
+		return err
+	}
+	f, err := os.Open(name)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	raw, err := io.ReadAll(io.LimitReader(f, maxSigningManifestRead+1))
+	if err != nil {
+		return err
+	}
+	sum := sha256.Sum256(raw)
+	if int64(len(raw)) != manifest.SizeBytes || hex.EncodeToString(sum[:]) != manifest.SHA256 {
+		return errors.New("exported signing manifest bytes differ from its artifact record")
+	}
+	m, err := worker.ParseSigningManifest(raw, release)
+	if err != nil {
+		return err
+	}
+	if m.Archive.SHA256 != archive.SHA256 || m.Archive.SizeBytes != archive.SizeBytes {
+		return errors.New("signing manifest does not name the exported archive")
+	}
+	return nil
+}
+
+// archiveArtifacts returns a result's single sealed archive tar and single
+// signing manifest artifacts, both non-empty.
+func archiveArtifacts(r worker.Result) (archive, manifest evidence.Artifact, ok bool) {
+	archives, manifests := 0, 0
+	for _, a := range r.Artifacts {
+		switch a.Name {
+		case profiles.ArchiveArtifact:
+			archive = a
+			archives++
+		case profiles.SigningManifestArtifact:
+			manifest = a
+			manifests++
+		}
+	}
+	return archive, manifest, archives == 1 && manifests == 1 && archive.SizeBytes > 0 && manifest.SizeBytes > 0
+}
+
+// archiveRunPasses is the ios_archive part of a run's tool evidence: the
+// archive exited 0 and exported exactly one sealed archive tar and one
+// signing manifest (whose content archiveOutput checked during the run).
+// Other recipes pass trivially.
+func archiveRunPasses(p model.Profile, r worker.Result) bool {
+	if p.Kind != model.IOSArchive {
+		return true
+	}
+	_, _, ok := archiveArtifacts(r)
+	return ok && r.ExitCode != nil && *r.ExitCode == 0 && r.Signal == ""
+}
+
 // toolEvidencePasses checks the root-written evidence for every profile.
 func toolEvidencePasses(dir string, c Challenge, raw []byte) ([]byte, bool, string) {
 	b, err := protectedRead(filepath.Join(dir, toolEvidenceFile))
@@ -436,7 +529,7 @@ func toolEvidencePasses(dir string, c Challenge, raw []byte) ([]byte, bool, stri
 			// A template run must also report the recipe it derived from the
 			// pinned source's .macserve.json, and a Flutter template run the
 			// pinned Flutter and CocoaPods it observed.
-			if run.Profile == p.ID && run.Error == "" && run.ProfileDigest == c.Observation.Profiles[p.ID] && run.Result.State == model.Succeeded && run.Result.CleanupOK && run.Result.Observation.Xcode == p.Xcode && (p.Template == nil) == (run.Result.Observation.Recipe == nil) && scriptRunPasses(p, run.Result) && flutterRunPasses(p, run.Result) {
+			if run.Profile == p.ID && run.Error == "" && run.ProfileDigest == c.Observation.Profiles[p.ID] && run.Result.State == model.Succeeded && run.Result.CleanupOK && run.Result.Observation.Xcode == p.Xcode && (p.Template == nil) == (run.Result.Observation.Recipe == nil) && scriptRunPasses(p, run.Result) && flutterRunPasses(p, run.Result) && archiveRunPasses(p, run.Result) {
 				ok = true
 			}
 		}

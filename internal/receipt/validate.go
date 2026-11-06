@@ -19,7 +19,7 @@ func sameSimulator(a, b *model.Simulator) bool {
 }
 func sameStrings(a, b []string) bool { return slices.Equal(a, b) }
 func expectedFor(p Payload) Expected {
-	return Expected{RepositoryID: p.Repository.ID, Repo: p.Request.Repo, SHA: p.Request.SHA, Profile: p.Request.Profile, ProfileDigest: p.ProfileDigest, Kind: p.Request.Kind, Xcode: p.Request.Xcode, Simulator: p.Request.Simulator, RequiredTests: p.Tests.Required}
+	return Expected{RepositoryID: p.Repository.ID, Repo: p.Request.Repo, SHA: p.Request.SHA, Profile: p.Request.Profile, ProfileDigest: p.ProfileDigest, Kind: p.Request.Kind, Xcode: p.Request.Xcode, Simulator: p.Request.Simulator, RequiredTests: p.Tests.Required, Release: p.Request.Release}
 }
 
 // ValidateSuccess must only be called on the Payload returned by Verify. A
@@ -28,7 +28,7 @@ func ValidateSuccess(p Payload, e Expected) error {
 	if e.RepositoryID <= 0 || e.Repo == "" || !validSHA(e.SHA) || e.Profile == "" || !validDigest(e.ProfileDigest) || e.Xcode.Version == "" || e.Xcode.Build == "" {
 		return fmt.Errorf("%w: incomplete expected policy", ErrInvalid)
 	}
-	if p.Repository.ID != e.RepositoryID || p.Repository.Name != e.Repo || p.Request.Repo != e.Repo || p.Request.SHA != e.SHA || p.Source.Commit != e.SHA || p.Request.Profile != e.Profile || p.ProfileDigest != e.ProfileDigest || p.Request.Kind != e.Kind || p.Request.Xcode != e.Xcode || !sameSimulator(p.Request.Simulator, e.Simulator) || !sameStrings(p.Tests.Required, e.RequiredTests) {
+	if p.Repository.ID != e.RepositoryID || p.Repository.Name != e.Repo || p.Request.Repo != e.Repo || p.Request.SHA != e.SHA || p.Source.Commit != e.SHA || p.Request.Profile != e.Profile || p.ProfileDigest != e.ProfileDigest || p.Request.Kind != e.Kind || p.Request.Xcode != e.Xcode || !sameSimulator(p.Request.Simulator, e.Simulator) || !sameStrings(p.Tests.Required, e.RequiredTests) || !profiles.SameRelease(p.Request.Release, e.Release) {
 		return fmt.Errorf("%w: expected policy mismatch", ErrInvalid)
 	}
 	if p.State != model.Succeeded || !p.Complete || len(p.Missing) != 0 {
@@ -68,13 +68,29 @@ func incomplete(p Payload) []string {
 	} else {
 		require(p.Request.Kind != model.SimulatorUITest && p.Request.Kind != model.SimulatorScript, "simulator pin")
 	}
+	// An ios_archive receipt binds its admitted release, the admission-time
+	// default-branch head its commit equals (resolved through the GitHub App,
+	// never a qualification pin) and its signing manifest; no other receipt
+	// carries any of them.
+	if p.Request.Kind == model.IOSArchive {
+		require(p.Request.Simulator == nil, "simulator pin")
+		require(p.Release != nil && profiles.SameRelease(p.Release, p.Request.Release) && profiles.ValidateRelease(*p.Release, p.Request.Flutter != nil) == nil, "release")
+		v := p.ReleaseProvenance
+		require(v != nil && v.Source == model.ProvenanceGitHubApp && v.RepositoryID > 0 && v.RepositoryID == p.Repository.ID && v.HeadSHA == p.Request.SHA && v.HeadSHA == p.Source.Commit && model.ValidBranch(v.DefaultBranch) && !v.ResolvedAt.IsZero() && !v.ResolvedAt.After(p.CreatedAt), "release provenance")
+		require(validDigest(p.SigningManifestSHA256), "signing manifest digest")
+	} else {
+		require(p.Request.Release == nil && p.Release == nil && p.ReleaseProvenance == nil && p.SigningManifestSHA256 == "", "release evidence")
+	}
 	require(!p.LogsTruncated && validLogs(p.Logs), "raw logs")
 	require(p.CommandCount > 0 && p.ArtifactCount >= len(p.Logs) && validDigest(p.Digests.Commands) && validDigest(p.Digests.Artifacts) && validDigest(p.Digests.Generated) && validDigest(p.Digests.Lockfiles) && validDigest(p.Digests.TestCases), "evidence digests")
 	t := p.Tests
 	if !p.Request.Kind.Tests() {
 		scope := "build-only test scope"
-		if p.Request.Kind == model.SimulatorScript {
+		switch p.Request.Kind {
+		case model.SimulatorScript:
 			scope = "script test scope"
+		case model.IOSArchive:
+			scope = "archive test scope"
 		}
 		require(t.Status == "tests_not_run" && t.Tests == 0 && t.Passed == 0 && t.Failed == 0 && t.Skipped == 0 && t.ExpectedFailures == 0 && len(t.Required) == 0 && len(t.ExecutedRequired) == 0, scope)
 	} else {
@@ -151,7 +167,7 @@ func validateDetails(p Payload, require func(bool, string)) {
 	r := d.Result
 	snapshot := d.Profile
 	snapshotDigest, err := snapshot.SnapshotDigest()
-	require(err == nil && snapshotDigest == p.ProfileDigest && snapshot.ID == p.Request.Profile && snapshot.Version == p.ProfileVersion && snapshot.Repo == p.Request.Repo && snapshot.Kind == p.Request.Kind && snapshot.Xcode == p.Request.Xcode && sameSimulator(snapshot.Simulator, p.Request.Simulator) && snapshot.MemoryLimitMiB == p.Resources.MemoryLimitMiB, "recipe manifest")
+	require(err == nil && snapshotDigest == p.ProfileDigest && snapshot.ID == p.Request.Profile && snapshot.Version == p.ProfileVersion && snapshot.Repo == p.Request.Repo && snapshot.Kind == p.Request.Kind && snapshot.Xcode == p.Request.Xcode && sameSimulator(snapshot.Simulator, p.Request.Simulator) && profiles.SameRelease(snapshot.Release, p.Request.Release) && snapshot.MemoryLimitMiB == p.Resources.MemoryLimitMiB, "recipe manifest")
 	// A template job's snapshot has no recipe; the executed recipe, and a test
 	// template's required tests (its shard's selectors; a script template has
 	// none), are the derivation from its reported repository configuration.
@@ -209,6 +225,13 @@ func validateDetails(p Payload, require func(bool, string)) {
 		}
 		require(found, "required artifact")
 	}
+	// An archive's evidence is its sealed tar and the signing manifest whose
+	// SHA-256 the receipt names, both by their exact artifact names.
+	if p.Request.Kind == model.IOSArchive {
+		archive, archiveFound := names[profiles.ArchiveArtifact]
+		manifest, manifestFound := names[profiles.SigningManifestArtifact]
+		require(archiveFound && manifestFound && archive.SizeBytes > 0 && manifest.SizeBytes > 0 && manifest.SHA256 == p.SigningManifestSHA256, "archive artifacts")
+	}
 	require(len(r.Observation.GeneratedDigests) == len(profile.GeneratedFiles), "generated file count")
 	for _, f := range profile.GeneratedFiles {
 		require(r.Observation.GeneratedDigests[f.Path] == hashBytes([]byte(f.Content)), "generated file digest")
@@ -219,8 +242,11 @@ func validateDetails(p Payload, require func(bool, string)) {
 	require(reflect.DeepEqual(testEvidence(p.Request.Kind, profile.RequiredTests, r.Summary), p.Tests), "test predicate")
 	if !p.Request.Kind.Tests() {
 		ran := "build tests not run"
-		if p.Request.Kind == model.SimulatorScript {
+		switch p.Request.Kind {
+		case model.SimulatorScript:
 			ran = "script tests not run"
+		case model.IOSArchive:
+			ran = "archive tests not run"
 		}
 		require(r.Summary == nil, ran)
 		return

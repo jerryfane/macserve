@@ -258,5 +258,5 @@ func receiptExpectation(repositories map[string]int64, job model.Job) (receipt.E
 	if err != nil {
 		return receipt.Expected{}, err
 	}
-	return receipt.Expected{RepositoryID: repositories[job.Request.Repo], Repo: job.Request.Repo, SHA: job.Request.SHA, Profile: job.Request.Profile, ProfileDigest: job.ProfileDigest, Kind: job.Request.Kind, Xcode: job.Request.Xcode, Simulator: job.Request.Simulator, RequiredTests: profile.RequiredTests}, nil
+	return receipt.Expected{RepositoryID: repositories[job.Request.Repo], Repo: job.Request.Repo, SHA: job.Request.SHA, Profile: job.Request.Profile, ProfileDigest: job.ProfileDigest, Kind: job.Request.Kind, Xcode: job.Request.Xcode, Simulator: job.Request.Simulator, RequiredTests: profile.RequiredTests, Release: job.Request.Release}, nil
 }

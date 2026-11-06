@@ -48,6 +48,8 @@ type Expected struct {
 	Xcode                             model.Xcode
 	Simulator                         *model.Simulator
 	RequiredTests                     []string
+	// Release is an ios_archive job's admitted release; nil for other kinds.
+	Release *model.ReleaseRequest
 }
 
 type Signature struct {
@@ -120,40 +122,47 @@ type EvidenceDigests struct {
 // Payload core fields are retained verbatim in a compact receipt. Complete is
 // the signer's evidence assertion, not a replacement for the verifier's policy.
 type Payload struct {
-	Schema         int                 `json:"schema"`
-	JobID          string              `json:"job_id"`
-	AttemptID      string              `json:"attempt_id"`
-	InputDigest    string              `json:"input_digest"`
-	Service        ServiceIdentity     `json:"service"`
-	Repository     Repository          `json:"repository"`
-	Approval       Approval            `json:"approval"`
-	Request        model.Request       `json:"request"`
-	RequestDigest  string              `json:"request_digest"`
-	ProfileDigest  string              `json:"profile_digest"`
-	ProfileVersion int                 `json:"profile_version"`
-	Source         worker.Source       `json:"source"`
-	Observation    Observation         `json:"observation"`
-	State          model.State         `json:"state"`
-	Reason         string              `json:"reason,omitempty"`
-	ExitCode       *int                `json:"exit_code,omitempty"`
-	Signal         string              `json:"signal,omitempty"`
-	CreatedAt      time.Time           `json:"created_at"`
-	StartedAt      time.Time           `json:"started_at"`
-	FinishedAt     time.Time           `json:"finished_at"`
-	Deadline       *time.Time          `json:"deadline,omitempty"`
-	SealedAt       time.Time           `json:"sealed_at"`
-	WorkerEpoch    string              `json:"worker_epoch"`
-	Resources      ResourcePolicy      `json:"resources"`
-	Tests          TestEvidence        `json:"tests"`
-	Logs           []evidence.Artifact `json:"logs"`
-	LogsTruncated  bool                `json:"logs_truncated"`
-	Digests        EvidenceDigests     `json:"digests"`
-	CommandCount   int                 `json:"command_count"`
-	ArtifactCount  int                 `json:"artifact_count"`
-	Complete       bool                `json:"complete"`
-	Missing        []string            `json:"missing"`
-	Details        *Details            `json:"details,omitempty"`
-	Manifest       *ManifestReference  `json:"manifest,omitempty"`
+	Schema      int             `json:"schema"`
+	JobID       string          `json:"job_id"`
+	AttemptID   string          `json:"attempt_id"`
+	InputDigest string          `json:"input_digest"`
+	Service     ServiceIdentity `json:"service"`
+	Repository  Repository      `json:"repository"`
+	Approval    Approval        `json:"approval"`
+	Request     model.Request   `json:"request"`
+	// Release, ReleaseProvenance and SigningManifestSHA256 are an ios_archive
+	// job's admitted release, its admission-time default-branch binding, and
+	// the SHA-256 of its signing-manifest.json artifact; other receipts omit
+	// all three.
+	Release               *model.ReleaseRequest    `json:"release,omitzero"`
+	ReleaseProvenance     *model.ReleaseProvenance `json:"release_provenance,omitzero"`
+	SigningManifestSHA256 string                   `json:"signing_manifest_sha256,omitzero"`
+	RequestDigest         string                   `json:"request_digest"`
+	ProfileDigest         string                   `json:"profile_digest"`
+	ProfileVersion        int                      `json:"profile_version"`
+	Source                worker.Source            `json:"source"`
+	Observation           Observation              `json:"observation"`
+	State                 model.State              `json:"state"`
+	Reason                string                   `json:"reason,omitempty"`
+	ExitCode              *int                     `json:"exit_code,omitempty"`
+	Signal                string                   `json:"signal,omitempty"`
+	CreatedAt             time.Time                `json:"created_at"`
+	StartedAt             time.Time                `json:"started_at"`
+	FinishedAt            time.Time                `json:"finished_at"`
+	Deadline              *time.Time               `json:"deadline,omitempty"`
+	SealedAt              time.Time                `json:"sealed_at"`
+	WorkerEpoch           string                   `json:"worker_epoch"`
+	Resources             ResourcePolicy           `json:"resources"`
+	Tests                 TestEvidence             `json:"tests"`
+	Logs                  []evidence.Artifact      `json:"logs"`
+	LogsTruncated         bool                     `json:"logs_truncated"`
+	Digests               EvidenceDigests          `json:"digests"`
+	CommandCount          int                      `json:"command_count"`
+	ArtifactCount         int                      `json:"artifact_count"`
+	Complete              bool                     `json:"complete"`
+	Missing               []string                 `json:"missing"`
+	Details               *Details                 `json:"details,omitempty"`
+	Manifest              *ManifestReference       `json:"manifest,omitempty"`
 }
 
 type Signer struct {

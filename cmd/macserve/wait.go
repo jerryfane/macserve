@@ -100,7 +100,7 @@ func runWait(args []string, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	result, err := waiter.Run(ctx, waiter.Options{Client: client, Repo: pins.Request.Repo, RepositoryID: pins.RepositoryID, PullRequest: pr, Profile: pins.Request.Profile, RequestID: requestID, Mode: mode, AppID: pins.AppID, Timeout: timeout, Keys: keys,
-		Expected: receipt.Expected{RepositoryID: pins.RepositoryID, Repo: pins.Request.Repo, SHA: sha, Profile: pins.Request.Profile, ProfileDigest: pins.ProfileDigest, Kind: pins.Request.Kind, Xcode: pins.Request.Xcode, Simulator: pins.Request.Simulator, RequiredTests: pins.RequiredTests},
+		Expected: receipt.Expected{RepositoryID: pins.RepositoryID, Repo: pins.Request.Repo, SHA: sha, Profile: pins.Request.Profile, ProfileDigest: pins.ProfileDigest, Kind: pins.Request.Kind, Xcode: pins.Request.Xcode, Simulator: pins.Request.Simulator, RequiredTests: pins.RequiredTests, Release: pins.Request.Release},
 	})
 	if err != nil {
 		return fail(err)
