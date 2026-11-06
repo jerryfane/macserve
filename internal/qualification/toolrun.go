@@ -199,7 +199,7 @@ func pinRequest(p model.Profile, pin SourcePin, timeoutSeconds int) (model.Admis
 	if p.Template != nil {
 		repo = pin.Repo
 	}
-	return registry.Resolve(model.Request{Repo: repo, SHA: pin.Commit, Kind: p.Kind, Profile: p.ID, Xcode: p.Xcode, Simulator: p.Simulator, Shard: pin.Shard, TimeoutSeconds: timeoutSeconds})
+	return registry.Resolve(model.Request{Repo: repo, SHA: pin.Commit, Kind: p.Kind, Profile: p.ID, Xcode: p.Xcode, Simulator: p.Simulator, Shard: pin.Shard, Flutter: profiles.RequestFlutter(p), TimeoutSeconds: timeoutSeconds})
 }
 
 func sourcePin(pins SourcePins, profile string) (SourcePin, bool) {
@@ -434,8 +434,9 @@ func toolEvidencePasses(dir string, c Challenge, raw []byte) ([]byte, bool, stri
 		ok := false
 		for _, run := range t.Runs {
 			// A template run must also report the recipe it derived from the
-			// pinned source's .macserve.json.
-			if run.Profile == p.ID && run.Error == "" && run.ProfileDigest == c.Observation.Profiles[p.ID] && run.Result.State == model.Succeeded && run.Result.CleanupOK && run.Result.Observation.Xcode == p.Xcode && (p.Template == nil) == (run.Result.Observation.Recipe == nil) && scriptRunPasses(p, run.Result) {
+			// pinned source's .macserve.json, and a Flutter template run the
+			// pinned Flutter and CocoaPods it observed.
+			if run.Profile == p.ID && run.Error == "" && run.ProfileDigest == c.Observation.Profiles[p.ID] && run.Result.State == model.Succeeded && run.Result.CleanupOK && run.Result.Observation.Xcode == p.Xcode && (p.Template == nil) == (run.Result.Observation.Recipe == nil) && scriptRunPasses(p, run.Result) && flutterRunPasses(p, run.Result) {
 				ok = true
 			}
 		}

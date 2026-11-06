@@ -99,7 +99,7 @@ func TestWorkspaceWalksRefuseMountPoint(t *testing.T) {
 	if err := workspaceBudgetWith(root, 1<<40, statat); !errors.Is(err, errWorkspaceMount) || !strings.Contains(err.Error(), `"checkout/ios/mounted"`) {
 		t.Fatalf("budget walk = %v, want mount refusal", err)
 	}
-	digests, err := lockfilesWith(context.Background(), root, uint32(os.Geteuid()), statat)
+	digests, err := lockfilesWith(context.Background(), root, uint32(os.Geteuid()), false, statat)
 	if !errors.Is(err, errWorkspaceMount) || len(digests) != 0 {
 		t.Fatalf("lockfile walk = %v %v, want mount refusal", digests, err)
 	}

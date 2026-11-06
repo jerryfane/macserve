@@ -155,6 +155,14 @@ func validateDetails(p Payload, require func(bool, string)) {
 	// A template job's snapshot has no recipe; the executed recipe, and a test
 	// template's required tests (its shard's selectors; a script template has
 	// none), are the derivation from its reported repository configuration.
+	// A Flutter template job names its pinned Flutter version and observed
+	// exactly the pinned Flutter and CocoaPods; any other job neither.
+	if snapshot.Template != nil && snapshot.Template.Flutter != nil {
+		pin, o := snapshot.Template.Flutter, p.Observation.Flutter
+		require(p.Request.Flutter != nil && p.Request.Flutter.Version == pin.Version && o.FrameworkVersion == pin.Version && o.DartSDKVersion != "" && o.Ruby != "" && o.CocoaPods == pin.CocoaPodsVersion, "flutter observation")
+	} else {
+		require(p.Request.Flutter == nil && r.Observation.Flutter == nil && p.Observation.Flutter == observed(r.Observation).Flutter, "flutter observation")
+	}
 	profile, err := profiles.Effective(snapshot, r.Observation.Recipe)
 	if err != nil {
 		require(false, "template recipe manifest")

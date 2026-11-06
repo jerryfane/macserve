@@ -425,6 +425,13 @@ func probeReport(ctx context.Context, c Challenge, raw []byte, role string) (Rep
 			detail += "\n" + extra
 			add("tool_profiles", developer, 1, ok, detail, "")
 		}
+		// A Flutter template's pinned tools are part of its tool profile.
+		for _, t := range c.Templates {
+			if t.Flutter != nil {
+				ok, detail := inspectFlutterTools(ctx, *t.Flutter, c.Environment.JobUID)
+				add("tool_profiles", t.ID+" flutter "+t.Flutter.Version, 1, ok, detail, "")
+			}
+		}
 	}
 	r.Finished = time.Now().UTC()
 	for _, row := range r.Results {

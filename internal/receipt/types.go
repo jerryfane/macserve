@@ -98,6 +98,9 @@ type Observation struct {
 	// RepoConfigSHA256 is the sha256 of a template job's .macserve.json bytes;
 	// the derived commands are in the details manifest's result observation.
 	RepoConfigSHA256 string `json:"repo_config_sha256,omitempty"`
+	// Flutter is a Flutter template job's observed Flutter, Dart, Ruby and
+	// CocoaPods versions; other jobs' receipts omit it.
+	Flutter worker.FlutterObservation `json:"flutter,omitzero"`
 }
 type ResourcePolicy struct {
 	TimeoutSeconds  int   `json:"timeout_seconds"`

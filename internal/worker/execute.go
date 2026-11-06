@@ -127,6 +127,11 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 		if err := hostguard.ToolchainDirectory(job.Profile.DeveloperDir, toolchainPolicyUID(e.options.JobUID)); err != nil {
 			return result, err
 		}
+		if pin := flutterPin(job.Profile); pin != nil {
+			if err := checkFlutterTools(*pin, toolchainPolicyUID(e.options.JobUID)); err != nil {
+				return result, err
+			}
+		}
 	}
 	names, err := e.registryNames()
 	if err != nil {
@@ -267,7 +272,7 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 	}
 	x.stdout = &logWriter{state: x.logs, file: stdout, stream: "stdout", sink: sink, cancel: cancel}
 	x.stderr = &logWriter{state: x.logs, file: stderr, stream: "stderr", sink: sink, cancel: cancel}
-	prepareCtx, prepareCancel := context.WithTimeout(ctx, prepareBudget(job.Request.Kind))
+	prepareCtx, prepareCancel := context.WithTimeout(ctx, prepareBudget(job.Request.Kind, flutterPin(job.Profile) != nil))
 	checkout, err := x.root.OpenRoot("checkout")
 	if err != nil {
 		prepareCancel()
@@ -276,7 +281,8 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 	err = extractSource(prepareCtx, checkout, archive, source, e.options.MaxWorkspaceBytes)
 	if err == nil && x.job.Profile.Template != nil {
 		// Template jobs: the recipe is derived from the repository's
-		// .macserve.json before any toolchain or recipe command runs.
+		// .macserve.json, and a Flutter job's lockfiles preflighted, before
+		// any toolchain or recipe command runs.
 		x.job.Profile, result.Observation.Recipe, err = templateRecipe(checkout, x.job.Profile)
 	}
 	closeErr := checkout.Close()
@@ -284,7 +290,7 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 		prepareCancel()
 		return result, err
 	}
-	result.Observation.LockfileDigests, err = lockfiles(prepareCtx, x.root, uint32(os.Geteuid()))
+	result.Observation.LockfileDigests, err = lockfiles(prepareCtx, x.root, uint32(os.Geteuid()), flutterPin(x.job.Profile) != nil)
 	if err != nil {
 		prepareCancel()
 		return result, err
@@ -350,26 +356,10 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 func (x *execution) checkScript() error {
 	run := x.job.Profile.Run
 	relative, ok := strings.CutPrefix(strings.Join(run.Args, " "), profiles.ScriptCheckoutPrefix)
-	if run.Executable != "/bin/bash" || len(run.Args) != 1 || !ok || !safeRelative(relative) {
+	if run.Executable != "/bin/bash" || len(run.Args) != 1 || !ok {
 		return errors.New("script recipe is not a checkout script")
 	}
-	name := "checkout/" + relative
-	if err := noSymlinkPath(x.root, name); err != nil {
-		return fmt.Errorf("script %s: %w", relative, err)
-	}
-	file, err := x.root.OpenFile(name, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
-	if err != nil {
-		return fmt.Errorf("script %s: %w", relative, err)
-	}
-	info, err := file.Stat()
-	closeErr := file.Close()
-	if err = errors.Join(err, closeErr); err != nil {
-		return fmt.Errorf("script %s: %w", relative, err)
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("script %s is not a regular file", relative)
-	}
-	return nil
+	return x.checkCheckoutFile(relative)
 }
 
 // runEnvironment is what a script job's run command adds to environment: the
@@ -389,10 +379,10 @@ func (x *execution) runEnvironment() []string {
 
 // prepareBudget bounds source extraction, the simulator and every prepare
 // command, always within the job deadline. A test or script job's prepare may
-// include a template's build-for-testing or build, so those kinds get 30
-// minutes; builds keep 10.
-func prepareBudget(kind model.Kind) time.Duration {
-	if kind == model.Build {
+// include a template's build-for-testing or build, and a Flutter job's pub
+// get and pod install, so those get 30 minutes; other builds keep 10.
+func prepareBudget(kind model.Kind, flutter bool) time.Duration {
+	if kind == model.Build && !flutter {
 		return 10 * time.Minute
 	}
 	return 30 * time.Minute
@@ -437,10 +427,16 @@ func (x *execution) prepare(ctx context.Context) error {
 		return err
 	}
 	for _, command := range x.job.Profile.Prepare {
+		if err := x.flutterStep(ctx, command, false); err != nil {
+			return err
+		}
 		if err := x.recipe(ctx, command); err != nil {
 			return err
 		}
 		if err := workspaceBudget(x.root, x.engine.options.MaxWorkspaceBytes); err != nil {
+			return err
+		}
+		if err := x.flutterStep(ctx, command, true); err != nil {
 			return err
 		}
 	}
@@ -461,8 +457,15 @@ func (x *execution) invoke(ctx context.Context, command Command, stdout, stderr 
 	return result, x.engine.quarantine(err)
 }
 
+// command is one job command in the workspace with the job environment; a
+// Flutter job's environment also names its Flutter tools (see
+// flutterEnvironment).
 func (x *execution) command(executable string, args []string) Command {
-	return Command{Executable: executable, Args: args, Dir: x.workspace, Env: environment(x.workspace, x.job.Profile.DeveloperDir, x.engine.options.JobUser), MemoryLimitMiB: x.job.Profile.MemoryLimitMiB, MemoryBaseline: &x.memoryBaseline}
+	env := environment(x.workspace, x.job.Profile.DeveloperDir, x.engine.options.JobUser)
+	if pin := flutterPin(x.job.Profile); pin != nil {
+		env = flutterEnvironment(env, x.workspace, *pin)
+	}
+	return Command{Executable: executable, Args: args, Dir: x.workspace, Env: env, MemoryLimitMiB: x.job.Profile.MemoryLimitMiB, MemoryBaseline: &x.memoryBaseline}
 }
 
 func (x *execution) capture(ctx context.Context, executable string, args ...string) ([]byte, error) {
@@ -643,14 +646,16 @@ func workspaceBudgetWith(root *os.Root, limit int64, statat statAt) error {
 	})
 }
 
-func lockfiles(ctx context.Context, root *os.Root, owner uint32) (map[string]string, error) {
-	return lockfilesWith(ctx, root, owner, unix.Fstatat)
+// lockfiles digests the dependency lockfiles under checkout; a Flutter job
+// also tracks pubspec.lock.
+func lockfiles(ctx context.Context, root *os.Root, owner uint32, flutter bool) (map[string]string, error) {
+	return lockfilesWith(ctx, root, owner, flutter, unix.Fstatat)
 }
 
 // lockfilesWith digests the dependency lockfiles under checkout. It runs
 // after job code has run, so it walks only the workspace device (see
 // walkSameDevice) and opens each lockfile from its parent's descriptor.
-func lockfilesWith(ctx context.Context, root *os.Root, owner uint32, statat statAt) (map[string]string, error) {
+func lockfilesWith(ctx context.Context, root *os.Root, owner uint32, flutter bool, statat statAt) (map[string]string, error) {
 	top, err := root.Open(".")
 	if err != nil {
 		return nil, err
@@ -674,6 +679,10 @@ func lockfilesWith(ctx context.Context, root *os.Root, owner uint32, statat stat
 		}
 		switch name {
 		case "Package.resolved", "Podfile.lock", "Cartfile.resolved", "Gemfile.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "Cargo.lock", "go.sum":
+		case "pubspec.lock":
+			if !flutter {
+				return nil
+			}
 		default:
 			return nil
 		}
@@ -714,14 +723,25 @@ func (x *execution) checkLockfiles(ctx context.Context) error {
 	if _, native := x.engine.options.Runner.(*nativeRunner); !native {
 		owner = uint32(os.Geteuid())
 	}
-	after, err := lockfiles(ctx, x.root, owner)
+	flutter := flutterPin(x.job.Profile) != nil
+	after, err := lockfiles(ctx, x.root, owner, flutter)
+	if x.result.Observation.LockfileDigests == nil {
+		// The job failed before its lockfiles were first digested (a refused
+		// .macserve.json or Flutter preflight): nothing is tracked yet.
+		return err
+	}
 	for name, digest := range x.result.Observation.LockfileDigests {
 		if after[name] != digest {
 			err = errors.Join(err, fmt.Errorf("tracked dependency lockfile mutated: %s", name))
 		}
 	}
+	// Other jobs may create lockfiles (a package resolve writes
+	// Package.resolved); in a Flutter job every lockfile is committed.
 	for name, digest := range after {
 		if _, exists := x.result.Observation.LockfileDigests[name]; !exists {
+			if flutter {
+				err = errors.Join(err, fmt.Errorf("dependency lockfile created: %s", name))
+			}
 			x.result.Observation.LockfileDigests[name] = digest
 		}
 	}

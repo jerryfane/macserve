@@ -170,6 +170,9 @@ func (r *Registry) Resolve(request model.Request) (model.Admission, error) {
 	if request.Shard != "" {
 		return model.Admission{}, fmt.Errorf("%w: only test and script templates accept a shard", ErrUnsupported)
 	}
+	if request.Flutter != nil {
+		return model.Admission{}, fmt.Errorf("%w: only Flutter templates accept a Flutter version", ErrUnsupported)
+	}
 	if request.TimeoutSeconds == 0 {
 		request.TimeoutSeconds = p.DefaultTimeoutSeconds
 	}
@@ -194,6 +197,14 @@ func (r *Registry) resolveTemplate(request model.Request) (model.Admission, erro
 	if request.Kind != t.Kind || request.Xcode != t.Xcode {
 		return model.Admission{}, fmt.Errorf("%w: repository, kind or toolchain pins", ErrUnsupported)
 	}
+	// Like Xcode, a Flutter template's version must be named exactly.
+	if !sameFlutter(request.Flutter, t.Flutter) {
+		if t.Flutter == nil {
+			return model.Admission{}, fmt.Errorf("%w: only Flutter templates accept a Flutter version", ErrUnsupported)
+		}
+		return model.Admission{}, fmt.Errorf("%w: Flutter template requires flutter version %s exactly", ErrUnsupported, t.Flutter.Version)
+	}
+	request.Flutter = cloneFlutterRequest(request.Flutter)
 	if !t.Kind.UsesSimulator() {
 		if request.Simulator != nil {
 			return model.Admission{}, fmt.Errorf("%w: repository, kind or toolchain pins", ErrUnsupported)
@@ -303,6 +314,9 @@ func normalizeTemplate(t *model.Template) error {
 	}
 	if !absolutePath(t.DeveloperDir) {
 		return fmt.Errorf("%w: developer directory", ErrInvalid)
+	}
+	if err := normalizeFlutterPin(*t); err != nil {
+		return err
 	}
 	return normalizeBudgets(t.Kind, &t.DefaultTimeoutSeconds, &t.MaxTimeoutSeconds, &t.MemoryLimitMiB)
 }
@@ -500,5 +514,9 @@ func cloneProfile(p model.Profile) model.Profile {
 func cloneTemplate(t model.Template) model.Template {
 	t.Owners = append([]string(nil), t.Owners...)
 	t.Simulators = append([]model.Simulator(nil), t.Simulators...)
+	if t.Flutter != nil {
+		pin := *t.Flutter
+		t.Flutter = &pin
+	}
 	return t
 }

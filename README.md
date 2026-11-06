@@ -118,7 +118,10 @@ is the whole per-repository setup:
 Use exactly one of `project` or `workspace`; `xcodegen` and `resolve_packages` are optional. For test templates, add
 `ui_test` and/or `unit_test` sections of named shards (`{"shards": {"terminal": ["AppUITests/TerminalTests"]}}`,
 selectors `Target/Class` or `Target/Class/method`); a test job names one shard with `"shard"` and runs exactly its
-selectors, which its receipt requires to have executed. Repository content cannot choose executables, flags,
+selectors, which its receipt requires to have executed. Flutter templates (a template with a pinned Flutter
+version) serve repositories that add a `flutter` section (`{"app_dir": "apps/mobile"}`, with `work_dir`
+`apps/mobile/ios` and `workspace` `Runner.xcworkspace`); their jobs name `"flutter": {"version": ...}` and run the
+pinned root-owned Flutter, Ruby and CocoaPods. Repository content cannot choose executables, flags,
 environment, destinations, configurations or signing. Full rules:
 [Onboarding a repository](docs/install.md#onboarding-a-repository).
 

@@ -77,6 +77,9 @@ func observed(o worker.Observation) Observation {
 	if o.Recipe != nil {
 		value.RepoConfigSHA256 = o.Recipe.ConfigSHA256
 	}
+	if o.Flutter != nil {
+		value.Flutter = *o.Flutter
+	}
 	return value
 }
 

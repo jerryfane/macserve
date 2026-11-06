@@ -210,11 +210,12 @@ func (b *Build) do(ctx context.Context, method, path string, header map[string]s
 }
 
 type capability struct {
-	ID     string      `json:"id"`
-	Repo   string      `json:"repo"`
-	Owners []string    `json:"owners"`
-	Kind   model.Kind  `json:"kind"`
-	Xcode  model.Xcode `json:"xcode"`
+	ID      string                `json:"id"`
+	Repo    string                `json:"repo"`
+	Owners  []string              `json:"owners"`
+	Kind    model.Kind            `json:"kind"`
+	Xcode   model.Xcode           `json:"xcode"`
+	Flutter *model.FlutterRequest `json:"flutter,omitempty"`
 }
 
 type capabilities struct {
@@ -297,7 +298,7 @@ func (b *Build) Submit(ctx context.Context, r BuildRequest) (string, model.Reque
 	if err != nil {
 		return "", model.Request{}, err
 	}
-	request := model.Request{Repo: r.Repo, SHA: r.SHA, Kind: chosen.Kind, Profile: chosen.ID, Xcode: chosen.Xcode}
+	request := model.Request{Repo: r.Repo, SHA: r.SHA, Kind: chosen.Kind, Profile: chosen.ID, Xcode: chosen.Xcode, Flutter: chosen.Flutter}
 	var job struct {
 		ID    string      `json:"id"`
 		State model.State `json:"state"`

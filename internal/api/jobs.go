@@ -222,6 +222,10 @@ func (h *handler) capabilities(w http.ResponseWriter, r *http.Request, p store.P
 			if len(template.Simulators) > 0 {
 				item["simulators"] = template.Simulators
 			}
+			// A Flutter template's job must name this Flutter version.
+			if template.Flutter != nil {
+				item["flutter"] = model.FlutterRequest{Version: template.Flutter.Version}
+			}
 			templates = append(templates, item)
 		}
 	}
