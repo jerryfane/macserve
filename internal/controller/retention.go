@@ -23,7 +23,10 @@ type retainedExport struct {
 }
 
 // trimPool is called with evidenceMu held. It counts each content-addressed byte
-// file once regardless of manifest aliases, and never evicts an active job.
+// file once regardless of manifest aliases, and never evicts an active job or
+// a job whose signing is in progress: the signing reads its archive and
+// manifest from, and stores its outputs into, that directory until its
+// terminal signing status is committed.
 func (c *Controller) trimPool(ctx context.Context, reservation, limit int64) error {
 	if c.poolKnown && c.poolBytes <= limit-reservation {
 		return nil
@@ -59,7 +62,13 @@ func (c *Controller) trimPool(ctx context.Context, reservation, limit int64) err
 			} else if err != nil {
 				return err
 			} else if job.State.Terminal() && job.FinishedAt != nil {
-				terminal = append(terminal, retainedExport{id: id, bytes: size, finished: *job.FinishedAt})
+				signing, err := c.options.Store.GetSigning(ctx, id)
+				if err != nil && !errors.Is(err, store.ErrNotFound) {
+					return err
+				}
+				if err != nil || signing.Status != store.Signing {
+					terminal = append(terminal, retainedExport{id: id, bytes: size, finished: *job.FinishedAt})
+				}
 			}
 		}
 		if errors.Is(readErr, io.EOF) {

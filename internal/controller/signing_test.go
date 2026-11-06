@@ -220,3 +220,36 @@ func TestControllerSignWithoutSignerIsUnavailable(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+// trimPool never evicts a job whose signing is in progress, under any pool
+// pressure; once the signing is terminal the job is evictable again.
+func TestTrimPoolKeepsInProgressSigning(t *testing.T) {
+	f, client, _ := signingFixture(t)
+	job := signableJob(t, f, client)
+	ctx := context.Background()
+	if _, started, err := f.db.BeginSigning(ctx, job.ID, f.now); err != nil || !started {
+		t.Fatalf("begin: %v %v", started, err)
+	}
+	dir := filepath.Join(f.controller.options.Root, "artifacts", job.ID)
+	f.controller.evidenceMu.Lock()
+	err := f.controller.trimPool(ctx, 0, 1)
+	f.controller.evidenceMu.Unlock()
+	if !errors.Is(err, evidence.ErrArtifactLimit) {
+		t.Fatalf("trim under pressure: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, hexSum(client.archive))); err != nil {
+		t.Fatalf("in-progress signing's archive evicted: %v", err)
+	}
+	if err := f.db.FinishSigning(ctx, job.ID, store.SignFailed, "done", nil, f.now); err != nil {
+		t.Fatal(err)
+	}
+	f.controller.evidenceMu.Lock()
+	err = f.controller.trimPool(ctx, 0, 1)
+	f.controller.evidenceMu.Unlock()
+	if err != nil {
+		t.Fatalf("trim after signing: %v", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("terminal job kept: %v", err)
+	}
+}
