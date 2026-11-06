@@ -22,7 +22,10 @@ Network probes record actual job-user reachability as **`not enforced in phase 1
 reachable destinations are not qualification failures and failed connections are not denial proof.
 Configured coexisting services must remain running with unchanged PIDs during installation and qualification
 windows. Main and configured peer PF rules are measured read-only before/after; available measurements must
-match, while unreadable PF is explicitly `unavailable` and does not block those operations.
+match, while unreadable PF is explicitly `unavailable` and does not block those operations. After a qualification
+window, steady-state health requires only that the same configured services are still running: a peer that
+restarts under a new PID (for example its own redeploy) does not invalidate qualification, while a stopped or
+changed peer set does.
 PF enforcement may be a separately reviewed future opt-in; it is not implemented or implied by phase-1 health.
 
 ## Implemented packages

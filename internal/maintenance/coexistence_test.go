@@ -441,11 +441,42 @@ func TestCoexistenceEvidenceBindsWindowButOnlyCurrentServices(t *testing.T) {
 	if err := ValidateCoexistenceEvidence(e, current); err != nil {
 		t.Fatal(err)
 	}
-	current.Services[0].PID++
-	if err := ValidateCoexistenceEvidence(e, current); err == nil {
-		t.Fatal("current PID drift accepted")
+	// A peer restarted after qualification (2026-11-06: the keyring daemon was
+	// redeployed): still running under a new PID, so health stays valid.
+	current.Services[0].PID += 1000
+	if err := ValidateCoexistenceEvidence(e, current); err != nil {
+		t.Fatalf("restarted running peer refused: %v", err)
 	}
-	current.Services[0].PID--
+	stopped := current
+	stopped.Services = slices.Clone(current.Services)
+	stopped.Services[0].PID = 0
+	if err := ValidateCoexistenceEvidence(e, stopped); err == nil {
+		t.Fatal("stopped peer accepted")
+	}
+	missing := current
+	missing.Services = slices.Clone(current.Services[1:])
+	if err := ValidateCoexistenceEvidence(e, missing); err == nil {
+		t.Fatal("missing peer accepted")
+	}
+	renamed := current
+	renamed.Services = slices.Clone(current.Services)
+	renamed.Services[0].Label = "org.example.other"
+	if err := ValidateCoexistenceEvidence(e, renamed); err == nil {
+		t.Fatal("different peer accepted")
+	}
+	regressed := current
+	regressed.RecordedAt = e.After.RecordedAt.Add(-time.Second)
+	if err := ValidateCoexistenceEvidence(e, regressed); err == nil {
+		t.Fatal("regressed observation accepted")
+	}
+	// Inside the qualification window PIDs must not change.
+	window := e
+	window.After = coexistenceStateFixture(at.Add(time.Second))
+	window.After.Services = slices.Clone(window.After.Services)
+	window.After.Services[0].PID++
+	if err := ValidateCoexistenceEvidence(window, current); err == nil {
+		t.Fatal("PID change inside the qualification window accepted")
+	}
 	e.After.Anchors[0].TranslationSHA256 = digest([]byte("window drift"))
 	if err := ValidateCoexistenceEvidence(e, current); err == nil {
 		t.Fatal("recorded rule drift accepted")
