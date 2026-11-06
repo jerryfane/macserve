@@ -204,13 +204,15 @@ func eligible(policy Policy, pull githubapi.PullRequest) bool {
 // recipe returns the admitted recipe snapshot that profile id names for the
 // policy repository: an explicit profile of that repository, or a template
 // whose owners include the repository owner while the repository has no
-// explicit profile of the template's kind.
+// explicit profile of the template's kind. A pull request never selects an
+// ios_archive template: a release archive is admitted only at the default
+// branch's head through the private API.
 func (p *Poller) recipe(policy Policy, id string) (model.Profile, bool) {
 	if profile, ok := p.recipes[id]; ok {
 		return profile, profile.Repo == policy.Repository
 	}
 	template, ok := p.tmpls[id]
-	if !ok {
+	if !ok || template.Kind == model.IOSArchive {
 		return model.Profile{}, false
 	}
 	owner, _, _ := strings.Cut(policy.Repository, "/")

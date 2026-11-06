@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/jerryfane/macserve/internal/controller"
 	"github.com/jerryfane/macserve/internal/evidence"
+	"github.com/jerryfane/macserve/internal/githubapi"
 	"github.com/jerryfane/macserve/internal/model"
 	"github.com/jerryfane/macserve/internal/profiles"
 	"github.com/jerryfane/macserve/internal/store"
@@ -30,11 +32,38 @@ type Options struct {
 	Artifact        func(context.Context, string, string) (*os.File, evidence.Artifact, error)
 	Receipt         func(context.Context, string) (json.RawMessage, error)
 	ReceiptManifest func(context.Context, string, string) (json.RawMessage, error)
-	Now             func() time.Time
+	// BranchHeads is the controller's GitHub App; nil refuses ios_archive
+	// admission.
+	BranchHeads BranchHeads
+	Now         func() time.Time
 }
 type handler struct{ Options }
 
+// BranchHeads resolves a repository's default-branch head through the
+// controller's GitHub App.
+type BranchHeads interface {
+	DefaultBranchHead(ctx context.Context, repo string) (githubapi.BranchHead, error)
+}
+
 var ErrForbidden = errors.New("scope or repository denied")
+
+// ErrNoGitHubApp refuses an ios_archive admission on a controller without a
+// GitHub App to resolve the default-branch head.
+var ErrNoGitHubApp = errors.New("ios_archive admission requires the controller's GitHub App")
+
+// errHeadUnavailable is a failed default-branch resolution; the GitHub error
+// itself is not returned to the client.
+var errHeadUnavailable = errors.New("default-branch head could not be resolved")
+
+// HeadMismatchError refuses an ios_archive request whose commit is not its
+// repository's current default-branch head.
+type HeadMismatchError struct {
+	SHA, Branch, Head string
+}
+
+func (e *HeadMismatchError) Error() string {
+	return "ios_archive sha " + e.SHA + " is not the " + e.Branch + " default-branch head " + e.Head
+}
 
 func New(o Options) (http.Handler, error) {
 	if o.Store == nil || o.Profiles == nil || o.Status == nil || o.Artifact == nil || o.Receipt == nil {
@@ -48,8 +77,11 @@ func New(o Options) (http.Handler, error) {
 
 // Submit is shared by HTTP and authenticated coordinator integrations. Replays
 // normalize defaults using the admitted snapshot, never today's profile registry.
-func Submit(ctx context.Context, db *store.Store, registry *profiles.Registry, principal store.Principal, key string, request model.Request, now time.Time) (model.Job, bool, error) {
-	if !principal.HasScope("jobs:submit") || !principal.AllowsRepository(request.Repo) {
+// An ios_archive job also needs the release:archive scope, and is admitted
+// only at its repository's default-branch head as heads resolves it now; a
+// replay keeps its first admission's provenance.
+func Submit(ctx context.Context, db *store.Store, registry *profiles.Registry, heads BranchHeads, principal store.Principal, key string, request model.Request, now time.Time) (model.Job, bool, error) {
+	if !principal.HasScope("jobs:submit") || !principal.AllowsRepository(request.Repo) || request.Kind == model.IOSArchive && !principal.HasScope("release:archive") {
 		return model.Job{}, false, ErrForbidden
 	}
 	original, err := db.Replay(ctx, principal.ID, key, request)
@@ -62,6 +94,19 @@ func Submit(ctx context.Context, db *store.Store, registry *profiles.Registry, p
 	admission, err := registry.Resolve(request)
 	if err != nil {
 		return model.Job{}, false, err
+	}
+	if admission.Request.Kind == model.IOSArchive {
+		if heads == nil {
+			return model.Job{}, false, ErrNoGitHubApp
+		}
+		head, err := heads.DefaultBranchHead(ctx, admission.Request.Repo)
+		if err != nil {
+			return model.Job{}, false, fmt.Errorf("%w: %w", errHeadUnavailable, err)
+		}
+		if head.SHA != admission.Request.SHA {
+			return model.Job{}, false, &HeadMismatchError{SHA: admission.Request.SHA, Branch: head.Branch, Head: head.SHA}
+		}
+		admission.ReleaseProvenance = &model.ReleaseProvenance{RepositoryID: head.RepositoryID, DefaultBranch: head.Branch, HeadSHA: head.SHA, ResolvedAt: now.UTC(), Source: model.ProvenanceGitHubApp}
 	}
 	return db.Enqueue(ctx, principal.ID, key, admission, now)
 }
@@ -166,6 +211,12 @@ func writeError(w http.ResponseWriter, err error) {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="macserve"`)
 	case errors.Is(err, ErrForbidden):
 		status, code, message = 403, "forbidden", "permission denied"
+	case errors.Is(err, ErrNoGitHubApp):
+		status, code, message = 422, "unsupported_request", ErrNoGitHubApp.Error()
+	case errors.As(err, new(*HeadMismatchError)):
+		status, code, message = 409, "not_default_branch_head", err.Error()
+	case errors.Is(err, errHeadUnavailable):
+		status, code, message, retry = 503, "unavailable", "GitHub default-branch head could not be resolved", true
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, os.ErrNotExist):
 		status, code, message = 404, "not_found", "resource not found"
 	case errors.Is(err, store.ErrInvalid), errors.Is(err, profiles.ErrInvalid):

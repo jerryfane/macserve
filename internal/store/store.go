@@ -156,7 +156,7 @@ func (s *Store) initialize(ctx context.Context) error {
 	if err := tx.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version > 3 {
+	if version > 4 {
 		return fmt.Errorf("unsupported store schema version %d", version)
 	}
 	if version == 0 {
@@ -171,6 +171,11 @@ func (s *Store) initialize(ctx context.Context) error {
 	}
 	if version < 3 {
 		if _, err := tx.ExecContext(ctx, sourceCleanupSchema); err != nil {
+			return err
+		}
+	}
+	if version < 4 {
+		if _, err := tx.ExecContext(ctx, releaseSchema); err != nil {
 			return err
 		}
 	}
@@ -233,7 +238,7 @@ CREATE TABLE logs (
 PRAGMA user_version=1;
 `
 
-const jobColumns = `id,principal,request,profile,profile_digest,request_digest,state,reason,created_at,updated_at,started_at,finished_at,deadline,worker_epoch,lease_token,cancel_requested,result,cleanup_ok`
+const jobColumns = `id,principal,request,profile,profile_digest,request_digest,state,reason,created_at,updated_at,started_at,finished_at,deadline,worker_epoch,lease_token,cancel_requested,result,cleanup_ok,release_provenance`
 
 type scanner interface{ Scan(...any) error }
 
@@ -243,10 +248,10 @@ func scanJob(row scanner) (model.Job, error) {
 
 func scanJobSequence(row scanner, sequence *int64) (model.Job, error) {
 	var job model.Job
-	var request, profile, result []byte
+	var request, profile, result, provenance []byte
 	var created, updated int64
 	var started, finished, deadline sql.NullInt64
-	dest := []any{sequence, &job.ID, &job.Principal, &request, &profile, &job.ProfileDigest, &job.RequestDigest, &job.State, &job.Reason, &created, &updated, &started, &finished, &deadline, &job.WorkerEpoch, &job.LeaseToken, &job.CancelRequested, &result, &job.CleanupOK}
+	dest := []any{sequence, &job.ID, &job.Principal, &request, &profile, &job.ProfileDigest, &job.RequestDigest, &job.State, &job.Reason, &created, &updated, &started, &finished, &deadline, &job.WorkerEpoch, &job.LeaseToken, &job.CancelRequested, &result, &job.CleanupOK, &provenance}
 	if sequence == nil {
 		dest = dest[1:]
 	}
@@ -262,6 +267,14 @@ func scanJobSequence(row scanner, sequence *int64) (model.Job, error) {
 	}
 	if err := json.Unmarshal(profile, &job.Profile); err != nil {
 		return job, err
+	}
+	// NULL for every job but an ios_archive one, including all rows admitted
+	// before schema version 4.
+	if provenance != nil {
+		job.ReleaseProvenance = new(model.ReleaseProvenance)
+		if err := json.Unmarshal(provenance, job.ReleaseProvenance); err != nil {
+			return job, err
+		}
 	}
 	job.CreatedAt = time.Unix(0, created).UTC()
 	job.UpdatedAt = time.Unix(0, updated).UTC()

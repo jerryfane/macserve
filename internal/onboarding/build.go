@@ -224,7 +224,9 @@ type capabilities struct {
 	BlockedBy []string     `json:"blocked_by"`
 }
 
-// choose picks the profile or template for r from the capabilities.
+// choose picks the profile or template for r from the capabilities. An
+// ios_archive template is never chosen: its jobs need a release, which a
+// build request does not carry.
 func choose(c capabilities, r BuildRequest) (capability, error) {
 	owner, _, _ := strings.Cut(r.Repo, "/")
 	var matches []capability
@@ -234,6 +236,9 @@ func choose(c capabilities, r BuildRequest) (capability, error) {
 		}
 	}
 	for _, t := range c.Templates {
+		if t.Kind == model.IOSArchive {
+			continue
+		}
 		for _, o := range t.Owners {
 			if strings.EqualFold(o, owner) && (r.Profile == "" || r.Profile == t.ID) {
 				matches = append(matches, t)

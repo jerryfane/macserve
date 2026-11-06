@@ -40,9 +40,10 @@ type Error struct {
 func (e *Error) Error() string { return fmt.Sprintf("GitHub HTTP status %d", e.Status) }
 
 type Repository struct {
-	ID       int64           `json:"id"`
-	FullName string          `json:"full_name"`
-	Owner    RepositoryOwner `json:"owner"`
+	ID            int64           `json:"id"`
+	FullName      string          `json:"full_name"`
+	Owner         RepositoryOwner `json:"owner"`
+	DefaultBranch string          `json:"default_branch"`
 }
 
 type RepositoryOwner struct {

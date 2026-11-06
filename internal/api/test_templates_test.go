@@ -105,7 +105,7 @@ func TestSubmitTestTemplateJobPinsSimulatorAndShard(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := viaJSON[model.Request](t, map[string]any{"repo": "themartianapp/herdrup", "sha": strings.Repeat("a", 40), "kind": model.SimulatorUITest, "profile": template.ID, "xcode": template.Xcode, "shard": "iphone-terminal"}, nil)
-	job, replay, err := Submit(ctx, f.db, registry, org, "shard-1", request, testTime)
+	job, replay, err := Submit(ctx, f.db, registry, nil, org, "shard-1", request, testTime)
 	if err != nil || replay {
 		t.Fatalf("test template job refused: %v", err)
 	}
@@ -113,28 +113,28 @@ func TestSubmitTestTemplateJobPinsSimulatorAndShard(t *testing.T) {
 		t.Fatalf("admitted job %+v", job)
 	}
 	// Replaying the same request, with the simulator still omitted, is a replay.
-	again, replay, err := Submit(ctx, f.db, registry, org, "shard-1", request, testTime)
+	again, replay, err := Submit(ctx, f.db, registry, nil, org, "shard-1", request, testTime)
 	if err != nil || !replay || again.ID != job.ID {
 		t.Fatalf("replay: %+v %v %v", again, replay, err)
 	}
 	// So is naming the pin it resolved to; another shard or device conflicts.
 	named := request
 	named.Simulator = &iPhone
-	if again, replay, err := Submit(ctx, f.db, registry, org, "shard-1", named, testTime); err != nil || !replay || again.ID != job.ID {
+	if again, replay, err := Submit(ctx, f.db, registry, nil, org, "shard-1", named, testTime); err != nil || !replay || again.ID != job.ID {
 		t.Fatalf("replay with the admitted simulator: %v %v", replay, err)
 	}
 	for name, changed := range map[string]model.Request{
 		"shard":     viaJSON[model.Request](t, request, func(m map[string]any) { m["shard"] = "iphone-chrome" }),
 		"simulator": viaJSON[model.Request](t, request, func(m map[string]any) { m["simulator"] = iPad }),
 	} {
-		if _, _, err := Submit(ctx, f.db, registry, org, "shard-1", changed, testTime); !errors.Is(err, store.ErrConflict) {
+		if _, _, err := Submit(ctx, f.db, registry, nil, org, "shard-1", changed, testTime); !errors.Is(err, store.ErrConflict) {
 			t.Fatalf("replay with another %s: %v", name, err)
 		}
 	}
 	// The second pin is its own job.
 	other := request
 	other.Simulator = &iPad
-	if job, _, err := Submit(ctx, f.db, registry, org, "shard-2", other, testTime); err != nil || *job.Profile.Simulator != iPad {
+	if job, _, err := Submit(ctx, f.db, registry, nil, org, "shard-2", other, testTime); err != nil || *job.Profile.Simulator != iPad {
 		t.Fatalf("listed simulator: %+v %v", job, err)
 	}
 

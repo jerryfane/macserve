@@ -97,6 +97,10 @@ func prepare(o *Options) error {
 		if o.Expected.Simulator == nil {
 			return errors.New("UI and script evidence requires pinned simulator identity")
 		}
+	case model.IOSArchive:
+		// Pull request policies never select an ios_archive template, so no
+		// pull request receipt can carry one.
+		return errors.New("ios_archive jobs are admitted only through the private API, never from a pull request")
 	default:
 		return errors.New("waiter requires a pinned job kind")
 	}

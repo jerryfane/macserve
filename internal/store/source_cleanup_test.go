@@ -82,7 +82,7 @@ func TestSourceDebtMigrationRecoversPreviouslyUncertainExports(t *testing.T) {
 	// Emulate the pre-ledger database, including worker registration having
 	// already cleared its overloaded quarantine bit.
 	requireError(t, s.RegisterWorker(ctx, "epoch-b"), nil)
-	_, err := s.db.ExecContext(ctx, "DROP TABLE source_cleanup; PRAGMA user_version=2;")
+	_, err := s.db.ExecContext(ctx, "DROP TABLE source_cleanup; ALTER TABLE jobs DROP COLUMN release_provenance; PRAGMA user_version=2;")
 	requireError(t, err, nil)
 	requireError(t, s.Close(), nil)
 	s = openStore(t, path, Options{})

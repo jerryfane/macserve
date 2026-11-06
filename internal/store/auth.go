@@ -94,7 +94,7 @@ func (s *Store) ReplacePrincipals(ctx context.Context, principals []Principal) e
 		p.Scopes = append([]string{}, p.Scopes...)
 		for _, scope := range p.Scopes {
 			switch scope {
-			case "jobs:submit", "jobs:read", "jobs:cancel", "service:admin":
+			case "jobs:submit", "jobs:read", "jobs:cancel", "service:admin", "release:archive":
 			default:
 				return ErrInvalid
 			}

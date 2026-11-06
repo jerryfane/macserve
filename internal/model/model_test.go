@@ -1,6 +1,9 @@
 package model
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestTerminalStatesCannotReopen(t *testing.T) {
 	terminal := []State{Succeeded, Failed, TimedOut, Cancelled, Interrupted, Expired}
@@ -26,6 +29,19 @@ func TestExecutionCannotSkipFinalization(t *testing.T) {
 		}
 		if !from.CanTransition(Finalizing) {
 			t.Errorf("%q cannot enter finalization", from)
+		}
+	}
+}
+
+func TestValidBranch(t *testing.T) {
+	for _, name := range []string{"main", "release/1.2", "dev_x-1", "v1.0", strings.Repeat("a", 255)} {
+		if !ValidBranch(name) {
+			t.Errorf("%q refused", name)
+		}
+	}
+	for _, name := range []string{"", strings.Repeat("a", 256), "/main", "main/", "a//b", "a..b", ".hidden", "a/.b", "main.", "main.lock", "a.lock/b", "ma in", "main~1", "a^b", "a:b", "a?b", "a*b", "a[b", `a\b`, "@", "a@{1}", "mäin"} {
+		if ValidBranch(name) {
+			t.Errorf("%q accepted", name)
 		}
 	}
 }

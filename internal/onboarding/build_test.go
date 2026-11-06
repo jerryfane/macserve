@@ -154,6 +154,23 @@ func TestSubmitChoosesProfile(t *testing.T) {
 	}
 }
 
+// An ios_archive template needs a release a build request never carries, so
+// it neither makes a build ambiguous nor is ever chosen.
+func TestSubmitNeverChoosesArchiveTemplate(t *testing.T) {
+	caps := `{"profiles":[],"templates":[{"id":"org-ios-sim-build-v1","owners":["jdoe"],"kind":"build","xcode":{"version":"16.2","build":"16C5032a"}},{"id":"org-ios-archive-v1","owners":["jdoe"],"kind":"ios_archive","xcode":{"version":"16.2","build":"16C5032a"}}]}`
+	f := &fakeAPI{caps: caps}
+	b, _ := newTestBuild(t, f)
+	if _, _, err := b.Submit(context.Background(), BuildRequest{Repo: "jdoe/app", SHA: testSHA}); err != nil {
+		t.Fatal(err)
+	}
+	if f.bodies[0].Profile != "org-ios-sim-build-v1" || f.bodies[0].Kind != model.Build {
+		t.Errorf("chose %+v", f.bodies[0])
+	}
+	if _, _, err := b.Submit(context.Background(), BuildRequest{Repo: "jdoe/app", SHA: testSHA, Profile: "org-ios-archive-v1"}); err == nil || len(f.bodies) != 1 {
+		t.Errorf("archive template chosen: %v", err)
+	}
+}
+
 func TestSubmitRejectsBadInput(t *testing.T) {
 	f := &fakeAPI{caps: templateCaps}
 	b, _ := newTestBuild(t, f)

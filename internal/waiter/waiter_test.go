@@ -18,6 +18,7 @@ import (
 
 	"github.com/jerryfane/macserve/internal/githubapi"
 	"github.com/jerryfane/macserve/internal/githubpull"
+	"github.com/jerryfane/macserve/internal/model"
 	"github.com/jerryfane/macserve/internal/receipt"
 	"github.com/jerryfane/macserve/internal/waiter"
 )
@@ -493,6 +494,22 @@ func TestWaiterRejectsInvalidMachineIdentityBeforeAPIMutation(t *testing.T) {
 				t.Fatal("posted malformed machine request")
 			}
 		})
+	}
+}
+
+// A pull request never runs an ios_archive job, so the waiter refuses one
+// before posting anything.
+func TestWaiterRefusesArchiveKindBeforeAPIMutation(t *testing.T) {
+	f := newWire(t)
+	f.options.Expected.Kind = model.IOSArchive
+	f.options.Expected.Simulator = nil
+	if _, err := waiter.Run(context.Background(), f.options); err == nil || !strings.Contains(err.Error(), "private API") {
+		t.Fatalf("archive waiter = %v", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.posts != 0 {
+		t.Fatal("posted an archive request on a pull request")
 	}
 }
 

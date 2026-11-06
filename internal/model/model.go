@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -159,6 +160,27 @@ const (
 	ProvenanceGitHubApp     = "github_app"
 	ProvenanceQualification = "qualification"
 )
+
+// ValidBranch reports whether name is a default-branch name a release is
+// bound to: 1 to 255 bytes of ASCII letters, digits, '.', '_', '-' and '/'
+// within git's check-ref-format rules (no empty or '.'-leading component, no
+// "..", no component ending ".lock", no trailing '.').
+func ValidBranch(name string) bool {
+	if len(name) == 0 || len(name) > 255 || strings.HasSuffix(name, ".") || strings.Contains(name, "..") {
+		return false
+	}
+	for _, c := range []byte(name) {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '_' || c == '-' || c == '/') {
+			return false
+		}
+	}
+	for part := range strings.SplitSeq(name, "/") {
+		if part == "" || part[0] == '.' || strings.HasSuffix(part, ".lock") {
+			return false
+		}
+	}
+	return true
+}
 
 // Command is trusted configuration, never a client-supplied command or shell string.
 // Arguments may reference documented worker placeholders such as ${CHECKOUT}.
