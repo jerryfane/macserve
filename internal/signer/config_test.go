@@ -89,3 +89,57 @@ func TestSecurityScriptGuards(t *testing.T) {
 		}
 	}
 }
+
+// fakeSecurity mimics Apple's security -i: it prompts, runs each line
+// (unknown commands such as exit, and lines starting with "fail", print an
+// error and set status 1; other commands print nothing and set status 0),
+// and at EOF exits with the last command's status.
+const fakeSecurity = `#!/bin/sh
+status=0
+while IFS= read -r line; do
+	printf 'security> '
+	case "$line" in
+	create-keychain*|set-keychain-settings*|unlock-keychain*) status=0 ;;
+	fail*) echo "security: $line: failed" >&2; status=1 ;;
+	*) echo "security: unknown command \"$line\"" >&2; status=1 ;;
+	esac
+done
+printf 'security> '
+exit $status
+`
+
+func TestSecurityScriptEndsAtEOF(t *testing.T) {
+	for _, line := range strings.Split(string(securityInput([]string{"unlock-keychain -p s /k", "set-keychain-settings /k"})), "\n") {
+		if strings.TrimSpace(line) == "exit" {
+			t.Fatal("security -i input has an exit line")
+		}
+	}
+	if got := string(securityInput([]string{"a", "b"})); got != "a\nb\n" {
+		t.Fatalf("input %q", got)
+	}
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "security")
+	if err := os.WriteFile(binary, []byte(fakeSecurity), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tools := ExecTools{Home: dir, security: binary}
+	secret := strings.Repeat("a", 64)
+	if err := tools.CreateKeychain(t.Context(), "/k/signing.keychain-db", secret); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := tools.UnlockKeychain(t.Context(), "/k/signing.keychain-db", secret); err != nil {
+		t.Fatalf("unlock: %v", err)
+	}
+	// The last command's failure is the exit status.
+	if err := tools.securityScript(t.Context(), "unlock-keychain -p x /k", "fail second"); err == nil || !strings.Contains(err.Error(), "failed") {
+		t.Fatalf("last command failure: %v", err)
+	}
+	// An earlier failure exits 0 but prints its message.
+	if err := tools.securityScript(t.Context(), "fail first", "unlock-keychain -p x /k"); err == nil || !strings.Contains(err.Error(), "reported an error") {
+		t.Fatalf("earlier command failure: %v", err)
+	}
+	// The removed exit line would itself fail.
+	if err := tools.securityScript(t.Context(), "unlock-keychain -p x /k", "exit"); err == nil {
+		t.Fatal("exit accepted by fake security")
+	}
+}

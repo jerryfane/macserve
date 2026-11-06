@@ -53,6 +53,8 @@ type ExecTools struct {
 	// Timeout bounds one invocation; zero means 10 minutes (codesign
 	// --timestamp contacts Apple's timestamp service).
 	Timeout time.Duration
+	// security overrides securityPath in tests.
+	security string
 }
 
 const (
@@ -107,13 +109,18 @@ func (t ExecTools) runOutputs(ctx context.Context, stdin []byte, name string, ar
 }
 
 // securityScript runs commands through security -i so a secret is never an
-// argument. security -i reports a failed command as a message and still
-// exits 0, and its successful keychain commands print nothing, so any
-// output besides its prompts fails the call. The output is never
-// returned: it may quote a command line.
+// argument. security has no exit command: interactive mode ends at EOF of
+// its input and exits with the last command's status, so the script is the
+// commands alone. A failed earlier command only prints a message, and
+// successful keychain commands print nothing, so any output besides
+// prompts also fails the call. The output is never returned: it may quote
+// a command line.
 func (t ExecTools) securityScript(ctx context.Context, lines ...string) error {
-	script := strings.Join(lines, "\n") + "\nexit\n"
-	stdout, stderr, err := t.runOutputs(ctx, []byte(script), securityPath, "-i")
+	binary := t.security
+	if binary == "" {
+		binary = securityPath
+	}
+	stdout, stderr, err := t.runOutputs(ctx, securityInput(lines), binary, "-i")
 	if err != nil {
 		return errors.New("security -i failed")
 	}
@@ -121,6 +128,12 @@ func (t ExecTools) securityScript(ctx context.Context, lines ...string) error {
 		return errors.New("security -i reported an error")
 	}
 	return nil
+}
+
+// securityInput is the security -i standard input for lines: each command
+// on its own line, then EOF.
+func securityInput(lines []string) []byte {
+	return []byte(strings.Join(lines, "\n") + "\n")
 }
 
 // onlyPrompts reports whether out holds nothing but security -i prompts
