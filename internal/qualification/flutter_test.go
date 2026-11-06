@@ -116,3 +116,72 @@ func TestInspectFlutterToolsRefusesMismatchedTools(t *testing.T) {
 		})
 	}
 }
+
+// flutterChallenge adds a Flutter build template on the environment's
+// developer directory to c.
+func flutterChallenge(c Challenge) (Challenge, string) {
+	pin := qualificationFlutterPin
+	t := model.Template{ID: "org-flutter-build-v1", Version: 1, Kind: model.Build, Owners: []string{"themartianapp"}, Xcode: model.Xcode{Version: "27.1", Build: "27A9275"}, DeveloperDir: c.Environment.DeveloperDir, Flutter: &pin}
+	c.Templates = append(c.Templates, t)
+	return c, flutterToolTarget(t)
+}
+
+// withFlutterRow returns r with a tool_profiles row for target appended, or
+// r unchanged for an empty target.
+func withFlutterRow(r Report, target string, success bool) Report {
+	if target == "" {
+		return r
+	}
+	r.Results = append(append([]Result(nil), r.Results...), Result{Category: "tool_profiles", Target: target, Attempt: 1, Success: success})
+	return r
+}
+
+// The session aggregate expects one passing tool_profiles row per developer
+// directory and per Flutter template: a passing Flutter row passes, a missing
+// or failing one fails, and a Flutter row without a Flutter template fails.
+func TestAggregateToolProfilesIncludesFlutterTemplates(t *testing.T) {
+	base, j, o, receipts := phaseOneFixture()
+	c, target := flutterChallenge(base)
+	facts := sittingFacts{rebootOK: true, toolOK: true}
+	if got := aggregate(c, withFlutterRow(j, target, true), o, receipts, facts)["tool_profiles"]; got.Status != "pass" {
+		t.Fatalf("passing flutter row: %+v", got)
+	}
+	for name, tc := range map[string]struct {
+		c      Challenge
+		target string
+		ok     bool
+	}{
+		"flutter row missing":     {c, "", true},
+		"flutter row failing":     {c, target, false},
+		"unexpected flutter row":  {base, target, true},
+		"other template's target": {c, "org-other-v1 flutter 3.41.9", true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := aggregate(tc.c, withFlutterRow(j, tc.target, tc.ok), o, receipts, facts)["tool_profiles"]; got.Status != "fail" {
+				t.Fatalf("tool_profiles %+v", got)
+			}
+		})
+	}
+}
+
+// Carry validation applies the same tool_profiles targets.
+func TestCarryJobProbeIncludesFlutterTemplates(t *testing.T) {
+	base := carryChallengeFixture()
+	c, target := flutterChallenge(base)
+	approved := c
+	approved.Carry = false
+	if err := checkCarryJobProbe(withFlutterRow(deniedReport(c), target, true), c, "h", approved); err != nil {
+		t.Fatalf("passing flutter row refused: %v", err)
+	}
+	for name, report := range map[string]Report{
+		"flutter row missing": deniedReport(c),
+		"flutter row failing": withFlutterRow(deniedReport(c), target, false),
+	} {
+		if err := checkCarryJobProbe(report, c, "h", approved); err == nil || !strings.Contains(err.Error(), "tool inspection") {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if err := checkCarryJobProbe(withFlutterRow(deniedReport(base), target, true), base, "h", approved); err == nil {
+		t.Error("unexpected flutter row accepted without a Flutter template")
+	}
+}

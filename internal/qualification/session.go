@@ -650,13 +650,7 @@ func aggregate(c Challenge, j, o Report, receipts []Receipts, facts sittingFacts
 	homeOwner, hoc := rows(o, "owner_home_denial", homes, 1)
 	canaryControls, canaryCount := ownerCanaryControls(c, j, o, receipts)
 	set("owner_home_denial", home && homeOwner && canaryControls, hc, hoc+canaryCount, "owner reads the exact canary before/after both probes and lists actual home; job must receive permission denial on every path")
-	dirs := []string{c.Environment.DeveloperDir}
-	for _, p := range c.recipes() {
-		dirs = append(dirs, p.DeveloperDir)
-	}
-	slices.Sort(dirs)
-	dirs = slices.Compact(dirs)
-	tools, tc := rows(j, "tool_profiles", dirs, 1)
+	tools, tc := rows(j, "tool_profiles", c.toolProfileTargets(), 1)
 	set("owner_unaffected", homeOwner && canaryControls, hoc+canaryCount, hoc+canaryCount, "owner home and before/after canary controls required; network observations are informational; no owner Apple tools or simulator operations")
 	set("tool_profiles", tools && facts.toolOK, tc, 0, "job pinned tool inspection; "+facts.toolReason)
 	if tools && !facts.toolOK {

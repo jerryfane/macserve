@@ -17,6 +17,9 @@ const (
 	// FlutterWorkspace is the Xcode workspace of every Flutter repository,
 	// in <app_dir>/ios.
 	FlutterWorkspace = "Runner.xcworkspace"
+	// FlutterScheme is the only scheme of a Flutter repository: flutter build
+	// does not take a scheme, so flavors and custom schemes are unsupported.
+	FlutterScheme = "Runner"
 	// FlutterSDKClone, FlutterPubCache and FlutterCocoaPodsHome are a Flutter
 	// job's workspace directories: its writable APFS clone of the pinned SDK
 	// (FLUTTER_ROOT), its pub cache and its CocoaPods home.
@@ -108,9 +111,9 @@ func cloneFlutterRequest(f *model.FlutterRequest) *model.FlutterRequest {
 }
 
 // validateFlutter checks the flutter section's fixed layout: work_dir is
-// <app_dir>/ios, the workspace is Runner.xcworkspace (no project), neither
-// xcodegen nor resolve_packages, and at most eight checkout-relative .rb
-// files to run.
+// <app_dir>/ios, the workspace is Runner.xcworkspace (no project), the scheme
+// is Runner, neither xcodegen nor resolve_packages, and at most eight
+// checkout-relative .rb files to run.
 func validateFlutter(c model.RepoConfig) error {
 	f := c.Flutter
 	if f == nil {
@@ -124,6 +127,8 @@ func validateFlutter(c model.RepoConfig) error {
 		return repoConfigError("work_dir must be flutter.app_dir's ios directory %q", ios)
 	case c.Project != "" || c.Workspace != FlutterWorkspace:
 		return repoConfigError("a flutter repository uses workspace %q and no project", FlutterWorkspace)
+	case c.Scheme != FlutterScheme:
+		return repoConfigError("a flutter repository uses scheme %q: Flutter flavors/custom schemes are not supported", FlutterScheme)
 	case c.XcodeGen || c.ResolvePackages:
 		return repoConfigError("a flutter repository cannot use xcodegen or resolve_packages")
 	case len(f.PrepareRuby) > maxPrepareRuby:

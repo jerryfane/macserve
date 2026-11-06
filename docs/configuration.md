@@ -54,8 +54,9 @@ per-shard timeouts. Preparation has a 30-minute budget. The full
 A Flutter template (one with a `flutter` pin: `version`, `sdk_sha256`, `ruby_sha256`, `cocoapods_version`,
 `gems_sha256`) runs `build`, `unit_test` or `simulator_ui_test` jobs for repositories whose `.macserve.json` has a
 `flutter` section, `{"app_dir": "apps/mobile", "prepare_ruby": ["scripts/add_call_directory_target.rb"]}` (at most 8
-checkout-relative `.rb` scripts), with `work_dir` `<app_dir>/ios`, `workspace` `Runner.xcworkspace`, no `project`,
-`xcodegen` or `resolve_packages`; other templates refuse such a file and a Flutter template refuses any other. Its
+checkout-relative `.rb` scripts), with `work_dir` `<app_dir>/ios`, `workspace` `Runner.xcworkspace`, `scheme`
+`Runner` (Flutter flavors and custom schemes are not supported), no `project`, `xcodegen` or `resolve_packages`;
+other templates refuse such a file and a Flutter template refuses any other. Its
 requests must name the pinned version exactly, `"flutter": {"version": "3.41.9"}`, and requests for any other recipe
 must not name one. `<app_dir>/pubspec.lock` and `<app_dir>/ios/Podfile.lock` must be committed regular files (the
 latter naming the pinned `COCOAPODS:` version); both are tracked, and a lockfile created during a Flutter job fails it.

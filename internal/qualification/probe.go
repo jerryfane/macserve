@@ -394,13 +394,7 @@ func probeReport(ctx context.Context, c Challenge, raw []byte, role string) (Rep
 		add("owner_home_denial", p, 1, ok, detail, "")
 	}
 	if role == "job" {
-		developerDirs := []string{c.Environment.DeveloperDir}
-		for _, p := range c.recipes() {
-			developerDirs = append(developerDirs, p.DeveloperDir)
-		}
-		slices.Sort(developerDirs)
-		developerDirs = slices.Compact(developerDirs)
-		for _, developer := range developerDirs {
+		for _, developer := range c.toolDeveloperDirs() {
 			err := hostguard.ToolchainDirectory(developer, c.Environment.JobUID)
 			if err != nil {
 				add("tool_profiles", developer, 1, false, err.Error(), "")
@@ -426,11 +420,9 @@ func probeReport(ctx context.Context, c Challenge, raw []byte, role string) (Rep
 			add("tool_profiles", developer, 1, ok, detail, "")
 		}
 		// A Flutter template's pinned tools are part of its tool profile.
-		for _, t := range c.Templates {
-			if t.Flutter != nil {
-				ok, detail := inspectFlutterTools(ctx, *t.Flutter, c.Environment.JobUID)
-				add("tool_profiles", t.ID+" flutter "+t.Flutter.Version, 1, ok, detail, "")
-			}
+		for _, t := range c.flutterTemplates() {
+			ok, detail := inspectFlutterTools(ctx, *t.Flutter, c.Environment.JobUID)
+			add("tool_profiles", flutterToolTarget(t), 1, ok, detail, "")
 		}
 	}
 	r.Finished = time.Now().UTC()

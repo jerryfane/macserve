@@ -58,6 +58,7 @@ func TestFlutterRepoConfigValidation(t *testing.T) {
 		"project and flutter":      replace(`"workspace":"Runner.xcworkspace"`, `"project":"Runner.xcodeproj"`),
 		"project beside workspace": replace(`"scheme"`, `"project":"Runner.xcodeproj","scheme"`),
 		"other workspace":          replace(`"Runner.xcworkspace"`, `"App.xcworkspace"`),
+		"custom scheme":            replace(`"scheme":"Runner"`, `"scheme":"Runner-dev"`),
 		"xcodegen and flutter":     replace(`"scheme"`, `"xcodegen":true,"scheme"`),
 		"resolve_packages":         replace(`"scheme"`, `"resolve_packages":true,"scheme"`),
 		"app_dir traversal":        strings.NewReplacer(`"app_dir":"apps/mobile"`, `"app_dir":"../mobile"`, `"work_dir":"apps/mobile/ios"`, `"work_dir":"../mobile/ios"`).Replace(flutterRepoConfig),

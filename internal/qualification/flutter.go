@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"slices"
 	"strings"
 
 	"github.com/jerryfane/macserve/internal/hostguard"
@@ -13,6 +14,47 @@ import (
 	"github.com/jerryfane/macserve/internal/profiles"
 	"github.com/jerryfane/macserve/internal/worker"
 )
+
+// toolDeveloperDirs are the developer directories the job probe inspects,
+// one tool_profiles row each: the environment's and every recipe's, sorted
+// and unique.
+func (c Challenge) toolDeveloperDirs() []string {
+	dirs := []string{c.Environment.DeveloperDir}
+	for _, p := range c.recipes() {
+		dirs = append(dirs, p.DeveloperDir)
+	}
+	slices.Sort(dirs)
+	return slices.Compact(dirs)
+}
+
+// flutterTemplates are the challenge's templates with a Flutter pin, in
+// configuration order.
+func (c Challenge) flutterTemplates() []model.Template {
+	var list []model.Template
+	for _, t := range c.Templates {
+		if t.Flutter != nil {
+			list = append(list, t)
+		}
+	}
+	return list
+}
+
+// flutterToolTarget is the tool_profiles target of a Flutter template's
+// pinned-tool row.
+func flutterToolTarget(t model.Template) string {
+	return t.ID + " flutter " + t.Flutter.Version
+}
+
+// toolProfileTargets are every tool_profiles target a job probe must report
+// once and passing: each developer directory and each Flutter template's
+// pinned tools. The probe, the session aggregate and carry validation share it.
+func (c Challenge) toolProfileTargets() []string {
+	targets := c.toolDeveloperDirs()
+	for _, t := range c.flutterTemplates() {
+		targets = append(targets, flutterToolTarget(t))
+	}
+	return targets
+}
 
 // inspectFlutterTools is the tool_profiles check of one Flutter template's
 // pinned tools, as the job account: every tool path is root-owned and not
