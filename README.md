@@ -35,7 +35,7 @@ needs network credentials for your private network. No VM required.
 
 | Feature | What you get |
 | --- | --- |
-| **Exact commits** | `build`, `unit_test`, `simulator_ui_test` and template-only `simulator_script` and `ios_archive` (unsigned release archive; no signing or upload) jobs for a repository at an exact 40-character commit SHA. |
+| **Exact commits** | `build`, `unit_test`, `simulator_ui_test` and template-only `simulator_script` and `ios_archive` (unsigned release archive, signed by the optional code signer and uploaded by the agent: [TestFlight](docs/testflight.md)) jobs for a repository at an exact 40-character commit SHA. |
 | **Pinned toolchains** | The Xcode version and build, and the simulator runtime, are pinned per job. |
 | **Zero-config onboarding** | Org-level templates: any repository of an approved GitHub owner builds, and runs sharded unit or UI tests on a pinned simulator, by committing a small `.macserve.json`. |
 | **No command injection** | Controller-owned, versioned profiles and templates fix the xcodebuild command line; clients cannot inject shell commands, environment variables or paths. |
@@ -43,6 +43,7 @@ needs network credentials for your private network. No VM required.
 | **Signed receipts** | Ed25519 signatures over RFC 8785 canonical JSON, verified against pinned keys. |
 | **GitHub pull mode** | A GitHub App polls allowlisted repositories and publishes `mac-evidence/<profile>` check runs, which can be required checks. |
 | **Linux CI waiter** | `macserve wait` lets a Linux workflow request exact-head evidence and verify the pinned receipt. |
+| **Agent-side TestFlight upload** | `macserve testflight-upload` verifies a signed job's signer receipt and `App.ipa`, then uploads it through the App Store Connect Build Upload API with keyring-signed JWTs; no Apple key on the Mac or in the agent. [Details](docs/testflight.md). |
 | **Fail-closed health** | Short-lived, root-owned host health; missing, stale or changed qualification stops admission and cancels active work. |
 
 ## How it works

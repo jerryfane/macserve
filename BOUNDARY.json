@@ -35,6 +35,7 @@
       "internal/signer/**",
       "internal/source/**",
       "internal/store/**",
+      "internal/testflight/**",
       "internal/waiter/**",
       "internal/worker/**",
       "internal/workerclient/**"

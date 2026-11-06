@@ -30,7 +30,8 @@ Optional `signer` connects the controller to the [code signer](#code-signer).
   `DELETE /v1/admin/pause` clears only manual pause. An optional owner-controlled pause marker also blocks dispatch.
 - `POST /v1/jobs/{id}/sign` (scope `release:sign`; the job's own principal or `service:admin`) signs a succeeded
   `ios_archive` job through the code signer: `202` while signing, `200` once signed, a failed signing is retried.
-  `GET /v1/jobs/{id}/signing` reports the signing sub-status.
+  `GET /v1/jobs/{id}/signing` reports the signing sub-status. The agent then uploads the signed `App.ipa` with
+  `macserve testflight-upload` ([TestFlight](testflight.md)); macserve never contacts App Store Connect.
 
 Job kinds are `build`, `unit_test`, `simulator_ui_test`, `simulator_script` and `ios_archive`; the last two run only
 from an org template. A `simulator_script` request names a `shard` of the repository's `.macserve.json` `script` section,
