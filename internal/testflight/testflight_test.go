@@ -212,6 +212,53 @@ func TestExistingUploadIsResumed(t *testing.T) {
 	}
 }
 
+// Committed content counts only when its file carries this ipa's checksum:
+// in a PROCESSING upload, and in an AWAITING_UPLOAD upload whose file is
+// already committed. Anything else is refused without success evidence.
+func TestCommittedUploadMustCarryThisChecksum(t *testing.T) {
+	for name, test := range map[string]struct {
+		checksum map[string]any
+		want     string
+	}{
+		"absent":      {nil, "without a source file checksum"},
+		"empty hash":  {map[string]any{"hash": "", "algorithm": "MD5"}, "without a source file checksum"},
+		"no algo":     {map[string]any{"hash": strings.Repeat("0", 32)}, "without a source file checksum"},
+		"mismatch":    {map[string]any{"hash": strings.Repeat("0", 32), "algorithm": "MD5"}, "not this ipa's"},
+		"other algo":  {map[string]any{"hash": strings.Repeat("0", 32), "algorithm": "CRC32"}, "unsupported"},
+		"matches md5": {nil, ""},
+	} {
+		for _, uploadState := range []string{stateProcessing, stateAwaitingUpload} {
+			t.Run(name+"/"+uploadState, func(t *testing.T) {
+				f := validFixture(t)
+				a := f.ascState
+				checksum := test.checksum
+				if test.want == "" {
+					sum := md5.Sum(f.ipa)
+					checksum = map[string]any{"hash": hex.EncodeToString(sum[:]), "algorithm": "MD5"}
+				}
+				a.uploads = append(a.uploads, &fakeUpload{id: "upload-3", version: testVersion, build: testBuild, platform: "IOS", state: uploadState, created: f.clock.Now()})
+				a.files["upload-3"] = []*fakeFile{{id: "file-4", state: fileUploadComplete, size: int64(len(f.ipa)), checksum: checksum}}
+				ev, err := f.run()
+				if slices.ContainsFunc(a.log, func(s string) bool { return !strings.HasPrefix(s, "GET ") }) || len(a.partCalls) != 0 {
+					t.Fatalf("committed upload was modified: %v %v", a.log, a.partCalls)
+				}
+				if test.want == "" {
+					if err != nil || ev.FinalState != "COMPLETE" || !ev.Resumed || ev.BuildUploadID != "upload-3" {
+						t.Fatalf("bound upload: %+v %v", ev, err)
+					}
+					return
+				}
+				if err == nil || !strings.Contains(err.Error(), test.want) || !strings.Contains(err.Error(), "cannot be bound to this ipa") {
+					t.Fatalf("got %v, want %q", err, test.want)
+				}
+				if ev.FinalState != "" || ev.StateErrors != nil || ev.BuildUploadID != "upload-3" || ev.Error == "" {
+					t.Fatalf("unbound upload reported as evidence: %+v", ev)
+				}
+			})
+		}
+	}
+}
+
 func TestRefusesUnverifiedIPA(t *testing.T) {
 	_, otherKey, _ := ed25519.GenerateKey(rand.Reader)
 	for name, test := range map[string]struct {

@@ -142,6 +142,10 @@ func Run(ctx context.Context, o Options) (Evidence, error) {
 		o.logf("created build upload %s", upload.ID)
 	}
 	if err := asc.deliver(ctx, upload, signed); err != nil {
+		if errors.Is(err, errUnbound) {
+			// Another ipa's state is no evidence for this one.
+			ev.FinalState, ev.StateErrors = "", nil
+		}
 		return finish(err)
 	}
 	final, err := asc.poll(ctx, upload.ID, o.PollInterval)

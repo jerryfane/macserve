@@ -337,6 +337,9 @@ func (a *fakeASC) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			a.error(w, 404, "NOT_FOUND", "no upload")
 			return
 		}
+		if files := a.files[u.id]; u.state == stateAwaitingUpload && len(files) > 0 && files[0].state == fileUploadComplete {
+			u.state = stateProcessing
+		}
 		if u.state == stateProcessing {
 			u.polls++
 			if u.polls > a.processingPolls {

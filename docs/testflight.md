@@ -83,9 +83,13 @@ build and `IOS` is resumed instead of creating a duplicate (`COMPLETE` first, th
 
 - `AWAITING_UPLOAD`: the existing ipa reservation is reused (its `fileSize` must equal this ipa's), every upload
   operation is sent again (parts are idempotent until commit) and the file is committed. A commit App Store
-  Connect refuses is accepted only if the build upload already reports `PROCESSING` or `COMPLETE`.
-- `PROCESSING` or `COMPLETE`: nothing is uploaded; its ipa file must have this ipa's size and, if it carries a
-  checksum, this ipa's checksum; then it is polled.
+  Connect refuses is accepted only if the build upload already reports `PROCESSING` or `COMPLETE` and its file
+  is bound (below).
+- `PROCESSING` or `COMPLETE`, or a file already committed: nothing is uploaded or committed. The ipa file must be
+  bound to this ipa: this ipa's size, and a `sourceFileChecksums.file` with a supported `algorithm` (`MD5` or
+  `SHA_256`) and a `hash` equal to this ipa's. Apple may omit the checksum; an absent, empty or different checksum
+  means the remote bytes cannot be shown to be this ipa, so the run fails with no `final_state` and the upload
+  must be resolved in App Store Connect or a new build number archived. A bound upload is then polled.
 - only `FAILED` uploads: the run fails with their errors. Delete the upload in App Store Connect or archive a new
   build number.
 

@@ -428,34 +428,30 @@ func (c *ascClient) ensureUpload(ctx context.Context, r release) (buildUpload, b
 	}
 }
 
-// deliver uploads and commits the ipa. A build upload already past
-// AWAITING_UPLOAD is not touched, but its listed ipa file must have this
-// ipa's size and, when it carries one, its checksum.
+// deliver uploads and commits the ipa. Content already committed (a build
+// upload past AWAITING_UPLOAD, or a committed file) is not touched, and
+// counts only when its file carries this ipa's checksum (bound).
 func (c *ascClient) deliver(ctx context.Context, upload buildUpload, ipa *signedIPA) error {
 	if s := upload.state(); s == stateProcessing || s == stateComplete {
-		file, found, err := c.findFile(ctx, upload.ID, ipa)
-		if err == nil && !found {
-			err = fmt.Errorf("build upload %s is %s but lists no ipa file to compare with this one", upload.ID, s)
-		}
-		if err == nil {
-			_, err = commitChecksums(file, ipa)
-		}
-		return err
+		return c.bound(ctx, upload.ID, ipa)
 	}
 	file, err := c.ensureFile(ctx, upload.ID, ipa)
 	if err != nil {
 		return err
 	}
-	commit, err := commitChecksums(file, ipa)
-	if err != nil {
-		return err
-	}
 	switch file.state() {
 	case fileUploadComplete, stateComplete:
-		c.logf("build upload file %s is already committed", file.ID)
+		if err := committedMatches(upload.ID, file, ipa); err != nil {
+			return err
+		}
+		c.logf("build upload file %s is already committed with this ipa's checksum", file.ID)
 		return nil
 	case stateFailed:
 		return fmt.Errorf("build upload file %s FAILED%s", file.ID, describe(file.Attributes.AssetDeliveryState.Errors))
+	}
+	commit, err := commitChecksums(file, ipa)
+	if err != nil {
+		return err
 	}
 	if err := c.upload(ctx, file, ipa); err != nil {
 		return err
@@ -471,16 +467,52 @@ func (c *ascClient) deliver(ctx context.Context, upload buildUpload, ipa *signed
 	}
 	// A commit that App Store Connect already applied (a lost response
 	// resent, or an earlier run) is refused; accept it only once the build
-	// upload reports processing.
+	// upload reports processing and its file is bound to this ipa.
 	var current struct {
 		Data buildUpload `json:"data"`
 	}
 	if lookup := c.do(ctx, http.MethodGet, "/v1/buildUploads/"+upload.ID, nil, &current, true); lookup == nil {
 		if s := current.Data.state(); s == stateProcessing || s == stateComplete {
-			return nil
+			return c.bound(ctx, upload.ID, ipa)
 		}
 	}
 	return err
+}
+
+// bound requires a committed build upload's ipa file to carry this ipa's
+// checksum.
+func (c *ascClient) bound(ctx context.Context, uploadID string, ipa *signedIPA) error {
+	file, found, err := c.findFile(ctx, uploadID, ipa)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("build upload %s lists no ipa file: %w", uploadID, errUnbound)
+	}
+	return committedMatches(uploadID, file, ipa)
+}
+
+// errUnbound refuses committed App Store Connect content that cannot be
+// shown to be this ipa. Nothing distinguishes it from another build of the
+// same version and build number, so it is never reported as success.
+var errUnbound = errors.New("the existing upload cannot be bound to this ipa; resolve it in App Store Connect or archive a new build number")
+
+// committedMatches requires a committed file's sourceFileChecksums.file to
+// name a supported algorithm and a hash equal to this ipa's. Apple may omit
+// the checksum; then the remote bytes are unproven and refused.
+func committedMatches(uploadID string, file uploadFile, ipa *signedIPA) error {
+	c := file.Attributes.SourceFileChecksums
+	if c == nil || c.File == nil || c.File.Hash == "" || c.File.Algorithm == "" {
+		return fmt.Errorf("build upload %s file %s is committed without a source file checksum: %w", uploadID, file.ID, errUnbound)
+	}
+	want, ok := map[string]string{"MD5": ipa.md5, "SHA_256": ipa.sha256}[c.File.Algorithm]
+	if !ok {
+		return fmt.Errorf("build upload %s file %s carries an unsupported %q checksum: %w", uploadID, file.ID, clean(c.File.Algorithm), errUnbound)
+	}
+	if !strings.EqualFold(c.File.Hash, want) {
+		return fmt.Errorf("build upload %s file %s carries %s %s, not this ipa's %s: %w", uploadID, file.ID, c.File.Algorithm, clean(c.File.Hash), want, errUnbound)
+	}
+	return nil
 }
 
 // findFile returns the build upload's ipa file reservation, which must be
