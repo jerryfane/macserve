@@ -60,7 +60,10 @@ func TestQualificationInvalidatesChangedLiveFacts(t *testing.T) {
 		})
 	}
 }
-func TestQualificationRefusesPostApprovalServiceRestart(t *testing.T) {
+// A peer that restarts after qualification keeps the host qualified while it is
+// running (2026-11-06: a keyring redeploy closed the gate until requalification);
+// a peer that is not running, or a changed peer set, still invalidates health.
+func TestQualificationToleratesRunningPeerRestartOnly(t *testing.T) {
 	now, q, evidence, observation := approvedFixture()
 	for _, state := range []*CoexistenceState{&evidence.Coexistence.Before, &evidence.Coexistence.After, observation.Coexistence} {
 		state.Services = []ServicePID{{Label: "com.example.guest-router", PID: 123}}
@@ -70,8 +73,19 @@ func TestQualificationRefusesPostApprovalServiceRestart(t *testing.T) {
 	}
 	observation.Coexistence.Services[0].PID = 124
 	health, err := Evaluate(now, q, evidence, observation)
-	if err == nil || health.BoundaryValidated || health.AccountedBytes != -1 {
-		t.Fatalf("restarted peer retained qualified health: %+v %v", health, err)
+	if err != nil || !health.BoundaryValidated || health.AccountedBytes != 1234 {
+		t.Fatalf("restarted running peer lost qualified health: %+v %v", health, err)
+	}
+	for name, services := range map[string][]ServicePID{
+		"not running": {{Label: "com.example.guest-router", PID: 0}},
+		"missing":     nil,
+		"other peer":  {{Label: "com.example.other-router", PID: 124}},
+	} {
+		observation.Coexistence.Services = services
+		health, err = Evaluate(now, q, evidence, observation)
+		if err == nil || health.BoundaryValidated || health.AccountedBytes != -1 {
+			t.Fatalf("%s peer retained qualified health: %+v %v", name, health, err)
+		}
 	}
 }
 

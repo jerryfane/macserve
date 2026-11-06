@@ -314,9 +314,23 @@ func SameCoexistence(before, after CoexistenceState) error {
 	return nil
 }
 
+// ValidateCoexistenceEvidence checks steady-state health against a qualification
+// window. The window itself must show unchanged services and rules. After the
+// window, the same configured services must still be running, each with a
+// valid PID, but a peer may have restarted: its own updates are not a macserve
+// boundary change and must not take the host out of service until requalified.
 func ValidateCoexistenceEvidence(e CoexistenceEvidence, current CoexistenceState) error {
 	if err := SameCoexistence(e.Before, e.After); err != nil {
 		return err
 	}
-	return SameCoexistingServices(e.After, current)
+	if err := validCoexistenceState(current); err != nil {
+		return err
+	}
+	if current.RecordedAt.Before(e.After.RecordedAt) {
+		return errors.New("coexistence observation time regressed")
+	}
+	if !slices.EqualFunc(e.After.Services, current.Services, func(a, b ServicePID) bool { return a.Label == b.Label }) {
+		return errors.New("coexisting service set changed")
+	}
+	return nil
 }
