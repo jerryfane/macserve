@@ -849,6 +849,8 @@ Place each App Store provisioning profile under `/Library/macserve/signer-profil
 
 Grant `release:sign` to the principal (in `principals[].scopes` of `controller.json`). For a succeeded `ios_archive` job, a caller holding `release:sign` that is the job's own principal or also holds `service:admin` calls `POST /v1/jobs/<id>/sign` (no body): `202` while signing (also when signing was already started), `200` once signed; a failed signing is retried by calling it again. Without `release:sign` the call is `403`; a job that has not finished is `409 result_not_ready`; a controller without a `signer` section answers `422`. The job's `state` never changes; the job view and `GET /v1/jobs/<id>/signing` carry `signing: {status: signing|signed|sign_failed, reason?, started_at, updated_at, artifacts?}`, where a signed job's `App.ipa` and `signer-receipt.json` are listed with their `/v1/jobs/<id>/artifacts/<sha256>` download links. `GET /v1/capabilities` publishes the signer receipt key as `signer: {key_id, public_key}`.
 
+The agent uploads the signed `App.ipa` to App Store Connect itself with `macserve testflight-upload`, verifying the signer receipt against that key first; see [TestFlight](testflight.md).
+
 ### Enabling
 
 Enable `org.macserve.signer` only after `signer-init`, the identity import, `signer-policy.json` and the controller `signer` section are in place and a fresh qualification (which now includes the job probe's [`signer_denial`](architecture.md#code-signer-boundary) rows) has been approved. Adding the signer changes the anchored configuration (`config/` files and the signer plist), so the owner approves again.
