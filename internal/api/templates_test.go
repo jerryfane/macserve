@@ -34,7 +34,7 @@ func TestOwnerWildcardPrincipalSubmitsTemplateJobs(t *testing.T) {
 		return model.Request{Repo: repo, SHA: strings.Repeat("a", 40), Kind: model.Build, Profile: profile, Xcode: template.Xcode}
 	}
 	for i, repo := range []string{"themartianapp/new-app", "TheMartianApp/Another"} {
-		job, replay, err := Submit(ctx, f.db, registry, org, "key-"+string(rune('a'+i)), request(repo, template.ID), testTime)
+		job, replay, err := Submit(ctx, f.db, registry, nil, org, "key-"+string(rune('a'+i)), request(repo, template.ID), testTime)
 		if err != nil || replay || job.Profile.Template == nil || job.ProfileDigest != registry.Digests()[template.ID] {
 			t.Fatalf("%s: wildcard principal refused: %+v %v", repo, job, err)
 		}
@@ -50,12 +50,12 @@ func TestOwnerWildcardPrincipalSubmitsTemplateJobs(t *testing.T) {
 		{org, request("example-org/example-app", exact.ID)},        // wildcard of another owner
 	}
 	for i, r := range refusals {
-		if _, _, err := Submit(ctx, f.db, registry, r.principal, "refused-"+string(rune('a'+i)), r.request, testTime); !errors.Is(err, ErrForbidden) {
+		if _, _, err := Submit(ctx, f.db, registry, nil, r.principal, "refused-"+string(rune('a'+i)), r.request, testTime); !errors.Is(err, ErrForbidden) {
 			t.Fatalf("refusal %d: got %v", i, err)
 		}
 	}
 	// Exact-repository principals keep today's behaviour.
-	if _, _, err := Submit(ctx, f.db, registry, exactOnly, "exact", request("example-org/example-app", exact.ID), testTime); err != nil {
+	if _, _, err := Submit(ctx, f.db, registry, nil, exactOnly, "exact", request("example-org/example-app", exact.ID), testTime); err != nil {
 		t.Fatalf("exact principal refused: %v", err)
 	}
 	for _, bad := range []string{"*/*", "themartianapp/*/x", "/*", "the_martian/*", "themartianapp/**"} {

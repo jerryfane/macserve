@@ -292,6 +292,10 @@ func TestMaterialHasValidCryptoConsumerConfigsAndPrivateIntent(t *testing.T) {
 	if c.GitHub != nil || c.Principals[0].TokenSHA256 != digest([]byte(m.Token)) || c.Receipt.Repositories["example-org/example-app"] != 12345 {
 		t.Fatal("incorrect API staging policy")
 	}
+	// The owner admits every job kind, including an ios_archive release.
+	if got := c.Principals[0].Scopes; !slices.Equal(got, []string{"jobs:submit", "jobs:read", "jobs:cancel", "service:admin", "release:archive"}) {
+		t.Fatalf("owner scopes %v", got)
+	}
 	if _, err := workerclient.LoadConfig(filepath.Join(stage, "worker.json")); err != nil {
 		t.Fatal(err)
 	}

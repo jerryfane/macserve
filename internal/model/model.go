@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -18,11 +19,17 @@ const (
 	// repository script on it; the files it writes under the job's output
 	// directory are its artifacts. It has no test evidence.
 	SimulatorScript Kind = "simulator_script"
+	// IOSArchive archives the scheme unsigned for iOS devices (Release,
+	// CODE_SIGNING_ALLOWED=NO) at the request's release version. A trusted
+	// worker step seals the .xcarchive and its signing manifest as the job's
+	// artifacts; signing and upload are not part of the job. It has no
+	// simulator and no test evidence.
+	IOSArchive Kind = "ios_archive"
 )
 
-// Known reports whether k is one of the four job kinds.
+// Known reports whether k is one of the five job kinds.
 func (k Kind) Known() bool {
-	return k == Build || k.UsesSimulator()
+	return k == Build || k == IOSArchive || k.UsesSimulator()
 }
 
 // Tests reports whether jobs of kind k run xcodebuild tests: they carry
@@ -38,8 +45,11 @@ func (k Kind) UsesSimulator() bool {
 
 // MaxTimeoutSeconds is the largest job timeout a recipe of kind k may allow.
 func (k Kind) MaxTimeoutSeconds() int {
-	if k == SimulatorScript {
+	switch k {
+	case SimulatorScript:
 		return 7200
+	case IOSArchive:
+		return 5400
 	}
 	return 3600
 }
@@ -112,9 +122,64 @@ type Request struct {
 	Shard     string     `json:"shard,omitempty"` // test and script templates only: the .macserve.json shard to run
 	// Flutter names a Flutter template job's Flutter version: it must equal
 	// the template's pin exactly and is refused for any other recipe.
-	Flutter        *FlutterRequest `json:"flutter,omitempty"`
+	Flutter *FlutterRequest `json:"flutter,omitempty"`
+	// Release is an ios_archive job's version and Dart defines; it is
+	// required for that kind and refused for every other.
+	Release        *ReleaseRequest `json:"release,omitempty"`
 	TimeoutSeconds int             `json:"timeout_seconds,omitempty"`
 	Context        RequestContext  `json:"context,omitempty"`
+}
+
+// ReleaseRequest is an ios_archive job's release: the marketing version
+// (CFBundleShortVersionString) and build number (CFBundleVersion) the archive
+// is built at and its manifest binds, and, for a Flutter template only, the
+// --dart-define values the release is compiled with. Dart defines are
+// non-secret app configuration by contract: they are stored in the job
+// record and the signed receipt.
+type ReleaseRequest struct {
+	BuildName   string            `json:"build_name"`
+	BuildNumber string            `json:"build_number"`
+	DartDefines map[string]string `json:"dart_defines,omitempty"`
+}
+
+// ReleaseProvenance is the server-derived default-branch binding of an
+// ios_archive job: the numeric repository ID, its default branch and that
+// branch's head, which the job's commit equals, resolved at admission
+// through the controller's GitHub App (Source ProvenanceGitHubApp). A
+// qualification tool run records its pinned source instead (Source
+// ProvenanceQualification); no receipt carries that.
+type ReleaseProvenance struct {
+	RepositoryID  int64     `json:"repository_id"`
+	DefaultBranch string    `json:"default_branch"`
+	HeadSHA       string    `json:"head_sha"`
+	ResolvedAt    time.Time `json:"resolved_at"`
+	Source        string    `json:"source"`
+}
+
+const (
+	ProvenanceGitHubApp     = "github_app"
+	ProvenanceQualification = "qualification"
+)
+
+// ValidBranch reports whether name is a default-branch name a release is
+// bound to: 1 to 255 bytes of ASCII letters, digits, '.', '_', '-' and '/'
+// within git's check-ref-format rules (no empty or '.'-leading component, no
+// "..", no component ending ".lock", no trailing '.').
+func ValidBranch(name string) bool {
+	if len(name) == 0 || len(name) > 255 || strings.HasSuffix(name, ".") || strings.Contains(name, "..") {
+		return false
+	}
+	for _, c := range []byte(name) {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '_' || c == '-' || c == '/') {
+			return false
+		}
+	}
+	for part := range strings.SplitSeq(name, "/") {
+		if part == "" || part[0] == '.' || strings.HasSuffix(part, ".lock") {
+			return false
+		}
+	}
+	return true
 }
 
 // Command is trusted configuration, never a client-supplied command or shell string.
@@ -159,14 +224,19 @@ type Profile struct {
 	// Shard is the admitted request's shard on a test or script template job
 	// snapshot; configured profiles never carry it.
 	Shard string `json:"shard,omitempty"`
+	// Release is the admitted request's release on an ios_archive template
+	// job snapshot, from which its recipe derives; configured profiles never
+	// carry it.
+	Release *ReleaseRequest `json:"release,omitempty"`
 }
 
 // Template is a controller-owned, owner-scoped recipe. Every repository of a
 // listed GitHub account may use it by declaring its Xcode project or workspace
 // and scheme, and for a test or script template its shards, in .macserve.json;
 // the command line is fixed in code. A test or script template pins one to
-// four simulators; a build template pins none. A template with a Flutter pin
-// serves only repositories with a flutter section, and only those.
+// four simulators; a build or ios_archive template pins none. A template with
+// a Flutter pin serves only repositories with a flutter section, and only
+// those.
 type Template struct {
 	ID                    string      `json:"id"`
 	Version               int         `json:"version"`
@@ -283,6 +353,9 @@ type Admission struct {
 	Request       Request `json:"request"`
 	Profile       Profile `json:"profile"`
 	ProfileDigest string  `json:"profile_digest"`
+	// ReleaseProvenance is set by the admitting controller, never by a
+	// client, for an ios_archive job only.
+	ReleaseProvenance *ReleaseProvenance `json:"release_provenance,omitempty"`
 }
 
 type Job struct {
@@ -304,6 +377,9 @@ type Job struct {
 	CancelRequested bool            `json:"cancel_requested"`
 	Result          json.RawMessage `json:"result,omitempty"`
 	CleanupOK       bool            `json:"cleanup_ok"`
+	// ReleaseProvenance is an ios_archive job's admission-time
+	// default-branch binding; other jobs have none.
+	ReleaseProvenance *ReleaseProvenance `json:"release_provenance,omitempty"`
 }
 
 type ServiceState struct {

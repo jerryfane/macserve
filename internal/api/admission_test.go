@@ -101,7 +101,7 @@ func TestReplayCannotBecomeNewAdmissionWhenRetentionRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, replay, err := Submit(ctx, f.db, registry, f.owner, "retention", f.request, testTime.Add(91*24*time.Hour))
+	_, replay, err := Submit(ctx, f.db, registry, nil, f.owner, "retention", f.request, testTime.Add(91*24*time.Hour))
 	if !errors.Is(err, profiles.ErrUnsupported) || replay {
 		t.Fatalf("pruned key bypassed current profiles: replay=%v err=%v", replay, err)
 	}

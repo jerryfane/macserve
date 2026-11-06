@@ -99,6 +99,9 @@ func New(options Options) (*Engine, error) {
 	if options.Now == nil {
 		options.Now = time.Now
 	}
+	if options.PlistJSON == nil {
+		options.PlistJSON = plutilJSON
+	}
 	var err error
 	native := options.Runner == nil
 	if native {

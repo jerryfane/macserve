@@ -100,7 +100,7 @@ func profileBytes(admission model.Admission) ([]byte, error) {
 		} else if profile.Simulator == nil || !slices.Contains(t.Simulators, *profile.Simulator) || profile.Shard == "" {
 			return nil, ErrInvalid
 		}
-	} else if !validOpaque(profile.Run.Executable, 4096) || profile.Shard != "" || request.Shard != "" || request.Flutter != nil || profile.Kind == model.SimulatorScript {
+	} else if !validOpaque(profile.Run.Executable, 4096) || profile.Shard != "" || request.Shard != "" || request.Flutter != nil || profile.Kind == model.SimulatorScript || profile.Kind == model.IOSArchive {
 		return nil, ErrInvalid
 	}
 	if (request.Simulator == nil) != (profile.Simulator == nil) || request.Simulator != nil && *request.Simulator != *profile.Simulator {
@@ -192,6 +192,12 @@ func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, principal, key string
 	if err != nil {
 		return model.Job{}, false, err
 	}
+	// A replay above returns its first admission's provenance, like its first
+	// profile snapshot: both are server-derived facts of that admission.
+	provenance, err := releaseBytes(admission)
+	if err != nil {
+		return model.Job{}, false, err
+	}
 	if err := s.expire(ctx, tx, now); err != nil {
 		return model.Job{}, false, err
 	}
@@ -207,7 +213,7 @@ func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, principal, key string
 	if err != nil {
 		return model.Job{}, false, err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO jobs(id,principal,idempotency_key,repo,request,profile,request_digest,profile_digest,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, id, principal, key, admission.Request.Repo, request, profile, digest, admission.ProfileDigest, model.Queued, now.UnixNano(), now.UnixNano())
+	_, err = tx.ExecContext(ctx, `INSERT INTO jobs(id,principal,idempotency_key,repo,request,profile,request_digest,profile_digest,state,created_at,updated_at,release_provenance) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, id, principal, key, admission.Request.Repo, request, profile, digest, admission.ProfileDigest, model.Queued, now.UnixNano(), now.UnixNano(), provenance)
 	if err != nil {
 		return model.Job{}, false, err
 	}

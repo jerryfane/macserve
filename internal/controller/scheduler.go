@@ -10,6 +10,7 @@ import (
 	"github.com/jerryfane/macserve/internal/model"
 	"github.com/jerryfane/macserve/internal/protocol"
 	"github.com/jerryfane/macserve/internal/store"
+	"github.com/jerryfane/macserve/internal/worker"
 )
 
 func (c *Controller) register(ctx context.Context, registration protocol.Registration) error {
@@ -256,7 +257,13 @@ func (c *Controller) checkActive(ctx context.Context) {
 		finishing = a.finalizingSince
 	}
 	if !finishing.IsZero() {
-		if now.Sub(finishing) <= c.options.CleanupTimeout+c.options.DeliveryTimeout+c.options.HeartbeatTimeout {
+		window := c.options.CleanupTimeout + c.options.DeliveryTimeout + c.options.HeartbeatTimeout
+		if job.Request.Kind == model.IOSArchive {
+			// The worker builds, seals and exports the archive evidence in
+			// its own window after the job has stopped.
+			window += worker.ArchiveEvidenceTimeout
+		}
+		if now.Sub(finishing) <= window {
 			c.mu.Unlock()
 			return
 		}

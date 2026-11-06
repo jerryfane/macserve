@@ -173,6 +173,9 @@ func (r *Registry) Resolve(request model.Request) (model.Admission, error) {
 	if request.Flutter != nil {
 		return model.Admission{}, fmt.Errorf("%w: only Flutter templates accept a Flutter version", ErrUnsupported)
 	}
+	if request.Release != nil {
+		return model.Admission{}, fmt.Errorf("%w: only ios_archive templates accept a release", ErrUnsupported)
+	}
 	if request.TimeoutSeconds == 0 {
 		request.TimeoutSeconds = p.DefaultTimeoutSeconds
 	}
@@ -205,6 +208,19 @@ func (r *Registry) resolveTemplate(request model.Request) (model.Admission, erro
 		return model.Admission{}, fmt.Errorf("%w: Flutter template requires flutter version %s exactly", ErrUnsupported, t.Flutter.Version)
 	}
 	request.Flutter = cloneFlutterRequest(request.Flutter)
+	// An archive's version, and a Flutter archive's Dart defines, are fixed
+	// at admission and derive its recipe; no other kind takes a release.
+	if t.Kind == model.IOSArchive {
+		if request.Release == nil {
+			return model.Admission{}, fmt.Errorf("%w: ios_archive templates require a release build_name and build_number", ErrInvalid)
+		}
+		if err := ValidateRelease(*request.Release, t.Flutter != nil); err != nil {
+			return model.Admission{}, err
+		}
+	} else if request.Release != nil {
+		return model.Admission{}, fmt.Errorf("%w: only ios_archive templates accept a release", ErrUnsupported)
+	}
+	request.Release = cloneRelease(request.Release)
 	if !t.Kind.UsesSimulator() {
 		if request.Simulator != nil {
 			return model.Admission{}, fmt.Errorf("%w: repository, kind or toolchain pins", ErrUnsupported)
@@ -237,14 +253,15 @@ func (r *Registry) resolveTemplate(request model.Request) (model.Admission, erro
 		return model.Admission{}, fmt.Errorf("%w: timeout exceeds profile maximum", ErrInvalid)
 	}
 	snapshot := TemplateSnapshot(t, request.Repo)
-	snapshot.Simulator, snapshot.Shard = cloneSimulator(request.Simulator), request.Shard
+	snapshot.Simulator, snapshot.Shard, snapshot.Release = cloneSimulator(request.Simulator), request.Shard, cloneRelease(request.Release)
 	return model.Admission{Request: request, Profile: snapshot, ProfileDigest: e.digest}, nil
 }
 
 // TemplateSnapshot is the admitted recipe snapshot of a template job for repo:
 // the template's identity, pins and budgets with no recipe commands, which the
 // worker derives from the repository's .macserve.json. Admission of a test or
-// script template job adds the request's simulator and shard.
+// script template job adds the request's simulator and shard, and of an
+// ios_archive template job the request's release.
 func TemplateSnapshot(t model.Template, repo string) model.Profile {
 	snapshot := cloneTemplate(t)
 	return model.Profile{ID: t.ID, Version: t.Version, Repo: repo, Kind: t.Kind, Xcode: t.Xcode, DeveloperDir: t.DeveloperDir, DefaultTimeoutSeconds: t.DefaultTimeoutSeconds, MaxTimeoutSeconds: t.MaxTimeoutSeconds, MemoryLimitMiB: t.MemoryLimitMiB, Template: &snapshot}
@@ -285,9 +302,9 @@ func normalizeTemplate(t *model.Template) error {
 		return fmt.Errorf("%w: ID or version", ErrInvalid)
 	}
 	switch t.Kind {
-	case model.Build:
+	case model.Build, model.IOSArchive:
 		if len(t.Simulators) != 0 {
-			return fmt.Errorf("%w: build templates pin no simulator", ErrInvalid)
+			return fmt.Errorf("%w: build and ios_archive templates pin no simulator", ErrInvalid)
 		}
 	case model.UnitTest, model.SimulatorUITest, model.SimulatorScript:
 		if len(t.Simulators) == 0 || len(t.Simulators) > 4 {
@@ -299,7 +316,7 @@ func normalizeTemplate(t *model.Template) error {
 			}
 		}
 	default:
-		return fmt.Errorf("%w: templates support only build, unit_test, simulator_ui_test and simulator_script jobs", ErrUnsupported)
+		return fmt.Errorf("%w: templates support only build, unit_test, simulator_ui_test, simulator_script and ios_archive jobs", ErrUnsupported)
 	}
 	if len(t.Owners) == 0 {
 		return fmt.Errorf("%w: at least one owner is required", ErrInvalid)
@@ -322,8 +339,8 @@ func normalizeTemplate(t *model.Template) error {
 }
 
 func normalizeProfile(p *model.Profile) error {
-	if p.Template != nil || p.Shard != "" {
-		return fmt.Errorf("%w: configured profiles cannot embed a template or shard", ErrInvalid)
+	if p.Template != nil || p.Shard != "" || p.Release != nil {
+		return fmt.Errorf("%w: configured profiles cannot embed a template, shard or release", ErrInvalid)
 	}
 	if !idPattern.MatchString(p.ID) || p.Version <= 0 || !validRepo(p.Repo) {
 		return fmt.Errorf("%w: ID, version or repository", ErrInvalid)
@@ -332,8 +349,8 @@ func normalizeProfile(p *model.Profile) error {
 	if !p.Kind.Known() {
 		return fmt.Errorf("%w: job kind", ErrUnsupported)
 	}
-	if p.Kind == model.SimulatorScript {
-		return fmt.Errorf("%w: simulator_script jobs run only from templates", ErrUnsupported)
+	if p.Kind == model.SimulatorScript || p.Kind == model.IOSArchive {
+		return fmt.Errorf("%w: %s jobs run only from templates", ErrUnsupported, p.Kind)
 	}
 	if !versionPattern.MatchString(p.Xcode.Version) || !buildPattern.MatchString(p.Xcode.Build) {
 		return fmt.Errorf("%w: exact Xcode version and build required", ErrInvalid)
@@ -379,7 +396,7 @@ func normalizeBudgets(kind model.Kind, defaultTimeout, maxTimeout, memory *int) 
 		switch kind {
 		case model.SimulatorUITest:
 			*defaultTimeout = 2400
-		case model.SimulatorScript:
+		case model.SimulatorScript, model.IOSArchive:
 			*defaultTimeout = 3600
 		}
 	}
@@ -504,6 +521,7 @@ func cloneProfile(p model.Profile) model.Profile {
 	p.GeneratedFiles = append([]model.GeneratedFile(nil), p.GeneratedFiles...)
 	p.Artifacts = append([]model.ArtifactRule(nil), p.Artifacts...)
 	p.RequiredTests = append([]string(nil), p.RequiredTests...)
+	p.Release = cloneRelease(p.Release)
 	if p.Template != nil {
 		t := cloneTemplate(*p.Template)
 		p.Template = &t

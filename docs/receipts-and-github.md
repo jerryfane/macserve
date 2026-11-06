@@ -23,6 +23,15 @@ A Flutter template job's receipt has `request.flutter.version` equal to the temp
 (`flutter --version --machine`), the first line of `ruby -v` (`ruby`) and `pod --version` (`cocoapods`). Success
 requires `framework_version` and `cocoapods` to equal the pin and the other two to be non-empty. Receipts of other
 jobs have no `flutter` key, and a receipt for a non-Flutter recipe with a Flutter request or observation is refused.
+An `ios_archive` receipt says tests were not run and carries three fields no other receipt has: `release` (the
+admitted `build_name`, `build_number` and `dart_defines`, equal to `request.release`), `release_provenance`
+(`repository_id`, `default_branch`, `head_sha`, `resolved_at` and `source`, resolved at admission through the
+controller's GitHub App) and `signing_manifest_sha256`, the SHA-256 of the `signing-manifest.json` artifact. Success
+requires `source` `github_app`, `repository_id` equal to the receipt's repository, `head_sha` equal to the request
+and source commit, a `resolved_at` not after creation, both required artifacts `App.xcarchive.tar` and
+`signing-manifest.json`, and the manifest digest equal to that artifact's. A receipt of any other kind with one of
+these fields is refused; their absence keeps other receipts' bytes unchanged. The receipt proves an unsigned
+archive of a default-branch head; it does not sign or upload anything.
 The controller logs a refused or failed worker request with its method, route and job ID; a receipt refusal
 returns HTTP 422.
 Submodules and Git LFS are unsupported and rejected, not silently omitted.

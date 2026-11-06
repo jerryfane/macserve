@@ -69,14 +69,14 @@ func validFlutterPin(pin model.FlutterPin) bool {
 }
 
 // normalizeFlutterPin checks a template's optional Flutter pin: exact
-// versions, lowercase sha256 digests and a kind with an Xcode build or test
-// step to run after the Flutter configuration.
+// versions, lowercase sha256 digests and a kind with an Xcode build, test or
+// archive step to run after the Flutter configuration.
 func normalizeFlutterPin(t model.Template) error {
 	if t.Flutter == nil {
 		return nil
 	}
-	if t.Kind != model.Build && !t.Kind.Tests() {
-		return fmt.Errorf("%w: Flutter templates support only build, unit_test and simulator_ui_test jobs", ErrUnsupported)
+	if t.Kind != model.Build && t.Kind != model.IOSArchive && !t.Kind.Tests() {
+		return fmt.Errorf("%w: Flutter templates support only build, unit_test, simulator_ui_test and ios_archive jobs", ErrUnsupported)
 	}
 	if !validFlutterPin(*t.Flutter) {
 		return fmt.Errorf("%w: exact Flutter version, CocoaPods version and lowercase sha256 digests required", ErrInvalid)
@@ -155,13 +155,16 @@ func flutterCommand(args ...string) model.Command {
 
 // flutterPrepare is a Flutter job's fixed prepare before any Xcode step, run
 // in app_dir: clone the SDK, resolve exactly the committed pubspec.lock,
-// write the iOS configuration (which runs pod install), then run each
-// prepare_ruby script with the pinned Ruby.
-func flutterPrepare(pin model.FlutterPin, f model.FlutterConfig) []model.Command {
+// write the iOS configuration (which runs pod install) for the simulator
+// debug build or, for an ios_archive job, the unsigned release at its build
+// name, build number and Dart defines, then run each prepare_ruby script
+// with the pinned Ruby.
+func flutterPrepare(pin model.FlutterPin, f model.FlutterConfig, release *model.ReleaseRequest) []model.Command {
+	config := append(append([]string{"build", "ios", "--config-only"}, flutterConfigArgs(release)...), "--suppress-analytics")
 	commands := []model.Command{
 		FlutterSDKCloneCommand(pin),
 		flutterCommand("pub", "get", "--enforce-lockfile", "--suppress-analytics"),
-		flutterCommand("build", "ios", "--config-only", "--simulator", "--debug", "--suppress-analytics"),
+		flutterCommand(config...),
 	}
 	ruby := FlutterToolPaths(pin).Ruby
 	for _, script := range f.PrepareRuby {

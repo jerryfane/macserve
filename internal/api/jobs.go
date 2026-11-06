@@ -23,7 +23,7 @@ func (h *handler) submit(w http.ResponseWriter, r *http.Request, p store.Princip
 		writeError(w, store.ErrInvalid)
 		return
 	}
-	if !p.AllowsRepository(request.Repo) {
+	if !p.AllowsRepository(request.Repo) || request.Kind == model.IOSArchive && !p.HasScope("release:archive") {
 		writeError(w, ErrForbidden)
 		return
 	}
@@ -38,7 +38,7 @@ func (h *handler) submit(w http.ResponseWriter, r *http.Request, p store.Princip
 			return
 		}
 		var replay bool
-		job, replay, err = Submit(r.Context(), h.Store, h.Profiles, p, keys[0], request, h.Now())
+		job, replay, err = Submit(r.Context(), h.Store, h.Profiles, h.BranchHeads, p, keys[0], request, h.Now())
 		if !replay {
 			status = http.StatusAccepted
 		}

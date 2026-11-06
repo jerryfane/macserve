@@ -113,7 +113,9 @@ func (s *Signer) Seal(ctx context.Context, job model.Job, result worker.Result) 
 		Repository                                                  Repository
 		Approval                                                    Approval
 		Result                                                      worker.Result
-	}{job.ID, job.Principal, job.ProfileDigest, job.RequestDigest, job.WorkerEpoch, job.Request, job.Profile, job.CreatedAt, job.Deadline, s.options.Service, repository, approval, result}
+		// Omitted when absent, so other jobs' input digests are unchanged.
+		ReleaseProvenance *model.ReleaseProvenance `json:",omitempty"`
+	}{job.ID, job.Principal, job.ProfileDigest, job.RequestDigest, job.WorkerEpoch, job.Request, job.Profile, job.CreatedAt, job.Deadline, s.options.Service, repository, approval, result, job.ReleaseProvenance}
 	inputDigest, err := valueDigest(input)
 	if err != nil {
 		return nil, err
@@ -145,6 +147,15 @@ func (s *Signer) Seal(ctx context.Context, job model.Job, result worker.Result) 
 	}
 	p := Payload{Schema: 1, JobID: job.ID, AttemptID: approval.AttemptID, InputDigest: inputDigest, Service: s.options.Service, Repository: repository, Approval: approval, Request: job.Request, ProfileDigest: job.ProfileDigest, ProfileVersion: job.Profile.Version, Source: result.Source, Observation: observed(result.Observation), State: result.State, Reason: result.Reason, ExitCode: result.ExitCode, Signal: result.Signal, CreatedAt: job.CreatedAt, StartedAt: result.StartedAt, FinishedAt: result.FinishedAt, Deadline: job.Deadline, SealedAt: s.options.Now().UTC(), WorkerEpoch: job.WorkerEpoch, Resources: ResourcePolicy{TimeoutSeconds: job.Request.TimeoutSeconds, MemoryLimitMiB: job.Profile.MemoryLimitMiB, PeakMemoryMiB: result.PeakMemoryMiB, CleanupRequired: true, CleanupOK: result.CleanupOK}, Tests: testEvidence(job.Request.Kind, required, result.Summary), Logs: []evidence.Artifact{}, LogsTruncated: result.LogsTruncated, CommandCount: len(result.Commands), ArtifactCount: len(result.Artifacts), Details: &Details{Profile: job.Profile, Result: result}}
 	p.RequestDigest = job.RequestDigest
+	if job.Request.Kind == model.IOSArchive {
+		p.Release, p.ReleaseProvenance = job.Request.Release, job.ReleaseProvenance
+		for _, a := range result.Artifacts {
+			if a.Name == profiles.SigningManifestArtifact {
+				p.SigningManifestSHA256 = a.SHA256
+				break
+			}
+		}
+	}
 	for _, a := range result.Artifacts {
 		if a.Name == "evidence/stdout.log" || a.Name == "evidence/stderr.log" {
 			p.Logs = append(p.Logs, a)
