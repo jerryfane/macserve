@@ -72,6 +72,15 @@ var (
 )
 
 func (t ExecTools) run(ctx context.Context, stdin []byte, name string, args ...string) ([]byte, error) {
+	stdout, stderr, err := t.runOutputs(ctx, stdin, name, args...)
+	if err != nil {
+		return nil, fmt.Errorf("%s %s: %w: %s", name, args[0], err, strings.TrimSpace(string(stderr)))
+	}
+	return stdout, nil
+}
+
+// runOutputs runs a tool and returns its bounded standard output and error.
+func (t ExecTools) runOutputs(ctx context.Context, stdin []byte, name string, args ...string) ([]byte, []byte, error) {
 	timeout := t.Timeout
 	if timeout <= 0 {
 		timeout = 10 * time.Minute
@@ -88,30 +97,36 @@ func (t ExecTools) run(ctx context.Context, stdin []byte, name string, args ...s
 	var stdout, stderr boundedBuffer
 	stdout.max, stderr.max = maxToolBytes, 64<<10
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	err := cmd.Run()
-	if err != nil {
-		return nil, fmt.Errorf("%s %s: %w: %s", name, args[0], err, strings.TrimSpace(stderr.String()))
+	if err := cmd.Run(); err != nil {
+		return nil, stderr.Bytes(), err
 	}
 	if stdout.overflow {
-		return nil, fmt.Errorf("%s %s: output exceeds %d bytes", name, args[0], maxToolBytes)
+		return nil, stderr.Bytes(), fmt.Errorf("output exceeds %d bytes", maxToolBytes)
 	}
-	return stdout.Bytes(), nil
+	return stdout.Bytes(), stderr.Bytes(), nil
 }
 
 // securityScript runs commands through security -i so a secret is never an
-// argument. security -i reports a failed command on its output and still
-// exits 0, so any reported error fails the call.
+// argument. security -i reports a failed command as a message and still
+// exits 0, and its successful keychain commands print nothing, so any
+// output besides its prompts fails the call. The output is never
+// returned: it may quote a command line.
 func (t ExecTools) securityScript(ctx context.Context, lines ...string) error {
 	script := strings.Join(lines, "\n") + "\nexit\n"
-	out, err := t.run(ctx, []byte(script), securityPath, "-i")
+	stdout, stderr, err := t.runOutputs(ctx, []byte(script), securityPath, "-i")
 	if err != nil {
 		return errors.New("security -i failed")
 	}
-	lower := strings.ToLower(string(out))
-	if strings.Contains(lower, "error") || strings.Contains(lower, "returned -") || strings.Contains(lower, "could not") {
+	if !onlyPrompts(stdout) || !onlyPrompts(stderr) {
 		return errors.New("security -i reported an error")
 	}
 	return nil
+}
+
+// onlyPrompts reports whether out holds nothing but security -i prompts
+// and whitespace.
+func onlyPrompts(out []byte) bool {
+	return strings.TrimSpace(strings.ReplaceAll(string(out), "security>", "")) == ""
 }
 
 func checkKeychainArgs(keychain, secret string) error {

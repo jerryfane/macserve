@@ -73,3 +73,19 @@ func TestLoadPolicyStrict(t *testing.T) {
 		}
 	}
 }
+
+// security -i succeeds only with nothing but prompts; secrets and paths
+// must be safe to pass unquoted on its standard input.
+func TestSecurityScriptGuards(t *testing.T) {
+	if !onlyPrompts([]byte("security> security> \n")) || onlyPrompts([]byte("security> security: SecKeychainUnlock x: The user name or passphrase you entered is not correct.\n")) {
+		t.Fatal("prompt detection")
+	}
+	if checkKeychainArgs("/a/k.keychain-db", strings.Repeat("a", 64)) != nil {
+		t.Fatal("valid arguments refused")
+	}
+	for _, c := range [][2]string{{"/a/k db", strings.Repeat("a", 64)}, {"/a/k", strings.Repeat("a", 31)}, {"/a/k", strings.Repeat("a", 40) + " x"}, {"/a/k\n", strings.Repeat("a", 64)}} {
+		if checkKeychainArgs(c[0], c[1]) == nil {
+			t.Fatalf("accepted %q", c)
+		}
+	}
+}
