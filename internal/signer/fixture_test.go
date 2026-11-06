@@ -50,6 +50,9 @@ type fakeTools struct {
 	unlocked   int
 	unlockErr  error
 	signErr    error
+	// dropSigned removes this key from every entitlements plist codesign
+	// "signs", so the packaged app lacks it.
+	dropSigned string
 }
 
 func (f *fakeTools) CreateKeychain(_ context.Context, keychain, _ string) error {
@@ -99,6 +102,16 @@ func (f *fakeTools) Sign(_ context.Context, spec SignSpec) error {
 	data, err := os.ReadFile(spec.Entitlements)
 	if err != nil {
 		return err
+	}
+	if f.dropSigned != "" {
+		value, err := decodePlist(data)
+		if err != nil {
+			return err
+		}
+		delete(value.(map[string]any), f.dropSigned)
+		if data, err = encodePlist(value); err != nil {
+			return err
+		}
 	}
 	return os.WriteFile(filepath.Join(dir, "entitlements.plist"), data, 0o644)
 }

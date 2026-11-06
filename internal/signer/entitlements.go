@@ -16,17 +16,19 @@ const (
 	keychainGroupsKey = "keychain-access-groups"
 	getTaskAllowKey   = "get-task-allow"
 	apsEnvironmentKey = "aps-environment"
+	betaReportsKey    = "beta-reports-active"
 )
 
 // finalEntitlements returns the entitlements to sign a bundle with: every
 // requested key, each present in the profile and allowed by its value, plus
 // the profile-derived application-identifier, team-identifier,
-// get-task-allow (false) and keychain-access-groups (the bundle's own
-// <team>.<bundle id> group from the profile's wildcard when the build
-// requested none). Requested values may use $(AppIdentifierPrefix) and
-// $(TeamIdentifierPrefix), which resolve to "<team>.". A requested key the
-// profile lacks, a value it does not allow, a malformed value or a missing
-// required key refuses the bundle.
+// get-task-allow (false), beta-reports-active (true; parseProfile requires
+// it of an App Store profile, and TestFlight requires it of the build) and
+// keychain-access-groups (the bundle's own <team>.<bundle id> group from
+// the profile's wildcard when the build requested none). Requested values
+// may use $(AppIdentifierPrefix) and $(TeamIdentifierPrefix), which resolve
+// to "<team>.". A requested key the profile lacks, a value it does not
+// allow, a malformed value or a missing required key refuses the bundle.
 func finalEntitlements(requested json.RawMessage, profile Profile, required []string) (map[string]any, error) {
 	refuse := func(format string, args ...any) (map[string]any, error) {
 		return nil, fmt.Errorf("entitlements for %s: "+format, append([]any{profile.BundleID}, args...)...)
@@ -53,6 +55,10 @@ func finalEntitlements(requested json.RawMessage, profile Profile, required []st
 	if _, found := allowed[getTaskAllowKey]; found {
 		final[getTaskAllowKey] = false
 	}
+	if allowed[betaReportsKey] != any(true) {
+		return refuse("profile does not grant beta-reports-active")
+	}
+	final[betaReportsKey] = true
 	keys := make([]string, 0, len(request))
 	for key := range request {
 		keys = append(keys, key)
@@ -67,6 +73,12 @@ func finalEntitlements(requested json.RawMessage, profile Profile, required []st
 			s, ok := value.(string)
 			if !ok || key == appIdentifierKey && !strings.HasSuffix(s, profile.BundleID) || key == teamIdentifierKey && s != profile.TeamID && s != "" {
 				return refuse("requested %s %v contradicts the profile", key, value)
+			}
+			continue
+		case betaReportsKey:
+			// Distribution signs it true whatever the build requested.
+			if _, ok := value.(bool); !ok {
+				return refuse("requested %s %v is malformed", key, value)
 			}
 			continue
 		}

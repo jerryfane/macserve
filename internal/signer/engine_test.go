@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"crypto/ed25519"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -90,6 +91,7 @@ func TestSignInsideOutEmbedsProfilesAndSealsReceipt(t *testing.T) {
 		"application-identifier":                fixtureTeam + "." + appID,
 		"com.apple.developer.team-identifier":   fixtureTeam,
 		"get-task-allow":                        false,
+		"beta-reports-active":                   true,
 		"aps-environment":                       "production",
 		"keychain-access-groups":                []any{fixtureTeam + "." + appID},
 		"com.apple.security.application-groups": []any{"group.com.example.shared"},
@@ -367,4 +369,55 @@ func TestInitCreatesPrivateStateOnce(t *testing.T) {
 		t.Fatal("group-readable key accepted")
 	}
 	_ = key
+}
+
+// A bundle that requests no entitlements is still signed with
+// beta-reports-active true from its App Store profile, and a packaged app
+// whose signature lacks it is refused.
+func TestSignDerivesBetaReportsActiveFromProfile(t *testing.T) {
+	w := newWorld(t)
+	app := w.policy.Apps[appID]
+	app.RequiredEntitlements = nil
+	w.policy.Apps[appID] = app
+	w.newEngine()
+	w.setArchive(w.entries, map[string]any{})
+	signed, err := w.sign(w.request())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer signed.Close()
+	for _, b := range signed.Payload.Bundles {
+		if b.EntitlementsSHA256 == "" {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(signed.work, "verify", "Payload", "Example.app", strings.TrimPrefix(strings.TrimPrefix(b.Path, appPath), "/"), "_CodeSignature", "entitlements.plist"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		value, err := decodePlist(raw)
+		if err != nil || value.(map[string]any)["beta-reports-active"] != true {
+			t.Fatalf("%s packaged entitlements %v %v", b.Path, value, err)
+		}
+	}
+	w.tools.dropSigned = "beta-reports-active"
+	_, err = w.sign(w.request())
+	requireRefusal(t, err, "entitlements differ")
+}
+
+func TestFinalEntitlementsRequireBetaReportsGrant(t *testing.T) {
+	p := testProfile(t)
+	got, err := finalEntitlements(json.RawMessage(`{}`), p, nil)
+	if err != nil || got["beta-reports-active"] != true {
+		t.Fatalf("empty request: %v %v", got, err)
+	}
+	if got, err := finalEntitlements(json.RawMessage(`{"beta-reports-active":false}`), p, nil); err != nil || got["beta-reports-active"] != true {
+		t.Fatalf("requested false: %v %v", got, err)
+	}
+	if _, err := finalEntitlements(json.RawMessage(`{"beta-reports-active":"yes"}`), p, nil); err == nil {
+		t.Fatal("malformed beta-reports-active accepted")
+	}
+	delete(p.Entitlements, "beta-reports-active")
+	if _, err := finalEntitlements(json.RawMessage(`{}`), p, nil); err == nil || !strings.Contains(err.Error(), "beta-reports-active") {
+		t.Fatalf("profile without grant: %v", err)
+	}
 }
