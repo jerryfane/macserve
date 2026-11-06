@@ -258,7 +258,7 @@ func decode(w http.ResponseWriter, r *http.Request, target any) error {
 		return store.ErrInvalid
 	}
 	tokens := json.NewDecoder(bytes.NewReader(data))
-	if err := jsonValue(tokens, 0); err != nil {
+	if err := jsonValue(tokens, 0, false); err != nil {
 		return store.ErrInvalid
 	}
 	if _, err := tokens.Token(); err != io.EOF {
@@ -271,7 +271,12 @@ func decode(w http.ResponseWriter, r *http.Request, target any) error {
 	}
 	return nil
 }
-func jsonValue(d *json.Decoder, depth int) error {
+
+// jsonValue checks one JSON value: unique object keys, bounded depth and, for
+// struct fields, lowercase ASCII snake_case names. mapKeys marks an object that
+// decodes into a map (release.dart_defines), whose keys are data: uppercase
+// ASCII letters, digits and '_' (profiles.ValidateRelease applies the exact rule).
+func jsonValue(d *json.Decoder, depth int, mapKeys bool) error {
 	if depth > 32 {
 		return store.ErrInvalid
 	}
@@ -297,20 +302,23 @@ func jsonValue(d *json.Decoder, depth int) error {
 			}
 			// Public request fields use lowercase ASCII snake_case. Reject
 			// aliases before encoding/json's case-insensitive field matching,
-			// including Unicode folds such as long-s in "verſion".
+			// including Unicode folds such as long-s in "verſion". Map keys
+			// match exactly, so only their ASCII alphabet is checked here.
 			for _, c := range name {
-				if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_') {
+				lower := c >= 'a' && c <= 'z' && !mapKeys
+				upper := c >= 'A' && c <= 'Z' && mapKeys
+				if !(lower || upper || c >= '0' && c <= '9' || c == '_') {
 					return store.ErrInvalid
 				}
 			}
 			seen[name] = true
-			if err := jsonValue(d, depth+1); err != nil {
+			if err := jsonValue(d, depth+1, !mapKeys && name == "dart_defines"); err != nil {
 				return err
 			}
 		}
 	case '[':
 		for d.More() {
-			if err := jsonValue(d, depth+1); err != nil {
+			if err := jsonValue(d, depth+1, false); err != nil {
 				return err
 			}
 		}

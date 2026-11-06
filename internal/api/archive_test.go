@@ -187,3 +187,89 @@ func TestCapabilitiesListArchiveTemplate(t *testing.T) {
 		t.Fatalf("templates: %s", w.Body.String())
 	}
 }
+
+// flutterArchiveSetup is archiveSetup with a Flutter archive template, the only
+// kind whose release may carry dart_defines.
+func flutterArchiveSetup(t *testing.T, heads BranchHeads) (*fixture, model.Request) {
+	t.Helper()
+	f := setup(t)
+	pin := &model.FlutterPin{Version: "3.41.9", SDKSHA256: strings.Repeat("1", 64), RubySHA256: strings.Repeat("2", 64), CocoaPodsVersion: "1.16.2", GemsSHA256: strings.Repeat("3", 64)}
+	archive := model.Template{ID: "org-flutter-ios-archive-v1", Version: 1, Kind: model.IOSArchive, Owners: []string{"themartianapp"}, Xcode: model.Xcode{Version: "27.0", Build: "27A100"}, DeveloperDir: "/Applications/Example.app/Contents/Developer", Flutter: pin}
+	registry, err := profiles.New(nil, []model.Template{archive})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.ReplacePrincipals(context.Background(), []store.Principal{f.owner, principal(archiveToken, "releaser", "themartianapp/*", "jobs:submit", "jobs:read", "release:archive")}); err != nil {
+		t.Fatal(err)
+	}
+	f.options.Profiles, f.options.BranchHeads = registry, heads
+	if f.handler, err = New(f.options); err != nil {
+		t.Fatal(err)
+	}
+	return f, model.Request{Repo: "themartianapp/app", SHA: strings.Repeat("c", 40), Kind: model.IOSArchive, Profile: archive.ID, Xcode: archive.Xcode, Flutter: &model.FlutterRequest{Version: "3.41.9"}, Release: &model.ReleaseRequest{BuildName: "2.0.1", BuildNumber: "17"}}
+}
+
+// Review F1 (PR #88): the strict decoder applied struct-field name rules to the
+// dart_defines map, so every valid define was refused over HTTP.
+func TestArchiveSubmitAcceptsDartDefinesOverHTTP(t *testing.T) {
+	heads := &fakeHeads{head: githubapi.BranchHead{RepositoryID: 77, Branch: "main", SHA: strings.Repeat("c", 40)}}
+	f, request := flutterArchiveSetup(t, heads)
+	request.Release.DartDefines = map[string]string{"API_BASE_URL": "https://api.example.com/?a=1&b=2", "POSTHOG_TOKEN": "phc_x"}
+	if code, body := submitArchive(t, f, "defines", request); code != 202 {
+		t.Fatalf("valid dart_defines: %d %s", code, body)
+	}
+	job, err := f.db.Lookup(context.Background(), "releaser", "defines")
+	if err != nil || !reflect.DeepEqual(job.Request.Release.DartDefines, request.Release.DartDefines) {
+		t.Fatalf("stored defines = %+v %v", job.Request.Release, err)
+	}
+	// Map keys are data, but still exact ASCII and unique; struct fields stay lowercase.
+	for name, body := range map[string]string{
+		"lowercase key":   `"dart_defines":{"api_url":"x"}`,
+		"unicode key":     `"dart_defines":{"API_ſ":"x"}`,
+		"duplicate key":   `"dart_defines":{"A":"x","A":"y"}`,
+		"uppercase field": `"Dart_defines":{"A":"x"}`,
+	} {
+		raw := `{"repo":"themartianapp/app","sha":"` + strings.Repeat("c", 40) + `","kind":"ios_archive","profile":"org-flutter-ios-archive-v1","xcode":{"version":"27.0","build":"27A100"},"flutter":{"version":"3.41.9"},"release":{"build_name":"2.0.1","build_number":"17",` + body + `}}`
+		if w := perform(f.handler, "POST", "/v1/jobs", archiveToken, "bad-"+strings.ReplaceAll(name, " ", "-"), raw); w.Code != 400 {
+			t.Fatalf("%s admitted: %d %s", name, w.Code, w.Body.String())
+		}
+	}
+}
+
+// Review F2 (PR #88): the dart_defines budget counts JSON-encoded bytes, so a
+// release at the budget is stored and one byte over is refused at validation
+// instead of failing the 16 KiB stored-request bound.
+func TestArchiveDartDefinesBudgetMatchesStoredEncoding(t *testing.T) {
+	heads := &fakeHeads{head: githubapi.BranchHead{RepositoryID: 77, Branch: "main", SHA: strings.Repeat("c", 40)}}
+	f, request := flutterArchiveSetup(t, heads)
+	defines := map[string]string{}
+	for i, key := range []string{"A", "B", "C", "D", "E"} {
+		value := strings.Repeat("<", 136) // 816 encoded bytes
+		if i == 4 {
+			value = strings.Repeat("<", 135) + "xx" // 812 encoded bytes: 5 keys + 4*816 + 812 = 4081
+		}
+		defines[key] = value
+	}
+	defines["F"] = strings.Repeat("y", 14) // 1 + 14: exactly 4096
+	request.Release.DartDefines = defines
+	if code, body := submitArchive(t, f, "at-budget", request); code != 202 {
+		t.Fatalf("release at the encoded budget: %d %s", code, body)
+	}
+	if job, err := f.db.Lookup(context.Background(), "releaser", "at-budget"); err != nil || !reflect.DeepEqual(job.Request.Release.DartDefines, defines) {
+		t.Fatalf("stored = %v", err)
+	}
+	over := map[string]string{}
+	for k, v := range defines {
+		over[k] = v
+	}
+	over["F"] += "y"
+	request.Release.DartDefines = over
+	if code, body := submitArchive(t, f, "over-budget", request); code != 400 {
+		t.Fatalf("release one encoded byte over the budget: %d %s", code, body)
+	}
+	// The pre-fix review case: three 1024-byte '<' values (3075 raw bytes) are refused.
+	request.Release.DartDefines = map[string]string{"A": strings.Repeat("<", 1024), "B": strings.Repeat("<", 1024), "C": strings.Repeat("<", 1024)}
+	if code, body := submitArchive(t, f, "escaped", request); code != 400 {
+		t.Fatalf("escaped release beyond the budget: %d %s", code, body)
+	}
+}

@@ -20,9 +20,11 @@ const (
 	SigningManifestArtifact = "signing-manifest.json"
 )
 
-// Release request limits. The aggregate bound keeps a compact receipt, which
-// carries the release in its request and its release field, below the
-// receipt publication limit.
+// Release request limits. The aggregate bound is measured on the JSON
+// encoding the store and receipts use (encoding/json escapes '<', '>' and '&'
+// as six bytes, '"' and '\\' as two), so every accepted release also fits the
+// 16 KiB stored request and keeps a compact receipt, which carries the release
+// in its request and its release field, below the receipt publication limit.
 const (
 	maxDartDefines      = 32
 	maxDartDefineValue  = 1024
@@ -71,10 +73,10 @@ func ValidateRelease(r model.ReleaseRequest, flutter bool) error {
 				return fmt.Errorf("%w: dart_defines %s value must be printable ASCII without '$'", ErrInvalid, key)
 			}
 		}
-		total += len(key) + len(value)
+		total += len(key) + jsonStringBytes(value)
 	}
 	if total > maxDartDefinesBytes {
-		return fmt.Errorf("%w: release dart_defines exceed %d bytes in all", ErrInvalid, maxDartDefinesBytes)
+		return fmt.Errorf("%w: release dart_defines exceed %d JSON-encoded bytes in all", ErrInvalid, maxDartDefinesBytes)
 	}
 	return nil
 }
@@ -122,4 +124,22 @@ func flutterConfigArgs(release *model.ReleaseRequest) []string {
 		args = append(args, "--dart-define", key+"="+release.DartDefines[key])
 	}
 	return args
+}
+
+// jsonStringBytes is the length of a printable-ASCII value inside an
+// encoding/json string (without quotes): '<', '>' and '&' become \u003c-style
+// six-byte escapes, '"' and '\\' two bytes, every other byte one.
+func jsonStringBytes(value string) int {
+	n := 0
+	for i := range len(value) {
+		switch value[i] {
+		case '<', '>', '&':
+			n += 6
+		case '"', '\\':
+			n += 2
+		default:
+			n++
+		}
+	}
+	return n
 }

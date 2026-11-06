@@ -86,7 +86,8 @@ preparation has a 30-minute budget. The request needs both `jobs:submit` and `re
 `build_name` is one to three dot-separated numbers of one to four digits; `build_number` is one to nine digits
 without a leading zero. `dart_defines` is for Flutter templates only (other archive templates refuse it): at most 32
 entries, keys matching `^[A-Z][A-Z0-9_]{0,63}$`, values of at most 1024 printable ASCII characters without `$`, at
-most 4096 key and value bytes in all. Dart defines are non-secret app configuration: they are stored in the job
+most 4096 bytes in all, counting keys plus values as JSON encodes them (`<`, `>` and `&` count six bytes, `"` and `\`
+two). Dart defines are non-secret app configuration: they are stored in the job
 record and the signed receipt. Every other kind refuses `release`, and configured profiles cannot be `ios_archive`.
 
 Admission binds the archive to the repository's default branch: the controller's GitHub App reads the numeric
