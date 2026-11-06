@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jerryfane/macserve/internal/evidence"
 	"github.com/jerryfane/macserve/internal/model"
@@ -251,5 +252,62 @@ func TestTrimPoolKeepsInProgressSigning(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("terminal job kept: %v", err)
+	}
+}
+
+// errorSignClient fails every signing with err.
+type errorSignClient struct{ err error }
+
+func (e errorSignClient) Sign(context.Context, signer.Request, io.Writer) (signer.Result, error) {
+	return signer.Result{}, e.err
+}
+
+// A signer error longer than the store's reason bound (and not valid
+// UTF-8) still ends the signing as sign_failed with a bounded reason, and a
+// new request retries.
+func TestControllerSignBoundsLongFailureReason(t *testing.T) {
+	f, client, _ := signingFixture(t)
+	job := signableJob(t, f, client)
+	long := strings.Repeat("x", 5499) + "\xff"
+	f.controller.options.Signer.Client = errorSignClient{err: errors.New(long)}
+	if _, err := f.controller.Sign(context.Background(), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	record := waitSigning(t, f, job.ID)
+	if record.Status != store.SignFailed || len(record.Reason) > store.MaxReasonBytes || !strings.HasSuffix(record.Reason, "[truncated]") || !strings.HasPrefix(record.Reason, "xxxx") {
+		t.Fatalf("record status %s, reason %d bytes", record.Status, len(record.Reason))
+	}
+	again, err := f.controller.Sign(context.Background(), job.ID)
+	if err != nil || again.Status != store.Signing {
+		t.Fatalf("retry: %+v %v", again, err)
+	}
+	waitSigning(t, f, job.ID)
+}
+
+// An outcome the store refuses is replaced by sign_failed with a fixed
+// reason rather than leaving the signing in progress.
+func TestFinishSigningFallsBackWhenOutcomeIsRefused(t *testing.T) {
+	f, client, _ := signingFixture(t)
+	job := signableJob(t, f, client)
+	if _, _, err := f.db.BeginSigning(context.Background(), job.ID, f.now); err != nil {
+		t.Fatal(err)
+	}
+	// signed without artifacts is invalid for the store.
+	f.controller.finishSigning(job.ID, store.Signed, "", nil)
+	record, err := f.db.GetSigning(context.Background(), job.ID)
+	if err != nil || record.Status != store.SignFailed || record.Reason != signingFallbackReason {
+		t.Fatalf("record %+v %v", record, err)
+	}
+}
+
+func TestSigningReasonIsBoundedUTF8(t *testing.T) {
+	if got := signingReason("short"); got != "short" {
+		t.Fatalf("short reason %q", got)
+	}
+	for _, reason := range []string{strings.Repeat("é", 3000), strings.Repeat("a", 5000) + "\xc3", "bad\xffbyte"} {
+		got := signingReason(reason)
+		if len(got) > store.MaxReasonBytes || !utf8.ValidString(got) {
+			t.Fatalf("reason of %d bytes -> %d bytes, valid %v", len(reason), len(got), utf8.ValidString(got))
+		}
 	}
 }

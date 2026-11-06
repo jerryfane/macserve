@@ -11,7 +11,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jerryfane/macserve/internal/evidence"
 	"github.com/jerryfane/macserve/internal/model"
@@ -69,11 +71,41 @@ func (c *Controller) Sign(ctx context.Context, id string) (store.SigningRecord, 
 		if err != nil {
 			status, reason, artifacts = store.SignFailed, err.Error(), nil
 		}
-		// Recorded even during shutdown, so a restart does not see it in
-		// progress.
-		_ = c.options.Store.FinishSigning(context.Background(), id, status, reason, artifacts, c.options.Now())
+		c.finishSigning(id, status, reason, artifacts)
 	}()
 	return record, nil
+}
+
+// signingFallbackReason replaces an outcome the store refused to record.
+const signingFallbackReason = "signing outcome could not be recorded"
+
+// finishSigning records a signing's outcome, even during shutdown, so no
+// finished signing stays in progress: the reason is bounded valid UTF-8,
+// and an outcome the store refuses is replaced by sign_failed with a fixed
+// reason, retried briefly. A restart fails anything still in progress.
+func (c *Controller) finishSigning(id string, status store.SigningStatus, reason string, artifacts []evidence.Artifact) {
+	err := c.options.Store.FinishSigning(context.Background(), id, status, signingReason(reason), artifacts, c.options.Now())
+	for attempt := 1; err != nil && !errors.Is(err, store.ErrTransition) && attempt <= 3; attempt++ {
+		err = c.options.Store.FinishSigning(context.Background(), id, store.SignFailed, signingFallbackReason, nil, c.options.Now())
+		if err != nil {
+			time.Sleep(time.Duration(attempt) * 100 * time.Millisecond)
+		}
+	}
+}
+
+// signingReason is reason as valid UTF-8 within store.MaxReasonBytes,
+// truncated at a rune boundary with a marker.
+func signingReason(reason string) string {
+	const marker = " [truncated]"
+	reason = strings.ToValidUTF8(reason, "\uFFFD")
+	if len(reason) <= store.MaxReasonBytes {
+		return reason
+	}
+	cut := store.MaxReasonBytes - len(marker)
+	for cut > 0 && !utf8.RuneStart(reason[cut]) {
+		cut--
+	}
+	return reason[:cut] + marker
 }
 
 // SigningStatus returns a job's signing record.

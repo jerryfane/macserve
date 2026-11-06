@@ -379,8 +379,13 @@ func validOpaque(value string, max int) bool {
 	return value != "" && len(value) <= max && utf8.ValidString(value) && strings.TrimSpace(value) == value && strings.IndexFunc(value, unicode.IsControl) < 0
 }
 
-func validReason(value string) bool { return len(value) <= 4096 && utf8.ValidString(value) }
-func validTime(now time.Time) bool  { return !now.IsZero() && now.Equal(time.Unix(0, now.UnixNano())) }
+// MaxReasonBytes bounds a stored state or signing reason, valid UTF-8.
+const MaxReasonBytes = 4096
+
+func validReason(value string) bool {
+	return len(value) <= MaxReasonBytes && utf8.ValidString(value)
+}
+func validTime(now time.Time) bool { return !now.IsZero() && now.Equal(time.Unix(0, now.UnixNano())) }
 
 func contention(err error) bool {
 	var sqliteErr *sqlite.Error
