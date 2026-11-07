@@ -41,6 +41,12 @@ PF enforcement may be a separately reviewed future opt-in; it is not implemented
   cancellation and retention. Terminal logs and results cannot be amended by a late worker.
   Interrupted execution or uncertain cleanup quarantines dispatch. Clearing quarantine requires a caller-proven
   quiescent worker with a new authenticated epoch; subsequent claims must use that persisted epoch.
+  Every cancellation request records its cause in the job's `cancel_reason` column (schema version 6): source
+  (client, admin pause, deadline, host readiness with the gate's blockers, gate error, log limit, controller
+  shutdown, GitHub), principal, time and a detail bounded to 512 bytes. The first request wins and the job's
+  finish keeps it; the API shows it on the job and in the job list, never in the receipt. The controller logs each
+  cancellation it requests and each readiness change, and maintenance each invalid health record it publishes, on
+  timestamped stderr lines ([configuration](configuration.md)).
 - `internal/worker`: exclusive execution, verified full-tree source extraction, pinned toolchain/runtime checks,
   per-job environments and owned simulators, background scheduling and dedicated-job-UID process cleanup,
   including descendants that leave their process group/session. The memory budget charges the summed
