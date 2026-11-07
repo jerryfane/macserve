@@ -30,11 +30,15 @@ var Doctor = Policy{
 		Fields: []string{"name", "summary", "help", "run"},
 	},
 	Imports: []string{
-		module + "/internal/controller", module + "/internal/deploy", module + "/internal/hostguard",
+		module + "/internal/deploy", module + "/internal/health", module + "/internal/hostguard",
 		module + "/internal/model", module + "/internal/setup", module + "/internal/setup/plan",
 	},
 	Seams: []string{
 		module + "/internal/deploy.ParseEnvironment",
+		// installed-binaries.json: strict decode of bytes already read and
+		// a digest lookup, no I/O.
+		module + "/internal/deploy.ParseInstalledBinaries",
+		"(*" + module + "/internal/deploy.InstalledBinaries).ReleaseDigest",
 		module + "/internal/hostguard.ConsoleAdmissible",
 		module + "/internal/setup.SystemBoot",
 		module + "/internal/setup/plan.AllowedCommand",
@@ -68,6 +72,16 @@ var Doctor = Policy{
 		"(*net.Dialer).DialContext": {Caller: doctorFunc + "portInUse", Max: 1, Args: []string{"ctx", `"tcp"`, "ap.String()"}},
 		"(net.Conn).Close":          {Caller: doctorFunc + "portInUse", Max: 1, Args: []string{}},
 		"encoding/json.Unmarshal":   {},
+		// ProgramArguments of a launchd plist already read into memory.
+		"encoding/xml.NewDecoder":               {Caller: doctorFunc + "programArguments", Max: 1, Args: []string{"bytes.NewReader(data)"}},
+		"(*encoding/xml.Decoder).Token":         {Caller: doctorFunc + "programArguments", Max: 1, Args: []string{}},
+		"(*encoding/xml.Decoder).DecodeElement": {Caller: doctorFunc + "programArguments", Max: 2},
+		// ParseInstalledBinaries: strict decode of installed-binaries.json
+		// bytes already read, and its digest syntax check.
+		"encoding/json.NewDecoder":                       {Caller: module + "/internal/deploy.ParseInstalledBinaries", Max: 1, Args: []string{"bytes.NewReader(data)"}},
+		"(*encoding/json.Decoder).DisallowUnknownFields": {Caller: module + "/internal/deploy.ParseInstalledBinaries", Max: 1, Args: []string{}},
+		"(*encoding/json.Decoder).Decode":                {Caller: module + "/internal/deploy.ParseInstalledBinaries", Max: 2},
+		"encoding/hex.DecodeString":                      {Caller: module + "/internal/deploy.validDigest", Max: 1, Args: []string{"s"}},
 		// Pure encoding into memory (doctor's report, model and ledger digests).
 		"encoding/json.Marshal":       {},
 		"encoding/json.MarshalIndent": {},
