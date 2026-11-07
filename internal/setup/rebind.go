@@ -100,8 +100,8 @@ func (l *Ledger) rebindAnchor(base string, baseAt time.Time) string {
 
 // CheckControllerRebind is the setup ledger's precondition for qualify
 // rebind-controller, checked before the anchor changes: no native setup
-// ledger (an installation set up otherwise), or an installed ledger with
-// an approval and no upgrade running.
+// ledger (an installation set up otherwise), or an installed ledger whose
+// approve-and-start is done and with no upgrade running.
 func CheckControllerRebind(s Store) error {
 	l, loc, err := s.Load()
 	if err != nil || l == nil {
@@ -116,16 +116,33 @@ func CheckControllerRebind(s Store) error {
 	if !ownApproval(l) || l.AnchorSHA256() == "" {
 		return errors.New("the setup ledger records no approved activation anchor to rebind")
 	}
+	// approve-and-start resumes by comparing the files qualify approve
+	// wrote with the ones it recorded; a rebind before it completes would
+	// make that comparison fail for good.
+	if l.record(StepApproveAndStart).Status != StatusDone {
+		return errors.New("macserve setup has not finished approve-and-start; finish it before a controller rebind")
+	}
 	return nil
 }
 
 // RecordControllerRebind records in the native setup ledger that the
 // installed controller is now release controller and the activation anchor
-// anchorSHA256, after qualify rebind-controller committed them. Without a
-// native setup ledger it does nothing. Re-running once recorded is a no-op.
-func RecordControllerRebind(s Store, controller, anchorSHA256 string, now time.Time) error {
+// anchorSHA256, after qualify rebind-controller committed them. It runs
+// under the activation anchor lock (qualification.RebindController's
+// Record) and refuses a result that is no longer current: the anchor at
+// anchorPath must still be anchorSHA256, so an older rebind cannot record
+// over a newer one. Without a native setup ledger it does nothing.
+// Re-running once recorded is a no-op.
+func RecordControllerRebind(s Store, anchorPath, controller, anchorSHA256 string, now time.Time) error {
 	if err := CheckControllerRebind(s); err != nil {
 		return err
+	}
+	live, err := fileSHA256(anchorPath)
+	if err != nil {
+		return err
+	}
+	if live != anchorSHA256 {
+		return fmt.Errorf("the activation anchor is %s, not the rebind's %s: another change committed after it; re-run the rebind", live, anchorSHA256)
 	}
 	l, loc, err := s.Load()
 	if err != nil || l == nil {
@@ -143,4 +160,19 @@ func RecordControllerRebind(s Store, controller, anchorSHA256 string, now time.T
 		return err
 	}
 	return s.Save(l, loc)
+}
+
+// ControllerRebindLedger is native setup's side of qualify
+// rebind-controller (qualification.RebindLedger): Check before the anchor
+// changes and Record after, both under the activation anchor lock.
+type ControllerRebindLedger struct {
+	Store      Store
+	AnchorPath string
+	Now        func() time.Time
+}
+
+func (c ControllerRebindLedger) Check() error { return CheckControllerRebind(c.Store) }
+
+func (c ControllerRebindLedger) Record(controller, anchorSHA256 string) error {
+	return RecordControllerRebind(c.Store, c.AnchorPath, controller, anchorSHA256, c.Now())
 }

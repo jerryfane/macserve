@@ -167,15 +167,9 @@ func runQualify(args []string, stdout, stderr io.Writer) int {
 		// anchor: it must allow the rebind before the anchor changes, and it
 		// records the new controller and anchor after (a re-run once both
 		// are recorded is a no-op).
-		store := setup.SystemStore()
-		err := setup.CheckControllerRebind(store)
-		var result qualification.RebindResult
-		if err == nil {
-			result, err = qualification.RebindController(ctx, *rebindFrom, *rebindTo)
-		}
-		if err == nil {
-			err = setup.RecordControllerRebind(store, result.ControllerReleaseSHA256, result.AnchorSHA256, time.Now())
-		}
+		// Both run under the activation anchor lock.
+		ledger := setup.ControllerRebindLedger{Store: setup.SystemStore(), AnchorPath: setup.InstallRoot + "/config/activation-anchor.json", Now: time.Now}
+		result, err := qualification.RebindController(ctx, *rebindFrom, *rebindTo, ledger)
 		if err == nil {
 			err = json.NewEncoder(stdout).Encode(result)
 		}

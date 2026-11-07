@@ -1022,10 +1022,10 @@ func TestControllerRebindKeepsLedgerConsistent(t *testing.T) {
 		t.Fatal("an unrecorded rebind was accepted")
 	}
 	at := u.h.Now().Add(time.Minute)
-	if err := RecordControllerRebind(u.h.Store, digestHex(rebound), digestHex([]byte(`{"rebound":1}`)), at); err != nil {
+	if err := RecordControllerRebind(u.h.Store, anchor, digestHex(rebound), digestHex([]byte(`{"rebound":1}`)), at); err != nil {
 		t.Fatal(err)
 	}
-	if err := RecordControllerRebind(u.h.Store, digestHex(rebound), digestHex([]byte(`{"rebound":1}`)), at.Add(time.Minute)); err != nil {
+	if err := RecordControllerRebind(u.h.Store, anchor, digestHex(rebound), digestHex([]byte(`{"rebound":1}`)), at.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	l := u.ledger()
@@ -1034,7 +1034,7 @@ func TestControllerRebindKeepsLedgerConsistent(t *testing.T) {
 	}
 	// A same-release re-sign changes only the anchor.
 	writeRoot(t, anchor, []byte(`{"rebound":2}`), 0o644)
-	if err := RecordControllerRebind(u.h.Store, digestHex(rebound), digestHex([]byte(`{"rebound":2}`)), at.Add(2*time.Minute)); err != nil {
+	if err := RecordControllerRebind(u.h.Store, anchor, digestHex(rebound), digestHex([]byte(`{"rebound":2}`)), at.Add(2*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	if l := u.ledger(); len(l.Rebinds) != 2 || l.AnchorSHA256() != digestHex([]byte(`{"rebound":2}`)) {
@@ -1068,4 +1068,69 @@ func TestControllerRebindKeepsLedgerConsistent(t *testing.T) {
 	if err := l.validateRebinds(); err == nil {
 		t.Fatal("rebind from another controller validated")
 	}
+}
+
+// TestControllerRebindRefusedDuringApproveAndStart: approve-and-start
+// resumes by comparing the files qualify approve wrote with the ledger's
+// record of them, so a rebind is refused until it is done (before the
+// anchor changes), and resuming then still starts.
+func TestControllerRebindRefusedDuringApproveAndStart(t *testing.T) {
+	u := newUpgradeHost(t)
+	l := u.ledger()
+	r := l.record(StepApproveAndStart)
+	r.Status, r.Finished, r.FinishBoot = StatusRunning, nil, nil
+	if err := u.h.Store.Save(l, LedgerInstalled); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckControllerRebind(u.h.Store); err == nil || !strings.Contains(err.Error(), "approve-and-start") {
+		t.Fatalf("rebind allowed during approve-and-start: %v", err)
+	}
+	anchor := u.h.configPath("activation-anchor.json")
+	if err := RecordControllerRebind(u.h.Store, anchor, digestHex([]byte("c")), mustDigest(t, anchor), u.h.Now()); err == nil {
+		t.Fatal("rebind recorded during approve-and-start")
+	}
+	if len(u.ledger().Rebinds) != 0 || u.ledger().AnchorSHA256() != l.Approval.Approved["activation-anchor.json"] {
+		t.Fatal("a refused rebind changed the ledger")
+	}
+}
+
+// TestControllerRebindRecordRefusesStaleResult: two rebinds A then B, with
+// B committed and recorded first; A's late record (its anchor is no
+// longer the one on disk) is refused, so the ledger keeps B, the binaries
+// and anchor on disk.
+func TestControllerRebindRecordRefusesStaleResult(t *testing.T) {
+	u := newUpgradeHost(t)
+	anchor := u.h.configPath("activation-anchor.json")
+	a, b := []byte(`{"rebind":"A"}`), []byte(`{"rebind":"B"}`)
+	ctrlA, ctrlB := digestHex([]byte("controller A")), digestHex([]byte("controller B"))
+	writeRoot(t, anchor, b, 0o644)
+	if err := RecordControllerRebind(u.h.Store, anchor, ctrlB, digestHex(b), u.h.Now().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordControllerRebind(u.h.Store, anchor, ctrlA, digestHex(a), u.h.Now().Add(2*time.Minute)); err == nil || !strings.Contains(err.Error(), "another change committed") {
+		t.Fatalf("stale rebind recorded: %v", err)
+	}
+	if l := u.ledger(); len(l.Rebinds) != 1 || l.InstalledController() != ctrlB || l.AnchorSHA256() != digestHex(b) {
+		t.Fatalf("ledger no longer describes the last rebind: %+v", l.Rebinds)
+	}
+	// The admin rollback: the reverse rebind is recorded, and its re-run is
+	// a no-op.
+	writeRoot(t, anchor, a, 0o644)
+	for range 2 {
+		if err := RecordControllerRebind(u.h.Store, anchor, ctrlA, digestHex(a), u.h.Now().Add(3*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if l := u.ledger(); len(l.Rebinds) != 2 || l.InstalledController() != ctrlA {
+		t.Fatalf("reverse rebind: %+v", l.Rebinds)
+	}
+}
+
+func mustDigest(t *testing.T, path string) string {
+	t.Helper()
+	d, err := fileSHA256(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
 }

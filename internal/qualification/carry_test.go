@@ -896,3 +896,27 @@ func TestParseInstalledBinaries(t *testing.T) {
 		}
 	}
 }
+
+type fakeRebindLedger struct {
+	calls    []string
+	checkErr error
+}
+
+func (f *fakeRebindLedger) Check() error { f.calls = append(f.calls, "check"); return f.checkErr }
+func (f *fakeRebindLedger) Record(controller, anchor string) error {
+	f.calls = append(f.calls, "record "+controller+" "+anchor)
+	return nil
+}
+
+// TestRebindLedgerRefusalLeavesAnchor: the ledger's Check runs under the
+// anchor lock before anything is read or written; its refusal ends the
+// rebind with no Record.
+func TestRebindLedgerRefusalLeavesAnchor(t *testing.T) {
+	l := &fakeRebindLedger{checkErr: errors.New("approve-and-start is running")}
+	if _, err := rebindLocked(controller, newCtrl, l, func() error { return nil }); err == nil || !strings.Contains(err.Error(), "approve-and-start") {
+		t.Fatalf("got %v", err)
+	}
+	if !slices.Equal(l.calls, []string{"check"}) {
+		t.Fatalf("calls %v", l.calls)
+	}
+}

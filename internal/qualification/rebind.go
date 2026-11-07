@@ -33,7 +33,7 @@ type RebindResult struct {
 // Authority for the new controller is the administrator's verified release
 // manifest; this native step only keeps the anchor exact. Re-running after
 // the anchor already binds to and equals the live configuration is a no-op.
-func RebindController(ctx context.Context, from, to string) (RebindResult, error) {
+func RebindController(ctx context.Context, from, to string, ledger RebindLedger) (RebindResult, error) {
 	if err := rootOnly(); err != nil {
 		return RebindResult{}, err
 	}
@@ -45,6 +45,24 @@ func RebindController(ctx context.Context, from, to string) (RebindResult, error
 		return RebindResult{}, fmt.Errorf("activation anchor busy: %w", err)
 	}
 	defer unlock()
+	return rebindLocked(from, to, ledger, func() error { return ActivationCheck(ctx) })
+}
+
+// RebindLedger is the installer's record of the bound binaries (native
+// setup's ledger). RebindController calls Check before the anchor changes
+// and Record (with the controller release digest and the anchor digest now
+// in place) after, both under the anchor lock, so the whole check, commit
+// and record is one serialized step and a retry records the current state.
+type RebindLedger interface {
+	Check() error
+	Record(controllerRelease, anchorSHA256 string) error
+}
+
+// rebindLocked is RebindController under the anchor lock.
+func rebindLocked(from, to string, ledger RebindLedger, check func() error) (RebindResult, error) {
+	if err := ledger.Check(); err != nil {
+		return RebindResult{}, err
+	}
 	a, anchorRaw, err := loadAnchorBytes()
 	if err != nil {
 		return RebindResult{}, err
@@ -73,7 +91,12 @@ func RebindController(ctx context.Context, from, to string) (RebindResult, error
 			return RebindResult{}, err
 		}
 	}
-	if err := ActivationCheck(ctx); err != nil {
+	// Recorded before the activation check: the ledger must describe the
+	// anchor on disk even when the check then fails.
+	if err := ledger.Record(result.ControllerReleaseSHA256, result.AnchorSHA256); err != nil {
+		return RebindResult{}, fmt.Errorf("record the rebind: %w", err)
+	}
+	if err := check(); err != nil {
 		return RebindResult{}, fmt.Errorf("activation check after rebind: %w", err)
 	}
 	return result, nil
