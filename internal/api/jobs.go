@@ -102,6 +102,10 @@ func jobView(job model.Job) map[string]any {
 	if job.State == model.Failed || job.State == model.TimedOut || job.State == model.Interrupted || job.State == model.Expired {
 		view["failure_category"] = job.State
 	}
+	// Why cancellation was requested; the receipt never carries it.
+	if job.CancelReason != nil {
+		view["cancel_reason"] = job.CancelReason
+	}
 	if len(job.Result) > 0 {
 		var completion controller.Completion
 		if json.Unmarshal(job.Result, &completion) == nil {
@@ -139,7 +143,7 @@ func (h *handler) job(w http.ResponseWriter, r *http.Request, p store.Principal)
 			return
 		}
 		previous := job.State
-		job, err = h.Store.Cancel(r.Context(), job.ID, body.Reason, h.Now())
+		job, err = h.Store.Cancel(r.Context(), job.ID, body.Reason, model.CancelReason{Source: model.CancelClient, Principal: p.ID, Detail: body.Reason}, h.Now())
 		if err != nil {
 			writeError(w, err)
 			return

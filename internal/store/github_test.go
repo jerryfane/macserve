@@ -178,7 +178,7 @@ func TestGitHubOutboxGenerationAndCrashLease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.Cancel(ctx, run.JobID, "superseded", testNow); err != nil {
+	if _, err = s.Cancel(ctx, run.JobID, "superseded", model.CancelReason{Source: model.CancelClient, Principal: "owner"}, testNow); err != nil {
 		t.Fatal(err)
 	}
 	if err = s.FinishGitHubPublication(ctx, publication, 90, time.Time{}); err != nil {
@@ -243,7 +243,7 @@ func TestGitHubPublicationRetryDeadlineSurvivesUpdatesAndReopen(t *testing.T) {
 	if err = s.FinishGitHubPublication(ctx, publication, 0, retry); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.Cancel(ctx, run.JobID, "superseded", testNow); err != nil {
+	if _, err = s.Cancel(ctx, run.JobID, "superseded", model.CancelReason{Source: model.CancelClient, Principal: "owner"}, testNow); err != nil {
 		t.Fatal(err)
 	}
 	input.Request = &GitHubRequest{CommentID: 1, RequestID: "actions:42:1", BodySHA256: strings.Repeat("a", 64)}

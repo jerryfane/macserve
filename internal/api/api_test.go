@@ -231,7 +231,7 @@ func TestLogsPagingTerminalAndStreamResume(t *testing.T) {
 	if w.Code != 200 || len(page.Records) != 1 || page.Records[0].Seq != 1 || page.EOF {
 		t.Fatalf("page: %s", w.Body.String())
 	}
-	if _, err := f.db.Cancel(ctx, job.ID, "stop", testTime); err != nil {
+	if _, err := f.db.Cancel(ctx, job.ID, "stop", model.CancelReason{Source: model.CancelClient, Principal: "owner"}, testTime); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.db.Transition(ctx, job.ID, job.LeaseToken, model.Cancelling, model.Finalizing, "stop", testTime); err != nil {

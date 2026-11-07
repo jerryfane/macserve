@@ -156,7 +156,7 @@ func (s *Store) initialize(ctx context.Context) error {
 	if err := tx.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version > 5 {
+	if version > 6 {
 		return fmt.Errorf("unsupported store schema version %d", version)
 	}
 	if version == 0 {
@@ -181,6 +181,11 @@ func (s *Store) initialize(ctx context.Context) error {
 	}
 	if version < 5 {
 		if _, err := tx.ExecContext(ctx, signingSchema); err != nil {
+			return err
+		}
+	}
+	if version < 6 {
+		if _, err := tx.ExecContext(ctx, cancelReasonSchema); err != nil {
 			return err
 		}
 	}
@@ -243,7 +248,7 @@ CREATE TABLE logs (
 PRAGMA user_version=1;
 `
 
-const jobColumns = `id,principal,request,profile,profile_digest,request_digest,state,reason,created_at,updated_at,started_at,finished_at,deadline,worker_epoch,lease_token,cancel_requested,result,cleanup_ok,release_provenance`
+const jobColumns = `id,principal,request,profile,profile_digest,request_digest,state,reason,created_at,updated_at,started_at,finished_at,deadline,worker_epoch,lease_token,cancel_requested,result,cleanup_ok,release_provenance,cancel_reason`
 
 type scanner interface{ Scan(...any) error }
 
@@ -253,10 +258,10 @@ func scanJob(row scanner) (model.Job, error) {
 
 func scanJobSequence(row scanner, sequence *int64) (model.Job, error) {
 	var job model.Job
-	var request, profile, result, provenance []byte
+	var request, profile, result, provenance, cancelReason []byte
 	var created, updated int64
 	var started, finished, deadline sql.NullInt64
-	dest := []any{sequence, &job.ID, &job.Principal, &request, &profile, &job.ProfileDigest, &job.RequestDigest, &job.State, &job.Reason, &created, &updated, &started, &finished, &deadline, &job.WorkerEpoch, &job.LeaseToken, &job.CancelRequested, &result, &job.CleanupOK, &provenance}
+	dest := []any{sequence, &job.ID, &job.Principal, &request, &profile, &job.ProfileDigest, &job.RequestDigest, &job.State, &job.Reason, &created, &updated, &started, &finished, &deadline, &job.WorkerEpoch, &job.LeaseToken, &job.CancelRequested, &result, &job.CleanupOK, &provenance, &cancelReason}
 	if sequence == nil {
 		dest = dest[1:]
 	}
@@ -278,6 +283,14 @@ func scanJobSequence(row scanner, sequence *int64) (model.Job, error) {
 	if provenance != nil {
 		job.ReleaseProvenance = new(model.ReleaseProvenance)
 		if err := json.Unmarshal(provenance, job.ReleaseProvenance); err != nil {
+			return job, err
+		}
+	}
+	// NULL for every job never cancelled, and every job cancelled before
+	// schema version 6.
+	if cancelReason != nil {
+		job.CancelReason = new(model.CancelReason)
+		if err := json.Unmarshal(cancelReason, job.CancelReason); err != nil {
 			return job, err
 		}
 	}

@@ -45,7 +45,7 @@ func TestLeaseAndStateMachineBoundaries(t *testing.T) {
 	}
 	requireError(t, s.Finish(ctx, job.ID, job.LeaseToken, model.Succeeded, nil, true, "rewrite", end), ErrTransition)
 	requireError(t, s.Transition(ctx, job.ID, job.LeaseToken, model.Finalizing, model.Cancelling, "rewrite", end), ErrTransition)
-	cancelled, err := s.Cancel(ctx, job.ID, "late cancellation", end.Add(time.Hour))
+	cancelled, err := s.Cancel(ctx, job.ID, "late cancellation", model.CancelReason{Source: model.CancelClient, Principal: "owner"}, end.Add(time.Hour))
 	if err != nil || !reflect.DeepEqual(cancelled, terminal) {
 		t.Fatalf("terminal cancellation mutated result: %+v %v", cancelled, err)
 	}
@@ -65,7 +65,7 @@ func TestCancellationAtEveryNonterminalStage(t *testing.T) {
 					}
 				}
 			}
-			cancelled, err := s.Cancel(ctx, job.ID, "owner request", testNow.Add(time.Second))
+			cancelled, err := s.Cancel(ctx, job.ID, "owner request", model.CancelReason{Source: model.CancelClient, Principal: "owner"}, testNow.Add(time.Second))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -79,7 +79,7 @@ func TestCancellationAtEveryNonterminalStage(t *testing.T) {
 			if cancelled.State != want || !cancelled.CancelRequested {
 				t.Fatalf("cancelled from %s: %+v", stage, cancelled)
 			}
-			again, err := s.Cancel(ctx, job.ID, "repeated cancellation", testNow.Add(2*time.Second))
+			again, err := s.Cancel(ctx, job.ID, "repeated cancellation", model.CancelReason{Source: model.CancelClient, Principal: "owner"}, testNow.Add(2*time.Second))
 			if err != nil || !reflect.DeepEqual(again, cancelled) {
 				t.Fatalf("cancel was not idempotent: %+v %v", again, err)
 			}
@@ -113,7 +113,7 @@ func TestPauseDrainAndCancelActive(t *testing.T) {
 	enqueueJob(t, s, "principal", "one", testNow)
 	second := enqueueJob(t, s, "principal", "two", testNow)
 	active := claimJob(t, s, "epoch", testNow)
-	paused, err := s.Pause(ctx, "owner activity", "drain", testNow)
+	paused, err := s.Pause(ctx, "owner activity", "drain", "admin", testNow)
 	if err != nil || !paused.Paused || paused.PauseMode != "drain" || paused.Generation != 1 {
 		t.Fatalf("pause: %+v %v", paused, err)
 	}
@@ -131,7 +131,7 @@ func TestPauseDrainAndCancelActive(t *testing.T) {
 	if active.ID != second.ID {
 		t.Fatal("resume did not release queue")
 	}
-	paused, err = s.Pause(ctx, "owner needs quiescence", "cancel_active", testNow.Add(4*time.Second))
+	paused, err = s.Pause(ctx, "owner needs quiescence", "cancel_active", "admin", testNow.Add(4*time.Second))
 	if err != nil || !paused.Paused || paused.Generation <= state.Generation {
 		t.Fatalf("cancel_active pause: %+v %v", paused, err)
 	}
@@ -140,7 +140,7 @@ func TestPauseDrainAndCancelActive(t *testing.T) {
 		t.Fatal("cancel_active did not atomically cancel")
 	}
 	finishJob(t, s, active, model.Cancelled, true, testNow.Add(5*time.Second))
-	_, err = s.Pause(ctx, "", "freeze", testNow)
+	_, err = s.Pause(ctx, "", "freeze", "admin", testNow)
 	requireError(t, err, ErrInvalid)
 }
 
@@ -152,7 +152,7 @@ func TestCancelActivePauseDuringFinalization(t *testing.T) {
 	if err := s.Transition(ctx, job.ID, job.LeaseToken, model.Preparing, model.Finalizing, "exporting", testNow); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Pause(ctx, "owner request", "cancel_active", testNow); err != nil {
+	if _, err := s.Pause(ctx, "owner request", "cancel_active", "admin", testNow); err != nil {
 		t.Fatal(err)
 	}
 	got := getJob(t, s, job.ID)
@@ -170,7 +170,7 @@ func TestCleanupFailureQuarantineSurvivesReopen(t *testing.T) {
 	job := claimJob(t, s, "old-epoch", testNow)
 	requireError(t, s.AcknowledgeQuiescent(ctx, "new-epoch"), ErrTransition)
 	finishJob(t, s, job, model.Failed, false, testNow.Add(time.Second))
-	if _, err := s.Pause(ctx, "manual pause", "drain", testNow); err != nil {
+	if _, err := s.Pause(ctx, "manual pause", "drain", "admin", testNow); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {

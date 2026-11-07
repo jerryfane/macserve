@@ -379,7 +379,7 @@ func (s *Store) BlockGitHub(ctx context.Context, r GitHubRun, reason string, now
 			var job model.Job
 			job, err = getTx(ctx, tx, old.JobID)
 			if err == nil {
-				err = cancelTx(ctx, tx, job, reason, now)
+				err = cancelTx(ctx, tx, job, reason, model.CancelReason{Source: model.CancelGitHub, Detail: reason}, now)
 			}
 		}
 	}

@@ -360,7 +360,7 @@ func (p *Poller) pollRepository(ctx context.Context, policy Policy) error {
 		}
 		err = p.checkDispatch(ctx, job)
 		if errors.Is(err, ErrIneligible) {
-			_, err = p.options.Store.Cancel(ctx, job.ID, "GitHub head superseded or ineligible", now)
+			_, err = p.options.Store.Cancel(ctx, job.ID, "GitHub head superseded or ineligible", model.CancelReason{Source: model.CancelGitHub, Detail: err.Error()}, now)
 		}
 		if err != nil {
 			failures = append(failures, err)

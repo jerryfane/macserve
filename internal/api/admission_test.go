@@ -64,7 +64,7 @@ func TestReplayCannotBecomeNewAdmissionWhenRetentionRuns(t *testing.T) {
 	// looked up the key, skipped readiness, then pruned here before Submit's
 	// second lookup, silently recreating work while readiness was false.
 	f.options.Now = func() time.Time {
-		if _, err := f.db.Cancel(ctx, job.ID, "retired", testTime); err != nil {
+		if _, err := f.db.Cancel(ctx, job.ID, "retired", model.CancelReason{Source: model.CancelClient, Principal: "owner"}, testTime); err != nil {
 			t.Fatal(err)
 		}
 		if err := f.db.Prune(ctx, testTime.Add(91*24*time.Hour)); err != nil {
@@ -87,7 +87,7 @@ func TestReplayCannotBecomeNewAdmissionWhenRetentionRuns(t *testing.T) {
 	if err != nil || retained.ID != job.ID || retained.State != model.Queued {
 		t.Fatalf("replay changed original admission: %+v %v", retained, err)
 	}
-	if _, err := f.db.Cancel(ctx, job.ID, "retired", testTime); err != nil {
+	if _, err := f.db.Cancel(ctx, job.ID, "retired", model.CancelReason{Source: model.CancelClient, Principal: "owner"}, testTime); err != nil {
 		t.Fatal(err)
 	}
 	if err := f.db.Prune(ctx, testTime.Add(91*24*time.Hour)); err != nil {

@@ -150,7 +150,7 @@ func TestQueuedExpiryAndRetainedIdempotencyBoundary(t *testing.T) {
 	ctx := context.Background()
 	s, _ := newStore(t, Options{QueueTTL: time.Hour, Retention: 2 * time.Hour})
 	job := enqueueJob(t, s, "principal", "key", testNow)
-	if _, err := s.Pause(ctx, "paused", "drain", testNow); err != nil {
+	if _, err := s.Pause(ctx, "paused", "drain", "admin", testNow); err != nil {
 		t.Fatal(err)
 	}
 	_, err := s.Claim(ctx, "epoch", testNow.Add(time.Hour-time.Nanosecond))
