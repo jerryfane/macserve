@@ -256,6 +256,15 @@ That rests on B processes, not on the controller:
 - **Accepted limit.** The TLS key stays with the controller: K code can impersonate the private API endpoint to
   clients that trust its certificate. Rollback of a bad K release is best-effort against a malicious K.
 
+**Release provenance of K.** A controller-only release reaches the Mac as a *controller-carry* release: the
+release workflow republishes the base release's root binary bytes, refuses unless the root binary's
+`go list -deps` source closure, the store schema version and the base `BOUNDARY.json` classes allow it, and
+signs `release-manifest.json` with the CI release key ([releases](releases.md)). K code is trusted only as far
+as merge + review + that key: the Mac verifies the signature against its pinned public key and does not prove
+that a change was reviewed or merged. The goal, reached only once the keyholder and worker changes above land,
+is that a compromised key or a malicious merged K change reaches at most what K can reach as the controller UID,
+never root, the owner's home or Apple signing.
+
 ## Code signer boundary
 
 The optional `signer` daemon (`org.macserve.signer`, account `_macserve_sign`) is a separate privilege domain

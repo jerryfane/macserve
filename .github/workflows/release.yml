@@ -18,6 +18,7 @@ jobs:
     outputs:
       sha256: ${{ steps.build.outputs.sha256 }}
       controller-sha256: ${{ steps.build.outputs.controller-sha256 }}
+      controller-store-schema: ${{ steps.build.outputs.controller-store-schema }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -32,27 +33,41 @@ jobs:
         run: |
           rebuild/macserve/checks/release-build.sh "$RUNNER_TEMP/rebuild" > "$RUNNER_TEMP/rebuild.sums"
           cat "$RUNNER_TEMP/rebuild.sums"
+          # The controller binary's own report (carry contract) of the store
+          # schema it migrates to; release-manifest create requires the
+          # tag's source to agree.
+          version=$("$RUNNER_TEMP/rebuild/macserve-controller-darwin-arm64" version --json)
+          echo "$version"
+          schema=$(jq -er '.store_schema_version | select(type == "number" and . >= 1)' <<<"$version")
           {
             echo "sha256=$(awk '$2 ~ /\/macserve-darwin-arm64$/ { print $1 }' "$RUNNER_TEMP/rebuild.sums")"
             echo "controller-sha256=$(awk '$2 ~ /\/macserve-controller-darwin-arm64$/ { print $1 }' "$RUNNER_TEMP/rebuild.sums")"
+            echo "controller-store-schema=$schema"
           } >> "$GITHUB_OUTPUT"
 
+  # Builds, gates and attests the binaries and writes release-manifest.json.
+  # Publishes nothing: the sign job signs the manifest, the publish job
+  # releases.
   release:
     needs: rebuild
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
       id-token: write
       attestations: write
       # The carry-proof step reads CI runs of the tag commit.
       actions: read
     env:
       GOMAXPROCS: "2"
+    outputs:
+      kind: ${{ steps.kind.outputs.kind }}
+      base: ${{ steps.kind.outputs.base }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-          # The carry-proof step diffs the tag against its predecessor tag.
+          # The carry-proof and release-manifest steps diff the tag against
+          # earlier tags.
           fetch-depth: 0
           fetch-tags: true
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
@@ -67,12 +82,60 @@ jobs:
           REBUILT_SHA256: ${{ needs.rebuild.outputs.sha256 }}
           REBUILT_CONTROLLER_SHA256: ${{ needs.rebuild.outputs.controller-sha256 }}
         run: |
-          sha256sum macserve-darwin-arm64 macserve-controller-darwin-arm64 > SHA256SUMS
-          cat SHA256SUMS
+          sha256sum macserve-darwin-arm64 macserve-controller-darwin-arm64
           printf '%s  %s\n' \
             "$REBUILT_SHA256" macserve-darwin-arm64 \
             "$REBUILT_CONTROLLER_SHA256" macserve-controller-darwin-arm64 |
             sha256sum --check --strict
+      # A controller-carry tag is an annotated tag whose message has the line
+      # "Macserve-Carry-Base: vX.Y.Z". Its release republishes that full
+      # release's macserve-darwin-arm64 bytes (verified against the base's
+      # attested SHA256SUMS and the binary's own attestation) in place of
+      # this build; only macserve-controller is new. release-manifest create
+      # below refuses the carry unless the root binary's source closure, the
+      # store schema and the boundary allow it.
+      - name: Select full or controller-carry
+        id: kind
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          DIST: ${{ runner.temp }}/dist
+          BASE_DIR: ${{ runner.temp }}/base
+        run: |
+          # The checkout may hold the pushed tag as a lightweight ref; the
+          # carry marker is in the annotated tag object.
+          git fetch --no-tags --force origin "+refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$GITHUB_SHA"
+          base=$(go run ./checks/release-manifest carry-base -tag "$RELEASE_TAG")
+          if [ -z "$base" ]; then
+            echo "kind=full" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "controller-carry: republishing $base's macserve-darwin-arm64"
+          base_commit=$(git rev-parse "refs/tags/$base^{commit}")
+          mkdir "$BASE_DIR"
+          patterns=(--pattern macserve-darwin-arm64 --pattern SHA256SUMS)
+          if gh release view "$base" --json assets --jq '.assets[].name' | grep -qxF release-manifest.json; then
+            patterns+=(--pattern release-manifest.json)
+          fi
+          gh release download "$base" --dir "$BASE_DIR" "${patterns[@]}"
+          for f in SHA256SUMS macserve-darwin-arm64; do
+            gh attestation verify "$BASE_DIR/$f" \
+              --repo "$GH_REPO" \
+              --signer-workflow "$GH_REPO/.github/workflows/release.yml" \
+              --source-ref "refs/tags/$base" \
+              --source-digest "$base_commit" \
+              --deny-self-hosted-runners
+          done
+          (cd "$BASE_DIR" && grep -E '^[0-9a-f]{64}  macserve-darwin-arm64$' SHA256SUMS | sha256sum --check --strict)
+          cp "$BASE_DIR/macserve-darwin-arm64" "$DIST/macserve-darwin-arm64"
+          { echo "kind=controller-carry"; echo "base=$base"; } >> "$GITHUB_OUTPUT"
+      - name: Write SHA256SUMS
+        working-directory: ${{ runner.temp }}/dist
+        run: |
+          sha256sum macserve-darwin-arm64 macserve-controller-darwin-arm64 > SHA256SUMS
+          cat SHA256SUMS
       - name: Attest build provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
@@ -93,53 +156,214 @@ jobs:
               --source-digest "$GITHUB_SHA" \
               --deny-self-hosted-runners
           done
+      # The manifest the CI release key signs (carry contract, schema
+      # macserve-release-manifest/1). For a controller-carry, create refuses
+      # unless every changed path is class K, C, G or T in the base's
+      # BOUNDARY.json, `go list -deps ./cmd/macserve` reads the same files,
+      # modules, go.mod and go.sum at both tags, the store schema version is
+      # unchanged, and the full boundary check passes.
+      - name: Build release-manifest.json
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          DIST: ${{ runner.temp }}/dist
+          BASE_DIR: ${{ runner.temp }}/base
+          KIND: ${{ steps.kind.outputs.kind }}
+          BASE: ${{ steps.kind.outputs.base }}
+          CONTROLLER_STORE_SCHEMA: ${{ needs.rebuild.outputs.controller-store-schema }}
+        run: |
+          args=()
+          if [ "$KIND" = controller-carry ]; then
+            args=(-base-tag "$BASE" -base-sums "$BASE_DIR/SHA256SUMS")
+            if [ -f "$BASE_DIR/release-manifest.json" ]; then
+              args+=(-base-manifest "$BASE_DIR/release-manifest.json")
+            fi
+          fi
+          go run ./checks/release-manifest create \
+            -tag "$RELEASE_TAG" -commit "$GITHUB_SHA" -dist "$DIST" \
+            -controller-store-schema-version "$CONTROLLER_STORE_SCHEMA" \
+            -out "$DIST/release-manifest.json" "${args[@]}"
+          cat "$DIST/release-manifest.json"
       # A release that changes only C, G and T paths (by the predecessor
       # release's BOUNDARY.json) carries qualification: macserve upgrade
       # accepts a carry only from this release's carry-proof.json asset, with
       # its digest in this SHA256SUMS. Any other release publishes without one
       # (the generator then prints "no carry proof: REASON" and exits 0).
       - name: Build release-carry proof
-        id: carry
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
+          KIND: ${{ steps.kind.outputs.kind }}
           REBUILT_SHA256: ${{ needs.rebuild.outputs.sha256 }}
           REBUILT_CONTROLLER_SHA256: ${{ needs.rebuild.outputs.controller-sha256 }}
           DIST: ${{ runner.temp }}/dist
         run: |
-          # The proof must describe the commit this job built and attested.
-          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$GITHUB_SHA"
           binary=$(sha256sum "$DIST/macserve-darwin-arm64")
           controller=$(sha256sum "$DIST/macserve-controller-darwin-arm64")
+          rebuilt=$REBUILT_SHA256
+          if [ "$KIND" = controller-carry ]; then
+            # The published root binary is the base release's, which that
+            # release's own rebuild gate reproduced.
+            rebuilt=${binary%% *}
+          fi
           go run ./checks/carry-proof \
             -repo "$GH_REPO" -tag "$RELEASE_TAG" \
-            -binary-sha256 "${binary%% *}" -rebuilt-sha256 "$REBUILT_SHA256" \
+            -binary-sha256 "${binary%% *}" -rebuilt-sha256 "$rebuilt" \
             -controller-binary-sha256 "${controller%% *}" \
             -controller-rebuilt-sha256 "$REBUILT_CONTROLLER_SHA256" \
             -out "$DIST/carry-proof.json"
-          subjects="$DIST/SHA256SUMS"
           if [ -f "$DIST/carry-proof.json" ]; then
             (cd "$DIST" && sha256sum carry-proof.json >> SHA256SUMS)
             cat "$DIST/carry-proof.json"
-            subjects="$subjects,$DIST/carry-proof.json"
           fi
           cat "$DIST/SHA256SUMS"
+      - name: Hand the manifest to the sign job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-manifest
+          path: ${{ runner.temp }}/dist/release-manifest.json
+          if-no-files-found: error
+          retention-days: 3
+      - name: Hand the release files to the publish job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-dist
+          path: ${{ runner.temp }}/dist/
+          if-no-files-found: error
+          retention-days: 3
+
+  # The only job that sees the CI release key. The release-signing
+  # environment admits only v* tags; the job runs no third-party code after
+  # the key is in its environment, and checks that the tag is on main and
+  # that the secret is the key pinned in checks/release-manifest.
+  sign:
+    needs: release
+    runs-on: ubuntu-latest
+    environment: release-signing
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Require the tag commit on main
+        run: |
+          git rev-parse --verify refs/remotes/origin/main
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main
+      - name: Build the signer
+        run: go build -o "$RUNNER_TEMP/release-manifest" ./checks/release-manifest
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-manifest
+          path: ${{ runner.temp }}/sign
+      - name: Sign release-manifest.json
+        working-directory: ${{ runner.temp }}/sign
+        env:
+          MACSERVE_RELEASE_SIGNING_KEY: ${{ secrets.MACSERVE_RELEASE_SIGNING_KEY }}
+          PUB: ${{ github.workspace }}/checks/release-manifest/release-signing.pub
+        run: |
+          "$RUNNER_TEMP/release-manifest" sign \
+            -manifest release-manifest.json -pub "$PUB" -out release-manifest.json.sig
+      - name: Verify the signature as an administrator would
+        working-directory: ${{ runner.temp }}/sign
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          PUB: ${{ github.workspace }}/checks/release-manifest/release-signing.pub
+        run: |
+          "$RUNNER_TEMP/release-manifest" verify -pub "$PUB" \
+            -manifest release-manifest.json -sig release-manifest.json.sig \
+            -tag "$RELEASE_TAG" -commit "$GITHUB_SHA"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-manifest-sig
+          path: ${{ runner.temp }}/sign/release-manifest.json.sig
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    needs: [release, sign]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GOMAXPROCS: "2"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      # Built in the checkout (the module root); the steps below run it from
+      # the dist directory, which is outside the module.
+      - name: Build the verifier
+        run: go build -o "$RUNNER_TEMP/release-manifest" ./checks/release-manifest
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-dist
+          path: ${{ runner.temp }}/dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-manifest-sig
+          path: ${{ runner.temp }}/dist
+      # The binaries handed over are the ones the release job attested, and
+      # the signed manifest names exactly them and this tag and commit.
+      - name: Verify the signed manifest and the binaries
+        working-directory: ${{ runner.temp }}/dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          KIND: ${{ needs.release.outputs.kind }}
+          PUB: ${{ github.workspace }}/checks/release-manifest/release-signing.pub
+        run: |
+          for f in macserve-darwin-arm64 macserve-controller-darwin-arm64; do
+            gh attestation verify "$f" \
+              --repo "$GH_REPO" \
+              --signer-workflow "$GH_REPO/.github/workflows/release.yml" \
+              --source-ref "$GITHUB_REF" \
+              --source-digest "$GITHUB_SHA" \
+              --deny-self-hosted-runners
+          done
+          "$RUNNER_TEMP/release-manifest" verify -pub "$PUB" \
+            -manifest release-manifest.json -sig release-manifest.json.sig \
+            -tag "$RELEASE_TAG" -commit "$GITHUB_SHA" -kind "$KIND" -sums SHA256SUMS \
+            -macserve macserve-darwin-arm64 -controller macserve-controller-darwin-arm64
+          sha256sum release-manifest.json release-manifest.json.sig >> SHA256SUMS
+          cat SHA256SUMS
+      - name: List the attested release files
+        id: subjects
+        env:
+          DIST: ${{ runner.temp }}/dist
+        run: |
+          subjects="$DIST/SHA256SUMS,$DIST/release-manifest.json,$DIST/release-manifest.json.sig"
+          if [ -f "$DIST/carry-proof.json" ]; then
+            subjects="$subjects,$DIST/carry-proof.json"
+          fi
           echo "subjects=$subjects" >> "$GITHUB_OUTPUT"
-      # SHA256SUMS (and carry-proof.json, when built) get their own build
-      # provenance attestation, so an owner can verify the digest list and the
-      # proof macserve upgrade trusts, not only the binaries.
-      - name: Attest SHA256SUMS and the carry proof
+      # SHA256SUMS, the signed manifest and its signature (and
+      # carry-proof.json, when built) get their own build provenance
+      # attestation, so an owner can verify the digest list and the proofs
+      # macserve upgrade and the carry verb trust, not only the binaries.
+      - name: Attest SHA256SUMS, the release manifest and the carry proof
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: ${{ steps.carry.outputs.subjects }}
-      - name: Verify the SHA256SUMS and carry proof attestations
+          subject-path: ${{ steps.subjects.outputs.subjects }}
+      - name: Verify the SHA256SUMS, manifest and carry proof attestations
         working-directory: ${{ runner.temp }}/dist
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          files=(SHA256SUMS)
+          files=(SHA256SUMS release-manifest.json release-manifest.json.sig)
           if [ -f carry-proof.json ]; then
             files+=(carry-proof.json)
           fi
@@ -151,11 +375,12 @@ jobs:
               --source-digest "$GITHUB_SHA" \
               --deny-self-hosted-runners
           done
-      # Runs only after the byte-identical rebuild, attestation and consumer
-      # verification gates above. The formula takes both digests from the
-      # SHA256SUMS that was just checked against the rebuild, and is published
-      # with the release. The tap (jerryfane/homebrew-macserve) is bumped by a
-      # reviewed PR that copies this asset; this workflow holds no tap token.
+      # Runs only after the byte-identical rebuild, attestation, signature
+      # and consumer verification gates above. The formula takes both digests
+      # from the SHA256SUMS that was just checked against the rebuild and the
+      # signed manifest, and is published with the release. The tap
+      # (jerryfane/homebrew-macserve) is bumped by a reviewed PR that copies
+      # this asset; this workflow holds no tap token.
       - name: Render Homebrew formula
         env:
           GH_REPO: ${{ github.repository }}
@@ -172,13 +397,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
+          KIND: ${{ needs.release.outputs.kind }}
+          BASE: ${{ needs.release.outputs.base }}
         run: |
-          assets=(macserve-darwin-arm64 macserve-controller-darwin-arm64 SHA256SUMS macserve.rb)
+          assets=(macserve-darwin-arm64 macserve-controller-darwin-arm64 SHA256SUMS release-manifest.json release-manifest.json.sig macserve.rb)
           carry="No carry-proof.json: this release changes a boundary path over its predecessor (or the change could not be proved), so it carries no qualification."
           if [ -f carry-proof.json ]; then
             assets+=(carry-proof.json)
             carry="carry-proof.json, listed in SHA256SUMS, proves this release changes only C, G and T paths of its predecessor's BOUNDARY.json; macserve upgrade accepts a release carry only from it."
           fi
+          kind="Kind full: both binaries are built from this tag."
+          if [ "$KIND" = controller-carry ]; then
+            kind="Kind controller-carry of $BASE: macserve-darwin-arm64 is $BASE's binary republished byte for byte (macserve version reports $BASE); only macserve-controller is built from this tag."
+          fi
           gh release create "$RELEASE_TAG" "${assets[@]}" \
             --verify-tag --title "$RELEASE_TAG" \
-            --notes "Darwin arm64 macserve and macserve-controller built by checks/release-build.sh (CGO disabled, -trimpath, -buildvcs=true), rebuilt byte-identically on a second runner, with GitHub build provenance attestations for both, SHA256SUMS and carry-proof.json when present (gh attestation verify FILE --repo $GH_REPO). Verify SHA256SUMS (and carry-proof.json) that way before macserve setup or macserve upgrade. $carry"
+            --notes "Darwin arm64 macserve and macserve-controller built by checks/release-build.sh (CGO disabled, -trimpath, -buildvcs=true), rebuilt byte-identically on a second runner, with GitHub build provenance attestations for both, SHA256SUMS, release-manifest.json and its signature, and carry-proof.json when present (gh attestation verify FILE --repo $GH_REPO). release-manifest.json is signed by the CI release key (release-manifest.json.sig); verify it with the verify command of checks/release-manifest, run from a checkout of this tag (docs/releases.md). Verify SHA256SUMS (and carry-proof.json) that way before macserve setup or macserve upgrade. $kind $carry"

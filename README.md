@@ -213,6 +213,7 @@ deployment and background GUI operation have not been qualified by the automated
 | [Receipts and GitHub](docs/receipts-and-github.md) | Signed receipts, GitHub pull mode, PR comment grammar, Linux waiter |
 | [Host health](docs/host-health.md) | Installation assets, owner-home rules, maintenance health publication |
 | [Persistence policy](docs/persistence-policy.md) | Reviewed registration-persistence policy and its migration |
+| [Releases](docs/releases.md) | Release workflow, signed release manifest, controller-carry releases, CI release key and rotation |
 
 ## Development
 
