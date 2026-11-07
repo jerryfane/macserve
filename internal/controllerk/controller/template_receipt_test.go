@@ -90,7 +90,7 @@ func TestTemplateJobCompletesWithSignedReceipt(t *testing.T) {
 // with no executed case turns the success claim into a failure.
 func TestTemplateTestJobsCompleteWithSignedReceipt(t *testing.T) {
 	selectors := []string{"HerdrUITests/TerminalControlTests", "HerdrUITests/TerminalSearchTests"}
-	report, err := os.ReadFile(filepath.Join("..", "evidence", "testdata", "herdrup-uitests.json"))
+	report, err := os.ReadFile(filepath.Join("..", "..", "evidence", "testdata", "herdrup-uitests.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
