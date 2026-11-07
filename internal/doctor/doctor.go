@@ -433,17 +433,19 @@ func (s *state) network() {
 
 // recorded is the digest setup recorded for the installed binary input
 // ("macserve" or setup.ControllerInput): the last macserve upgrade's, else
-// the latest step input. A release record from before the controller
+// the latest step input; for the controller also a later controller
+// rebind. A release record from before the controller
 // binary records none.
 func (s *state) recorded(input string) string {
 	if s.ledger == nil {
 		return ""
 	}
+	if input == setup.ControllerInput {
+		// Includes controller rebinds recorded after the last upgrade.
+		return s.ledger.InstalledController()
+	}
 	for i := len(s.ledger.Releases) - 1; i >= 0; i-- {
 		if r := s.ledger.Releases[i]; r.Status == setup.StatusDone {
-			if input == setup.ControllerInput {
-				return r.ControllerSHA256
-			}
 			return r.SHA256
 		}
 	}

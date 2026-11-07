@@ -236,32 +236,23 @@ func (l *Ledger) InstalledBinary() string {
 
 // InstalledController is the digest of the macserve-controller binary
 // this ledger installed, as InstalledBinary: the last finished upgrade's,
-// else install's. Empty when the installed release predates the
-// controller binary.
+// else install's, or a controller rebind recorded after it. Empty when the
+// installed release predates the controller binary.
 func (l *Ledger) InstalledController() string {
-	for i := len(l.Releases) - 1; i >= 0; i-- {
-		if l.Releases[i].Status == StatusDone {
-			return l.Releases[i].ControllerSHA256
-		}
-	}
-	for i := len(l.Records) - 1; i >= 0; i-- {
-		if d := l.Records[i].Inputs[ControllerInput]; d != "" {
-			return d
-		}
-	}
-	return ""
+	return l.controllerAt(len(l.Releases))
 }
 
 // AnchorSHA256 is the activation anchor this ledger recorded: the last
-// carried release's, else the one qualify approve wrote.
+// carried release's, else the one qualify approve wrote, unless a later
+// controller rebind wrote a newer one.
 func (l *Ledger) AnchorSHA256() string {
-	if n := len(l.Releases); n > 0 && l.Releases[n-1].Effect == EffectCarried {
-		return l.Releases[n-1].AnchorSHA256
+	if n := len(l.Releases); n > 0 && l.Releases[n-1].Effect == EffectCarried && l.Releases[n-1].Finished != nil {
+		return l.rebindAnchor(l.Releases[n-1].AnchorSHA256, *l.Releases[n-1].Finished)
 	}
 	if l.Approval == nil {
 		return ""
 	}
-	return l.Approval.Approved["activation-anchor.json"]
+	return l.rebindAnchor(l.Approval.Approved["activation-anchor.json"], l.Approval.At)
 }
 
 // BeginRelease records a running upgrade before anything is installed.
@@ -344,7 +335,7 @@ func (l *Ledger) validateReleases() error {
 		if (r.FromControllerSHA256 != "" && !sha256Hex.MatchString(r.FromControllerSHA256)) || (r.ControllerSHA256 != "" && !sha256Hex.MatchString(r.ControllerSHA256)) {
 			return fmt.Errorf("setup ledger: release %d has an invalid controller digest", i)
 		}
-		if i > 0 && (l.Releases[i-1].SHA256 != r.FromSHA256 || l.Releases[i-1].ControllerSHA256 != r.FromControllerSHA256 || l.Releases[i-1].To != r.From) {
+		if i > 0 && (l.Releases[i-1].SHA256 != r.FromSHA256 || l.controllerAt(i) != r.FromControllerSHA256 || l.Releases[i-1].To != r.From) {
 			return fmt.Errorf("setup ledger: release %d does not continue from release %d", i, i-1)
 		}
 		if (r.CarryProofSHA256 != "" && !sha256Hex.MatchString(r.CarryProofSHA256)) || (r.Carry && r.CarryProofSHA256 == "") {
@@ -381,7 +372,7 @@ func (l *Ledger) validateReleases() error {
 	if len(l.Releases) > 0 && l.record(StepInstall).Status != StatusDone {
 		return errors.New("setup ledger: a release is recorded before install")
 	}
-	if len(l.Releases) > 0 && (l.record(StepInstall).Inputs["macserve"] != l.Releases[0].FromSHA256 || l.record(StepInstall).Inputs[ControllerInput] != l.Releases[0].FromControllerSHA256) {
+	if len(l.Releases) > 0 && (l.record(StepInstall).Inputs["macserve"] != l.Releases[0].FromSHA256 || l.controllerAt(0) != l.Releases[0].FromControllerSHA256) {
 		return errors.New("setup ledger: the first release does not continue from the installed binaries")
 	}
 	return nil

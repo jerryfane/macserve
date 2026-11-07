@@ -41,6 +41,9 @@ var Doctor = Policy{
 		"(*" + module + "/internal/deploy.InstalledBinaries).ReleaseDigest",
 		module + "/internal/hostguard.ConsoleAdmissible",
 		module + "/internal/setup.SystemBoot",
+		// The recorded controller digest: a walk of the decoded ledger's
+		// install input, releases and controller rebinds, no I/O.
+		"(*" + module + "/internal/setup.Ledger).InstalledController",
 		module + "/internal/setup/plan.AllowedCommand",
 		mainPkg + ".usage",
 	},

@@ -168,6 +168,8 @@ type Ledger struct {
 	Approval *Approval `json:"approval,omitempty"`
 	// Releases are the macserve upgrades since install, oldest first.
 	Releases []Release `json:"releases,omitempty"`
+	// Rebinds are the controller-only rebinds since install, oldest first.
+	Rebinds []ControllerRebind `json:"controller_rebinds,omitempty"`
 }
 
 const ledgerSchema = 1
@@ -492,5 +494,8 @@ func (l *Ledger) validate() error {
 	} else if step.Status == StatusDone {
 		return errors.New("setup ledger: approve-and-start done without approval")
 	}
-	return l.validateReleases()
+	if err := l.validateReleases(); err != nil {
+		return err
+	}
+	return l.validateRebinds()
 }

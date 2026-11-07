@@ -1002,3 +1002,70 @@ func TestUpgradeMapsSignedBinaries(t *testing.T) {
 		t.Fatal("stale installed-binaries.json kept after installing unsigned release bytes")
 	}
 }
+
+// TestControllerRebindKeepsLedgerConsistent: a controller rebind
+// (qualify rebind-controller) recorded in the setup ledger makes the
+// ledger vouch for the new controller and anchor, so the upgrade's
+// installed-binary and anchor checks accept them; a re-run is a no-op, a
+// same-release re-sign records only the new anchor, and no rebind is
+// recorded while an upgrade runs.
+func TestControllerRebindKeepsLedgerConsistent(t *testing.T) {
+	u := newUpgradeHost(t)
+	if u.ledger().AnchorSHA256() == "" {
+		t.Fatal("fixture has no approved anchor")
+	}
+	rebound := []byte("macserve-controller release v0.1.1")
+	writeRoot(t, u.h.installedControllerPath(), rebound, 0o755)
+	anchor := u.h.configPath("activation-anchor.json")
+	writeRoot(t, anchor, []byte(`{"rebound":1}`), 0o644)
+	if r := u.upgrade(Request{}); r.Error == "" {
+		t.Fatal("an unrecorded rebind was accepted")
+	}
+	at := u.h.Now().Add(time.Minute)
+	if err := RecordControllerRebind(u.h.Store, digestHex(rebound), digestHex([]byte(`{"rebound":1}`)), at); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordControllerRebind(u.h.Store, digestHex(rebound), digestHex([]byte(`{"rebound":1}`)), at.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	l := u.ledger()
+	if len(l.Rebinds) != 1 || l.InstalledController() != digestHex(rebound) || l.AnchorSHA256() != digestHex([]byte(`{"rebound":1}`)) {
+		t.Fatalf("rebind not recorded once: %+v", l.Rebinds)
+	}
+	// A same-release re-sign changes only the anchor.
+	writeRoot(t, anchor, []byte(`{"rebound":2}`), 0o644)
+	if err := RecordControllerRebind(u.h.Store, digestHex(rebound), digestHex([]byte(`{"rebound":2}`)), at.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if l := u.ledger(); len(l.Rebinds) != 2 || l.AnchorSHA256() != digestHex([]byte(`{"rebound":2}`)) {
+		t.Fatalf("re-sign not recorded: %+v", l.Rebinds)
+	}
+	if r := u.upgrade(Request{}); r.Error != "" || !r.Done {
+		t.Fatalf("upgrade after a recorded rebind %+v", r)
+	}
+	if rel := u.ledger().Releases[0]; rel.FromControllerSHA256 != digestHex(rebound) {
+		t.Fatalf("release does not continue from the rebound controller: %+v", rel)
+	}
+
+	u = newUpgradeHost(t)
+	l = u.ledger()
+	boot, _ := u.h.Boot()
+	if err := l.BeginRelease(Release{Status: StatusRunning, Started: u.h.Now(), Boot: boot, From: "v0.1.0", To: "v0.2.0", FromSHA256: u.installed(), SHA256: u.h.SHA256, FromControllerSHA256: u.installedController(), ControllerSHA256: u.h.ControllerSHA256}); err != nil {
+		t.Fatal(err)
+	}
+	if err := u.h.Store.Save(l, LedgerInstalled); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckControllerRebind(u.h.Store); err == nil || !strings.Contains(err.Error(), "upgrade is running") {
+		t.Fatalf("rebind during an upgrade: %v", err)
+	}
+	l.Rebinds = []ControllerRebind{{At: u.h.Now().Add(time.Minute), After: 1, FromControllerSHA256: u.installedController(), ControllerSHA256: digestHex(rebound), AnchorSHA256: digestHex([]byte("a"))}}
+	if err := l.validateRebinds(); err == nil {
+		t.Fatal("rebind during an upgrade validated")
+	}
+	l.Releases = nil
+	l.Rebinds[0].After, l.Rebinds[0].FromControllerSHA256 = 0, digestHex([]byte("other"))
+	if err := l.validateRebinds(); err == nil {
+		t.Fatal("rebind from another controller validated")
+	}
+}

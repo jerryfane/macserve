@@ -208,7 +208,9 @@ principals), `internal/health` (the health record and readiness gate), `internal
 evidence packet) and `internal/daemonlog`.
 
 The activation anchor (schema 3) binds both binaries; a release carry may rebind either or both, and
-`macserve qualify rebind-controller` rebinds a controller-only change installed by the administrator.
+`macserve qualify rebind-controller` rebinds a controller-only change installed by the administrator. On a Mac set up by
+`macserve setup` it also records the new controller and anchor in the setup ledger (refused while an upgrade runs), so
+setup, upgrade and doctor keep accepting them.
 When binaries are installed Developer ID signed, root-owned `config/installed-binaries.json` maps each installed
 digest to its release digest; native checks compare on-disk bytes to `installed_sha256` and release provenance to
 `release_sha256` (absent file: the installed bytes are the release bytes).

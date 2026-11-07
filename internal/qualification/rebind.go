@@ -18,6 +18,9 @@ type RebindResult struct {
 	Result                    string `json:"result"` // "rebound" or "already-bound"
 	ControllerInstalledSHA256 string `json:"controller_installed_sha256"`
 	ControllerReleaseSHA256   string `json:"controller_release_sha256"`
+	// AnchorSHA256 is the activation anchor now in place; native setup's
+	// ledger records it with the controller (setup.RecordControllerRebind).
+	AnchorSHA256 string `json:"anchor_sha256"`
 }
 
 // RebindController commits a controller-only carry that the root
@@ -58,11 +61,13 @@ func RebindController(ctx context.Context, from, to string) (RebindResult, error
 	if err != nil {
 		return RebindResult{}, err
 	}
+	result.AnchorSHA256 = digest(anchorRaw)
 	if result.Result == "rebound" {
 		nextRaw, err := encode(next)
 		if err != nil {
 			return RebindResult{}, err
 		}
+		result.AnchorSHA256 = digest(nextRaw)
 		err = commitAnchor(anchorRaw, nextRaw, func() ([]byte, error) { return protectedRead(anchorPath) }, func() error { return nil }, func(b []byte) error { return replace(anchorPath, b) })
 		if err != nil {
 			return RebindResult{}, err

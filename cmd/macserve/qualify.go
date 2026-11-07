@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jerryfane/macserve/internal/qualification"
+	"github.com/jerryfane/macserve/internal/setup"
 	"github.com/jerryfane/macserve/internal/worker"
 )
 
@@ -89,8 +90,11 @@ rebind-controller --from-installed-sha256 OLD --to-installed-sha256 NEW
   bin/macserve-controller (OLD to NEW, on-disk digests) and
   config/installed-binaries.json, which must record NEW and keep the anchored
   bin/macserve release. Rebinds those two paths, appends a rebinds[] record
-  and runs activation-check. Prints one JSON line {"result":"rebound" or
-  "already-bound",...}; re-running once bound is a no-op.
+  and runs activation-check. On a Mac set up by macserve setup it first
+  requires the setup ledger's approval and no running upgrade, then records
+  the new controller release digest and anchor digest in the ledger. Prints
+  one JSON line {"result":"rebound" or "already-bound",...,"anchor_sha256"};
+  re-running once bound and recorded is a no-op.
 `
 
 func runQualify(args []string, stdout, stderr io.Writer) int {
@@ -159,7 +163,19 @@ func runQualify(args []string, stdout, stderr io.Writer) int {
 		defer stop()
 		ctx, cancel := context.WithTimeout(ctx, worker.PersistenceOperationTimeout)
 		defer cancel()
-		result, err := qualification.RebindController(ctx, *rebindFrom, *rebindTo)
+		// Native setup's ledger vouches for the installed binaries and the
+		// anchor: it must allow the rebind before the anchor changes, and it
+		// records the new controller and anchor after (a re-run once both
+		// are recorded is a no-op).
+		store := setup.SystemStore()
+		err := setup.CheckControllerRebind(store)
+		var result qualification.RebindResult
+		if err == nil {
+			result, err = qualification.RebindController(ctx, *rebindFrom, *rebindTo)
+		}
+		if err == nil {
+			err = setup.RecordControllerRebind(store, result.ControllerReleaseSHA256, result.AnchorSHA256, time.Now())
+		}
 		if err == nil {
 			err = json.NewEncoder(stdout).Encode(result)
 		}
