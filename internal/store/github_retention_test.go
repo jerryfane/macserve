@@ -100,7 +100,7 @@ func TestGitHubRetirementPreservesActiveJobsAndPublisherLease(t *testing.T) {
 	if err != nil || publication.Run.JobID != run.JobID {
 		t.Fatalf("retirement discarded active outbox: %+v %v", publication, err)
 	}
-	if _, err = s.Cancel(ctx, run.JobID, "obsolete", testNow); err != nil {
+	if _, err = s.Cancel(ctx, run.JobID, "obsolete", model.CancelReason{Source: model.CancelClient, Principal: "owner"}, testNow); err != nil {
 		t.Fatal(err)
 	}
 	if err = s.MaintainGitHub(ctx, 123, nil, testNow.Add(25*time.Hour)); err != nil {

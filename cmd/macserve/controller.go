@@ -26,6 +26,7 @@ func runController(args []string, stdout, stderr io.Writer) int {
 	if done {
 		return status
 	}
+	stderr = daemonStderr(stderr)
 	if err := hostguard.Controller(path); err != nil {
 		fmt.Fprintf(stderr, "macserve controller: %v\n", err)
 		return 1

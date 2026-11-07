@@ -3,7 +3,7 @@ package maintenance
 import (
 	"context"
 	"errors"
-	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -30,7 +30,9 @@ func Run(ctx context.Context, c Config) error {
 	if err := hostguard.RootDirectory(filepath.Dir(health)); err != nil {
 		return err
 	}
-	invalid := func() error {
+	var lastValid controller.Health
+	var report healthReport
+	invalid := func(cause string) error {
 		o := Observation{}
 		if opts, err := persistenceOptions(c); err == nil {
 			o.Persistence, err = worker.PersistenceAttestationStatus(opts)
@@ -39,12 +41,16 @@ func Run(ctx context.Context, c Config) error {
 			}
 		}
 		h, _ := Evaluate(time.Now(), Qualification{}, BoundaryEvidence{}, o)
-		return publish(health, h)
+		if err := publish(health, h); err != nil {
+			return err
+		}
+		report.invalid(h, lastValid, cause)
+		return nil
 	}
-	if err := invalid(); err != nil {
+	if err := invalid("maintenance starting"); err != nil {
 		return err
 	}
-	defer invalid()
+	defer func() { _ = invalid("maintenance stopping") }()
 	monitorCtx, stopMonitor := context.WithCancel(ctx)
 	monitorDone := make(chan struct{})
 	go func() {
@@ -55,7 +61,6 @@ func Run(ctx context.Context, c Config) error {
 		stopMonitor()
 		<-monitorDone
 	}()
-	var lastValid controller.Health
 	for {
 		started := time.Now()
 		current, err := LoadConfig(c.path)
@@ -70,7 +75,7 @@ func Run(ctx context.Context, c Config) error {
 			// can come from either context; only the daemon's own shutdown is not
 			// a timeout.
 			if err != nil && ctx.Err() == nil && keepLastValid(err, lastValid, time.Now()) {
-				fmt.Fprintf(os.Stderr, "macserve maintenance: probe inconclusive; keeping last valid health until %s: %v\n",
+				log.Printf("macserve maintenance: probe inconclusive; keeping last valid health until %s: %v\n",
 					lastValid.ExpiresAt.Format(time.RFC3339), err)
 				if !sleepUntil(ctx, started.Add(interval)) {
 					return ctx.Err()
@@ -80,13 +85,18 @@ func Run(ctx context.Context, c Config) error {
 		}
 		if err != nil {
 			// The published health carries no reason; keep it diagnosable.
-			fmt.Fprintf(os.Stderr, "macserve maintenance: probe failed: %v\n", err)
+			log.Printf("macserve maintenance: probe failed: %v\n", err)
 			if h.CheckedAt.IsZero() {
 				h, _ = Evaluate(time.Now(), Qualification{}, BoundaryEvidence{}, Observation{})
 			}
 		}
 		if pubErr := publish(health, h); pubErr != nil {
 			return pubErr
+		}
+		if err != nil {
+			report.invalid(h, lastValid, err.Error())
+		} else {
+			report.valid(h)
 		}
 		lastValid = controller.Health{}
 		if err == nil && h.BoundaryValidated {

@@ -52,7 +52,11 @@ func (c *Controller) next(ctx context.Context, epoch string) (*protocol.Lease, e
 		c.workerIdle = true
 	}
 	if gate.CancelActive && c.active != nil {
-		if _, err := c.options.Store.Cancel(ctx, c.active.job.ID, "host readiness requires cancellation", c.options.Now()); err != nil {
+		job, err := c.options.Store.Get(ctx, c.active.job.ID)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := c.cancelJob(ctx, job, "host readiness requires cancellation", readinessCause(gate, nil), c.options.Now()); err != nil {
 			return nil, err
 		}
 	}
@@ -68,8 +72,8 @@ func (c *Controller) next(ctx context.Context, epoch string) (*protocol.Lease, e
 		if err != nil {
 			return nil, err
 		}
-		if job.Deadline != nil && !c.options.Now().Before(*job.Deadline) {
-			_, err := c.options.Store.Cancel(ctx, job.ID, "job deadline exceeded", c.options.Now())
+		if now := c.options.Now(); job.Deadline != nil && !now.Before(*job.Deadline) {
+			_, err := c.cancelJob(ctx, job, "job deadline exceeded", model.CancelReason{Source: model.CancelDeadline}, now)
 			return nil, err
 		}
 		if !a.ready || job.State != model.Preparing || job.CancelRequested {
@@ -192,7 +196,12 @@ func (c *Controller) monitor() {
 func (c *Controller) checkActive(ctx context.Context) {
 	gate, gateErr := c.options.Gate(ctx)
 	c.mu.Lock()
-	if c.closed || c.active == nil {
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+	c.noteGate(gate, gateErr)
+	if c.active == nil {
 		c.mu.Unlock()
 		return
 	}
@@ -205,11 +214,11 @@ func (c *Controller) checkActive(ctx context.Context) {
 	now := c.options.Now()
 	deadline := job.Deadline != nil && !now.Before(*job.Deadline)
 	if deadline || gate.CancelActive || gateErr != nil {
-		reason := "host readiness requires cancellation"
+		reason, cause := "host readiness requires cancellation", readinessCause(gate, gateErr)
 		if deadline {
-			reason = "job deadline exceeded"
+			reason, cause = "job deadline exceeded", model.CancelReason{Source: model.CancelDeadline}
 		}
-		job, err = c.options.Store.Cancel(ctx, job.ID, reason, now)
+		job, err = c.cancelJob(ctx, job, reason, cause, now)
 		if err != nil {
 			c.mu.Unlock()
 			return

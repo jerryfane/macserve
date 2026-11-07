@@ -48,6 +48,7 @@ type Controller struct {
 	maintaining    bool
 	closed         bool
 	running        bool
+	gate           gateOutcome // last logged readiness outcome
 	server         *http.Server
 	requestTimeout time.Duration
 	closeOnce      sync.Once
@@ -241,7 +242,10 @@ func (c *Controller) Run(ctx context.Context) error {
 	c.mu.Lock()
 	c.closed = true
 	if c.active != nil {
-		_, cancelErr := c.options.Store.Cancel(context.Background(), c.active.job.ID, "controller shutdown", c.options.Now())
+		job, cancelErr := c.options.Store.Get(context.Background(), c.active.job.ID)
+		if cancelErr == nil {
+			_, cancelErr = c.cancelJob(context.Background(), job, "controller shutdown", model.CancelReason{Source: model.CancelShutdown}, c.options.Now())
+		}
 		err = errors.Join(err, cancelErr)
 	}
 	c.mu.Unlock()

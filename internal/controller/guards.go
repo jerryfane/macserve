@@ -113,30 +113,9 @@ func (g *Guard) Check(ctx context.Context) (GateState, error) {
 	if err != nil {
 		fail("isolation_unavailable", true)
 	} else {
-		now := g.options.Now()
 		state.UsedBytes = health.AccountedBytes
-		if health.Schema != 3 || health.JobUID != g.options.JobUID || !health.BoundaryValidated || !digestString(health.BoundaryReceiptSHA256) || health.CheckedAt.After(now.Add(5*time.Second)) || now.Sub(health.CheckedAt) > 45*time.Second || !health.ExpiresAt.After(now) || health.ExpiresAt.Sub(health.CheckedAt) > 45*time.Second || !health.ExpiresAt.After(health.CheckedAt) {
-			fail("isolation_unavailable", true)
-		}
-		if !health.PersistenceValid || health.PersistenceNeedsReview || health.PersistenceLastVerified.IsZero() || health.PersistenceLastVerified.After(now) {
-			fail("persistence_attestation_unavailable", false)
-		}
-		if health.AdmissionInconclusive != "" {
-			fail("worker_admission_inconclusive", false)
-		}
-		if health.AccountedBytes < 0 || health.AccountedBytes > ServiceBudgetBytes {
-			fail("service_disk_budget_exceeded", true)
-		} else if health.AccountedBytes > ServiceBudgetBytes-JobReservationBytes {
-			fail("service_disk_reservation_unavailable", false)
-		}
-		if health.MemoryPressure {
-			fail("host_memory_pressure", false)
-		}
-		for id, digest := range g.options.Profiles {
-			if health.QualifiedProfiles[id] != digest {
-				fail("toolchain_validation_unavailable", true)
-				break
-			}
+		for _, b := range HealthBlockers(health, g.options.Now(), g.options.JobUID, g.options.Profiles) {
+			fail(b.Name, b.Cancel)
 		}
 	}
 	if g.options.PauseFile != "" {
@@ -149,6 +128,46 @@ func (g *Guard) Check(ctx context.Context) (GateState, error) {
 	}
 	state.Ready = len(state.Blockers) == 0
 	return state, nil
+}
+
+// A Blocker is one reason the readiness gate refuses admission; Cancel
+// blockers also cancel active work.
+type Blocker struct {
+	Name   string
+	Cancel bool
+}
+
+// HealthBlockers is the part of the readiness gate decided by a published
+// health record, evaluated at now by a controller expecting jobUID and the
+// qualified digests in profiles; nil profiles skip toolchain qualification.
+// The maintenance daemon logs these for each health record it publishes.
+func HealthBlockers(health Health, now time.Time, jobUID uint32, profiles map[string]string) []Blocker {
+	var blockers []Blocker
+	fail := func(name string, cancel bool) { blockers = append(blockers, Blocker{name, cancel}) }
+	if health.Schema != 3 || health.JobUID != jobUID || !health.BoundaryValidated || !digestString(health.BoundaryReceiptSHA256) || health.CheckedAt.After(now.Add(5*time.Second)) || now.Sub(health.CheckedAt) > 45*time.Second || !health.ExpiresAt.After(now) || health.ExpiresAt.Sub(health.CheckedAt) > 45*time.Second || !health.ExpiresAt.After(health.CheckedAt) {
+		fail("isolation_unavailable", true)
+	}
+	if !health.PersistenceValid || health.PersistenceNeedsReview || health.PersistenceLastVerified.IsZero() || health.PersistenceLastVerified.After(now) {
+		fail("persistence_attestation_unavailable", false)
+	}
+	if health.AdmissionInconclusive != "" {
+		fail("worker_admission_inconclusive", false)
+	}
+	if health.AccountedBytes < 0 || health.AccountedBytes > ServiceBudgetBytes {
+		fail("service_disk_budget_exceeded", true)
+	} else if health.AccountedBytes > ServiceBudgetBytes-JobReservationBytes {
+		fail("service_disk_reservation_unavailable", false)
+	}
+	if health.MemoryPressure {
+		fail("host_memory_pressure", false)
+	}
+	for id, digest := range profiles {
+		if health.QualifiedProfiles[id] != digest {
+			fail("toolchain_validation_unavailable", true)
+			break
+		}
+	}
+	return blockers
 }
 func readRootHealth(path string) (Health, error) {
 	var h Health

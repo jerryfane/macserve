@@ -380,6 +380,54 @@ type Job struct {
 	// ReleaseProvenance is an ios_archive job's admission-time
 	// default-branch binding; other jobs have none.
 	ReleaseProvenance *ReleaseProvenance `json:"release_provenance,omitempty"`
+	// CancelReason is why cancellation was first requested, recorded with
+	// the request. Jobs never cancelled, and jobs cancelled before schema
+	// version 6, have none. It is job-record metadata only: receipts never
+	// carry it.
+	CancelReason *CancelReason `json:"cancel_reason,omitempty"`
+}
+
+// CancelSource names what requested a job's cancellation.
+type CancelSource string
+
+const (
+	// CancelClient is POST /v1/jobs/<id>/cancel by an API principal.
+	CancelClient CancelSource = "client"
+	// CancelAdminPause is PUT /v1/admin/pause with mode cancel_active.
+	CancelAdminPause CancelSource = "admin_pause"
+	// CancelDeadline is the controller enforcing the job's deadline.
+	CancelDeadline CancelSource = "deadline"
+	// CancelHostReadiness is the readiness gate requiring cancellation; its
+	// blockers are recorded.
+	CancelHostReadiness CancelSource = "host_readiness"
+	// CancelGateError is the readiness gate failing to evaluate.
+	CancelGateError CancelSource = "gate_error"
+	// CancelLogLimit is the job exceeding its log evidence limit.
+	CancelLogLimit CancelSource = "log_limit"
+	// CancelShutdown is the controller stopping with the job active.
+	CancelShutdown CancelSource = "controller_shutdown"
+	// CancelGitHub is GitHub intake superseding or blocking the job's run.
+	CancelGitHub CancelSource = "github"
+)
+
+func (s CancelSource) Valid() bool {
+	switch s {
+	case CancelClient, CancelAdminPause, CancelDeadline, CancelHostReadiness, CancelGateError, CancelLogLimit, CancelShutdown, CancelGitHub:
+		return true
+	}
+	return false
+}
+
+// CancelReason is the machine-readable cause of a cancellation request.
+// Principal is set for client and admin_pause requests, Blockers for
+// host_readiness; Detail is bounded free text. At is when the request was
+// recorded.
+type CancelReason struct {
+	Source    CancelSource `json:"source"`
+	Principal string       `json:"principal,omitempty"`
+	Blockers  []string     `json:"blockers,omitempty"`
+	At        time.Time    `json:"at"`
+	Detail    string       `json:"detail,omitempty"`
 }
 
 type ServiceState struct {

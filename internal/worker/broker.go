@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"maps"
 	"os"
 	"os/exec"
@@ -441,7 +442,9 @@ func NewNativeRunner(options Options) (Runner, error) {
 func nativeRunnerFor(options Options) *nativeRunner {
 	runner := newProcessRunner()
 	runner.uid = int(options.JobUID)
-	runner.diagnostics = os.Stderr
+	// The daemon's timestamped stderr: the worker command installs it as the
+	// standard logger's output before building the engine.
+	runner.diagnostics = log.Writer()
 	runner.command = func(command Command) *exec.Cmd {
 		args := []string{"asuser", strconv.FormatUint(uint64(options.JobUID), 10), options.HelperPath, "_job-exec", strconv.FormatUint(uint64(options.JobUID), 10), strconv.FormatUint(uint64(options.JobGID), 10), command.Dir, command.Executable}
 		args = append(args, command.Args...)

@@ -228,7 +228,7 @@ func (c *Controller) logs(w http.ResponseWriter, r *http.Request) {
 		}
 		_, err = c.options.Store.AppendLog(r.Context(), job.ID, job.LeaseToken, value.Stream, string(value.Data), c.options.Now())
 		if errors.Is(err, store.ErrLogLimit) {
-			_, _ = c.options.Store.Cancel(r.Context(), job.ID, "log evidence limit exceeded", c.options.Now())
+			_, _ = c.cancelJob(r.Context(), job, "log evidence limit exceeded", model.CancelReason{Source: model.CancelLogLimit}, c.options.Now())
 		}
 		return err
 	}()

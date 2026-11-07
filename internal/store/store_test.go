@@ -126,7 +126,7 @@ func TestRestartPreservesSnapshotsLeasesAndPause(t *testing.T) {
 	if _, err := s.AppendLog(ctx, job.ID, job.LeaseToken, "stdout", "partial output\n", testNow); err != nil {
 		t.Fatal(err)
 	}
-	pause, err := s.Pause(ctx, "owner activity", "drain", testNow)
+	pause, err := s.Pause(ctx, "owner activity", "drain", "admin", testNow)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +175,7 @@ func TestIdempotencyPrecedesCapacityAndProfileChanges(t *testing.T) {
 	requireError(t, err, ErrConflict)
 	_, _, err = s.Enqueue(ctx, "principal", "another", admissionFixture(), testNow)
 	requireError(t, err, ErrFull)
-	if _, err := s.Cancel(ctx, first.ID, "cancelled", testNow.Add(time.Minute)); err != nil {
+	if _, err := s.Cancel(ctx, first.ID, "cancelled", model.CancelReason{Source: model.CancelClient, Principal: "owner"}, testNow.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	terminal := getJob(t, s, first.ID)
@@ -200,7 +200,7 @@ func TestPrincipalScopeCapacityAndFIFO(t *testing.T) {
 	if claimed.ID != first.ID {
 		t.Fatal("claim did not use insertion order")
 	}
-	if _, err := s.Cancel(ctx, second.ID, "remove queued job", testNow); err != nil {
+	if _, err := s.Cancel(ctx, second.ID, "remove queued job", model.CancelReason{Source: model.CancelClient, Principal: "owner"}, testNow); err != nil {
 		t.Fatal(err)
 	}
 	_, _, err = s.Enqueue(ctx, "one", "over-own-limit", admissionFixture(), testNow)
@@ -329,7 +329,7 @@ func TestListUsesDurableRepositoryScopedCursor(t *testing.T) {
 	if err != nil || len(jobs) != 1 || jobs[0].ID != first.ID || cursor == "" {
 		t.Fatalf("first page: %+v %q %v", jobs, cursor, err)
 	}
-	if _, err := s.Cancel(ctx, first.ID, "done", testNow); err != nil {
+	if _, err := s.Cancel(ctx, first.ID, "done", model.CancelReason{Source: model.CancelClient, Principal: "owner"}, testNow); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Prune(ctx, testNow.Add(time.Hour)); err != nil {

@@ -337,9 +337,15 @@ func (s *Store) Transition(ctx context.Context, id, lease string, from, to model
 	return tx.Commit()
 }
 
-func cancelTx(ctx context.Context, tx *sql.Tx, job model.Job, reason string, now time.Time) error {
+// cancelTx requests cancellation and records cause as the job's cancel reason.
+// Only the first request is recorded; a cancelled or terminal job is unchanged.
+func cancelTx(ctx context.Context, tx *sql.Tx, job model.Job, reason string, cause model.CancelReason, now time.Time) error {
 	if job.State.Terminal() || job.CancelRequested {
 		return nil
+	}
+	recorded, err := cancelReasonBytes(cause, now)
+	if err != nil {
+		return err
 	}
 	state := job.State
 	var finished any
@@ -349,12 +355,14 @@ func cancelTx(ctx context.Context, tx *sql.Tx, job model.Job, reason string, now
 	} else if state == model.Preparing || state == model.Running {
 		state = model.Cancelling
 	}
-	_, err := tx.ExecContext(ctx, "UPDATE jobs SET state=?,cancel_requested=1,reason=?,updated_at=?,finished_at=? WHERE id=?", state, reason, now.UnixNano(), finished, job.ID)
+	_, err = tx.ExecContext(ctx, "UPDATE jobs SET state=?,cancel_requested=1,reason=?,cancel_reason=?,updated_at=?,finished_at=? WHERE id=?", state, reason, recorded, now.UnixNano(), finished, job.ID)
 	return err
 }
 
-func (s *Store) Cancel(ctx context.Context, id, reason string, now time.Time) (model.Job, error) {
-	if !validReason(reason) || !validTime(now) {
+// Cancel requests cancellation of a job for cause. The returned job carries
+// the cancel reason recorded by the first request.
+func (s *Store) Cancel(ctx context.Context, id, reason string, cause model.CancelReason, now time.Time) (model.Job, error) {
+	if !validReason(reason) || !validTime(now) || !validCancelReason(cause) {
 		return model.Job{}, ErrInvalid
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -366,7 +374,7 @@ func (s *Store) Cancel(ctx context.Context, id, reason string, now time.Time) (m
 	if err != nil {
 		return model.Job{}, err
 	}
-	if err := cancelTx(ctx, tx, job, reason, now); err != nil {
+	if err := cancelTx(ctx, tx, job, reason, cause, now); err != nil {
 		return model.Job{}, err
 	}
 	job, err = getTx(ctx, tx, id)

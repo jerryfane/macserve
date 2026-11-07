@@ -54,6 +54,9 @@ func runMaintenance(args []string, stdout, stderr io.Writer, observe bool) int {
 		return 2
 	}
 	path := *configPath
+	if !observe {
+		stderr = daemonStderr(stderr)
+	}
 	if os.Geteuid() != 0 {
 		fmt.Fprintln(stderr, "macserve maintenance: observer must run as root")
 		return 1

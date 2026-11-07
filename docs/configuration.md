@@ -25,6 +25,14 @@ Optional `signer` connects the controller to the [code signer](#code-signer).
   `/artifacts/{artifact_id}`, `/receipt`, `/receipt/manifest?sha256=DIGEST`, and `POST /cancel`.
   Missing signed receipts return `409`, not success. Non-executed cancellation/expiry or interrupted jobs with
   no collected completion have no execution receipt; GitHub reports non-success, never invented evidence.
+- A job whose cancellation was requested carries `cancel_reason` in `GET /v1/jobs/{id}`, the `GET /v1/jobs` list and
+  the cancel response: `source` (`client`, `admin_pause`, `deadline`, `host_readiness`, `gate_error`, `log_limit`,
+  `controller_shutdown` or `github`), `at` (when the request was recorded), `principal` for `client` and
+  `admin_pause`, `blockers` (the readiness gate's, e.g. `isolation_unavailable`, `host_memory_pressure`) for
+  `host_readiness`, and an optional `detail` of at most 512 bytes (the client or pause reason, the gate error, the
+  gate's free and accounted bytes). Only the first request is recorded and it survives the job's finish, whose
+  `reason` says only `cancellation requested`. Receipts never carry it and are byte-identical with or without it;
+  jobs never cancelled, or cancelled before this field existed (store schema version 6), have none.
 - `PUT /v1/admin/pause` accepts `{"reason":"benchmark","mode":"drain"}` or `cancel_active`.
   Poll `GET /v1/admin/state` until `quiescent=true` before benchmarking; acceptance of pause is not quiescence.
   `DELETE /v1/admin/pause` clears only manual pause. An optional owner-controlled pause marker also blocks dispatch.
@@ -134,6 +142,20 @@ or cancel work. Health expires within 45 seconds; missing, stale or changed non-
 qualification stops admission and cancels active work. Schema-1/2 records require fresh qualification,
 not migration. Merely creating a profile does not qualify it. Installation and actual non-network
 boundary qualification remain separate provisioning work.
+
+Every stderr line of the controller, worker and maintenance daemons
+(`/Library/macserve/var/controller/log/controller.err.log`, `/Library/macserve/var/broker/log/worker.err.log` and
+`maintenance.err.log`) starts with its RFC 3339 UTC time in milliseconds, e.g. `2026-11-07T03:16:26.412Z`, so a
+cancellation can be placed against its cause. The controller logs `controller readiness: ready=… cancel_active=…
+blockers=… active_job=…` at its first readiness evaluation and whenever the outcome changes, and
+`controller job cancellation requested: job=… source=… blockers=… detail=…` for each cancellation it requests
+itself (deadline, readiness, gate error, log limit, shutdown), naming the cause recorded as the job's
+`cancel_reason`. Maintenance logs `published invalid health checked_at=… last_valid_until=… blockers=…
+cancels_active_job=…: <cause>` for every invalid record it publishes, including at its own start and stop, after
+the existing `probe failed` line; `last_valid_until=none` means no valid health was held, so even an inconclusive
+probe could not keep one. A valid record is logged as `published health … blockers=…` when its blockers (for
+example `host_memory_pressure`, `service_disk_budget_exceeded`) differ from the previous record's. Toolchain
+qualification is the controller's own comparison and appears only in its lines.
 
 Disk admission reserves 30 GiB while preserving 120 GiB free; below 100 GiB active work is cancelled.
 The total accounted mutable-data budget is 80 GiB. The retained evidence pool reserves 1 GiB for store log

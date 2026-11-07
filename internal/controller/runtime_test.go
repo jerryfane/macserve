@@ -228,7 +228,7 @@ func TestUnixPeerBoundaryAsyncDrainAndEpochFencing(t *testing.T) {
 		t.Fatalf("async preparation status %d", status)
 	}
 	<-f.source.started
-	if _, err := f.db.Pause(context.Background(), "benchmark", "drain", f.now); err != nil {
+	if _, err := f.db.Pause(context.Background(), "benchmark", "drain", "admin", f.now); err != nil {
 		t.Fatal(err)
 	}
 	close(release)
@@ -346,7 +346,7 @@ func TestArtifactIntegrityAliasesExpiryAndQuiescentAcknowledgment(t *testing.T) 
 	if err != nil || status.Quiescent {
 		t.Fatalf("unacknowledged completion reported quiet: %+v %v", status, err)
 	}
-	if _, err := f.db.Pause(context.Background(), "benchmark", "drain", f.now); err != nil {
+	if _, err := f.db.Pause(context.Background(), "benchmark", "drain", "admin", f.now); err != nil {
 		t.Fatal(err)
 	}
 	if lease, err := f.controller.next(context.Background(), "epoch-a"); lease != nil || err != nil {
@@ -400,7 +400,7 @@ func TestCancellationWinsSealRaceAndCleanupFailureQuarantines(t *testing.T) {
 			result.CleanupOK = cleanup
 			f.controller.options.Seal = func(ctx context.Context, job model.Job, value worker.Result) (json.RawMessage, error) {
 				if value.State == model.Succeeded {
-					if _, err := f.db.Cancel(ctx, job.ID, "operator cancellation", f.now); err != nil {
+					if _, err := f.db.Cancel(ctx, job.ID, "operator cancellation", model.CancelReason{Source: model.CancelClient, Principal: "owner"}, f.now); err != nil {
 						return nil, err
 					}
 				}
@@ -510,7 +510,7 @@ func TestPreparationCancellationReleasesOnlyAfterExporterStops(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-f.source.started
-	if _, err := f.db.Cancel(context.Background(), job.ID, "operator", f.now); err != nil {
+	if _, err := f.db.Cancel(context.Background(), job.ID, "operator", model.CancelReason{Source: model.CancelClient, Principal: "owner"}, f.now); err != nil {
 		t.Fatal(err)
 	}
 	f.controller.checkActive(context.Background())

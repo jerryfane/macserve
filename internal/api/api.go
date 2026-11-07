@@ -189,7 +189,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err)
 			return
 		}
-		state, err := h.Store.Pause(r.Context(), body.Reason, body.Mode, h.Now())
+		state, err := h.Store.Pause(r.Context(), body.Reason, body.Mode, p.ID, h.Now())
 		if err != nil {
 			writeError(w, err)
 			return

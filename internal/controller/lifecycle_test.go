@@ -60,7 +60,7 @@ func TestCleanupAndDeliveryRetainTerminalEvidence(t *testing.T) {
 			f.offset.Store(int64(start))
 			switch cause {
 			case "cancel":
-				if _, err := f.db.Cancel(context.Background(), lease.Job.ID, "operator", c.options.Now()); err != nil {
+				if _, err := f.db.Cancel(context.Background(), lease.Job.ID, "operator", model.CancelReason{Source: model.CancelClient, Principal: "owner"}, c.options.Now()); err != nil {
 					t.Fatal(err)
 				}
 			case "finalizing":
@@ -393,7 +393,7 @@ func TestRetentionReclaimsUnderDiskPressureButHonorsOwnerPause(t *testing.T) {
 			blockers := []string{"disk_emergency"}
 			switch pause {
 			case "service":
-				if _, err := f.db.Pause(context.Background(), "owner benchmark", "drain", f.controller.options.Now()); err != nil {
+				if _, err := f.db.Pause(context.Background(), "owner benchmark", "drain", "admin", f.controller.options.Now()); err != nil {
 					t.Fatal(err)
 				}
 			case "marker":

@@ -21,8 +21,11 @@ func (s *Store) ServiceState(ctx context.Context) (model.ServiceState, error) {
 	return scanService(s.db.QueryRowContext(ctx, "SELECT "+serviceColumns+" FROM service_state WHERE singleton=1"))
 }
 
-func (s *Store) Pause(ctx context.Context, reason, mode string, now time.Time) (model.ServiceState, error) {
-	if mode != "drain" && mode != "cancel_active" || !validReason(reason) || !validTime(now) {
+// Pause stops dispatch; mode cancel_active also cancels the active job, its
+// cancel reason naming principal, the administrator who paused.
+func (s *Store) Pause(ctx context.Context, reason, mode, principal string, now time.Time) (model.ServiceState, error) {
+	cause := model.CancelReason{Source: model.CancelAdminPause, Principal: principal, Detail: reason}
+	if mode != "drain" && mode != "cancel_active" || !validReason(reason) || !validTime(now) || !validCancelReason(cause) {
 		return model.ServiceState{}, ErrInvalid
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -37,7 +40,7 @@ func (s *Store) Pause(ctx context.Context, reason, mode string, now time.Time) (
 	if mode == "cancel_active" {
 		job, err := scanJob(tx.QueryRowContext(ctx, "SELECT "+jobColumns+" FROM jobs WHERE state IN ("+activeStates+")"))
 		if err == nil {
-			if err := cancelTx(ctx, tx, job, reason, now); err != nil {
+			if err := cancelTx(ctx, tx, job, reason, cause, now); err != nil {
 				return model.ServiceState{}, err
 			}
 		} else if !errors.Is(err, ErrNotFound) {
