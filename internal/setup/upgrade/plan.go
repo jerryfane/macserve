@@ -176,16 +176,26 @@ func Plan(ctx context.Context, p Probe, o Options) Result {
 	if err == nil {
 		from.Macserve, err = inv.ReleaseDigest(deploy.BinaryName, digest(installed))
 	}
-	if err == nil && from.Controller != "" {
+	// The upgrade replaces the controller first and removes
+	// installed-binaries.json only after both replaces, so an interrupted
+	// upgrade of this release leaves its unsigned controller beside the old
+	// map. Those are this release's verified bytes, not a signed install the
+	// map must vouch for; the root helper accepts them only for its own
+	// pending upgrade of this release.
+	resumed := inv != nil && from.Controller == toController
+	if err == nil && from.Controller != "" && !resumed {
 		from.Controller, err = inv.ReleaseDigest(deploy.ControllerBinaryName, from.Controller)
 	}
 	if err != nil {
 		r.add("release.installed", Fail, "%v", err)
 		return r
 	}
-	if from.Controller == "" {
+	switch {
+	case from.Controller == "":
 		r.add("release.installed", Info, "%s is release %s (SHA-256 %s); %s is absent (installed before the controller binary): this upgrade installs it and requalifies", installedPath, r.From, from.Macserve, installedController)
-	} else {
+	case resumed:
+		r.add("release.installed", Info, "%s is release %s (SHA-256 %s); %s already holds this release's controller (SHA-256 %s): an upgrade to %s was interrupted, and the helper resumes only that pending upgrade", installedPath, r.From, from.Macserve, installedController, toController, r.To)
+	default:
 		r.add("release.installed", Info, "%s is release %s (SHA-256 %s; %s SHA-256 %s)", installedPath, r.From, from.Macserve, installedController, from.Controller)
 	}
 	if err := setup.CompareReleases(r.From, r.To); err != nil {

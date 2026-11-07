@@ -207,3 +207,38 @@ func TestPlanCarry(t *testing.T) {
 		t.Fatal("carry without a live session")
 	}
 }
+
+// TestPlanInterruptedSignedUpgrade: an upgrade of a signed installation
+// interrupted between the two replaces leaves this release's unsigned
+// controller beside the old installed-binaries.json. The plan lets that
+// same-release retry reach the root helper, which resumes only its own
+// pending upgrade; any other controller the map does not record still
+// fails.
+func TestPlanInterruptedSignedUpgrade(t *testing.T) {
+	inventory := func(h *host) {
+		inv := map[string]any{"schema": "macserve-installed-binaries/1", "binaries": map[string]any{
+			"macserve":            map[string]string{"release_sha256": sum(installed), "installed_sha256": sum(installed), "identifier": "app.themartian.macserve", "designated_requirement": "r"},
+			"macserve-controller": map[string]string{"release_sha256": sum(installedController), "installed_sha256": sum("signed " + installedController), "identifier": "app.themartian.macserve-controller", "designated_requirement": "r"},
+		}}
+		data, err := json.Marshal(inv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.files[Root+"/config/installed-binaries.json"] = string(data)
+	}
+	h := newHost()
+	inventory(h)
+	h.files[Root+"/bin/macserve-controller"] = "signed " + installedController
+	if r := Plan(context.Background(), h.probe(), Options{SHA256Sums: sums(nil)}); !r.Ready() {
+		t.Fatalf("signed installation refused: %+v", r.Checks)
+	}
+	h.files[Root+"/bin/macserve-controller"] = targetController
+	r := Plan(context.Background(), h.probe(), Options{SHA256Sums: sums(nil)})
+	if !r.Ready() || status(r, "release.installed") != Info {
+		t.Fatalf("interrupted same-release retry refused: %+v", r.Checks)
+	}
+	h.files[Root+"/bin/macserve-controller"] = "macserve-controller release v0.1.9"
+	if r := Plan(context.Background(), h.probe(), Options{SHA256Sums: sums(nil)}); r.Ready() || status(r, "release.installed") != Fail {
+		t.Fatalf("unrecorded controller accepted: %+v", r.Checks)
+	}
+}
