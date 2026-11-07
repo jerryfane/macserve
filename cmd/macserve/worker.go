@@ -54,6 +54,7 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 	if done {
 		return status
 	}
+	stderr = daemonStderr(stderr)
 	if err := hostguard.Worker(path); err != nil {
 		fmt.Fprintf(stderr, "macserve worker: %v\n", err)
 		return 1
