@@ -29,8 +29,10 @@ import (
 )
 
 const (
-	// releaseAsset is the binary whose digest SHA256SUMS lists.
-	releaseAsset = "macserve-darwin-arm64"
+	// releaseAsset and controllerAsset are the binaries whose digests
+	// SHA256SUMS lists.
+	releaseAsset    = "macserve-darwin-arm64"
+	controllerAsset = "macserve-controller-darwin-arm64"
 	// ciWorkflow is the workflow whose successful run on the tag commit the
 	// proof records.
 	ciWorkflow = ".github/workflows/ci.yml"
@@ -74,12 +76,14 @@ type fetcher func(ctx context.Context, url string, header http.Header) ([]byte, 
 
 // params are one generator run.
 type params struct {
-	repo, tag, prev   string
-	binary, rebuilt   string
-	gitDir, token     string
-	get               fetcher
-	codeload, release string // base URLs, overridable for tests
-	api               string
+	repo, tag, prev string
+	binary, rebuilt string
+	// controller and controllerRebuilt are macserve-controller's digests.
+	controller, controllerRebuilt string
+	gitDir, token                 string
+	get                           fetcher
+	codeload, release             string // base URLs, overridable for tests
+	api                           string
 }
 
 func (p *params) withDefaults() {
@@ -105,6 +109,9 @@ func generate(ctx context.Context, p params) (qualification.CarryProof, error) {
 	var proof qualification.CarryProof
 	if p.binary != p.rebuilt {
 		return proof, fmt.Errorf("binary sha256 %s differs from the rebuilt %s", p.binary, p.rebuilt)
+	}
+	if p.controller != p.controllerRebuilt {
+		return proof, fmt.Errorf("controller binary sha256 %s differs from the rebuilt %s", p.controller, p.controllerRebuilt)
 	}
 	g := gitRepo{dir: p.gitDir}
 	if !semver.MatchString(p.tag) {
@@ -170,17 +177,21 @@ func generate(ctx context.Context, p params) (qualification.CarryProof, error) {
 		return proof, err
 	}
 
-	// The predecessor release's published binary digest.
+	// The predecessor release's published binary digests. A predecessor
+	// without a controller binary (before the split) cannot be carried from.
 	sums, err := p.get(ctx, fmt.Sprintf("%s/%s/releases/download/%s/SHA256SUMS", p.release, p.repo, p.prev), nil)
 	if err != nil {
 		return proof, refuse("%s SHA256SUMS: %v", p.prev, err)
 	}
-	if from.BinarySHA256, err = releaseDigest(sums); err != nil {
+	if from.BinarySHA256, err = releaseDigest(sums, releaseAsset); err != nil {
 		return proof, refuse("%s SHA256SUMS: %v", p.prev, err)
 	}
-	to.BinarySHA256 = p.binary
-	if from.BinarySHA256 == to.BinarySHA256 {
-		return proof, refuse("%s and %s publish the same binary", p.prev, p.tag)
+	if from.ControllerBinarySHA256, err = releaseDigest(sums, controllerAsset); err != nil {
+		return proof, refuse("%s SHA256SUMS: %v", p.prev, err)
+	}
+	to.BinarySHA256, to.ControllerBinarySHA256 = p.binary, p.controller
+	if from.BinarySHA256 == to.BinarySHA256 && from.ControllerBinarySHA256 == to.ControllerBinarySHA256 {
+		return proof, refuse("%s and %s publish the same binaries", p.prev, p.tag)
 	}
 
 	// The source archive GitHub serves for each tag is exactly its git tree.
@@ -204,7 +215,7 @@ func generate(ctx context.Context, p params) (qualification.CarryProof, error) {
 	}
 
 	proof = qualification.CarryProof{
-		Schema:               1,
+		Schema:               2,
 		Kind:                 "release-carry-proof",
 		ReleaseEffect:        "QualificationCarried",
 		From:                 from,
@@ -213,7 +224,7 @@ func generate(ctx context.Context, p params) (qualification.CarryProof, error) {
 		ClassesPresent:       classes,
 		Changed:              changed,
 		CI:                   ci,
-		Provenance:           &qualification.CarryProvenance{RebuiltSHA256: p.rebuilt, AttestationBundleSHA256: ""},
+		Provenance:           &qualification.CarryProvenance{RebuiltSHA256: p.rebuilt, ControllerRebuiltSHA256: p.controllerRebuilt, AttestationBundleSHA256: ""},
 	}
 	return proof, nil
 }
@@ -229,7 +240,9 @@ func encodeProof(proof qualification.CarryProof) ([]byte, error) {
 	if len(data) > maxProof {
 		return nil, refuse("proof is %d bytes, over the %d byte limit", len(data), maxProof)
 	}
-	if _, err := qualification.ValidateCarryProof(data, proof.From.BinarySHA256, proof.To.BinarySHA256); err != nil {
+	from := qualification.CarryBinaries{Macserve: proof.From.BinarySHA256, Controller: proof.From.ControllerBinarySHA256}
+	to := qualification.CarryBinaries{Macserve: proof.To.BinarySHA256, Controller: proof.To.ControllerBinarySHA256}
+	if _, err := qualification.ValidateCarryProof(data, from, to); err != nil {
 		return nil, refuse("generated proof rejected: %v", err)
 	}
 	return data, nil
@@ -506,9 +519,8 @@ func (p params) ciRun(ctx context.Context, commit string) (*qualification.CarryC
 }
 
 // releaseDigest parses SHA256SUMS strictly ("<64 hex>  <name>" or
-// "<64 hex> *<name>" per line) and returns the single macserve-darwin-arm64
-// digest.
-func releaseDigest(sums []byte) (string, error) {
+// "<64 hex> *<name>" per line) and returns the single digest of asset.
+func releaseDigest(sums []byte, asset string) (string, error) {
 	var found []string
 	for _, line := range strings.Split(strings.TrimSuffix(string(sums), "\n"), "\n") {
 		digest, name, ok := strings.Cut(line, "  ")
@@ -518,12 +530,12 @@ func releaseDigest(sums []byte) (string, error) {
 		if !ok || !hex64.MatchString(digest) || name == "" || strings.ContainsAny(name, " \t\r") {
 			return "", fmt.Errorf("malformed line %q", line)
 		}
-		if name == releaseAsset {
+		if name == asset {
 			found = append(found, digest)
 		}
 	}
 	if len(found) != 1 {
-		return "", fmt.Errorf("lists %s %d times", releaseAsset, len(found))
+		return "", fmt.Errorf("lists %s %d times", asset, len(found))
 	}
 	return found[0], nil
 }

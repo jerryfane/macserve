@@ -42,7 +42,8 @@ canary --session DIR --transport udp|tcp|owner-home --out NEW_FILE
   --requalify chains to the session the owner last approved (activation anchor)
   and requires the live configuration to equal it.
   --carry begins a release-carry sitting: it chains to the anchored session,
-  allows only /Library/macserve/bin/macserve to differ from the anchor, needs
+  allows only /Library/macserve/bin/macserve and bin/macserve-controller to
+  differ from the anchor (schema-3 anchors only), needs
   the installed approval from this boot, the anchor's carry cap and the
   approved owner canary, and rebinds only the persistence attestation build
   (any other attestation binding difference refuses). It is never collected,
@@ -76,11 +77,20 @@ carry --session DIR --proof PROTECTED_CARRY_PROOF
   the proof must bind the anchored and installed binaries and claim only
   carry classes; probe denials, tool identities, parameters, the cap and
   live health with the kept approval are rechecked. Rewrites the activation
-  anchor with only the bin/macserve digest rebound plus one carries[] record
+  anchor with only the bin/macserve and bin/macserve-controller digests
+  rebound plus one carries[] record
   bound to the proof, then runs activation-check. Once per sitting.
 activation-check
   Read-only: the anchor matches the live configuration and installed approval
   evaluates to valid health now.
+rebind-controller --from-installed-sha256 OLD --to-installed-sha256 NEW
+  Root, after macserve-admin installed and health-checked a controller-only
+  carry: the live configuration may differ from the schema-3 anchor only in
+  bin/macserve-controller (OLD to NEW, on-disk digests) and
+  config/installed-binaries.json, which must record NEW and keep the anchored
+  bin/macserve release. Rebinds those two paths, appends a rebinds[] record
+  and runs activation-check. Prints one JSON line {"result":"rebound" or
+  "already-bound",...}; re-running once bound is a no-op.
 `
 
 func runQualify(args []string, stdout, stderr io.Writer) int {
@@ -94,7 +104,7 @@ func runQualify(args []string, stdout, stderr io.Writer) int {
 	session := fs.String("session", "", "protected sitting directory")
 	var env, allow, udp, ownerCanary, private, previous, role, out, listen, transport, owner, receipts *string
 	var requalify, carry *bool
-	var proof *string
+	var proof, rebindFrom, rebindTo *string
 	var duration *time.Duration
 	switch command {
 	case "plan":
@@ -121,6 +131,9 @@ func runQualify(args []string, stdout, stderr io.Writer) int {
 		receipts = fs.String("receipts", "", "owner-home control and optional UDP receiver reports")
 	case "carry":
 		proof = fs.String("proof", "", "root-protected carry-proof.json")
+	case "rebind-controller":
+		rebindFrom = fs.String("from-installed-sha256", "", "anchored on-disk controller digest")
+		rebindTo = fs.String("to-installed-sha256", "", "installed on-disk controller digest")
 	case "approve", "reapprove", "activation-check":
 	default:
 		fmt.Fprint(stderr, qualifyUsage)
@@ -136,6 +149,25 @@ func runQualify(args []string, stdout, stderr io.Writer) int {
 	if fs.NArg() != 0 {
 		fmt.Fprintln(stderr, "unexpected positional arguments")
 		return 2
+	}
+	if command == "rebind-controller" {
+		if *rebindFrom == "" || *rebindTo == "" {
+			fmt.Fprintln(stderr, "--from-installed-sha256 and --to-installed-sha256 are required")
+			return 2
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		ctx, cancel := context.WithTimeout(ctx, worker.PersistenceOperationTimeout)
+		defer cancel()
+		result, err := qualification.RebindController(ctx, *rebindFrom, *rebindTo)
+		if err == nil {
+			err = json.NewEncoder(stdout).Encode(result)
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "macserve qualify %s: %v\n", command, err)
+			return 1
+		}
+		return 0
 	}
 	if command != "plan" && command != "activation-check" && *session == "" {
 		fmt.Fprintln(stderr, "--session is required")

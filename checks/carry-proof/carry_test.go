@@ -34,6 +34,7 @@ const (
 var (
 	fromBinary = digest("macserve v0.1.0")
 	toBinary   = digest("macserve v0.2.0")
+	ctrlBinary = digest("macserve-controller v0.1.0")
 )
 
 func digest(s string) string {
@@ -51,15 +52,19 @@ type file struct {
 func fixtureManifest(t *testing.T, extraT ...string) string {
 	t.Helper()
 	data, err := json.Marshal(map[string]any{
-		"schema": 1,
+		"schema": 2,
 		"classes": map[string][]string{
 			"B": {"BOUNDARY.json", "go.mod", "internal/**"},
 			"G": {},
 			"C": {"internal/evidence/types.go"},
 			"T": append([]string{"README.md", "docs/**"}, extraT...),
+			"K": {"internal/controllerk/**"},
 		},
-		"seams":   map[string][]string{},
-		"g_calls": map[string][]string{},
+		"seams":             map[string][]string{},
+		"g_calls":           map[string][]string{},
+		"k_packages":        []string{"internal/controllerk/store"},
+		"k_allowed_imports": []string{},
+		"binaries":          map[string]any{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -69,12 +74,13 @@ func fixtureManifest(t *testing.T, extraT ...string) string {
 
 func baseFiles(t *testing.T) map[string]*file {
 	return map[string]*file{
-		"BOUNDARY.json":              {content: fixtureManifest(t)},
-		"go.mod":                     {content: "module example.com/fixture\n\ngo 1.26\n"},
-		"README.md":                  {content: "fixture\n"},
-		"docs/run.sh":                {content: "#!/bin/sh\necho fixture\n", exec: true},
-		"internal/evidence/types.go": {content: "package evidence\n\n// Version names the fixture.\nfunc Version() string { return \"1\" }\n"},
-		"internal/store/store.go":    {content: "package store\n\nfunc Name() string { return \"store\" }\n"},
+		"BOUNDARY.json":                       {content: fixtureManifest(t)},
+		"go.mod":                              {content: "module example.com/fixture\n\ngo 1.26\n"},
+		"README.md":                           {content: "fixture\n"},
+		"docs/run.sh":                         {content: "#!/bin/sh\necho fixture\n", exec: true},
+		"internal/evidence/types.go":          {content: "package evidence\n\n// Version names the fixture.\nfunc Version() string { return \"1\" }\n"},
+		"internal/hostguard/guard.go":         {content: "package hostguard\n\nfunc Name() string { return \"guard\" }\n"},
+		"internal/controllerk/store/store.go": {content: "package store\n\nfunc Name() string { return \"store\" }\n"},
 	}
 }
 
@@ -191,7 +197,7 @@ func newFixture(t *testing.T, base, changes map[string]*file) *fixture {
 	f.git("", "init", "-q", "-b", "main")
 	f.release(prevTag, "2026-01-01T00:00:00Z", base)
 	f.release(nextTag, "2026-02-01T00:00:00Z", changes)
-	f.served["https://github.com/"+testRepo+"/releases/download/"+prevTag+"/SHA256SUMS"] = []byte(fromBinary + "  " + releaseAsset + "\n" + digest("rb") + "  macserve.rb\n")
+	f.served["https://github.com/"+testRepo+"/releases/download/"+prevTag+"/SHA256SUMS"] = []byte(fromBinary + "  " + releaseAsset + "\n" + ctrlBinary + "  " + controllerAsset + "\n" + digest("rb") + "  macserve.rb\n")
 	f.served[codeloadURL(prevTag)] = f.archive(prevTag)
 	f.served[codeloadURL(nextTag)] = f.archive(nextTag)
 	f.served[ciURL(f.git("", "rev-parse", nextTag+"^{commit}"))] = ciRuns(f.git("", "rev-parse", nextTag+"^{commit}"))
@@ -212,7 +218,7 @@ func (f *fixture) get(_ context.Context, u string, header http.Header) ([]byte, 
 func (f *fixture) run(extra ...string) (int, string, []byte) {
 	f.t.Helper()
 	out := filepath.Join(f.t.TempDir(), "carry-proof.json")
-	args := append([]string{"-repo", testRepo, "-tag", nextTag, "-binary-sha256", toBinary, "-rebuilt-sha256", toBinary, "-out", out, "-git", f.dir}, extra...)
+	args := append([]string{"-repo", testRepo, "-tag", nextTag, "-binary-sha256", toBinary, "-rebuilt-sha256", toBinary, "-controller-binary-sha256", ctrlBinary, "-controller-rebuilt-sha256", ctrlBinary, "-out", out, "-git", f.dir}, extra...)
 	var stdout, stderr bytes.Buffer
 	getenv := func(k string) string {
 		if k == "GH_TOKEN" {
@@ -242,7 +248,7 @@ func TestCarryProofGolden(t *testing.T) {
 	}
 	// The proof passes qualify carry's own checks, from the predecessor's
 	// published binary to this release's.
-	proof, err := qualification.ValidateCarryProof(data, fromBinary, toBinary)
+	proof, err := qualification.ValidateCarryProof(data, qualification.CarryBinaries{Macserve: fromBinary, Controller: ctrlBinary}, qualification.CarryBinaries{Macserve: toBinary, Controller: ctrlBinary})
 	if err != nil {
 		t.Fatalf("ValidateCarryProof: %v\n%s", err, data)
 	}
@@ -299,7 +305,7 @@ func TestCarryProofTOnly(t *testing.T) {
 	if code != 0 || data == nil {
 		t.Fatalf("exit %d, no proof: %s", code, stdout)
 	}
-	proof, err := qualification.ValidateCarryProof(data, fromBinary, toBinary)
+	proof, err := qualification.ValidateCarryProof(data, qualification.CarryBinaries{Macserve: fromBinary, Controller: ctrlBinary}, qualification.CarryBinaries{Macserve: toBinary, Controller: ctrlBinary})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,8 +324,15 @@ func TestNoCarryProof(t *testing.T) {
 	}{
 		{
 			name:    "B change",
-			changes: map[string]*file{"internal/store/store.go": {content: "package store\n\nfunc Name() string { return \"store2\" }\n"}},
-			want:    "internal/store/store.go is class B",
+			changes: map[string]*file{"internal/hostguard/guard.go": {content: "package hostguard\n\nfunc Name() string { return \"guard2\" }\n"}},
+			want:    "internal/hostguard/guard.go is class B",
+		},
+		{
+			// K carry needs the keyholder and worker registry: refused
+			// until a later slice adds K to carryOK.
+			name:    "K change",
+			changes: map[string]*file{"internal/controllerk/store/store.go": {content: "package store\n\nfunc Name() string { return \"store2\" }\n"}},
+			want:    "internal/controllerk/store/store.go is class K",
 		},
 		{
 			name:    "unlisted path",
@@ -404,9 +417,9 @@ func TestNoCarryProof(t *testing.T) {
 			name:    "same binary as the predecessor",
 			changes: carryChanges(),
 			serve: func(f *fixture) {
-				f.served["https://github.com/"+testRepo+"/releases/download/"+prevTag+"/SHA256SUMS"] = []byte(toBinary + "  " + releaseAsset + "\n")
+				f.served["https://github.com/"+testRepo+"/releases/download/"+prevTag+"/SHA256SUMS"] = []byte(toBinary + "  " + releaseAsset + "\n" + ctrlBinary + "  " + controllerAsset + "\n")
 			},
-			want: "v0.1.0 and v0.2.0 publish the same binary",
+			want: "v0.1.0 and v0.2.0 publish the same binaries",
 		},
 		{
 			name:    "C source breaks the boundary rules",
@@ -525,7 +538,7 @@ func TestReleaseDigest(t *testing.T) {
 		a + "  macserve-darwin-arm64\r\n":                                 "",
 		"":                                                                "",
 	} {
-		got, err := releaseDigest([]byte(sums))
+		got, err := releaseDigest([]byte(sums), releaseAsset)
 		if got != want || (want == "") != (err != nil) {
 			t.Errorf("releaseDigest(%q) = %q, %v; want %q", sums, got, err, want)
 		}

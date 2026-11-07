@@ -30,10 +30,15 @@ const (
 	anchorPath = "/Library/macserve/config/activation-anchor.json"
 	configDir  = "/Library/macserve/config"
 	binDir     = "/Library/macserve/bin"
-	// anchorSchema 2 adds Carries. Schema-1 anchors (written before release
-	// carry existed) still verify; only the owner's approve writes schema 2,
-	// and only a schema-2 anchor can be carried.
-	anchorSchema       = 2
+	// installedController is the controller daemon binary. Like every file in
+	// binDir it is bound by the anchor; a release carry may rebind it.
+	installedController = binDir + "/macserve-controller"
+	// anchorSchema 3 records both binaries in each carry (macserve and
+	// macserve-controller). Schema-2 anchors (single-binary carries) and
+	// schema-1 anchors (no carries) still verify; only the owner's approve
+	// writes schema 3, and only a schema-3 anchor can be carried.
+	anchorSchema       = 3
+	singleBinarySchema = 2
 	legacyAnchorSchema = 1
 )
 
@@ -63,9 +68,28 @@ type ActivationAnchor struct {
 	Bindings        map[string]string `json:"bindings"`
 	Parameters      AnchorParameters  `json:"parameters"`
 	// Carries lists, oldest first, every release carry since the owner's
-	// approval (schema 2; empty after approve, absent in schema 1). Each one
-	// rebound only the bin/macserve digest.
+	// approval (schema 2 and 3; empty after approve, absent in schema 1).
+	// Each one rebound only the bin/macserve and (schema 3)
+	// bin/macserve-controller digests.
 	Carries []AnchorCarry `json:"carries"`
+	// Rebinds lists, oldest first, every controller-only rebind since the
+	// owner's approval (schema 3; qualify rebind-controller).
+	Rebinds []AnchorRebind `json:"rebinds,omitempty"`
+	// Release is the release digests of the bound binaries (schema 3). With
+	// installed-binaries.json the bound on-disk bytes are Developer ID
+	// signed and differ from them; without it they are equal.
+	Release *CarryBinaries `json:"release_binaries,omitempty"`
+}
+
+// AnchorRebind is one controller-only rebind committed by qualify
+// rebind-controller after an administrator controller carry. It rebinds
+// bin/macserve-controller and installed-binaries.json and nothing else.
+type AnchorRebind struct {
+	At                      time.Time `json:"at"`
+	FromControllerSHA256    string    `json:"from_controller_sha256"`
+	ToControllerSHA256      string    `json:"to_controller_sha256"`
+	ReleaseControllerSHA256 string    `json:"release_controller_sha256"`
+	InventorySHA256         string    `json:"inventory_sha256"`
 }
 
 // AnchorCarry is one boundary-preserving release committed by qualify carry.
@@ -74,7 +98,23 @@ type AnchorCarry struct {
 	Session          string    `json:"session"`
 	FromBinarySHA256 string    `json:"from_binary_sha256"`
 	ToBinarySHA256   string    `json:"to_binary_sha256"`
-	ProofSHA256      string    `json:"proof_sha256"`
+	// FromControllerSHA256 and ToControllerSHA256 are the controller
+	// binary before and after the carry (schema 3 only).
+	FromControllerSHA256 string `json:"from_controller_sha256,omitempty"`
+	ToControllerSHA256   string `json:"to_controller_sha256,omitempty"`
+	ProofSHA256          string `json:"proof_sha256"`
+}
+
+func (c AnchorCarry) from() CarryBinaries {
+	return CarryBinaries{Macserve: c.FromBinarySHA256, Controller: c.FromControllerSHA256}
+}
+func (c AnchorCarry) to() CarryBinaries {
+	return CarryBinaries{Macserve: c.ToBinarySHA256, Controller: c.ToControllerSHA256}
+}
+
+// anchoredBinaries are the binary digests an anchor's bindings record.
+func anchoredBinaries(bindings map[string]string) CarryBinaries {
+	return CarryBinaries{Macserve: bindings[installedHelper], Controller: bindings[installedController]}
 }
 
 func anchorParameters(c Challenge) AnchorParameters {
@@ -145,7 +185,26 @@ func newAnchor(dir string, c Challenge, v Candidate, at time.Time) (ActivationAn
 	if err != nil {
 		return ActivationAnchor{}, err
 	}
-	return ActivationAnchor{Schema: anchorSchema, ApprovedAt: at, Session: dir, CandidateSHA256: digest(cb), Bindings: bindings, Parameters: anchorParameters(c), Carries: []AnchorCarry{}}, nil
+	release, err := releaseBinaries(anchoredBinaries(bindings))
+	if err != nil {
+		return ActivationAnchor{}, err
+	}
+	return ActivationAnchor{Schema: anchorSchema, ApprovedAt: at, Session: dir, CandidateSHA256: digest(cb), Bindings: bindings, Parameters: anchorParameters(c), Carries: []AnchorCarry{}, Release: &release}, nil
+}
+
+// releaseBinaries maps installed (on-disk) binary digests to their release
+// digests through installed-binaries.json; without it they are equal.
+func releaseBinaries(installed CarryBinaries) (CarryBinaries, error) {
+	inv, err := deploy.LoadInstalledBinaries()
+	if err != nil {
+		return CarryBinaries{}, err
+	}
+	var out CarryBinaries
+	if out.Macserve, err = inv.ReleaseDigest("macserve", installed.Macserve); err != nil {
+		return out, err
+	}
+	out.Controller, err = inv.ReleaseDigest("macserve-controller", installed.Controller)
+	return out, err
 }
 
 func loadAnchor() (ActivationAnchor, error) {
@@ -165,15 +224,18 @@ func loadAnchorBytes() (ActivationAnchor, []byte, error) {
 	return a, b, validAnchor(a)
 }
 
-// validAnchor accepts a schema-1 anchor without carries, or a schema-2 anchor
-// whose carries chain from one binary digest to the next within the cap and
-// end at the bound bin/macserve digest.
+// validAnchor accepts a schema-1 anchor without carries, or a schema-2 or
+// schema-3 anchor whose carries (and, schema 3, controller rebinds) chain
+// from one binary pair to the next in time order within the caps and end at
+// the bound binary digests. A schema-2 carry names only bin/macserve; a
+// schema-3 carry names bin/macserve and bin/macserve-controller and changes
+// at least one of them; a rebind changes only bin/macserve-controller.
 func validAnchor(a ActivationAnchor) error {
-	if (a.Schema != anchorSchema && a.Schema != legacyAnchorSchema) || a.Session == "" || len(a.Bindings) == 0 {
+	if (a.Schema != anchorSchema && a.Schema != singleBinarySchema && a.Schema != legacyAnchorSchema) || a.Session == "" || len(a.Bindings) == 0 {
 		return errors.New("unsupported activation anchor")
 	}
 	if a.Schema == legacyAnchorSchema {
-		if a.Carries != nil {
+		if a.Carries != nil || a.Rebinds != nil || a.Release != nil {
 			return errors.New("unsupported activation anchor: schema 1 has no carries")
 		}
 		return nil
@@ -181,20 +243,65 @@ func validAnchor(a ActivationAnchor) error {
 	if a.Carries == nil || len(a.Carries) > carryCap {
 		return errors.New("unsupported activation anchor: invalid carries")
 	}
-	previous := a.ApprovedAt
+	if a.Schema == singleBinarySchema && (a.Rebinds != nil || a.Release != nil) {
+		return errors.New("unsupported activation anchor: schema 2 has no rebinds")
+	}
+	if a.Schema == anchorSchema && (a.Release == nil || len(a.Rebinds) > rebindCap) {
+		return errors.New("unsupported activation anchor: invalid release digests or rebinds")
+	}
+	type event struct {
+		at    time.Time
+		carry *AnchorCarry
+		index int
+	}
+	events := make([]event, 0, len(a.Carries)+len(a.Rebinds))
 	seen := map[string]bool{a.Session: true}
-	for i, carry := range a.Carries {
-		if carry.Session == "" || seen[carry.Session] || seen[carry.ProofSHA256] || len(carry.FromBinarySHA256) != 64 || len(carry.ToBinarySHA256) != 64 || len(carry.ProofSHA256) != 64 || carry.FromBinarySHA256 == carry.ToBinarySHA256 || !carry.At.After(previous) {
+	for i := range a.Carries {
+		carry := &a.Carries[i]
+		var binaries bool
+		if a.Schema == singleBinarySchema {
+			binaries = carry.FromControllerSHA256 == "" && carry.ToControllerSHA256 == "" && validDigest(carry.FromBinarySHA256) && validDigest(carry.ToBinarySHA256) && carry.FromBinarySHA256 != carry.ToBinarySHA256
+		} else {
+			binaries = carry.from().valid() && carry.to().valid() && carry.from() != carry.to()
+		}
+		if carry.Session == "" || seen[carry.Session] || seen[carry.ProofSHA256] || !binaries || len(carry.ProofSHA256) != 64 {
 			return fmt.Errorf("unsupported activation anchor: invalid or replayed carry %d", i)
 		}
-		if i > 0 && carry.FromBinarySHA256 != a.Carries[i-1].ToBinarySHA256 {
-			return fmt.Errorf("unsupported activation anchor: carry %d does not chain", i)
-		}
 		seen[carry.Session], seen[carry.ProofSHA256] = true, true
-		previous = carry.At
+		events = append(events, event{at: carry.At, carry: carry, index: i})
 	}
-	if n := len(a.Carries); n > 0 && a.Bindings[installedHelper] != a.Carries[n-1].ToBinarySHA256 {
-		return errors.New("unsupported activation anchor: binary binding differs from the last carry")
+	for i, r := range a.Rebinds {
+		if !validDigest(r.FromControllerSHA256) || !validDigest(r.ToControllerSHA256) || r.FromControllerSHA256 == r.ToControllerSHA256 || !validDigest(r.ReleaseControllerSHA256) || !validDigest(r.InventorySHA256) {
+			return fmt.Errorf("unsupported activation anchor: invalid rebind %d", i)
+		}
+		events = append(events, event{at: r.At, index: i})
+	}
+	slices.SortStableFunc(events, func(x, y event) int { return x.at.Compare(y.at) })
+	previous := a.ApprovedAt
+	var state CarryBinaries
+	macKnown, controllerKnown := false, false
+	for _, e := range events {
+		if !e.at.After(previous) {
+			return errors.New("unsupported activation anchor: carries and rebinds are not in time order")
+		}
+		previous = e.at
+		if e.carry != nil {
+			if macKnown && e.carry.FromBinarySHA256 != state.Macserve || controllerKnown && e.carry.FromControllerSHA256 != state.Controller {
+				return fmt.Errorf("unsupported activation anchor: carry %d does not chain", e.index)
+			}
+			state = e.carry.to()
+			macKnown, controllerKnown = true, a.Schema == anchorSchema
+			continue
+		}
+		r := a.Rebinds[e.index]
+		if controllerKnown && r.FromControllerSHA256 != state.Controller {
+			return fmt.Errorf("unsupported activation anchor: rebind %d does not chain", e.index)
+		}
+		state.Controller, controllerKnown = r.ToControllerSHA256, true
+	}
+	bound := anchoredBinaries(a.Bindings)
+	if macKnown && bound.Macserve != state.Macserve || controllerKnown && bound.Controller != state.Controller {
+		return errors.New("unsupported activation anchor: binary binding differs from the last carry or rebind")
 	}
 	return nil
 }

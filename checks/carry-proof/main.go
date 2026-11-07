@@ -3,7 +3,9 @@
 // release changes no boundary (B) path over its predecessor release.
 //
 //	go run ./checks/carry-proof -repo OWNER/REPO -tag vX.Y.Z [-prev vX.Y.Z] \
-//	  -binary-sha256 HEX -rebuilt-sha256 HEX -out carry-proof.json [-git DIR]
+//	  -binary-sha256 HEX -rebuilt-sha256 HEX \
+//	  -controller-binary-sha256 HEX -controller-rebuilt-sha256 HEX \
+//	  -out carry-proof.json [-git DIR]
 //
 // It classifies every path changed between the predecessor tag (default: the
 // highest lower vX.Y.Z tag) and the tag by the predecessor's BOUNDARY.json,
@@ -44,6 +46,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv fu
 	fs.StringVar(&p.prev, "prev", "", "predecessor tag (default: the highest lower vX.Y.Z tag)")
 	fs.StringVar(&p.binary, "binary-sha256", "", "sha256 of this release's "+releaseAsset)
 	fs.StringVar(&p.rebuilt, "rebuilt-sha256", "", "sha256 of the independent rebuild")
+	fs.StringVar(&p.controller, "controller-binary-sha256", "", "sha256 of this release's "+controllerAsset)
+	fs.StringVar(&p.controllerRebuilt, "controller-rebuilt-sha256", "", "sha256 of the controller's independent rebuild")
 	fs.StringVar(&out, "out", "", "carry-proof.json to write")
 	fs.StringVar(&p.gitDir, "git", ".", "git repository holding both tags")
 	if err := fs.Parse(args); err != nil {
@@ -62,8 +66,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, getenv fu
 		return usage("-tag is required")
 	case p.prev != "" && !semver.MatchString(p.prev):
 		return usage("-prev must be vX.Y.Z")
-	case !hex64.MatchString(p.binary) || !hex64.MatchString(p.rebuilt):
-		return usage("-binary-sha256 and -rebuilt-sha256 must be 64 lowercase hex")
+	case !hex64.MatchString(p.binary) || !hex64.MatchString(p.rebuilt) || !hex64.MatchString(p.controller) || !hex64.MatchString(p.controllerRebuilt):
+		return usage("-binary-sha256, -rebuilt-sha256, -controller-binary-sha256 and -controller-rebuilt-sha256 must be 64 lowercase hex")
 	case out == "":
 		return usage("-out is required")
 	}

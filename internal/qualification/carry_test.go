@@ -23,14 +23,21 @@ import (
 )
 
 var (
-	oldBinary = strings.Repeat("a", 64)
-	newBinary = strings.Repeat("b", 64)
-	nextBin   = strings.Repeat("c", 64)
+	oldBinary  = strings.Repeat("a", 64)
+	newBinary  = strings.Repeat("b", 64)
+	nextBin    = strings.Repeat("c", 64)
+	controller = strings.Repeat("e", 64)
+	newCtrl    = strings.Repeat("f", 64)
 )
+
+func pair(macserve string) CarryBinaries {
+	return CarryBinaries{Macserve: macserve, Controller: controller}
+}
 
 func carryBindings(binary string) map[string]string {
 	return map[string]string{
 		installedHelper:                                          binary,
+		installedController:                                      controller,
 		"/Library/macserve/bin/qualify.sh":                       "q1",
 		"/Library/macserve/config/deploy.env":                    "e1",
 		"/Library/macserve/config/worker.json":                   "w1",
@@ -40,11 +47,11 @@ func carryBindings(binary string) map[string]string {
 }
 
 func carryAnchorFixture() ActivationAnchor {
-	return ActivationAnchor{Schema: anchorSchema, ApprovedAt: time.Now().UTC().Add(-time.Hour), Session: "/Library/macserve/var/qualification/owner", CandidateSHA256: strings.Repeat("d", 64), Bindings: carryBindings(oldBinary), Parameters: AnchorParameters{JobUID: 502, OwnerUID: 501, ControllerUID: 503, Profiles: map[string]string{"ios": "digest"}, Socket: "/Library/macserve/var/broker/worker.sock"}, Carries: []AnchorCarry{}}
+	return ActivationAnchor{Schema: anchorSchema, ApprovedAt: time.Now().UTC().Add(-time.Hour), Session: "/Library/macserve/var/qualification/owner", CandidateSHA256: strings.Repeat("d", 64), Bindings: carryBindings(oldBinary), Parameters: AnchorParameters{JobUID: 502, OwnerUID: 501, ControllerUID: 503, Profiles: map[string]string{"ios": "digest"}, Socket: "/Library/macserve/var/broker/worker.sock"}, Carries: []AnchorCarry{}, Release: &CarryBinaries{Macserve: oldBinary, Controller: controller}}
 }
 
 func carryRecord(from, to, session string, at time.Time) AnchorCarry {
-	return AnchorCarry{At: at, Session: "/Library/macserve/var/qualification/" + session, FromBinarySHA256: from, ToBinarySHA256: to, ProofSHA256: digest([]byte(session))}
+	return AnchorCarry{At: at, Session: "/Library/macserve/var/qualification/" + session, FromBinarySHA256: from, ToBinarySHA256: to, FromControllerSHA256: controller, ToControllerSHA256: controller, ProofSHA256: digest([]byte(session))}
 }
 
 // Only the bin/macserve digest may differ for a carry; anchoredConfiguration
@@ -69,6 +76,7 @@ func TestCarryAnchorAllowsOnlyBinaryDigest(t *testing.T) {
 		"plist change":        func(m map[string]string) { m["/Library/LaunchDaemons/org.macserve.worker.plist"] = "p2" },
 		"manifest change":     func(m map[string]string) { m["/Library/macserve/var/broker/reviewed-persistence.json"] = "m2" },
 		"binary removed":      func(m map[string]string) { delete(m, installedHelper) },
+		"controller removed":  func(m map[string]string) { delete(m, installedController) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			now := carryBindings(newBinary)
@@ -80,9 +88,70 @@ func TestCarryAnchorAllowsOnlyBinaryDigest(t *testing.T) {
 	}
 }
 
+// A carry may change only the controller binary, or both binaries.
+func TestCarryAllowsControllerOnlyAndBothBinaries(t *testing.T) {
+	anchored := carryBindings(oldBinary)
+	controllerOnly := carryBindings(oldBinary)
+	controllerOnly[installedController] = newCtrl
+	both := carryBindings(newBinary)
+	both[installedController] = newCtrl
+	for name, now := range map[string]map[string]string{"controller only": controllerOnly, "both": both} {
+		if err := carryChanges(anchored, now); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	a := carryAnchorFixture()
+	record := carryRecord(oldBinary, oldBinary, "s1", time.Now().UTC())
+	record.ToControllerSHA256 = newCtrl
+	next, err := carriedAnchor(a, record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed := bindingChanges(a.Bindings, next.Bindings); len(changed) != 1 || changed[0] != installedController {
+		t.Fatalf("controller-only carry rebound %v", changed)
+	}
+	p := carryProofFixture()
+	p.To.BinarySHA256, p.To.ControllerBinarySHA256 = oldBinary, newCtrl
+	raw, err := encode(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ValidateCarryProof(raw, pair(oldBinary), CarryBinaries{Macserve: oldBinary, Controller: newCtrl}); err != nil {
+		t.Fatalf("controller-only proof refused: %v", err)
+	}
+}
+
+// A schema-2 anchor (single-binary carries, before the controller split)
+// still verifies but cannot be carried.
+func TestSchema2AnchorVerifiesButDoesNotCarry(t *testing.T) {
+	a := carryAnchorFixture()
+	a.Schema, a.Release = singleBinarySchema, nil
+	delete(a.Bindings, installedController)
+	a.Bindings[installedHelper] = newBinary
+	r := carryRecord(oldBinary, newBinary, "s1", time.Now().UTC().Add(-time.Minute))
+	r.FromControllerSHA256, r.ToControllerSHA256 = "", ""
+	a.Carries = []AnchorCarry{r}
+	if err := validAnchor(a); err != nil {
+		t.Fatalf("schema-2 anchor refused: %v", err)
+	}
+	r.ToControllerSHA256 = controller
+	a.Carries = []AnchorCarry{r}
+	if validAnchor(a) == nil {
+		t.Fatal("schema-2 carry with a controller digest accepted")
+	}
+	a.Carries = []AnchorCarry{}
+	proof, err := encode(carryProofFixture())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := carryPreflight(a, a.Bindings, pair(newBinary), proof, pair(nextBin), time.Now().UTC()); err == nil || !strings.Contains(err.Error(), "schema 1 or 2") {
+		t.Fatalf("schema-2 anchor carried: %v", err)
+	}
+}
+
 func TestAnchorSchema2AndSchema1Compatibility(t *testing.T) {
 	legacy := carryAnchorFixture()
-	legacy.Schema, legacy.Carries = legacyAnchorSchema, nil
+	legacy.Schema, legacy.Carries, legacy.Release = legacyAnchorSchema, nil, nil
 	if err := validAnchor(legacy); err != nil {
 		t.Fatalf("schema-1 anchor no longer verifies: %v", err)
 	}
@@ -106,7 +175,7 @@ func TestAnchorSchema2AndSchema1Compatibility(t *testing.T) {
 	}
 	at := time.Now().UTC().Add(-30 * time.Minute)
 	for name, mutate := range map[string]func(*ActivationAnchor){
-		"unknown schema":           func(a *ActivationAnchor) { a.Schema = 3 },
+		"unknown schema":           func(a *ActivationAnchor) { a.Schema = 4 },
 		"schema 1 with carries":    func(a *ActivationAnchor) { a.Schema = legacyAnchorSchema },
 		"schema 2 without carries": func(a *ActivationAnchor) { a.Carries = nil },
 		"binding not last carry": func(a *ActivationAnchor) {
@@ -140,6 +209,17 @@ func TestAnchorSchema2AndSchema1Compatibility(t *testing.T) {
 		},
 		"same binary carry": func(a *ActivationAnchor) {
 			a.Carries = []AnchorCarry{carryRecord(oldBinary, oldBinary, "s1", at)}
+		},
+		"carry without controller": func(a *ActivationAnchor) {
+			r := carryRecord(oldBinary, newBinary, "s1", at)
+			r.ToControllerSHA256 = ""
+			a.Bindings[installedHelper] = newBinary
+			a.Carries = []AnchorCarry{r}
+		},
+		"controller binding not last carry": func(a *ActivationAnchor) {
+			a.Bindings[installedHelper] = newBinary
+			a.Bindings[installedController] = newCtrl
+			a.Carries = []AnchorCarry{carryRecord(oldBinary, newBinary, "s1", at)}
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -194,7 +274,7 @@ func TestCarryCap(t *testing.T) {
 	}
 	binary := oldBinary
 	for i := range carryCap {
-		to := strings.Repeat(string(rune('e'+i)), 64)
+		to := strings.Repeat(string(rune('1'+i)), 64)
 		next, err := carriedAnchor(a, carryRecord(binary, to, "s"+string(rune('0'+i)), a.ApprovedAt.Add(time.Duration(i+1)*time.Minute)))
 		if err != nil {
 			t.Fatalf("carry %d: %v", i, err)
@@ -241,8 +321,8 @@ func TestCarryRequiresSameBoot(t *testing.T) {
 
 func carryProofFixture() CarryProof {
 	return CarryProof{Schema: carryProofSchema, Kind: carryProofKind, ReleaseEffect: carryEffect,
-		From:                 CarryRelease{Tag: "v0.1.30", Commit: "c1", Tree: "t1", BinarySHA256: oldBinary},
-		To:                   CarryRelease{Tag: "v0.1.31", Commit: "c2", Tree: "t2", BinarySHA256: newBinary},
+		From:                 CarryRelease{Tag: "v0.1.30", Commit: "c1", Tree: "t1", BinarySHA256: oldBinary, ControllerBinarySHA256: controller},
+		To:                   CarryRelease{Tag: "v0.1.31", Commit: "c2", Tree: "t2", BinarySHA256: newBinary, ControllerBinarySHA256: controller},
 		BoundaryManifestBlob: "blob", ClassesPresent: []string{"C", "T"},
 		Changed: []CarryChange{{Path: "internal/worker/job_observation.go", Class: "C", Old: []string{"100644", "o"}, New: []string{"100644", "n"}}, {Path: "docs/install.md", Class: "T", Old: []string{"100644", "o"}, New: []string{"100644", "n"}}},
 		CI:      &CarryCI{Workflow: "CI", RunID: 1, HeadSHA: "c2", Conclusion: "success"}}
@@ -257,16 +337,18 @@ func TestCarryProofBindsBinariesAndCarryClasses(t *testing.T) {
 		}
 		return b
 	}
-	if _, err := checkCarryProof(encodeProof(carryProofFixture()), a, live); err != nil {
+	if _, err := checkCarryProof(encodeProof(carryProofFixture()), a, anchoredBinaries(live)); err != nil {
 		t.Fatalf("valid proof refused: %v", err)
 	}
 	for name, mutate := range map[string]func(*CarryProof){
 		"required effect":     func(p *CarryProof) { p.ReleaseEffect = "QualificationRequired" },
 		"kind":                func(p *CarryProof) { p.Kind = "release-install" },
-		"schema":              func(p *CarryProof) { p.Schema = 2 },
+		"schema":              func(p *CarryProof) { p.Schema = 1 },
 		"wrong from binary":   func(p *CarryProof) { p.From.BinarySHA256 = nextBin },
 		"wrong to binary":     func(p *CarryProof) { p.To.BinarySHA256 = nextBin },
 		"same binary":         func(p *CarryProof) { p.To.BinarySHA256 = oldBinary },
+		"wrong to controller": func(p *CarryProof) { p.To.ControllerBinarySHA256 = newCtrl },
+		"no controller":       func(p *CarryProof) { p.From.ControllerBinarySHA256, p.To.ControllerBinarySHA256 = "", "" },
 		"same tag":            func(p *CarryProof) { p.To.Tag = p.From.Tag },
 		"boundary change":     func(p *CarryProof) { p.Changed[0].Class = "B"; p.ClassesPresent = []string{"B", "T"} },
 		"unlisted change":     func(p *CarryProof) { p.Changed[0].Class = ""; p.ClassesPresent = []string{"", "T"} },
@@ -277,7 +359,7 @@ func TestCarryProofBindsBinariesAndCarryClasses(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			p := carryProofFixture()
 			mutate(&p)
-			if _, err := checkCarryProof(encodeProof(p), a, live); err == nil {
+			if _, err := checkCarryProof(encodeProof(p), a, anchoredBinaries(live)); err == nil {
 				t.Fatal("invalid proof accepted")
 			}
 		})
@@ -285,7 +367,7 @@ func TestCarryProofBindsBinariesAndCarryClasses(t *testing.T) {
 	t.Run("unknown field", func(t *testing.T) {
 		raw := encodeProof(carryProofFixture())
 		raw = []byte(strings.Replace(string(raw), "{", `{"force": true,`, 1))
-		if _, err := checkCarryProof(raw, a, live); err == nil {
+		if _, err := checkCarryProof(raw, a, anchoredBinaries(live)); err == nil {
 			t.Fatal("proof with unknown field accepted")
 		}
 	})
@@ -294,7 +376,7 @@ func TestCarryProofBindsBinariesAndCarryClasses(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := checkCarryProof(encodeProof(carryProofFixture()), next, live); err == nil {
+		if _, err := checkCarryProof(encodeProof(carryProofFixture()), next, anchoredBinaries(live)); err == nil {
 			t.Fatal("replayed proof accepted after its carry")
 		}
 	})
@@ -666,7 +748,7 @@ func TestCarryPreflight(t *testing.T) {
 		return b
 	}
 	proof, now := encodeProof(carryProofFixture()), time.Now().UTC()
-	if err := carryPreflight(carryAnchorFixture(), carryBindings(oldBinary), oldBinary, proof, newBinary, now); err != nil {
+	if err := carryPreflight(carryAnchorFixture(), carryBindings(oldBinary), pair(oldBinary), proof, pair(newBinary), now); err != nil {
 		t.Fatalf("valid pre-check refused: %v", err)
 	}
 	for name, tc := range map[string]struct {
@@ -683,14 +765,14 @@ func TestCarryPreflight(t *testing.T) {
 			return m
 		}(), want: "configuration changed"},
 		"binary swapped early":   {live: carryBindings(newBinary), installed: newBinary, want: "configuration changed"},
-		"installed not anchored": {installed: nextBin, want: "not the anchored binary"},
-		"no installed digest":    {installed: "-", want: "not the anchored binary"},
+		"installed not anchored": {installed: nextBin, want: "not the anchored binaries"},
+		"no installed digest":    {installed: "-", want: "not the anchored binaries"},
 		"cap reached": {anchor: func(a *ActivationAnchor) {
 			for i := 0; i < carryCap; i++ {
 				a.Carries = append(a.Carries, carryRecord(oldBinary, oldBinary, fmt.Sprint("s", i), now))
 			}
 		}, want: "cap"},
-		"proof to another binary": {target: nextBin, want: "installed one"},
+		"proof to another binary": {target: nextBin, want: "installed ones"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			a := carryAnchorFixture()
@@ -712,10 +794,105 @@ func TestCarryPreflight(t *testing.T) {
 			if target == "" {
 				target = newBinary
 			}
-			err := carryPreflight(a, live, installed, proof, target, now)
+			err := carryPreflight(a, live, pair(installed), proof, pair(target), now)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("got %v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func inventoryFixture(macRelease, ctrlInstalled, ctrlRelease string) *deploy.InstalledBinaries {
+	return &deploy.InstalledBinaries{Schema: "macserve-installed-binaries/1", Binaries: map[string]deploy.InstalledBinary{
+		"macserve":            {ReleaseSHA256: macRelease, InstalledSHA256: oldBinary},
+		"macserve-controller": {ReleaseSHA256: ctrlRelease, InstalledSHA256: ctrlInstalled},
+	}}
+}
+
+// TestRebindController: a controller-only rebind rebinds exactly
+// bin/macserve-controller and installed-binaries.json, is idempotent once
+// bound, and refuses any other drift, a wrong from digest or an inventory
+// that does not record the installed controller.
+func TestRebindController(t *testing.T) {
+	inventory := strings.Repeat("9", 64)
+	ctrlRelease := strings.Repeat("8", 64)
+	now := time.Now().UTC()
+	live := carryBindings(oldBinary)
+	live[installedController] = newCtrl
+	live[deploy.InstalledBinariesPath] = inventory
+	inv := inventoryFixture(oldBinary, newCtrl, ctrlRelease)
+	next, result, err := reboundAnchor(carryAnchorFixture(), live, inv, controller, newCtrl, now)
+	if err != nil || result.Result != "rebound" || result.ControllerReleaseSHA256 != ctrlRelease {
+		t.Fatalf("rebind refused: %+v %v", result, err)
+	}
+	if changed := bindingChanges(next.Bindings, live); len(changed) != 0 {
+		t.Fatalf("rebound anchor differs from live: %v", changed)
+	}
+	if next.Release.Controller != ctrlRelease || next.Release.Macserve != oldBinary || len(next.Rebinds) != 1 {
+		t.Fatalf("rebound anchor release/rebinds wrong: %+v %+v", next.Release, next.Rebinds)
+	}
+	if _, again, err := reboundAnchor(next, live, inv, controller, newCtrl, now.Add(time.Second)); err != nil || again.Result != "already-bound" {
+		t.Fatalf("re-run not idempotent: %+v %v", again, err)
+	}
+	// A later carry chains from the rebound controller.
+	carried, err := carriedAnchor(next, AnchorCarry{At: now.Add(time.Minute), Session: "/s2", FromBinarySHA256: oldBinary, ToBinarySHA256: newBinary, FromControllerSHA256: newCtrl, ToControllerSHA256: newCtrl, ProofSHA256: digest([]byte("p2"))})
+	if err != nil {
+		t.Fatalf("carry after rebind refused: %v", err)
+	}
+	if err := validAnchor(carried); err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string]struct {
+		mutate func(map[string]string)
+		inv    *deploy.InstalledBinaries
+		from   string
+		want   string
+	}{
+		"other drift":        {mutate: func(m map[string]string) { m["/Library/macserve/config/worker.json"] = "w2" }, want: "configuration changed"},
+		"macserve changed":   {mutate: func(m map[string]string) { m[installedHelper] = newBinary }, want: "bin/macserve"},
+		"wrong from":         {from: nextBin, want: "anchored"},
+		"no inventory":       {inv: nil, want: "installed-binaries.json"},
+		"inventory mismatch": {inv: inventoryFixture(oldBinary, nextBin, ctrlRelease), want: "installed-binaries.json"},
+		"macserve release":   {inv: inventoryFixture(nextBin, newCtrl, ctrlRelease), want: "bin/macserve release"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			l := maps.Clone(live)
+			if tc.mutate != nil {
+				tc.mutate(l)
+			}
+			i, from := inv, controller
+			if tc.inv != nil || name == "no inventory" {
+				i = tc.inv
+			}
+			if tc.from != "" {
+				from = tc.from
+			}
+			if _, _, err := reboundAnchor(carryAnchorFixture(), l, i, from, newCtrl, now); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseInstalledBinaries(t *testing.T) {
+	good := `{"schema":"macserve-installed-binaries/1","binaries":{"macserve":{"release_sha256":"` + oldBinary + `","installed_sha256":"` + newBinary + `","identifier":"app.themartian.macserve","designated_requirement":"r"}}}`
+	b, err := deploy.ParseInstalledBinaries([]byte(good))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := b.ReleaseDigest("macserve", newBinary); err != nil || got != oldBinary {
+		t.Fatalf("release digest %s %v", got, err)
+	}
+	if _, err := b.ReleaseDigest("macserve", oldBinary); err == nil {
+		t.Fatal("on-disk digest other than installed_sha256 accepted")
+	}
+	var none *deploy.InstalledBinaries
+	if got, err := none.ReleaseDigest("macserve", newBinary); err != nil || got != newBinary {
+		t.Fatal("absent file must map on-disk to release digest")
+	}
+	for _, bad := range []string{strings.Replace(good, `"r"}`, `"r","x":1}`, 1), strings.Replace(good, "/1", "/2", 1), strings.Replace(good, `"macserve":{`, `"other":{`, 1)} {
+		if _, err := deploy.ParseInstalledBinaries([]byte(bad)); err == nil {
+			t.Fatalf("accepted %s", bad)
+		}
 	}
 }
