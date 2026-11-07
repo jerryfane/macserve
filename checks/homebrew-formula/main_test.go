@@ -12,8 +12,10 @@ import (
 var update = flag.Bool("update", false, "rewrite testdata/macserve.rb.golden")
 
 const (
-	goldenSHA = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	tmplPath  = "../../assets/homebrew/macserve.rb.tmpl"
+	goldenSHA      = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	controllerSHA  = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+	controllerLine = controllerSHA + "  macserve-controller-darwin-arm64\n"
+	tmplPath       = "../../assets/homebrew/macserve.rb.tmpl"
 )
 
 func writeSums(t *testing.T, body string) string {
@@ -26,7 +28,7 @@ func writeSums(t *testing.T, body string) string {
 }
 
 func TestGolden(t *testing.T) {
-	sums := writeSums(t, goldenSHA+"  macserve-darwin-arm64\n")
+	sums := writeSums(t, goldenSHA+"  macserve-darwin-arm64\n"+controllerLine)
 	var out bytes.Buffer
 	if err := run(tmplPath, sums, "v1.2.3", "jerryfane/macserve", &out); err != nil {
 		t.Fatal(err)
@@ -52,15 +54,19 @@ func TestGolden(t *testing.T) {
 
 func TestRefusesBadInputs(t *testing.T) {
 	for name, tc := range map[string]struct{ sums, tag, repo, want string }{
-		"missing entry":   {goldenSHA + "  other\n", "v1.2.3", "jerryfane/macserve", "no macserve-darwin-arm64"},
-		"empty sums":      {"", "v1.2.3", "jerryfane/macserve", "no macserve-darwin-arm64"},
-		"duplicate entry": {goldenSHA + "  macserve-darwin-arm64\n" + goldenSHA + "  macserve-darwin-arm64\n", "v1.2.3", "jerryfane/macserve", "2 times"},
-		"short sha":       {"abc  macserve-darwin-arm64\n", "v1.2.3", "jerryfane/macserve", "invalid sha256"},
-		"uppercase sha":   {strings.ToUpper(goldenSHA) + "  macserve-darwin-arm64\n", "v1.2.3", "jerryfane/macserve", "invalid sha256"},
-		"template inject": {`"; system "x  macserve-darwin-arm64` + "\n", "v1.2.3", "jerryfane/macserve", "invalid sha256"},
-		"malformed line":  {goldenSHA + "\n", "v1.2.3", "jerryfane/macserve", "malformed"},
-		"bad tag":         {goldenSHA + "  macserve-darwin-arm64\n", "1.2.3", "jerryfane/macserve", "invalid tag"},
-		"bad repo":        {goldenSHA + "  macserve-darwin-arm64\n", "v1.2.3", `x"/y`, "invalid repository"},
+		"missing entry":         {goldenSHA + "  other\n" + controllerLine, "v1.2.3", "jerryfane/macserve", "no macserve-darwin-arm64"},
+		"empty sums":            {"", "v1.2.3", "jerryfane/macserve", "no macserve-darwin-arm64"},
+		"duplicate entry":       {goldenSHA + "  macserve-darwin-arm64\n" + goldenSHA + "  macserve-darwin-arm64\n" + controllerLine, "v1.2.3", "jerryfane/macserve", "2 times"},
+		"short sha":             {"abc  macserve-darwin-arm64\n" + controllerLine, "v1.2.3", "jerryfane/macserve", "invalid sha256"},
+		"uppercase sha":         {strings.ToUpper(goldenSHA) + "  macserve-darwin-arm64\n" + controllerLine, "v1.2.3", "jerryfane/macserve", "invalid sha256"},
+		"template inject":       {`"; system "x  macserve-darwin-arm64` + "\n" + controllerLine, "v1.2.3", "jerryfane/macserve", "invalid sha256"},
+		"malformed line":        {goldenSHA + "\n", "v1.2.3", "jerryfane/macserve", "malformed"},
+		"bad tag":               {goldenSHA + "  macserve-darwin-arm64\n" + controllerLine, "1.2.3", "jerryfane/macserve", "invalid tag"},
+		"bad repo":              {goldenSHA + "  macserve-darwin-arm64\n" + controllerLine, "v1.2.3", `x"/y`, "invalid repository"},
+		"missing controller":    {goldenSHA + "  macserve-darwin-arm64\n", "v1.2.3", "jerryfane/macserve", "no macserve-controller-darwin-arm64"},
+		"duplicate controller":  {goldenSHA + "  macserve-darwin-arm64\n" + controllerLine + controllerLine, "v1.2.3", "jerryfane/macserve", "macserve-controller-darwin-arm64 2 times"},
+		"short controller sha":  {goldenSHA + "  macserve-darwin-arm64\nabc  macserve-controller-darwin-arm64\n", "v1.2.3", "jerryfane/macserve", "invalid sha256"},
+		"controller sha inject": {goldenSHA + "  macserve-darwin-arm64\n" + `"; system "x  macserve-controller-darwin-arm64` + "\n", "v1.2.3", "jerryfane/macserve", "invalid sha256"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var out bytes.Buffer
@@ -82,7 +88,7 @@ func TestRefusesBadInputs(t *testing.T) {
 // and sha patterns: a valid value with leading or trailing junk, including a
 // newline, must never reach the formula.
 func TestRefusesJunkAroundValidValues(t *testing.T) {
-	valid := formula{Repo: "jerryfane/macserve", Tag: "v0.1.29", SHA256: goldenSHA}
+	valid := formula{Repo: "jerryfane/macserve", Tag: "v0.1.29", SHA256: goldenSHA, ControllerSHA256: controllerSHA}
 	for name, tc := range map[string]struct {
 		edit func(*formula)
 		want string
@@ -90,6 +96,8 @@ func TestRefusesJunkAroundValidValues(t *testing.T) {
 		"sha trailing newline":  {func(f *formula) { f.SHA256 += "\nsystem 'x'" }, "invalid sha256"},
 		"sha trailing quote":    {func(f *formula) { f.SHA256 += `"` }, "invalid sha256"},
 		"sha leading junk":      {func(f *formula) { f.SHA256 = "\"\n" + f.SHA256 }, "invalid sha256"},
+		"controller sha junk":   {func(f *formula) { f.ControllerSHA256 += "\nsystem 'x'" }, "invalid sha256"},
+		"controller sha empty":  {func(f *formula) { f.ControllerSHA256 = "" }, "invalid sha256"},
 		"tag trailing newline":  {func(f *formula) { f.Tag += "\nfoo" }, "invalid tag"},
 		"tag trailing junk":     {func(f *formula) { f.Tag += `"` }, "invalid tag"},
 		"tag leading junk":      {func(f *formula) { f.Tag = "x\n" + f.Tag }, "invalid tag"},
@@ -100,7 +108,7 @@ func TestRefusesJunkAroundValidValues(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := valid
 			tc.edit(&f)
-			out, err := render("{{.Repo}} {{.Tag}} {{.SHA256}}", f)
+			out, err := render("{{.Repo}} {{.Tag}} {{.SHA256}} {{.ControllerSHA256}}", f)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err = %v, want %q", err, tc.want)
 			}
@@ -115,7 +123,7 @@ func TestRefusesJunkAroundValidValues(t *testing.T) {
 }
 
 func TestTemplateRefusesUnknownField(t *testing.T) {
-	_, err := render("{{.Missing}}", formula{Repo: "a/b", Tag: "v1.0.0", SHA256: goldenSHA})
+	_, err := render("{{.Missing}}", formula{Repo: "a/b", Tag: "v1.0.0", SHA256: goldenSHA, ControllerSHA256: controllerSHA})
 	if err == nil {
 		t.Fatal("unknown template field accepted")
 	}
