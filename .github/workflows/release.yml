@@ -302,6 +302,10 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
+      # Built in the checkout (the module root); the steps below run it from
+      # the dist directory, which is outside the module.
+      - name: Build the verifier
+        run: go build -o "$RUNNER_TEMP/release-manifest" ./checks/release-manifest
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-dist
@@ -329,7 +333,7 @@ jobs:
               --source-digest "$GITHUB_SHA" \
               --deny-self-hosted-runners
           done
-          go run "$GITHUB_WORKSPACE/checks/release-manifest" verify -pub "$PUB" \
+          "$RUNNER_TEMP/release-manifest" verify -pub "$PUB" \
             -manifest release-manifest.json -sig release-manifest.json.sig \
             -tag "$RELEASE_TAG" -commit "$GITHUB_SHA" -kind "$KIND" -sums SHA256SUMS \
             -macserve macserve-darwin-arm64 -controller macserve-controller-darwin-arm64
@@ -408,4 +412,4 @@ jobs:
           fi
           gh release create "$RELEASE_TAG" "${assets[@]}" \
             --verify-tag --title "$RELEASE_TAG" \
-            --notes "Darwin arm64 macserve and macserve-controller built by checks/release-build.sh (CGO disabled, -trimpath, -buildvcs=true), rebuilt byte-identically on a second runner, with GitHub build provenance attestations for both, SHA256SUMS, release-manifest.json and its signature, and carry-proof.json when present (gh attestation verify FILE --repo $GH_REPO). release-manifest.json is signed by the CI release key (release-manifest.json.sig; go run ./checks/release-manifest verify -pub checks/release-manifest/release-signing.pub -manifest release-manifest.json -sig release-manifest.json.sig). Verify SHA256SUMS (and carry-proof.json) that way before macserve setup or macserve upgrade. $kind $carry"
+            --notes "Darwin arm64 macserve and macserve-controller built by checks/release-build.sh (CGO disabled, -trimpath, -buildvcs=true), rebuilt byte-identically on a second runner, with GitHub build provenance attestations for both, SHA256SUMS, release-manifest.json and its signature, and carry-proof.json when present (gh attestation verify FILE --repo $GH_REPO). release-manifest.json is signed by the CI release key (release-manifest.json.sig); verify it with the verify command of checks/release-manifest, run from a checkout of this tag (docs/releases.md). Verify SHA256SUMS (and carry-proof.json) that way before macserve setup or macserve upgrade. $kind $carry"
