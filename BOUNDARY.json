@@ -1,5 +1,5 @@
 {
-  "schema": 1,
+  "schema": 2,
   "classes": {
     "B": [
       ".gitattributes",
@@ -13,13 +13,14 @@
       "cmd/macserve/**",
       "go.mod",
       "go.sum",
-      "internal/api/**",
-      "internal/controller/**",
+      "internal/controllerconfig/**",
+      "internal/daemonlog/**",
       "internal/deploy/**",
       "internal/doctor/**",
       "internal/evidence/**",
       "internal/githubapi/**",
-      "internal/githubpull/**",
+      "internal/githubwire/**",
+      "internal/health/**",
       "internal/hostguard/**",
       "internal/launchctlprint/**",
       "internal/maintenance/**",
@@ -34,7 +35,6 @@
       "internal/setup/**",
       "internal/signer/**",
       "internal/source/**",
-      "internal/store/**",
       "internal/testflight/**",
       "internal/waiter/**",
       "internal/worker/**",
@@ -62,6 +62,10 @@
       "internal/worker/job_observation_*_test.go",
       "internal/worker/report_types_test.go",
       "internal/worker/report_types_*_test.go"
+    ],
+    "K": [
+      "cmd/macserve-controller/**",
+      "internal/controllerk/**"
     ]
   },
   "seams": {
@@ -72,5 +76,49 @@
       "clip"
     ]
   },
-  "g_calls": {}
+  "g_calls": {},
+  "k_packages": [
+    "cmd/macserve-controller",
+    "internal/controllerk/api",
+    "internal/controllerk/controller",
+    "internal/controllerk/githubpull",
+    "internal/controllerk/store"
+  ],
+  "k_allowed_imports": [
+    "internal/controllerconfig",
+    "internal/daemonlog",
+    "internal/evidence",
+    "internal/githubapi",
+    "internal/githubwire",
+    "internal/health",
+    "internal/hostguard",
+    "internal/launchctlprint",
+    "internal/model",
+    "internal/peercred",
+    "internal/profiles",
+    "internal/protocol",
+    "internal/receipt",
+    "internal/signer",
+    "internal/source",
+    "internal/worker"
+  ],
+  "binaries": {
+    "macserve": {
+      "package": "cmd/macserve",
+      "classes": [
+        "B",
+        "G",
+        "C"
+      ]
+    },
+    "macserve-controller": {
+      "package": "cmd/macserve-controller",
+      "classes": [
+        "B",
+        "G",
+        "C",
+        "K"
+      ]
+    }
+  }
 }

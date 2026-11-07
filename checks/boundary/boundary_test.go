@@ -42,7 +42,7 @@ func TestEveryTrackedFileClassified(t *testing.T) {
 		}
 	}
 	sort.Strings(carry)
-	t.Logf("%d tracked files: B=%d G=%d C=%d T=%d", len(files), counts[ClassB], counts[ClassG], counts[ClassC], counts[ClassT])
+	t.Logf("%d tracked files: B=%d G=%d C=%d T=%d K=%d", len(files), counts[ClassB], counts[ClassG], counts[ClassC], counts[ClassT], counts[ClassK])
 	if testing.Verbose() {
 		t.Logf("non-boundary files:\n%s", strings.Join(carry, "\n"))
 	}
@@ -65,8 +65,8 @@ func TestBoundaryManifestPinsAssets(t *testing.T) {
 		"cmd/macserve/main.go", "cmd/macserve/qualify.go", "cmd/macserve/new.go",
 		"internal/hostguard/hostguard.go", "internal/deploy/new.go", "internal/qualification/anchor.go", "internal/qualification/new.go",
 		"internal/peercred/new.go", "internal/protocol/new.go", "internal/workerclient/new.go", "internal/pfctl/new.go", "internal/launchctlprint/new.go",
-		"internal/controller/guards.go", "internal/controller/socket.go", "internal/controller/config.go", "internal/controller/artifacts.go", "internal/controller/new.go",
-		"internal/api/api.go", "internal/store/auth.go", "internal/model/new.go", "internal/profiles/new.go",
+		"internal/controllerconfig/config.go", "internal/controllerconfig/new.go", "internal/health/new.go", "internal/githubwire/new.go", "internal/daemonlog/new.go",
+		"internal/model/new.go", "internal/profiles/new.go",
 		"internal/maintenance/evaluate.go", "internal/maintenance/coexistence.go", "internal/maintenance/persistence.go", "internal/maintenance/inspect.go", "internal/maintenance/new.go",
 		"internal/worker/simulator.go", "internal/worker/types.go", "internal/worker/execute.go", "internal/worker/new.go",
 		"internal/worker/simulator_test.go", "internal/worker/metal_test.go",
@@ -76,17 +76,15 @@ func TestBoundaryManifestPinsAssets(t *testing.T) {
 	// The root worker trusts the controller's job snapshot: validateJob only
 	// re-derives it from itself (profiles.ForSnapshot). Every path that
 	// chooses, persists or returns which repository, commit, profile or
-	// recipe a job runs with is therefore B, as is everything that signs or
-	// verifies receipts, the controller-side source tree export the worker
-	// reads .macserve.json from, and the root-side parser of job-produced
-	// test output.
+	// recipe a job runs with is therefore B or K (controller only, never
+	// carried until K carry exists), as is everything that signs or verifies
+	// receipts, the controller-side source tree export the worker reads
+	// .macserve.json from, and the root-side parser of job-produced test
+	// output. TestControllerManifestPinsK pins the K side.
 	pinned = append(pinned,
-		"internal/store/store.go", "internal/store/queue.go", "internal/store/github.go", "internal/store/runtime.go", "internal/store/new.go",
-		"internal/githubpull/poller.go", "internal/githubpull/publication.go", "internal/githubpull/new.go",
 		"internal/githubapi/client.go", "internal/githubapi/endpoints.go", "internal/githubapi/new.go",
 		"internal/receipt/signer.go", "internal/receipt/validate.go", "internal/receipt/canonical.go", "internal/receipt/new.go",
-		"internal/controller/types.go", "internal/controller/runtime.go", "internal/controller/completion.go",
-		"internal/api/jobs.go", "internal/evidence/tests.go", "internal/source/git.go", "internal/source/source.go", "internal/source/tree.go",
+		"internal/evidence/tests.go", "internal/source/git.go", "internal/source/source.go", "internal/source/tree.go",
 	)
 	for _, file := range pinned {
 		if class, err := m.Classify(file); err != nil || class != ClassB {
@@ -98,11 +96,50 @@ func TestBoundaryManifestPinsAssets(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, f := range files {
-		for _, prefix := range []string{"assets/", ".github/", "checks/", "cmd/macserve/", "internal/qualification/", "internal/hostguard/", "internal/store/", "internal/githubpull/", "internal/githubapi/", "internal/receipt/", "internal/controller/", "internal/api/", "internal/profiles/", "internal/model/", "internal/source/"} {
+		for _, prefix := range []string{"assets/", ".github/", "checks/", "cmd/macserve/", "internal/qualification/", "internal/hostguard/", "internal/githubapi/", "internal/receipt/", "internal/controllerconfig/", "internal/health/", "internal/githubwire/", "internal/daemonlog/", "internal/profiles/", "internal/model/", "internal/source/"} {
 			if strings.HasPrefix(f.Path, prefix) {
 				if class, _ := m.Classify(f.Path); class != ClassB {
 					t.Errorf("%s: class %q, want B", f.Path, class)
 				}
+			}
+		}
+	}
+}
+
+// TestControllerManifestPinsK keeps the controller binary and the
+// controller-only packages in class K, whole-package, and pins which binary
+// links K: only macserve-controller.
+func TestControllerManifestPinsK(t *testing.T) {
+	root := repoRoot(t)
+	m, err := LoadManifest(filepath.Join(root, ManifestFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]Binary{
+		"macserve":            {Package: "cmd/macserve", Classes: []string{ClassB, ClassG, ClassC}},
+		"macserve-controller": {Package: "cmd/macserve-controller", Classes: []string{ClassB, ClassG, ClassC, ClassK}},
+	}
+	if len(m.Binaries) != len(want) {
+		t.Errorf("binaries %v, want %v", m.Binaries, want)
+	}
+	for name, b := range want {
+		if got, ok := m.Binaries[name]; !ok || got.Package != b.Package || !slices.Equal(got.Classes, b.Classes) {
+			t.Errorf("binaries %s: %+v, want %+v", name, got, b)
+		}
+	}
+	for _, dir := range []string{"cmd/macserve-controller", "internal/controllerk/controller", "internal/controllerk/api", "internal/controllerk/store", "internal/controllerk/githubpull"} {
+		if !slices.Contains(m.KPackages, dir) {
+			t.Errorf("k_packages lacks %s", dir)
+		}
+	}
+	files, err := TrackedFiles(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		if strings.HasPrefix(f.Path, "internal/controllerk/") || strings.HasPrefix(f.Path, "cmd/macserve-controller/") {
+			if class, _ := m.Classify(f.Path); class != ClassK {
+				t.Errorf("%s: class %q, want K", f.Path, class)
 			}
 		}
 	}

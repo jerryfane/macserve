@@ -3,8 +3,24 @@
 // carry (C) and gate-tuning (G) code from changing the isolation boundary.
 //
 // Classes: B (boundary: any change needs full requalification), G (gate
-// tuning), C (carry), T (text and tests named for C/G files). A file that no
-// pattern matches is an error, so a new file is boundary until classified.
+// tuning), C (carry), T (text and tests named for C/G files), K (controller
+// only: linked into no binary but the controller). A file that no pattern
+// matches is an error, so a new file is boundary until classified.
+//
+// K is whole-package. k_packages lists the module-relative directories of
+// the K packages. A file belongs to the package of its nearest directory,
+// itself or an ancestor, that holds Go files the go command sees (testdata,
+// "_" and "." directories hold none), and is K exactly when that package is
+// listed: its Go source, its tests and its testdata are all K, and a K
+// pattern that splits a package or reaches outside one is an error. K test
+// files are K (they are not B or T).
+//
+// Link rules, on the darwin/arm64 release build: binaries names each built
+// artifact, its main package and the classes it may link. A binary without
+// K links no K package. A binary with K has a K main package and links,
+// besides std, other modules and K packages, only the module packages in
+// k_allowed_imports, which lists exactly the non-K module packages that the
+// K binaries link. No non-K package imports a K package, tests included.
 //
 // Pattern syntax: a slash-separated path. A segment that is exactly "**"
 // matches zero or more whole segments; "*" inside any other segment matches
@@ -35,11 +51,12 @@ const (
 	ClassG = "G"
 	ClassC = "C"
 	ClassT = "T"
+	ClassK = "K"
 )
 
-var classNames = []string{ClassB, ClassG, ClassC, ClassT}
+var classNames = []string{ClassB, ClassG, ClassC, ClassT, ClassK}
 
-// Manifest is BOUNDARY.json, schema 1.
+// Manifest is BOUNDARY.json, schema 2.
 type Manifest struct {
 	Schema  int                 `json:"schema"`
 	Classes map[string][]string `json:"classes"`
@@ -52,9 +69,27 @@ type Manifest struct {
 	// golang.org/x/sys identifiers ("syscall.Lstat", "unix.Statfs") that its G
 	// files may use.
 	GCalls map[string][]string `json:"g_calls"`
+	// KPackages are the module-relative directories of the K packages.
+	KPackages []string `json:"k_packages"`
+	// KAllowedImports are the module-relative directories of the non-K
+	// module packages that binaries linking K may link.
+	KAllowedImports []string `json:"k_allowed_imports"`
+	// Binaries maps each built artifact to its main package and the classes
+	// its linked module files may have.
+	Binaries map[string]Binary `json:"binaries"`
 
 	patterns []pattern
 }
+
+// Binary is one built artifact: its module-relative main package directory
+// and the classes of the module files it may link.
+type Binary struct {
+	Package string   `json:"package"`
+	Classes []string `json:"classes"`
+}
+
+// linksK reports whether the binary may link K packages.
+func (b Binary) linksK() bool { return slices.Contains(b.Classes, ClassK) }
 
 type pattern struct {
 	text, class string
@@ -84,7 +119,7 @@ func ParseManifest(data []byte) (*Manifest, error) {
 	if d.Decode(new(any)) != io.EOF {
 		return nil, errors.New("BOUNDARY.json: trailing data")
 	}
-	if m.Schema != 1 {
+	if m.Schema != 2 {
 		return nil, fmt.Errorf("BOUNDARY.json: unsupported schema %d", m.Schema)
 	}
 	if len(m.Classes) != len(classNames) {
@@ -128,7 +163,60 @@ func ParseManifest(data []byte) (*Manifest, error) {
 			}
 		}
 	}
+	if err := m.validateK(); err != nil {
+		return nil, fmt.Errorf("BOUNDARY.json: %w", err)
+	}
 	return &m, nil
+}
+
+// validateK checks k_packages, k_allowed_imports and binaries on their own;
+// ClassifyFiles and the link rules check them against the tree.
+func (m *Manifest) validateK() error {
+	k := map[string]bool{}
+	for _, dir := range m.KPackages {
+		if err := validRelPath(dir); err != nil {
+			return fmt.Errorf("k_packages %q: %w", dir, err)
+		}
+		if k[dir] {
+			return fmt.Errorf("k_packages %q listed twice", dir)
+		}
+		k[dir] = true
+	}
+	allowed := map[string]bool{}
+	for _, dir := range m.KAllowedImports {
+		if err := validRelPath(dir); err != nil {
+			return fmt.Errorf("k_allowed_imports %q: %w", dir, err)
+		}
+		if allowed[dir] || k[dir] {
+			return fmt.Errorf("k_allowed_imports %q listed twice or a K package", dir)
+		}
+		allowed[dir] = true
+	}
+	mains := map[string]string{}
+	for name, b := range m.Binaries {
+		if name == "" || strings.ContainsAny(name, "/ \t\n") {
+			return fmt.Errorf("binaries: malformed name %q", name)
+		}
+		if err := validRelPath(b.Package); err != nil {
+			return fmt.Errorf("binaries %s: package %q: %w", name, b.Package, err)
+		}
+		if other, dup := mains[b.Package]; dup {
+			return fmt.Errorf("binaries %s and %s build the same package %q", other, name, b.Package)
+		}
+		mains[b.Package] = name
+		if len(b.Classes) == 0 {
+			return fmt.Errorf("binaries %s: no classes", name)
+		}
+		for i, class := range b.Classes {
+			if !slices.Contains(classNames, class) || class == ClassT || slices.Contains(b.Classes[:i], class) {
+				return fmt.Errorf("binaries %s: class %q is unknown, T (never linked) or listed twice", name, class)
+			}
+		}
+		if b.linksK() != k[b.Package] {
+			return fmt.Errorf("binaries %s: a binary links K exactly when its main package %q is in k_packages", name, b.Package)
+		}
+	}
+	return nil
 }
 
 func validRelPath(p string) error {
@@ -241,8 +329,9 @@ type File struct {
 
 // ClassifyFiles classifies every tracked file exactly once and applies the
 // file-level rules: only regular files, C and G hold only non-test Go source,
-// test files are B or T, a T test file is named for a C or G file beside it,
-// and T holds no compiled Go source.
+// test files are B or T outside K packages, a T test file is named for a C or
+// G file beside it, T holds no compiled Go source, and a file is K exactly
+// when its package is in k_packages.
 func (m *Manifest) ClassifyFiles(files []File) (map[string]string, []string) {
 	classes := make(map[string]string, len(files))
 	var problems []string
@@ -294,8 +383,64 @@ func (m *Manifest) ClassifyFiles(files []File) (map[string]string, []string) {
 			problems = append(problems, file+": Go source is linked into the binary and cannot be T")
 		}
 	}
+	problems = append(problems, m.checkKPackages(files, classes)...)
 	sort.Strings(problems)
 	return classes, problems
+}
+
+// checkKPackages applies the whole-package K rule: a file is K exactly when
+// the package that owns it (see goPackageOf) is in k_packages, and every
+// k_packages entry is a package.
+func (m *Manifest) checkKPackages(files []File, classes map[string]string) []string {
+	pkgDirs := map[string]bool{}
+	for _, f := range files {
+		if dir, name := path.Split(f.Path); strings.HasSuffix(name, ".go") && goVisible(f.Path) {
+			pkgDirs[path.Clean(dir)] = true
+		}
+	}
+	var problems []string
+	for _, dir := range m.KPackages {
+		if !pkgDirs[dir] {
+			problems = append(problems, dir+": k_packages entry is not a Go package directory")
+		}
+	}
+	for file, class := range classes {
+		owner := goPackageOf(file, pkgDirs)
+		inK := owner != "" && slices.Contains(m.KPackages, owner)
+		switch {
+		case class == ClassK && !inK && owner == "":
+			problems = append(problems, file+": K file outside any Go package; K is whole-package (k_packages)")
+		case class == ClassK && !inK:
+			problems = append(problems, fmt.Sprintf("%s: K file in package %s, which is not in k_packages", file, owner))
+		case class != ClassK && inK:
+			problems = append(problems, fmt.Sprintf("%s: class %s in K package %s; every file of a K package is K", file, class, owner))
+		}
+	}
+	return problems
+}
+
+// goVisible reports whether the go command sees a file: no directory or
+// file name segment is testdata or starts with "_" or ".".
+func goVisible(file string) bool {
+	for _, seg := range strings.Split(file, "/") {
+		if seg == "testdata" || strings.HasPrefix(seg, "_") || strings.HasPrefix(seg, ".") {
+			return false
+		}
+	}
+	return true
+}
+
+// goPackageOf returns the package directory that owns file: the nearest of
+// its directory and their ancestors that holds Go files, or "" for none.
+func goPackageOf(file string, pkgDirs map[string]bool) string {
+	for dir := path.Dir(file); ; dir = path.Dir(dir) {
+		if pkgDirs[dir] {
+			return dir
+		}
+		if dir == "." {
+			return ""
+		}
+	}
 }
 
 func isGoSource(file string) bool {
