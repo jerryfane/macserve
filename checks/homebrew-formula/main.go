@@ -1,6 +1,6 @@
 // Command homebrew-formula renders assets/homebrew/macserve.rb.tmpl for one
-// release tag, taking the digest of macserve-darwin-arm64 from that release's
-// SHA256SUMS. It only reads its inputs and writes the formula to stdout.
+// release tag, taking the digests of macserve-darwin-arm64 and
+// macserve-controller-darwin-arm64 from that release's SHA256SUMS. It only reads its inputs and writes the formula to stdout.
 //
 //	go run ./checks/homebrew-formula -tag v0.1.28 -sums SHA256SUMS > macserve.rb
 package main
@@ -18,7 +18,10 @@ import (
 	"text/template"
 )
 
-const asset = "macserve-darwin-arm64"
+const (
+	asset           = "macserve-darwin-arm64"
+	controllerAsset = "macserve-controller-darwin-arm64"
+)
 
 // Go's ^ and $ without (?m) match only at the start and end of the text, so a
 // value with a newline or any other junk around it is refused.
@@ -29,7 +32,7 @@ var (
 )
 
 type formula struct {
-	Repo, Tag, Version, SHA256 string
+	Repo, Tag, Version, SHA256, ControllerSHA256 string
 }
 
 func main() {
@@ -56,11 +59,15 @@ func run(tmplPath, sumsPath, tag, repo string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	sha, err := assetDigest(sums)
+	sha, err := assetDigest(sums, asset)
 	if err != nil {
 		return err
 	}
-	rendered, err := render(string(source), formula{Repo: repo, Tag: tag, SHA256: sha})
+	controllerSHA, err := assetDigest(sums, controllerAsset)
+	if err != nil {
+		return err
+	}
+	rendered, err := render(string(source), formula{Repo: repo, Tag: tag, SHA256: sha, ControllerSHA256: controllerSHA})
 	if err != nil {
 		return err
 	}
@@ -68,9 +75,9 @@ func run(tmplPath, sumsPath, tag, repo string, out io.Writer) error {
 	return err
 }
 
-// assetDigest returns the digest listed for macserve-darwin-arm64. It refuses
-// a missing, duplicated or malformed entry instead of guessing.
-func assetDigest(sums []byte) (string, error) {
+// assetDigest returns the digest SHA256SUMS lists for asset. It refuses a
+// missing, duplicated or malformed entry instead of guessing.
+func assetDigest(sums []byte, asset string) (string, error) {
 	var found []string
 	scanner := bufio.NewScanner(bytes.NewReader(sums))
 	for scanner.Scan() {
@@ -111,8 +118,10 @@ func render(source string, f formula) ([]byte, error) {
 	if !repoPattern.MatchString(f.Repo) {
 		return nil, fmt.Errorf("invalid repository %q", f.Repo)
 	}
-	if !shaPattern.MatchString(f.SHA256) {
-		return nil, fmt.Errorf("invalid sha256 %q (want 64 lowercase hex digits)", f.SHA256)
+	for _, sha := range []string{f.SHA256, f.ControllerSHA256} {
+		if !shaPattern.MatchString(sha) {
+			return nil, fmt.Errorf("invalid sha256 %q (want 64 lowercase hex digits)", sha)
+		}
 	}
 	tmpl, err := template.New("formula").Option("missingkey=error").Parse(source)
 	if err != nil {

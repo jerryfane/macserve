@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jerryfane/macserve/internal/controller"
+	"github.com/jerryfane/macserve/internal/controllerconfig"
 	"github.com/jerryfane/macserve/internal/model"
 	"github.com/jerryfane/macserve/internal/profiles"
 )
@@ -161,12 +161,12 @@ func TestAppKeyWriteRefusesOverwriteSymlinkAndWrongOwner(t *testing.T) {
 func controllerFixture(t *testing.T, target KeyTarget) ConfigFile {
 	t.Helper()
 	config := filepath.Join(target.Root, "config")
-	c := controller.Config{
+	c := controllerconfig.Config{
 		Root: target.Root + "/var/controller", Socket: target.Root + "/var/controller/run/worker.sock", JobUID: 611,
 		ProfilesFile: config + "/profiles.json", Listen: "100.64.0.10:9443", AllowedNetworks: []string{"100.64.0.0/10", "fd7a:115c:a1e0::/48"},
 		TLSCertificate: config + "/tls-cert.pem", TLSKey: target.Dir() + "/tls-key.pem", HealthFile: target.Root + "/health/current.json",
 		PauseFile: config + "/owner.pause", OwnerUID: 501,
-		Receipt: controller.ReceiptConfig{KeyID: "k1", PrivateKeyFile: target.Dir() + "/receipt-key.pem", ServiceID: "svc", HostID: "host", Repositories: map[string]int64{"jdoe/myapp": 4242}},
+		Receipt: controllerconfig.ReceiptConfig{KeyID: "k1", PrivateKeyFile: target.Dir() + "/receipt-key.pem", ServiceID: "svc", HostID: "host", Repositories: map[string]int64{"jdoe/myapp": 4242}},
 	}
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
@@ -193,7 +193,7 @@ func TestWriteGitHubProducesLoadableConfig(t *testing.T) {
 	if err := file.WriteGitHub(enrollment(), target, pemBytes); err != nil {
 		t.Fatal(err)
 	}
-	c, err := controller.LoadConfig(file.Path)
+	c, err := controllerconfig.LoadConfig(file.Path)
 	if err != nil {
 		t.Fatal(err)
 	}

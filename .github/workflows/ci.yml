@@ -44,9 +44,15 @@ jobs:
         if: runner.os == 'macOS'
         run: nice -n 10 go test -count=1 -v -run 'RealImage|NeverEnters|RealMount|StudioStatfs' ./internal/maintenance ./internal/worker
       - name: Build CLI
-        run: nice -n 10 go build -p 2 -o "${{ runner.temp }}/macserve" ./cmd/macserve
+        run: |
+          nice -n 10 go build -p 2 -o "${{ runner.temp }}/macserve" ./cmd/macserve
+          nice -n 10 go build -p 2 -o "${{ runner.temp }}/macserve-controller" ./cmd/macserve-controller
+      # The controller daemon is its own binary; macserve has no controller
+      # subcommand.
       - name: CLI smoke
         run: |
+          nice -n 10 "${{ runner.temp }}/macserve-controller" --help
+          nice -n 10 "${{ runner.temp }}/macserve-controller" version --json
           nice -n 10 "${{ runner.temp }}/macserve" --help
           nice -n 10 "${{ runner.temp }}/macserve" maintenance --help
           nice -n 10 "${{ runner.temp }}/macserve" deploy-install --help
@@ -63,6 +69,7 @@ jobs:
       GOMAXPROCS: "2"
     outputs:
       sha256: ${{ steps.build.outputs.sha256 }}
+      controller-sha256: ${{ steps.build.outputs.controller-sha256 }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -75,9 +82,12 @@ jobs:
       - name: Rebuild Darwin arm64 release
         id: build
         run: |
-          line=$(rebuild/macserve/checks/release-build.sh "$RUNNER_TEMP/rebuild")
-          echo "$line"
-          echo "sha256=${line%% *}" >> "$GITHUB_OUTPUT"
+          rebuild/macserve/checks/release-build.sh "$RUNNER_TEMP/rebuild" > "$RUNNER_TEMP/rebuild.sums"
+          cat "$RUNNER_TEMP/rebuild.sums"
+          {
+            echo "sha256=$(awk '$2 ~ /\/macserve-darwin-arm64$/ { print $1 }' "$RUNNER_TEMP/rebuild.sums")"
+            echo "controller-sha256=$(awk '$2 ~ /\/macserve-controller-darwin-arm64$/ { print $1 }' "$RUNNER_TEMP/rebuild.sums")"
+          } >> "$GITHUB_OUTPUT"
 
   reproducible:
     name: Reproducible release build (Linux build matches macOS rebuild)
@@ -99,7 +109,12 @@ jobs:
         working-directory: ${{ runner.temp }}/dist
         env:
           REBUILT_SHA256: ${{ needs.reproducible-rebuild.outputs.sha256 }}
-        run: echo "$REBUILT_SHA256  macserve-darwin-arm64" | sha256sum --check --strict
+          REBUILT_CONTROLLER_SHA256: ${{ needs.reproducible-rebuild.outputs.controller-sha256 }}
+        run: |
+          printf '%s  %s\n' \
+            "$REBUILT_SHA256" macserve-darwin-arm64 \
+            "$REBUILT_CONTROLLER_SHA256" macserve-controller-darwin-arm64 |
+            sha256sum --check --strict
 
   # Dry run of release.yml's "Render Homebrew formula" step against the latest
   # published release's SHA256SUMS. Nothing is uploaded.
@@ -125,8 +140,17 @@ jobs:
           tag=$(gh release view --json tagName --jq .tagName)
           mkdir -p "$DIST"
           gh release download "$tag" --pattern SHA256SUMS --dir "$DIST"
+          # Releases before the controller split publish no
+          # macserve-controller-darwin-arm64; the renderer rightly refuses
+          # their SHA256SUMS, so there is nothing to dry-run against yet.
+          if ! awk '$2 == "macserve-controller-darwin-arm64" { found = 1 } END { exit !found }' "$DIST/SHA256SUMS"; then
+            echo "::notice::$tag predates macserve-controller; skipping the formula dry run"
+            exit 0
+          fi
           go run ./checks/homebrew-formula \
             -tag "$tag" -repo "$GH_REPO" \
             -sums "$DIST/SHA256SUMS" > "$DIST/macserve.rb"
           cat "$DIST/macserve.rb"
-          grep -F "sha256 \"$(awk '$2 == "macserve-darwin-arm64" { print $1 }' "$DIST/SHA256SUMS")\"" "$DIST/macserve.rb"
+          for asset in macserve-darwin-arm64 macserve-controller-darwin-arm64; do
+            grep -F "sha256 \"$(awk -v a="$asset" '$2 == a { print $1 }' "$DIST/SHA256SUMS")\"" "$DIST/macserve.rb"
+          done

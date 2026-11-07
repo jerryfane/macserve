@@ -239,6 +239,19 @@ func Verify(raw []byte, keys map[string]ed25519.PublicKey) (Payload, error) {
 	return p, nil
 }
 
+// ParsePublicKeys decodes pinned base64 Ed25519 public keys by key ID.
+func ParsePublicKeys(encoded map[string]string) (map[string]ed25519.PublicKey, error) {
+	keys := make(map[string]ed25519.PublicKey, len(encoded)+1)
+	for id, text := range encoded {
+		key, err := base64.StdEncoding.Strict().DecodeString(text)
+		if id == "" || err != nil || len(key) != ed25519.PublicKeySize {
+			return nil, errors.New("invalid pinned Ed25519 public key")
+		}
+		keys[id] = ed25519.PublicKey(key)
+	}
+	return keys, nil
+}
+
 // ParsePrivateKey accepts unencrypted PKCS#8 PEM, raw Ed25519 seed/private bytes,
 // or base64 seed/private bytes. Expanded private keys must contain the correct
 // public half; arbitrary 64-byte strings are not accepted as private keys.

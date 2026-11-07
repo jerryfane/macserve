@@ -13,14 +13,15 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/jerryfane/macserve/internal/controller"
+	"github.com/jerryfane/macserve/internal/controllerconfig"
+	"github.com/jerryfane/macserve/internal/health"
 	"github.com/jerryfane/macserve/internal/hostguard"
 	"github.com/jerryfane/macserve/internal/profiles"
 	"github.com/jerryfane/macserve/internal/worker"
 	"github.com/jerryfane/macserve/internal/workerclient"
 )
 
-func publish(path string, h controller.Health) error {
+func publish(path string, h health.Health) error {
 	if err := hostguard.RootDirectory(filepath.Dir(path)); err != nil {
 		return err
 	}
@@ -48,13 +49,13 @@ func publish(path string, h controller.Health) error {
 
 // Check evaluates the installed approval against live state once, without
 // publishing health. It requires macOS root and a protected loaded config.
-func Check(ctx context.Context, c Config) (controller.Health, error) {
+func Check(ctx context.Context, c Config) (health.Health, error) {
 	if c.path == "" {
-		return controller.Health{}, errors.New("check requires protected configuration")
+		return health.Health{}, errors.New("check requires protected configuration")
 	}
 	return observe(ctx, c)
 }
-func observe(ctx context.Context, c Config) (controller.Health, error) {
+func observe(ctx context.Context, c Config) (health.Health, error) {
 	invalid, _ := Evaluate(time.Now(), Qualification{}, BoundaryEvidence{}, Observation{})
 	opts, err := persistenceOptions(c)
 	if err != nil {
@@ -120,7 +121,7 @@ func Inspect(ctx context.Context, c Config) (Observation, error) {
 			return invalid, err
 		}
 	}
-	cc, err := controller.LoadConfig(c.ControllerConfig)
+	cc, err := controllerconfig.LoadConfig(c.ControllerConfig)
 	if err != nil {
 		return invalid, err
 	}

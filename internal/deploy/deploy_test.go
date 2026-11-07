@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/macserve/internal/controller"
+	"github.com/jerryfane/macserve/internal/controllerconfig"
 	"github.com/jerryfane/macserve/internal/maintenance"
 	"github.com/jerryfane/macserve/internal/profiles"
 	"github.com/jerryfane/macserve/internal/workerclient"
@@ -207,8 +207,20 @@ func TestEnvironmentCoexistenceTargets(t *testing.T) {
 }
 func TestRenderRejectsStaleMarkersAndActivation(t *testing.T) {
 	e, assets := fixture(t)
-	if _, err := renderAssets(e, assets); err != nil {
+	rendered, err := renderAssets(e, assets)
+	if err != nil {
 		t.Fatal(err)
+	}
+	// Only the controller service runs macserve-controller; the others
+	// keep macserve.
+	for name, arg0 := range map[string]string{
+		"launchd/org.macserve.controller.plist.tmpl":  "<key>ProgramArguments</key><array><string>/Library/macserve/bin/macserve-controller</string><string>--config</string><string>/Library/macserve/config/controller.json</string></array>",
+		"launchd/org.macserve.worker.plist.tmpl":      "<key>ProgramArguments</key><array><string>/Library/macserve/bin/macserve</string><string>worker</string>",
+		"launchd/org.macserve.maintenance.plist.tmpl": "<key>ProgramArguments</key><array><string>/Library/macserve/bin/macserve</string><string>maintenance</string>",
+	} {
+		if !bytes.Contains(rendered[name], []byte(arg0)) {
+			t.Errorf("%s does not run %s", name, arg0)
+		}
 	}
 	for _, source := range []string{"{{.StaleUID}}", "{{.JobUID}", "orphan }}", "{{.JobUID}}{{.Unknown}}"} {
 		if _, err := Render([]byte(source), map[string]string{"{{.JobUID}}": "611"}); err == nil {
@@ -285,7 +297,7 @@ func TestMaterialHasValidCryptoConsumerConfigsAndPrivateIntent(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	c, err := controller.LoadConfig(filepath.Join(stage, "controller.json"))
+	c, err := controllerconfig.LoadConfig(filepath.Join(stage, "controller.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -396,13 +408,32 @@ func TestPlanDoesNotPersistCredentialsOrMutateInputs(t *testing.T) {
 	if err := os.WriteFile(binary, data, 0600); err != nil {
 		t.Fatal(err)
 	}
+	controller := filepath.Join(root, "macserve-controller")
+	controllerData := []byte("controller binary plan fixture")
+	if err := os.WriteFile(controller, controllerData, 0600); err != nil {
+		t.Fatal(err)
+	}
 	assets, err := filepath.Abs(filepath.Join("..", "..", "assets"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var output bytes.Buffer
-	if err := Install(Options{EnvironmentPath: envPath, BinaryPath: binary, SHA256: digest(data), AssetsPath: assets}, &output, &output); err != nil {
+	options := Options{EnvironmentPath: envPath, BinaryPath: binary, SHA256: digest(data), ControllerBinaryPath: controller, ControllerSHA256: digest(controllerData), AssetsPath: assets}
+	if err := Install(options, &output, &output); err != nil {
 		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), digest(data)) || !strings.Contains(output.String(), digest(controllerData)) {
+		t.Fatalf("plan does not name both verified digests:\n%s", output.String())
+	}
+	wrong := options
+	wrong.ControllerSHA256 = digest(data)
+	if err := Install(wrong, &output, &output); err == nil || !strings.Contains(err.Error(), "controller binary") {
+		t.Fatalf("controller digest mismatch accepted: %v", err)
+	}
+	missing := options
+	missing.ControllerSHA256 = ""
+	if err := Install(missing, &output, &output); err == nil || !strings.Contains(err.Error(), "--controller-sha256") {
+		t.Fatalf("missing controller digest accepted: %v", err)
 	}
 	if strings.Contains(output.String(), "API_BEARER_TOKEN=") {
 		t.Fatal("plan emitted bearer credential")
@@ -411,7 +442,7 @@ func TestPlanDoesNotPersistCredentialsOrMutateInputs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 2 {
+	if len(entries) != 3 {
 		t.Fatal("plan persisted deployment state")
 	}
 	if runtime.GOOS != "darwin" || os.Getuid() != 0 || os.Geteuid() != 0 {
@@ -434,7 +465,7 @@ func TestBootstrapWrongDigestNeverExecutesBinary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("/bin/bash", script, "--env", filepath.Join(root, "unused.env"), "--binary", binary, "--sha256", strings.Repeat("0", 64))
+	cmd := exec.Command("/bin/bash", script, "--env", filepath.Join(root, "unused.env"), "--binary", binary, "--sha256", strings.Repeat("0", 64), "--controller-binary", binary, "--controller-sha256", strings.Repeat("0", 64))
 	cmd.Env = []string{"PATH=/usr/bin:/bin", "TMPDIR=" + root}
 	_, err = cmd.CombinedOutput()
 	if err == nil {

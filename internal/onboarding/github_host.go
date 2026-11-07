@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"syscall"
 
-	"github.com/jerryfane/macserve/internal/controller"
+	"github.com/jerryfane/macserve/internal/controllerconfig"
 	"github.com/jerryfane/macserve/internal/deploy"
 	"github.com/jerryfane/macserve/internal/profiles"
 )
@@ -41,7 +41,7 @@ func SystemConsoleUID() (uint32, error) {
 // Prepared is an installation ready for connect-github.
 type Prepared struct {
 	OwnerUID   uint32
-	Controller controller.Config
+	Controller controllerconfig.Config
 	Config     ConfigFile
 	Key        KeyTarget
 	Profiles   *profiles.Registry

@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/jerryfane/macserve/internal/githubapi"
-	"github.com/jerryfane/macserve/internal/githubpull"
+	"github.com/jerryfane/macserve/internal/githubwire"
 	"github.com/jerryfane/macserve/internal/model"
 	"github.com/jerryfane/macserve/internal/receipt"
 )
@@ -78,7 +78,7 @@ func prepare(o *Options) error {
 	if o.Mode == "" {
 		o.Mode = "ensure"
 	}
-	if _, err := githubpull.ParseRequest(fmt.Sprintf("/mac-evidence sha=%s profile=%s request=%s mode=%s", strings.Repeat("0", 40), o.Profile, o.RequestID, o.Mode)); err != nil {
+	if _, err := githubwire.ParseRequest(fmt.Sprintf("/mac-evidence sha=%s profile=%s request=%s mode=%s", strings.Repeat("0", 40), o.Profile, o.RequestID, o.Mode)); err != nil {
 		return errors.New("invalid machine evidence request")
 	}
 	o.Repo = strings.ToLower(o.Repo)
@@ -154,7 +154,7 @@ func run(ctx context.Context, o Options) (Result, error) {
 		return Result{}, errors.New("GitHub did not return the immutable machine request")
 	}
 	bodySum := sha256.Sum256([]byte(body))
-	correlation := githubpull.Correlation{CommentID: comment.ID, RequestID: o.RequestID, BodySHA256: hex.EncodeToString(bodySum[:])}
+	correlation := githubwire.Correlation{CommentID: comment.ID, RequestID: o.RequestID, BodySHA256: hex.EncodeToString(bodySum[:])}
 	var accepted acceptance
 	for {
 		if err := checkHead(ctx, o); err != nil {
@@ -249,8 +249,8 @@ func matchesCheck(check githubapi.Check, o Options) bool {
 	return check.ID > 0 && check.Name == "mac-evidence/"+o.Profile && check.AppID == o.AppID && check.HeadSHA == o.Expected.SHA
 }
 
-func matchPacket(check githubapi.Check, expected githubpull.Correlation) (githubpull.Packet, bool, error) {
-	var packet githubpull.Packet
+func matchPacket(check githubapi.Check, expected githubwire.Correlation) (githubwire.Packet, bool, error) {
+	var packet githubwire.Packet
 	if check.Output.Text == "" {
 		return packet, false, nil
 	}
@@ -281,7 +281,7 @@ func matchPacket(check githubapi.Check, expected githubpull.Correlation) (github
 	return packet, matched, nil
 }
 
-func verify(check githubapi.Check, packet githubpull.Packet, o Options) (Result, error) {
+func verify(check githubapi.Check, packet githubwire.Packet, o Options) (Result, error) {
 	if len(packet.Receipt) == 0 || len(packet.Receipt) > 32768 || bytes.Equal(bytes.TrimSpace(packet.Receipt), []byte("null")) {
 		return Result{}, errors.New("successful check lacks bounded signed evidence")
 	}

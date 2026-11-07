@@ -20,7 +20,7 @@ import (
 	"time"
 
 	"github.com/jerryfane/macserve/assets"
-	"github.com/jerryfane/macserve/internal/controller"
+	"github.com/jerryfane/macserve/internal/controllerconfig"
 	"github.com/jerryfane/macserve/internal/deploy"
 	"github.com/jerryfane/macserve/internal/onboarding"
 )
@@ -62,6 +62,9 @@ func testEnv(owner Owner) string {
 		"HOST_ADDRESSES=100.64.0.10\nDEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer\nREPOSITORIES=jdoe/myapp:4242\n"
 }
 
+// controllerBinary is the fixture release's macserve-controller.
+const controllerBinary = "macserve-controller binary"
+
 func itoa(u uint32) string { return strconv.FormatUint(uint64(u), 10) }
 
 func newFakeHost(t *testing.T) *fakeHost {
@@ -85,6 +88,10 @@ func newFakeHost(t *testing.T) *fakeHost {
 	if err := os.WriteFile(exe, []byte("macserve binary"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	// The release's macserve-controller beside the downloaded macserve.
+	if err := os.WriteFile(filepath.Join(top, "macserve-controller"), []byte(controllerBinary), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	files := map[string][]byte{}
 	for _, name := range assets.DeployNames {
 		files[name] = []byte("asset " + name)
@@ -93,13 +100,14 @@ func newFakeHost(t *testing.T) *fakeHost {
 	f := &fakeHost{t: t, top: top, fda: "granted\n", guiSession: true, boot: Boot{Time: "boot-time-1", SessionUUID: "11111111-1111-1111-1111-111111111111"}}
 	f.console = 501
 	f.h = &Helper{
-		Store:      Store{Staging: filepath.Join(top, "private/var/root/.macserve-setup"), Ledger: filepath.Join(top, "Library/macserve/var/setup"), Top: top, RootUID: uid, RootGID: gid},
-		Root:       filepath.Join(top, "Library/macserve"),
-		Owner:      Owner{UID: 501, GID: 20, Name: "jdoe", Home: "/Users/jdoe"},
-		SHA256:     digestHex([]byte("macserve binary")),
-		Executable: exe,
-		Assets:     files,
-		Install:    f.install,
+		Store:            Store{Staging: filepath.Join(top, "private/var/root/.macserve-setup"), Ledger: filepath.Join(top, "Library/macserve/var/setup"), Top: top, RootUID: uid, RootGID: gid},
+		Root:             filepath.Join(top, "Library/macserve"),
+		Owner:            Owner{UID: 501, GID: 20, Name: "jdoe", Home: "/Users/jdoe"},
+		SHA256:           digestHex([]byte("macserve binary")),
+		ControllerSHA256: digestHex([]byte(controllerBinary)),
+		Executable:       exe,
+		Assets:           files,
+		Install:          f.install,
 		Exec: func(_ context.Context, c Cmd) error {
 			f.execs = append(f.execs, c.Argv)
 			f.execEnv = append(f.execEnv, c.Env)
@@ -139,6 +147,13 @@ func (f *fakeHost) install(o deploy.Options, stdout, _ io.Writer) error {
 	if digestHex(bin) != o.SHA256 {
 		return errors.New("binary digest")
 	}
+	controller, err := os.ReadFile(o.ControllerBinaryPath)
+	if err != nil {
+		return err
+	}
+	if digestHex(controller) != o.ControllerSHA256 {
+		return errors.New("controller binary digest")
+	}
 	for _, name := range assets.DeployNames {
 		if _, err := os.Stat(filepath.Join(o.AssetsPath, name)); err != nil {
 			return err
@@ -161,25 +176,26 @@ func (f *fakeHost) install(o deploy.Options, stdout, _ io.Writer) error {
 	}
 	write("config/deploy.env", env, 0o644)
 	write("bin/macserve", bin, 0o755)
+	write("bin/macserve-controller", controller, 0o755)
 	write("config/profiles.json", []byte("{\"profiles\":[]}\n"), 0o644)
 	f.writeController(nil)
 	_, err = io.WriteString(stdout, testToken+"\n")
 	return err
 }
 
-func (f *fakeHost) controllerConfig() controller.Config {
+func (f *fakeHost) controllerConfig() controllerconfig.Config {
 	root := f.h.Root
 	config := root + "/config"
-	return controller.Config{
+	return controllerconfig.Config{
 		Root: root + "/var/controller", Socket: root + "/var/controller/run/worker.sock", JobUID: 6202,
 		ProfilesFile: config + "/profiles.json", Listen: "100.64.0.10:8443", AllowedNetworks: []string{"100.64.0.0/10", "fd7a:115c:a1e0::/48"},
 		TLSCertificate: config + "/tls-cert.pem", TLSKey: root + "/var/controller/secrets/tls-key.pem", HealthFile: root + "/health/current.json",
 		PauseFile: config + "/owner.pause", OwnerUID: 501,
-		Receipt: controller.ReceiptConfig{KeyID: "k1", PrivateKeyFile: root + "/var/controller/secrets/receipt-key.pem", ServiceID: "svc", HostID: "host", Repositories: map[string]int64{"jdoe/myapp": 4242}},
+		Receipt: controllerconfig.ReceiptConfig{KeyID: "k1", PrivateKeyFile: root + "/var/controller/secrets/receipt-key.pem", ServiceID: "svc", HostID: "host", Repositories: map[string]int64{"jdoe/myapp": 4242}},
 	}
 }
 
-func (f *fakeHost) writeController(github *controller.GitHubConfig) {
+func (f *fakeHost) writeController(github *controllerconfig.GitHubConfig) {
 	c := f.controllerConfig()
 	c.GitHub = github
 	data, err := json.MarshalIndent(c, "", "  ")
@@ -362,13 +378,14 @@ func TestInstallUsesDeployInstallAndMovesLedger(t *testing.T) {
 	want := deploy.Options{
 		EnvironmentPath: filepath.Join(f.h.Store.Staging, "deploy.env"), BinaryPath: filepath.Join(f.h.Store.Staging, "macserve"),
 		SHA256: f.h.SHA256, AssetsPath: filepath.Join(f.h.Store.Staging, "assets"), Apply: true,
+		ControllerBinaryPath: filepath.Join(f.h.Store.Staging, "macserve-controller"), ControllerSHA256: f.h.ControllerSHA256,
 	}
 	if o != want {
 		t.Errorf("options %+v, want %+v", o, want)
 	}
 	l, _ := r.DecodedLedger()
 	rec := l.record(StepInstall)
-	if rec.Status != StatusDone || rec.Inputs["macserve"] != f.h.SHA256 || rec.Inputs["deploy.env"] == "" || rec.Inputs["assets"] == "" {
+	if rec.Status != StatusDone || rec.Inputs["macserve"] != f.h.SHA256 || rec.Inputs[ControllerInput] != f.h.ControllerSHA256 || rec.Inputs["deploy.env"] == "" || rec.Inputs["assets"] == "" {
 		t.Errorf("install record %+v", rec)
 	}
 	if _, loc, err := f.h.Store.Load(); err != nil || loc != LedgerInstalled {
@@ -739,15 +756,19 @@ func TestDecodeRequestGrammar(t *testing.T) {
 }
 
 func TestParseRootArgsAndSudoOwner(t *testing.T) {
-	sha := strings.Repeat("a", 64)
-	if got, upgrade, err := ParseRootArgs([]string{"--sha256", sha}); err != nil || got != sha || upgrade {
-		t.Errorf("valid: %q %v %v", got, upgrade, err)
+	sha, ctl := strings.Repeat("a", 64), strings.Repeat("c", 64)
+	if got, err := ParseRootArgs([]string{"--sha256", sha}); err != nil || got != (RootArgs{SHA256: sha}) {
+		t.Errorf("valid: %+v %v", got, err)
 	}
-	if got, upgrade, err := ParseRootArgs([]string{"--upgrade", "--sha256", sha}); err != nil || got != sha || !upgrade {
-		t.Errorf("valid upgrade: %q %v %v", got, upgrade, err)
+	if got, err := ParseRootArgs([]string{"--sha256", sha, "--controller-sha256", ctl}); err != nil || got != (RootArgs{SHA256: sha, ControllerSHA256: ctl}) {
+		t.Errorf("valid install: %+v %v", got, err)
 	}
-	for _, args := range [][]string{nil, {"--sha256"}, {"--sha256", strings.ToUpper(sha)}, {"--sha256", sha, "--ledger", "/tmp/x"}, {"--env", "/tmp/x"}, {"--sha256=" + sha}, {"--sha256", sha, "--upgrade"}, {"--upgrade"}, {"--upgrade", "--upgrade", "--sha256", sha}} {
-		if _, _, err := ParseRootArgs(args); err == nil {
+	if got, err := ParseRootArgs([]string{"--upgrade", "--sha256", sha, "--controller-sha256", ctl}); err != nil || got != (RootArgs{SHA256: sha, ControllerSHA256: ctl, Upgrade: true}) {
+		t.Errorf("valid upgrade: %+v %v", got, err)
+	}
+	for _, args := range [][]string{nil, {"--sha256"}, {"--sha256", strings.ToUpper(sha)}, {"--sha256", sha, "--ledger", "/tmp/x"}, {"--env", "/tmp/x"}, {"--sha256=" + sha}, {"--sha256", sha, "--upgrade"}, {"--upgrade"}, {"--upgrade", "--upgrade", "--sha256", sha, "--controller-sha256", ctl},
+		{"--upgrade", "--sha256", sha}, {"--sha256", sha, "--controller-sha256"}, {"--sha256", sha, "--controller-sha256", strings.ToUpper(ctl)}, {"--controller-sha256", ctl, "--sha256", sha}, {"--sha256", sha, "--sha256", ctl}} {
+		if _, err := ParseRootArgs(args); err == nil {
 			t.Errorf("accepted %q", args)
 		}
 	}

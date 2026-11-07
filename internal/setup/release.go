@@ -17,8 +17,18 @@ import (
 // read-only `macserve upgrade --plan` (internal/setup/upgrade) and the root
 // helper's upgrade verb, which repeats every one of them as root.
 
-// ReleaseAsset is the release binary's name in a release's SHA256SUMS.
-const ReleaseAsset = "macserve-darwin-arm64"
+// ReleaseAsset and ControllerReleaseAsset are the release binaries' names
+// in a release's SHA256SUMS: macserve and macserve-controller, installed
+// side by side as bin/macserve and bin/macserve-controller.
+const (
+	ReleaseAsset           = "macserve-darwin-arm64"
+	ControllerReleaseAsset = "macserve-controller-darwin-arm64"
+)
+
+// ControllerInput is the step input (install) that records the installed
+// bin/macserve-controller's digest, next to "macserve". A ledger written
+// before the controller binary existed has none.
+const ControllerInput = "macserve-controller"
 
 var (
 	sumsLine       = regexp.MustCompile(`^([0-9a-f]{64}) [ *]([A-Za-z0-9._-]+)$`)
@@ -111,17 +121,25 @@ const CarryProofAsset = "carry-proof.json"
 
 // CheckCarryProof accepts a release-carry proof only as the target
 // release's own carry-proof.json asset: its digest is the one the same
-// SHA256SUMS lists (the file that also gave the binary's digest), it passes
-// qualify carry's own proof checks (qualification.ValidateCarryProof) from
-// the installed binary to the target, and it names exactly the installed
-// and the target release.
-func CheckCarryProof(raw, sums []byte, from, fromSHA256, to, toSHA256 string) (qualification.CarryProof, error) {
+// SHA256SUMS lists (the file that also gave both binaries' digests), it
+// passes qualify carry's own proof checks (qualification.ValidateCarryProof)
+// from the installed binaries to the target's, and it names exactly the
+// installed and the target release. An installation without
+// bin/macserve-controller (fromBinaries.Controller empty, installed before
+// the controller binary existed) is never carried.
+func CheckCarryProof(raw, sums []byte, from, to string, fromBinaries, toBinaries qualification.CarryBinaries) (qualification.CarryProof, error) {
 	var p qualification.CarryProof
 	if len(raw) == 0 || len(raw) > MaxCarryProof {
 		return p, errors.New("carry proof is empty or larger than 64 KiB")
 	}
-	if binary, err := ReleaseDigest(sums, ReleaseAsset); err != nil || binary != toSHA256 {
+	if fromBinaries.Controller == "" {
+		return p, errors.New("the installed release has no bin/macserve-controller (it predates the controller binary); a release carry rebinds both binaries, so this upgrade requalifies")
+	}
+	if binary, err := ReleaseDigest(sums, ReleaseAsset); err != nil || binary != toBinaries.Macserve {
 		return p, errors.Join(errors.New("a carry needs the release's SHA256SUMS, listing this binary"), err)
+	}
+	if controller, err := ReleaseDigest(sums, ControllerReleaseAsset); err != nil || controller != toBinaries.Controller {
+		return p, errors.Join(errors.New("a carry needs the release's SHA256SUMS, listing this release's macserve-controller"), err)
 	}
 	listed, err := ReleaseDigest(sums, CarryProofAsset)
 	if err != nil {
@@ -130,7 +148,7 @@ func CheckCarryProof(raw, sums []byte, from, fromSHA256, to, toSHA256 string) (q
 	if digestHex(raw) != listed {
 		return p, fmt.Errorf("the carry proof is not the release's %s (SHA256SUMS lists %s)", CarryProofAsset, listed)
 	}
-	if p, err = qualification.ValidateCarryProof(raw, fromSHA256, toSHA256); err != nil {
+	if p, err = qualification.ValidateCarryProof(raw, fromBinaries, toBinaries); err != nil {
 		return p, err
 	}
 	if p.From.Tag != from || p.To.Tag != to {
@@ -164,6 +182,12 @@ type Release struct {
 	To         string `json:"to"`
 	FromSHA256 string `json:"from_sha256"`
 	SHA256     string `json:"sha256"`
+	// FromControllerSHA256 and ControllerSHA256 are the installed and the
+	// new bin/macserve-controller. FromControllerSHA256 is empty for an
+	// installation from before the controller binary; both are empty in a
+	// record written before it.
+	FromControllerSHA256 string `json:"from_controller_sha256,omitempty"`
+	ControllerSHA256     string `json:"controller_sha256,omitempty"`
 	// PauseWritten: upgrade wrote owner.pause (it was absent).
 	PauseWritten bool `json:"pause_written,omitempty"`
 	// CarryProofSHA256 is the digest of the carry proof the owner gave.
@@ -210,16 +234,25 @@ func (l *Ledger) InstalledBinary() string {
 	return ""
 }
 
+// InstalledController is the digest of the macserve-controller binary
+// this ledger installed, as InstalledBinary: the last finished upgrade's,
+// else install's, or a controller rebind recorded after it. Empty when the
+// installed release predates the controller binary.
+func (l *Ledger) InstalledController() string {
+	return l.controllerAt(len(l.Releases))
+}
+
 // AnchorSHA256 is the activation anchor this ledger recorded: the last
-// carried release's, else the one qualify approve wrote.
+// carried release's, else the one qualify approve wrote, unless a later
+// controller rebind wrote a newer one.
 func (l *Ledger) AnchorSHA256() string {
-	if n := len(l.Releases); n > 0 && l.Releases[n-1].Effect == EffectCarried {
-		return l.Releases[n-1].AnchorSHA256
+	if n := len(l.Releases); n > 0 && l.Releases[n-1].Effect == EffectCarried && l.Releases[n-1].Finished != nil {
+		return l.rebindAnchor(l.Releases[n-1].AnchorSHA256, *l.Releases[n-1].Finished)
 	}
 	if l.Approval == nil {
 		return ""
 	}
-	return l.Approval.Approved["activation-anchor.json"]
+	return l.rebindAnchor(l.Approval.Approved["activation-anchor.json"], l.Approval.At)
 }
 
 // BeginRelease records a running upgrade before anything is installed.
@@ -299,7 +332,10 @@ func (l *Ledger) validateReleases() error {
 		if err := CompareReleases(r.From, r.To); err != nil {
 			return fmt.Errorf("setup ledger: release %d: %w", i, err)
 		}
-		if i > 0 && (l.Releases[i-1].SHA256 != r.FromSHA256 || l.Releases[i-1].To != r.From) {
+		if (r.FromControllerSHA256 != "" && !sha256Hex.MatchString(r.FromControllerSHA256)) || (r.ControllerSHA256 != "" && !sha256Hex.MatchString(r.ControllerSHA256)) {
+			return fmt.Errorf("setup ledger: release %d has an invalid controller digest", i)
+		}
+		if i > 0 && (l.Releases[i-1].SHA256 != r.FromSHA256 || l.controllerAt(i) != r.FromControllerSHA256 || l.Releases[i-1].To != r.From) {
 			return fmt.Errorf("setup ledger: release %d does not continue from release %d", i, i-1)
 		}
 		if (r.CarryProofSHA256 != "" && !sha256Hex.MatchString(r.CarryProofSHA256)) || (r.Carry && r.CarryProofSHA256 == "") {
@@ -336,8 +372,8 @@ func (l *Ledger) validateReleases() error {
 	if len(l.Releases) > 0 && l.record(StepInstall).Status != StatusDone {
 		return errors.New("setup ledger: a release is recorded before install")
 	}
-	if len(l.Releases) > 0 && l.record(StepInstall).Inputs["macserve"] != l.Releases[0].FromSHA256 {
-		return errors.New("setup ledger: the first release does not continue from the installed binary")
+	if len(l.Releases) > 0 && (l.record(StepInstall).Inputs["macserve"] != l.Releases[0].FromSHA256 || l.controllerAt(0) != l.Releases[0].FromControllerSHA256) {
+		return errors.New("setup ledger: the first release does not continue from the installed binaries")
 	}
 	return nil
 }

@@ -10,16 +10,18 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jerryfane/macserve/internal/deploy"
 	"github.com/jerryfane/macserve/internal/maintenance"
 )
 
 // Release carry (boundary-preserving releases): when the administrator proves
 // mechanically that a release changes no boundary file, an agent re-measures
-// the new binary in a carry sitting (begin --carry, the job probe and tool
+// the new binaries in a carry sitting (begin --carry, the job probe and tool
 // evidence) and commits it here. The commit rebinds only the anchor's
-// bin/macserve digest and appends a carry record bound to the proof; the
-// owner's session, candidate, parameters and approval time are unchanged, so
-// a later reboot's agent requalification still chains to the owner.
+// bin/macserve and bin/macserve-controller digests and appends a carry record
+// bound to the proof; the owner's session, candidate, parameters and approval
+// time are unchanged, so a later reboot's agent requalification still chains
+// to the owner.
 
 const (
 	// carryCap and carryWindow bound carries since the owner's approval
@@ -27,7 +29,9 @@ const (
 	carryCap    = 5
 	carryWindow = 14 * 24 * time.Hour
 
-	carryProofSchema = 1
+	// carryProofSchema 2 names both release binaries; a schema-1 proof
+	// (single binary) is refused.
+	carryProofSchema = 2
 	carryProofKind   = "release-carry-proof"
 	carryEffect      = "QualificationCarried"
 	carryProofFile   = "carry-proof.json"
@@ -40,12 +44,38 @@ var carryClasses = []string{"C", "G", "T"}
 
 // CarryRelease identifies one side of the proved release delta.
 type CarryRelease struct {
-	Tag          string `json:"tag"`
-	TagObject    string `json:"tag_object"`
-	Commit       string `json:"commit"`
-	Tree         string `json:"tree"`
-	SourceSHA256 string `json:"source_sha256"`
-	BinarySHA256 string `json:"binary_sha256"`
+	Tag                    string `json:"tag"`
+	TagObject              string `json:"tag_object"`
+	Commit                 string `json:"commit"`
+	Tree                   string `json:"tree"`
+	SourceSHA256           string `json:"source_sha256"`
+	BinarySHA256           string `json:"binary_sha256"`
+	ControllerBinarySHA256 string `json:"controller_binary_sha256"`
+}
+
+func (r CarryRelease) binaries() CarryBinaries {
+	return CarryBinaries{Macserve: r.BinarySHA256, Controller: r.ControllerBinarySHA256}
+}
+
+// CarryBinaries are the SHA-256 digests (lowercase hex) of the two release
+// binaries: bin/macserve and bin/macserve-controller.
+type CarryBinaries struct {
+	Macserve   string `json:"macserve"`
+	Controller string `json:"macserve_controller"`
+}
+
+func (b CarryBinaries) valid() bool { return validDigest(b.Macserve) && validDigest(b.Controller) }
+
+func validDigest(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // CarryChange is one changed path and its class; Old or New is absent for an
@@ -66,6 +96,7 @@ type CarryCI struct {
 
 type CarryProvenance struct {
 	RebuiltSHA256           string `json:"rebuilt_sha256"`
+	ControllerRebuiltSHA256 string `json:"controller_rebuilt_sha256"`
 	AttestationBundleSHA256 string `json:"attestation_bundle_sha256"`
 }
 
@@ -101,30 +132,41 @@ type CarryRecord struct {
 	ActivationCheck    string      `json:"activation_check"`
 }
 
-// carryChanges accepts live bindings that differ from the anchor in exactly
-// the installed macserve binary. With no binary change there is nothing to
-// carry (requalify instead).
+// carryChanges accepts live bindings that differ from the anchor in the
+// installed binaries only (bin/macserve, bin/macserve-controller or both).
+// With no binary change there is nothing to carry (requalify instead).
 func carryChanges(anchored, now map[string]string) error {
 	changed := bindingChanges(anchored, now)
-	if now[installedHelper] != "" && slices.Equal(changed, []string{installedHelper}) {
-		return nil
+	binaries := false
+	for _, path := range changed {
+		switch {
+		case path == installedHelper || path == installedController:
+			if now[path] == "" || anchored[path] == "" {
+				return fmt.Errorf("%s added or removed since the owner's approval; release carry refused, the owner must approve again", path)
+			}
+			binaries = true
+		case path == deploy.InstalledBinariesPath:
+			// The installer rewrites it with the binaries it signs.
+		default:
+			return fmt.Errorf("configuration changed beyond %s and %s since the owner's approval (%v); release carry refused, the owner must approve again", installedHelper, installedController, changed)
+		}
 	}
-	if len(changed) == 0 {
-		return fmt.Errorf("%s equals the anchored binary: nothing to carry", installedHelper)
+	if !binaries {
+		return errors.New("the installed binaries equal the anchored ones: nothing to carry")
 	}
-	return fmt.Errorf("configuration changed beyond %s since the owner's approval (%v); release carry refused, the owner must approve again", installedHelper, changed)
+	return nil
 }
 
-// carryableConfiguration returns the schema-2 anchor, its bytes and the live
-// bindings when the live configuration differs from the anchor exactly in
-// bin/macserve.
+// carryableConfiguration returns the schema-3 anchor, its bytes and the live
+// bindings when the live configuration differs from the anchor only in
+// the installed binaries.
 func carryableConfiguration() (ActivationAnchor, []byte, map[string]string, error) {
 	a, raw, err := loadAnchorBytes()
 	if err != nil {
 		return a, nil, nil, err
 	}
 	if a.Schema != anchorSchema {
-		return a, nil, nil, errors.New("activation anchor predates release carry (schema 1); the owner's approve writes a carryable anchor")
+		return a, nil, nil, errors.New("activation anchor predates the two-binary release carry (schema 1 or 2); the owner's approve writes a carryable anchor")
 	}
 	now, err := currentBindings()
 	if err != nil {
@@ -213,37 +255,41 @@ func loadApprovedChallenge(dir string) (Challenge, Candidate, error) {
 	return c, v, nil
 }
 
-// checkCarryProof binds the proof to the anchored and the installed binary
-// and requires it to claim only carry classes.
-func checkCarryProof(raw []byte, a ActivationAnchor, live map[string]string) (CarryProof, error) {
-	return ValidateCarryProof(raw, a.Bindings[installedHelper], live[installedHelper])
+// checkCarryProof binds the proof to the anchored and the installed binaries'
+// release digests and requires it to claim only carry classes.
+func checkCarryProof(raw []byte, a ActivationAnchor, liveRelease CarryBinaries) (CarryProof, error) {
+	if a.Release == nil {
+		return CarryProof{}, errors.New("activation anchor records no release digests")
+	}
+	return ValidateCarryProof(raw, *a.Release, liveRelease)
 }
 
 // ValidateCarryProof is every check qualify carry applies to the proof
 // itself: the strict decoding, the kind, complete and distinct release
-// identities, from binary fromSHA256 (the anchored one) to toSHA256 (the
-// installed one), unique changed paths of carry classes only and
-// classes_present equal to them. macserve upgrade's pre-check uses it too,
-// so a proof it accepts is one qualify carry accepts.
-func ValidateCarryProof(raw []byte, fromSHA256, toSHA256 string) (CarryProof, error) {
+// identities, from binaries from (the anchored ones) to binaries to (the
+// installed ones) with at least one of the two binaries changed, unique
+// changed paths of carry classes only and classes_present equal to them.
+// macserve upgrade's pre-check uses it too, so a proof it accepts is one
+// qualify carry accepts.
+func ValidateCarryProof(raw []byte, from, to CarryBinaries) (CarryProof, error) {
 	var p CarryProof
 	if err := decode(raw, &p); err != nil {
 		return p, fmt.Errorf("carry proof: %w", err)
 	}
 	if p.Schema != carryProofSchema || p.Kind != carryProofKind || p.ReleaseEffect != carryEffect {
-		return p, errors.New("carry proof is not a QualificationCarried release-carry proof")
+		return p, errors.New("carry proof is not a QualificationCarried two-binary release-carry proof")
 	}
 	if p.From.Tag == "" || p.To.Tag == "" || p.From.Tag == p.To.Tag || p.From.Commit == "" || p.To.Commit == "" || p.From.Commit == p.To.Commit || p.BoundaryManifestBlob == "" {
 		return p, errors.New("carry proof release identities incomplete")
 	}
-	if len(p.From.BinarySHA256) != 64 || p.From.BinarySHA256 == p.To.BinarySHA256 {
+	if !p.From.binaries().valid() || !p.To.binaries().valid() || p.From.binaries() == p.To.binaries() {
 		return p, errors.New("carry proof binary digests invalid")
 	}
-	if fromSHA256 == "" || p.From.BinarySHA256 != fromSHA256 {
-		return p, errors.New("carry proof starts from a binary other than the anchored one")
+	if !from.valid() || p.From.binaries() != from {
+		return p, errors.New("carry proof starts from binaries other than the anchored ones")
 	}
-	if toSHA256 == "" || p.To.BinarySHA256 != toSHA256 {
-		return p, errors.New("carry proof names a binary other than the installed one")
+	if !to.valid() || p.To.binaries() != to {
+		return p, errors.New("carry proof names binaries other than the installed ones")
 	}
 	if len(p.Changed) == 0 {
 		return p, errors.New("carry proof lists no changed path")
@@ -383,23 +429,41 @@ func commitAnchor(expected, next []byte, read func() ([]byte, error), prepare fu
 	return write(next)
 }
 
-// carriedAnchor is a with only the bin/macserve binding rebound and one carry
-// appended. It must still be a valid anchor (cap, chain, no replay).
+// carriedAnchor is a with only the bin/macserve and bin/macserve-controller
+// bindings rebound and one carry appended; its release digests become the
+// carry's (unsigned install). Carry then binds the live
+// installed-binaries.json and release digests when binaries are signed. It
+// must still be a valid anchor (cap, chain, no replay).
 func carriedAnchor(a ActivationAnchor, record AnchorCarry) (ActivationAnchor, error) {
 	out := a
 	out.Bindings = make(map[string]string, len(a.Bindings))
 	for k, v := range a.Bindings {
 		out.Bindings[k] = v
 	}
-	if out.Bindings[installedHelper] != record.FromBinarySHA256 {
-		return out, errors.New("carry does not start from the anchored binary")
+	if anchoredBinaries(out.Bindings) != record.from() {
+		return out, errors.New("carry does not start from the anchored binaries")
 	}
 	out.Bindings[installedHelper] = record.ToBinarySHA256
+	out.Bindings[installedController] = record.ToControllerSHA256
+	release := record.to()
+	out.Release = &release
 	out.Carries = append(slices.Clone(a.Carries), record)
 	if err := validAnchor(out); err != nil {
 		return out, err
 	}
 	return out, nil
+}
+
+// withInventory binds the live installed-binaries.json (or its absence) and
+// the release digests it maps the bound binaries to.
+func withInventory(a ActivationAnchor, live map[string]string, release CarryBinaries) ActivationAnchor {
+	if d, ok := live[deploy.InstalledBinariesPath]; ok {
+		a.Bindings[deploy.InstalledBinariesPath] = d
+	} else {
+		delete(a.Bindings, deploy.InstalledBinariesPath)
+	}
+	a.Release = &release
+	return a
 }
 
 // Carry commits a release-carry sitting (qualify carry): the agent-run
@@ -408,8 +472,9 @@ func carriedAnchor(a ActivationAnchor, record AnchorCarry) (ActivationAnchor, er
 // Under the session lock it rechecks the carryable configuration, the cap,
 // the parameters, the probe denials, the tool identities and live health with
 // the kept approval, then atomically rewrites the anchor with only the
-// bin/macserve digest rebound and runs the activation check. It never writes
-// qualification.json, boundary-evidence.json, owner.pause or services.
+// bin/macserve and bin/macserve-controller digests rebound and runs the
+// activation check. It never writes qualification.json,
+// boundary-evidence.json, owner.pause or services.
 func Carry(ctx context.Context, dir, proofPath string) error {
 	if err := rootOnly(); err != nil {
 		return err
@@ -467,7 +532,11 @@ func Carry(ctx context.Context, dir, proofPath string) error {
 	if err != nil {
 		return err
 	}
-	proof, err := checkCarryProof(proofRaw, a, live)
+	liveRelease, err := releaseBinaries(anchoredBinaries(live))
+	if err != nil {
+		return err
+	}
+	proof, err := checkCarryProof(proofRaw, a, liveRelease)
 	if err != nil {
 		return err
 	}
@@ -509,11 +578,15 @@ func Carry(ctx context.Context, dir, proofPath string) error {
 	if _, err = maintenance.Check(ctx, mc); err != nil {
 		return fmt.Errorf("health with the kept approval is not valid: %w", err)
 	}
-	record := AnchorCarry{At: now, Session: dir, FromBinarySHA256: proof.From.BinarySHA256, ToBinarySHA256: proof.To.BinarySHA256, ProofSHA256: digest(proofRaw)}
+	// The record binds the installed (on-disk) bytes; the proof binds the
+	// release digests, which the anchor records separately.
+	from, to := anchoredBinaries(a.Bindings), anchoredBinaries(live)
+	record := AnchorCarry{At: now, Session: dir, FromBinarySHA256: from.Macserve, ToBinarySHA256: to.Macserve, FromControllerSHA256: from.Controller, ToControllerSHA256: to.Controller, ProofSHA256: digest(proofRaw)}
 	next, err := carriedAnchor(a, record)
 	if err != nil {
 		return err
 	}
+	next = withInventory(next, live, proof.To.binaries())
 	nextRaw, err := encode(next)
 	if err != nil {
 		return err
@@ -540,13 +613,13 @@ func Carry(ctx context.Context, dir, proofPath string) error {
 }
 
 // CarryPreflight is the read-only pre-check macserve upgrade runs as root
-// before it replaces bin/macserve, so a carry it starts is one qualify carry
-// can commit: the anchor is schema 2 and still equals the live configuration
-// (activation check), with the installed binary the anchored one; the carry
-// cap and window allow one more; the proof passes ValidateCarryProof from
-// that binary to target; and health is valid with the kept approval on this
-// boot.
-func CarryPreflight(ctx context.Context, proof []byte, target string) error {
+// before it replaces bin/macserve and bin/macserve-controller, so a carry it
+// starts is one qualify carry can commit: the anchor is schema 3 and still
+// equals the live configuration (activation check), with the installed
+// binaries the anchored ones; the carry cap and window allow one more; the
+// proof passes ValidateCarryProof from those binaries to target; and health
+// is valid with the kept approval on this boot.
+func CarryPreflight(ctx context.Context, proof []byte, target CarryBinaries) error {
 	if err := rootOnly(); err != nil {
 		return err
 	}
@@ -558,8 +631,11 @@ func CarryPreflight(ctx context.Context, proof []byte, target string) error {
 	if err != nil {
 		return err
 	}
-	installed, err := fileDigest(installedHelper)
-	if err != nil {
+	var installed CarryBinaries
+	if installed.Macserve, err = fileDigest(installedHelper); err != nil {
+		return err
+	}
+	if installed.Controller, err = fileDigest(installedController); err != nil {
 		return err
 	}
 	if err := carryPreflight(a, live, installed, proof, target, time.Now().UTC()); err != nil {
@@ -570,21 +646,24 @@ func CarryPreflight(ctx context.Context, proof []byte, target string) error {
 
 // carryPreflight is CarryPreflight's decision on what it read: the live
 // configuration equals the anchor exactly (before the swap nothing may
-// differ), the anchor is schema 2 within the carry cap, the installed
-// binary is the anchored one, and the proof carries it to target.
-func carryPreflight(a ActivationAnchor, live map[string]string, installed string, proof []byte, target string, now time.Time) error {
+// differ), the anchor is schema 3 within the carry cap, the installed
+// binaries are the anchored ones, and the proof carries them to target.
+func carryPreflight(a ActivationAnchor, live map[string]string, installed CarryBinaries, proof []byte, target CarryBinaries, now time.Time) error {
 	if changed := bindingChanges(a.Bindings, live); len(changed) != 0 {
 		return fmt.Errorf("configuration changed since the owner's approval (%v); release carry refused", changed)
 	}
 	if a.Schema != anchorSchema {
-		return errors.New("activation anchor predates release carry (schema 1); the owner's approve writes a carryable anchor")
+		return errors.New("activation anchor predates the two-binary release carry (schema 1 or 2); the owner's approve writes a carryable anchor")
 	}
 	if err := carryAllowed(a, now); err != nil {
 		return err
 	}
-	if installed == "" || installed != a.Bindings[installedHelper] {
-		return fmt.Errorf("%s is not the anchored binary", installedHelper)
+	if !installed.valid() || installed != anchoredBinaries(a.Bindings) {
+		return fmt.Errorf("%s and %s are not the anchored binaries", installedHelper, installedController)
 	}
-	_, err := ValidateCarryProof(proof, installed, target)
+	if a.Release == nil {
+		return errors.New("activation anchor records no release digests")
+	}
+	_, err := ValidateCarryProof(proof, *a.Release, target)
 	return err
 }

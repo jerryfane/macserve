@@ -45,9 +45,10 @@ const (
 
 // Staged deploy-install inputs, under Staging.
 const (
-	stagedEnv    = "deploy.env"
-	stagedBinary = "macserve"
-	stagedAssets = "assets"
+	stagedEnv        = "deploy.env"
+	stagedBinary     = "macserve"
+	stagedController = "macserve-controller"
+	stagedAssets     = "assets"
 )
 
 func (s Store) staged(name string) string { return filepath.Join(s.Staging, name) }
@@ -423,7 +424,7 @@ func (s Store) StageTree(name string, files map[string][]byte) error {
 
 // RemoveStagedInputs removes the deploy-install inputs after install.
 func (s Store) RemoveStagedInputs() error {
-	return errors.Join(s.removeStaged(stagedEnv), s.removeStaged(stagedBinary), s.removeStaged(stagedAssets))
+	return errors.Join(s.removeStaged(stagedEnv), s.removeStaged(stagedBinary), s.removeStaged(stagedController), s.removeStaged(stagedAssets))
 }
 
 // AuditEntry is one line of the helper's audit log: every verb's start and

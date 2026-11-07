@@ -1,24 +1,26 @@
 {
-  "schema": 1,
+  "schema": 2,
   "kind": "release-carry-proof",
   "release_effect": "QualificationCarried",
   "from": {
     "tag": "v0.1.0",
-    "tag_object": "a6a33227290a5c454a97dcb2f1890ce7ee47e30a",
-    "commit": "3697ae4844fa9b8fddf8ad9e06ed65ec2e2c8b08",
-    "tree": "81bb270b29ae526834da972463e074a33324e282",
+    "tag_object": "cbf99b715884af9cb5eae8f581e294a05d142038",
+    "commit": "b3b4e17e9326cfaef837ffc43eecb2aaba3d8fa0",
+    "tree": "393607b588ca159d1f9b5e4af0c69aacc69cddb9",
     "source_sha256": "sha256 of the served v0.1.0 archive",
-    "binary_sha256": "25d616039700da641a118334afca5542d529d2c33be21858caff54f11b815731"
+    "binary_sha256": "25d616039700da641a118334afca5542d529d2c33be21858caff54f11b815731",
+    "controller_binary_sha256": "be710fa643679c7998eaca8391868bae53d641d3ddafc7224c06686984c9c396"
   },
   "to": {
     "tag": "v0.2.0",
-    "tag_object": "56311b8a0aad9e79fc1f58df4fc82e171c24d0db",
-    "commit": "361ef596d3370f3fa28eaefa40c0dafe14e007f8",
-    "tree": "73fb295e77121b7048c19979df9d18748d0c4496",
+    "tag_object": "15ba6884ed6b82031955015add54e8019367d592",
+    "commit": "6190fc3aaccab82a04e1f54704bcfa7a27a2169c",
+    "tree": "ef6ab5033a61a2c39301ca80ec3fd248f3d4335b",
     "source_sha256": "sha256 of the served v0.2.0 archive",
-    "binary_sha256": "3a694c0e1a93816b5e0212568788201010e7a64d903ab2e877c569c6e946f3ab"
+    "binary_sha256": "3a694c0e1a93816b5e0212568788201010e7a64d903ab2e877c569c6e946f3ab",
+    "controller_binary_sha256": "be710fa643679c7998eaca8391868bae53d641d3ddafc7224c06686984c9c396"
   },
-  "boundary_manifest_blob": "f8a2c807f8b4ab41c628b55211756789a1dcbcb4",
+  "boundary_manifest_blob": "43afd94802b71b91a0def07746c3b85cc33ec2fa",
   "classes_present": [
     "C",
     "T"
@@ -52,11 +54,12 @@
   "ci": {
     "workflow": ".github/workflows/ci.yml",
     "run_id": 4242,
-    "head_sha": "361ef596d3370f3fa28eaefa40c0dafe14e007f8",
+    "head_sha": "6190fc3aaccab82a04e1f54704bcfa7a27a2169c",
     "conclusion": "success"
   },
   "provenance": {
     "rebuilt_sha256": "3a694c0e1a93816b5e0212568788201010e7a64d903ab2e877c569c6e946f3ab",
+    "controller_rebuilt_sha256": "be710fa643679c7998eaca8391868bae53d641d3ddafc7224c06686984c9c396",
     "attestation_bundle_sha256": ""
   }
 }

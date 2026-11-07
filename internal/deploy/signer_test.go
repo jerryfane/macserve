@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/macserve/internal/controller"
+	"github.com/jerryfane/macserve/internal/controllerconfig"
 	"github.com/jerryfane/macserve/internal/signer"
 )
 
@@ -139,14 +139,14 @@ func TestSignerSection(t *testing.T) {
 		t.Fatal(err)
 	}
 	var section struct {
-		Signer controller.SignerConfig `json:"signer"`
+		Signer controllerconfig.SignerConfig `json:"signer"`
 	}
 	d := json.NewDecoder(bytes.NewReader(out))
 	d.DisallowUnknownFields()
 	if err := d.Decode(&section); err != nil {
 		t.Fatal(err)
 	}
-	if section.Signer != (controller.SignerConfig{Socket: SignerSocket, UID: 401, RPCGID: 402, Inbox: SignerInbox, KeyID: "macserve-signer-abc", PublicKey: key}) {
+	if section.Signer != (controllerconfig.SignerConfig{Socket: SignerSocket, UID: 401, RPCGID: 402, Inbox: SignerInbox, KeyID: "macserve-signer-abc", PublicKey: key}) {
 		t.Fatalf("controller signer section %+v", section.Signer)
 	}
 	for name, output := range map[string]string{

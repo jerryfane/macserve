@@ -13,8 +13,8 @@ import (
 	"path/filepath"
 	"slices"
 
-	"github.com/jerryfane/macserve/internal/controller"
-	"github.com/jerryfane/macserve/internal/githubpull"
+	"github.com/jerryfane/macserve/internal/controllerconfig"
+	"github.com/jerryfane/macserve/internal/githubwire"
 	"github.com/jerryfane/macserve/internal/profiles"
 )
 
@@ -94,10 +94,10 @@ type Enrollment struct {
 // Section is the controller github section for e with the App key at
 // keyFile: one policy for the one repository, revision 1, polled every
 // DefaultPollSeconds.
-func (e Enrollment) Section(keyFile string) *controller.GitHubConfig {
-	return &controller.GitHubConfig{
+func (e Enrollment) Section(keyFile string) *controllerconfig.GitHubConfig {
+	return &controllerconfig.GitHubConfig{
 		AppID: e.AppID, InstallationID: e.InstallationID, PrivateKeyFile: keyFile,
-		Policies: []githubpull.Policy{{
+		Policies: []githubwire.Policy{{
 			RepositoryID: e.RepositoryID, Repository: e.Repository,
 			AuthorIDs: slices.Clone(e.AuthorIDs), BaseBranches: slices.Clone(e.BaseBranches),
 			Profiles: slices.Clone(e.Profiles), PolicyRevision: 1,
@@ -112,8 +112,8 @@ type ConfigFile struct {
 	RootUID uint32
 }
 
-func (f ConfigFile) open() (controller.Config, fs.FileInfo, error) {
-	var c controller.Config
+func (f ConfigFile) open() (controllerconfig.Config, fs.FileInfo, error) {
+	var c controllerconfig.Config
 	if err := checkTrustedDir(filepath.Dir(f.Path), []uint32{f.RootUID}, false); err != nil {
 		return c, nil, err
 	}
@@ -146,7 +146,7 @@ func (f ConfigFile) open() (controller.Config, fs.FileInfo, error) {
 }
 
 // Check reads controller.json, refusing a file that already names an App.
-func (f ConfigFile) Check() (controller.Config, error) {
+func (f ConfigFile) Check() (controllerconfig.Config, error) {
 	c, _, err := f.open()
 	if err != nil {
 		return c, err
@@ -208,7 +208,7 @@ func (f ConfigFile) WriteGitHub(e Enrollment, key KeyTarget, pem []byte) error {
 	if err != nil {
 		return err
 	}
-	if _, err := controller.LoadConfig(temp); err != nil {
+	if _, err := controllerconfig.LoadConfig(temp); err != nil {
 		return fmt.Errorf("the new controller.json would not load: %w", err)
 	}
 	current, err := os.Lstat(f.Path)

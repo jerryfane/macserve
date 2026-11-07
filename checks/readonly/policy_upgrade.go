@@ -33,11 +33,15 @@ var Upgrade = Policy{
 		Var: mainPkg + ".onboardingCommands", Name: "name", Run: "run", Key: "upgrade", Root: mainPkg + ".runUpgrade",
 		Fields: []string{"name", "summary", "help", "run"},
 	},
+	// qualification only for the CarryBinaries struct type: no function of
+	// it is a seam, so plan code cannot call into it.
 	Imports: []string{
-		module + "/internal/deploy", module + "/internal/doctor", module + "/internal/setup",
+		module + "/internal/deploy", module + "/internal/doctor", module + "/internal/qualification", module + "/internal/setup",
 	},
 	Seams: []string{
 		module + "/internal/deploy.ParseEnvironment",
+		module + "/internal/deploy.ParseInstalledBinaries",
+		"(*" + module + "/internal/deploy.InstalledBinaries).ReleaseDigest",
 		module + "/internal/doctor.SystemProbe",
 		setupFunc + "ReleaseDigest",
 		setupFunc + "ReleaseVersion",
@@ -67,6 +71,10 @@ var Upgrade = Policy{
 		for _, name := range []string{"encoding/json.NewDecoder", "(*encoding/json.Decoder).UseNumber", "(*encoding/json.Decoder).Token", "(*encoding/json.Decoder).More", "(*encoding/json.Decoder).DisallowUnknownFields", "(*encoding/json.Decoder).Decode"} {
 			uses[name] = Use{}
 		}
+		// The release's macserve-controller beside this binary, read through
+		// doctor's readFile.
+		uses["path/filepath.Join"] = Use{Caller: upgradeFunc + "Plan", Max: 1, Args: []string{"filepath.Dir(self)", "deploy.ControllerBinaryName"}}
+		uses["path/filepath.Dir"] = Use{Caller: upgradeFunc + "Plan", Max: 1, Args: []string{"self"}}
 		// The release version stamped into a binary already in memory.
 		uses["debug/buildinfo.Read"] = Use{Caller: setupFunc + "ReleaseVersion", Max: 1, Args: []string{"bytes.NewReader(binary)"}}
 		uses["flag.NewFlagSet"] = Use{Caller: mainPkg + ".parseUpgradeFlags", Max: 1}

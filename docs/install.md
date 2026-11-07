@@ -21,7 +21,7 @@ Set `RELEASE_TAG` to an existing, reviewed `v*` release. Download its source and
 git clone --depth 1 --branch "$RELEASE_TAG" https://github.com/jerryfane/macserve.git macserve-deploy-kit
 cd macserve-deploy-kit
 gh release download "$RELEASE_TAG" --repo jerryfane/macserve \
-  --pattern macserve-darwin-arm64 --pattern SHA256SUMS
+  --pattern macserve-darwin-arm64 --pattern macserve-controller-darwin-arm64 --pattern SHA256SUMS
 cat SHA256SUMS
 ```
 
@@ -37,7 +37,7 @@ gh attestation verify macserve-deploy-kit/macserve-darwin-arm64 --repo jerryfane
   --source-ref "refs/tags/$RELEASE_TAG" --deny-self-hosted-runners
 ```
 
-The rebuilt sha256 must equal `EXPECTED_SHA256` and the downloaded binary's digest.
+The rebuilt sha256 of each binary must equal `EXPECTED_SHA256` / `EXPECTED_CONTROLLER_SHA256` and the downloaded binary's digest. The release ships two binaries: `macserve` (every root, worker, signer and owner role) and `macserve-controller` (the controller daemon only); both install root:wheel `0755` under `/Library/macserve/bin` (see [architecture](architecture.md#two-binaries-and-class-k)).
 
 #### Homebrew formula (release asset)
 
@@ -79,8 +79,10 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 REPOSITORIES=example-org/example-app:12345
 ENV
 : "${EXPECTED_SHA256:?Set the reviewed release binary digest}"
+: "${EXPECTED_CONTROLLER_SHA256:?Set the reviewed controller binary digest}"
 /bin/bash assets/install.sh --env deploy.env \
-  --binary macserve-darwin-arm64 --sha256 "$EXPECTED_SHA256"
+  --binary macserve-darwin-arm64 --sha256 "$EXPECTED_SHA256" \
+  --controller-binary macserve-controller-darwin-arm64 --controller-sha256 "$EXPECTED_CONTROLLER_SHA256"
 ```
 
 `deploy.env` is bounded **data**, never shell-sourced: plain `KEY=VALUE`, blank/comment lines, comma-separated lists, and `owner/repo:numeric-id` repository pins. No shell expansions, commands, unknown keys or duplicate keys. Default plan verifies the binary digest and validates/renders the deployment without creating accounts or installation files. It does not prove native identity availability or any security boundary.
@@ -108,7 +110,9 @@ sudo /bin/chmod -R go-w /private/var/root/macserve-deploy-kit
 sudo /bin/bash /private/var/root/macserve-deploy-kit/assets/install.sh \
   --env /private/var/root/macserve-deploy-kit/deploy.env \
   --binary /private/var/root/macserve-deploy-kit/macserve-darwin-arm64 \
-  --sha256 "$EXPECTED_SHA256" --apply
+  --sha256 "$EXPECTED_SHA256" \
+  --controller-binary /private/var/root/macserve-deploy-kit/macserve-controller-darwin-arm64 \
+  --controller-sha256 "$EXPECTED_CONTROLLER_SHA256" --apply
 ```
 
 Apply refuses existing installation/accounts/targets. It uses the existing account helper, verifies the staged executable, literal-renders and lints all three disabled plists, and writes matching controller/worker/maintenance configs plus `{"profiles":[]}`. It generates separate TLS and receipt keys; private keys are controller-owned `0600`. **The API token is printed once, only after success.** Move it directly into the authorized caller's secret storage: no `tee`, session transcript, shell-history assignment or shared log. Only its digest is installed. Preserve public trust pins from `/Library/macserve/config/deployment-pins.json`; never treat a receipt's own advertised key as an independent trust anchor.

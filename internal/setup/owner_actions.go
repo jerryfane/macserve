@@ -15,7 +15,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jerryfane/macserve/internal/controller"
+	"github.com/jerryfane/macserve/internal/controllerconfig"
+	"github.com/jerryfane/macserve/internal/deploy"
 	"github.com/jerryfane/macserve/internal/hostguard"
 )
 
@@ -35,7 +36,7 @@ func (h *Helper) github(l *Ledger, loc LedgerLocation) (Response, error) {
 	if err != nil {
 		return Response{}, err
 	}
-	c, err := controller.LoadConfig(h.configPath("controller.json"))
+	c, err := controllerconfig.LoadConfig(h.configPath("controller.json"))
 	if err != nil {
 		return Response{}, fmt.Errorf("controller.json: %w", err)
 	}
@@ -144,7 +145,11 @@ func (h *Helper) ownerActions(l *Ledger, loc LedgerLocation) (Response, error) {
 	if ok, detail := h.checkJobLogin(e.JobUID, e.OwnerUID); !ok {
 		return Response{Detail: detail}, nil
 	}
-	bin, err := h.installedBinary()
+	onDisk, err := h.installedBinary()
+	if err != nil {
+		return Response{}, err
+	}
+	bin, err := h.releaseDigest(deploy.BinaryName, onDisk)
 	if err != nil {
 		return Response{}, err
 	}
@@ -158,7 +163,19 @@ func (h *Helper) ownerActions(l *Ledger, loc LedgerLocation) (Response, error) {
 // installedBinary checks /Library/macserve/bin/macserve and returns its
 // sha256.
 func (h *Helper) installedBinary() (string, error) {
-	path := filepath.Join(h.Root, "bin", "macserve")
+	return h.installedFile(h.installedPath())
+}
+
+// installedController checks /Library/macserve/bin/macserve-controller and
+// returns its sha256; fs.ErrNotExist passes through (an installation from
+// before the controller binary has none).
+func (h *Helper) installedController() (string, error) {
+	return h.installedFile(h.installedControllerPath())
+}
+
+// installedFile checks one installed binary (a root-owned regular file,
+// not group- or world-writable, with one link) and returns its sha256.
+func (h *Helper) installedFile(path string) (string, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return "", err
@@ -177,6 +194,40 @@ func (h *Helper) installedBinary() (string, error) {
 		return "", err
 	}
 	return digestHex(data), nil
+}
+
+// installedBinariesName is deploy.InstalledBinariesPath under config/.
+const installedBinariesName = "installed-binaries.json"
+
+// installedBinaries reads config/installed-binaries.json, which the
+// administrator's installer writes when it installs Developer ID signed
+// binaries; nil when absent (the installed bytes are the release's).
+func (h *Helper) installedBinaries() (*deploy.InstalledBinaries, error) {
+	data, err := h.readConfig(installedBinariesName, 1<<16)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return deploy.ParseInstalledBinaries(data)
+}
+
+// releaseDigest maps the on-disk digest of the installed binary name
+// (deploy.BinaryName or deploy.ControllerBinaryName) to its release digest
+// through installed-binaries.json; without it they are equal. The ledger,
+// SHA256SUMS and carry proofs hold release digests, so every comparison of
+// an installed file with them goes through here. An absent binary ("")
+// stays "".
+func (h *Helper) releaseDigest(name, onDisk string) (string, error) {
+	if onDisk == "" {
+		return "", nil
+	}
+	inv, err := h.installedBinaries()
+	if err != nil {
+		return "", err
+	}
+	return inv.ReleaseDigest(name, onDisk)
 }
 
 // fdaPlist is the transient daemon: the installed macserve runs

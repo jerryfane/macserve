@@ -11,24 +11,33 @@ class Macserve < Formula
   depends_on arch: :arm64
   depends_on :macos
 
+  resource "macserve-controller" do
+    url "https://github.com/jerryfane/macserve/releases/download/v1.2.3/macserve-controller-darwin-arm64"
+    sha256 "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+  end
+
   def install
     # The Homebrew copy is owner-writable and is never the service binary:
     # macserve setup verifies the release digest and copies those bytes into
     # root-owned /Library/macserve/bin itself.
     bin.install "macserve-darwin-arm64" => "macserve"
+    resource("macserve-controller").stage do
+      bin.install "macserve-controller-darwin-arm64" => "macserve-controller"
+    end
   end
 
   def caveats
     <<~EOS
-      This installs the macserve command only; nothing is configured or started.
+      This installs the macserve and macserve-controller commands only; nothing is configured or started.
       Begin with the read-only preflight, run as yourself (not with sudo):
         macserve setup --plan
       Setup verifies the release SHA256SUMS before copying the binary into
-      root-owned /Library/macserve/bin; this Homebrew copy is never the service.
+      root-owned /Library/macserve/bin; these Homebrew copies are never the service.
     EOS
   end
 
   test do
     system bin/"macserve", "--help"
+    system bin/"macserve-controller", "--help"
   end
 end

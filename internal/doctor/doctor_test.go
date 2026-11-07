@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/macserve/internal/controller"
+	"github.com/jerryfane/macserve/internal/health"
 	"github.com/jerryfane/macserve/internal/setup"
 	"github.com/jerryfane/macserve/internal/setup/plan"
 )
@@ -22,7 +22,22 @@ var update = flag.Bool("update", false, "rewrite testdata golden files")
 
 var now = time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
 
-const binary = "macserve release bytes"
+const (
+	binary     = "macserve release bytes"
+	controller = "macserve-controller release bytes"
+)
+
+// controllerPlist is the controller plist deploy-install renders (only
+// ProgramArguments matters to doctor).
+func controllerPlist(args ...string) []byte {
+	var b strings.Builder
+	b.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>org.macserve.controller</string>\n<key>ProgramArguments</key><array>")
+	for _, a := range args {
+		b.WriteString("<string>" + a + "</string>")
+	}
+	b.WriteString("</array>\n<key>Disabled</key><true/>\n<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n</dict></plist>\n")
+	return []byte(b.String())
+}
 
 var env = []byte(`CONTROLLER_USER=macservectl
 CONTROLLER_UID=610
@@ -57,7 +72,7 @@ type fakeHost struct {
 
 func healthy(t *testing.T) *fakeHost {
 	t.Helper()
-	health, _ := json.Marshal(controller.Health{
+	health, _ := json.Marshal(health.Health{
 		Schema: 3, JobUID: 611, BoundaryReceiptSHA256: strings.Repeat("b", 64), BoundaryValidated: true,
 		CheckedAt: now.Add(-10 * time.Second), ExpiresAt: now.Add(30 * time.Second), AccountedBytes: 10 << 30,
 		PersistenceLastVerified: now.Add(-time.Minute), PersistenceValid: true,
@@ -66,6 +81,7 @@ func healthy(t *testing.T) *fakeHost {
 	for i := range l.Records {
 		l.Records[i].Status = setup.StatusDone
 	}
+	l.Records[1].Inputs = map[string]string{"macserve": sha256Hex([]byte(binary)), setup.ControllerInput: sha256Hex([]byte(controller))}
 	l.Records[4].Inputs = map[string]string{"macserve": sha256Hex([]byte(binary))}
 	l.Approval = &setup.Approval{SummarySHA256: strings.Repeat("c", 64), Boot: boot, At: now.Add(-time.Hour)}
 	ledger, err := json.Marshal(l)
@@ -74,7 +90,8 @@ func healthy(t *testing.T) *fakeHost {
 	}
 	h := &fakeHost{
 		files: map[string][]byte{
-			EnvFile: env, HealthFile: health, setup.LedgerPath: ledger, Binary: []byte(binary),
+			EnvFile: env, HealthFile: health, setup.LedgerPath: ledger, Binary: []byte(binary), Controller: []byte(controller),
+			launchDaemons + "org.macserve.controller.plist": controllerPlist(Controller, "--config", Root+"/config/controller.json"),
 			ProfilesFile: []byte(`{"profiles":[],"templates":[{"id":"org-ios-sim-build-v1","owners":["jdoe"],"xcode":{"version":"16.2","build":"16C5032a"}}]}`),
 		},
 		fileErr: map[string]error{},
@@ -99,9 +116,12 @@ func healthy(t *testing.T) *fakeHost {
 	dir := plan.FileInfo{Exists: true, Mode: fs.ModeDir | 0o755, Nlink: 3}
 	file := plan.FileInfo{Exists: true, Mode: 0o644, Nlink: 1}
 	for _, p := range protectedPaths {
-		if p.dir {
+		switch {
+		case p.dir:
 			h.stats[p.path] = dir
-		} else {
+		case p.binary:
+			h.stats[p.path] = plan.FileInfo{Exists: true, Mode: 0o755, Nlink: 1}
+		default:
 			h.stats[p.path] = file
 		}
 	}
@@ -206,6 +226,30 @@ func TestEachCheck(t *testing.T) {
 		{"net.tailnet", Warn, func(h *fakeHost) { h.listen = false }},
 		{"release.bytes", Fail, func(h *fakeHost) { h.files[Binary] = []byte("other bytes") }},
 		{"release.bytes", Unknown, func(h *fakeHost) { h.euid = 501; h.fileErr[Binary] = fs.ErrPermission }},
+		{"release.bytes", Fail, func(h *fakeHost) { h.files[Controller] = []byte("other controller") }},
+		{"release.bytes", Fail, func(h *fakeHost) { delete(h.files, Controller) }},
+		{"release.bytes", Fail, func(h *fakeHost) {
+			// Signed bytes the inventory does not record.
+			h.files[InstalledBinaries] = inventory(sha256Hex([]byte("signed")), sha256Hex([]byte(controller)))
+		}},
+		{"release.bytes", Pass, func(h *fakeHost) {
+			// Signed bytes map to the recorded release digests.
+			h.files[Binary], h.files[Controller] = []byte("signed macserve"), []byte("signed controller")
+			h.files[InstalledBinaries] = inventory(sha256Hex([]byte("signed macserve")), sha256Hex([]byte("signed controller")))
+		}},
+		{"release.bytes", Pass, func(h *fakeHost) {
+			// An installation from before the controller binary.
+			delete(h.files, Controller)
+			h.stats[Controller] = plan.FileInfo{}
+			h.files[launchDaemons+"org.macserve.controller.plist"] = controllerPlist(Binary, "controller", "--config", Root+"/config/controller.json")
+			h.setLedger(t, func(l *setup.Ledger) { delete(l.Records[1].Inputs, setup.ControllerInput) })
+		}},
+		{"fs.protect", Fail, func(h *fakeHost) { h.stats[Controller] = plan.FileInfo{Exists: true, Mode: 0o755, Nlink: 2} }},
+		{"fs.protect", Fail, func(h *fakeHost) { h.stats[Controller] = plan.FileInfo{Exists: true, Mode: 0o755, Nlink: 1, GID: 20} }},
+		{"fs.protect", Fail, func(h *fakeHost) { h.stats[Binary] = plan.FileInfo{Exists: true, Mode: 0o700, Nlink: 1} }},
+		{"svc.state", Fail, func(h *fakeHost) {
+			h.files[launchDaemons+"org.macserve.controller.plist"] = controllerPlist(Binary, "controller", "--config", Root+"/config/controller.json")
+		}},
 		{"fs.protect", Fail, func(h *fakeHost) { h.stats[EnvFile] = plan.FileInfo{Exists: true, Mode: 0o666, Nlink: 1} }},
 		{"fs.protect", Fail, func(h *fakeHost) {
 			h.stats[SecretsDir] = plan.FileInfo{Exists: true, Mode: fs.ModeDir | 0o755, UID: 610}
@@ -214,7 +258,7 @@ func TestEachCheck(t *testing.T) {
 		{"tcc.fda", Unknown, func(h *fakeHost) { h.fda = nil }},
 		{"session.job", Fail, func(h *fakeHost) { delete(h.commands, "/bin/launchctl print gui/611") }},
 		{"session.job", Fail, func(h *fakeHost) { h.stats[Console] = plan.FileInfo{Exists: true, UID: 611} }},
-		{"persistence", Fail, func(h *fakeHost) { h.setHealth(t, func(x *controller.Health) { x.PersistenceNeedsReview = true }) }},
+		{"persistence", Fail, func(h *fakeHost) { h.setHealth(t, func(x *health.Health) { x.PersistenceNeedsReview = true }) }},
 		{"qual.state", Fail, func(h *fakeHost) { h.stats[Anchor] = plan.FileInfo{} }},
 		{"qual.state", Warn, func(h *fakeHost) {
 			h.setLedger(t, func(l *setup.Ledger) { l.Approval.Boot.SessionUUID = "99999999-2222-3333-4444-555555555555" })
@@ -231,17 +275,17 @@ func TestEachCheck(t *testing.T) {
 		{"svc.state", Fail, func(h *fakeHost) { delete(h.commands, "/bin/launchctl print system/org.macserve.worker") }},
 		{"svc.state", Unknown, func(h *fakeHost) { delete(h.commands, "/bin/launchctl print-disabled system") }},
 		{"health", Fail, func(h *fakeHost) {
-			h.setHealth(t, func(x *controller.Health) {
+			h.setHealth(t, func(x *health.Health) {
 				x.CheckedAt = now.Add(-time.Minute)
 				x.ExpiresAt = now.Add(-15 * time.Second)
 			})
 		}},
-		{"health", Fail, func(h *fakeHost) { h.setHealth(t, func(x *controller.Health) { x.MemoryPressure = true }) }},
+		{"health", Fail, func(h *fakeHost) { h.setHealth(t, func(x *health.Health) { x.MemoryPressure = true }) }},
 		{"health", Unknown, func(h *fakeHost) { h.euid = 501; h.fileErr[HealthFile] = fs.ErrPermission }},
 		{"github.app", Fail, func(h *fakeHost) { h.github = errors.New("installation 7 no longer grants jdoe/app") }},
 		{"github.app", Unknown, func(h *fakeHost) { h.fda = nil }},
-		{"disk", Fail, func(h *fakeHost) { h.setHealth(t, func(x *controller.Health) { x.AccountedBytes = 81 << 30 }) }},
-		{"disk", Warn, func(h *fakeHost) { h.setHealth(t, func(x *controller.Health) { x.AccountedBytes = 60 << 30 }) }},
+		{"disk", Fail, func(h *fakeHost) { h.setHealth(t, func(x *health.Health) { x.AccountedBytes = 81 << 30 }) }},
+		{"disk", Warn, func(h *fakeHost) { h.setHealth(t, func(x *health.Health) { x.AccountedBytes = 60 << 30 }) }},
 		{"setup.ledger", Fail, func(h *fakeHost) {
 			h.setLedger(t, func(l *setup.Ledger) { l.Records[6].Status = setup.StatusFailed })
 		}},
@@ -267,8 +311,21 @@ func TestEachCheck(t *testing.T) {
 	}
 }
 
-func (h *fakeHost) setHealth(t *testing.T, f func(*controller.Health)) {
-	var x controller.Health
+// inventory is an installed-binaries.json recording the signed on-disk
+// digests of the fixture's release binaries.
+func inventory(macserve, controllerDigest string) []byte {
+	entry := func(release, installed, id string) map[string]string {
+		return map[string]string{"release_sha256": release, "installed_sha256": installed, "identifier": id, "designated_requirement": "identifier " + id}
+	}
+	data, _ := json.Marshal(map[string]any{"schema": "macserve-installed-binaries/1", "binaries": map[string]any{
+		"macserve":            entry(sha256Hex([]byte(binary)), macserve, "app.themartian.macserve"),
+		"macserve-controller": entry(sha256Hex([]byte(controller)), controllerDigest, "app.themartian.macserve-controller"),
+	}})
+	return data
+}
+
+func (h *fakeHost) setHealth(t *testing.T, f func(*health.Health)) {
+	var x health.Health
 	if err := json.Unmarshal(h.files[HealthFile], &x); err != nil {
 		t.Fatal(err)
 	}
@@ -288,9 +345,19 @@ func (h *fakeHost) setLedger(t *testing.T, f func(*setup.Ledger)) {
 func TestReleaseDigestSources(t *testing.T) {
 	h := healthy(t)
 	sum := sha256Hex([]byte(binary))
-	h.files["/tmp/SHA256SUMS"] = []byte(sum + "  macserve-darwin-arm64\n" + strings.Repeat("0", 64) + "  other\n")
+	h.files["/tmp/SHA256SUMS"] = []byte(sum + "  macserve-darwin-arm64\n" + sha256Hex([]byte(controller)) + "  macserve-controller-darwin-arm64\n" + strings.Repeat("0", 64) + "  other\n")
 	if c := checks(Run(context.Background(), h.probe(), Options{SHA256Sums: "/tmp/SHA256SUMS"}))["release.bytes"]; c.Status != Pass || !strings.Contains(c.Detail, "SHA256SUMS") {
 		t.Errorf("sums: %+v", c)
+	}
+	// A release that publishes no controller does not match an
+	// installation that has one.
+	h.files["/tmp/SHA256SUMS"] = []byte(sum + "  macserve-darwin-arm64\n")
+	if c := checks(Run(context.Background(), h.probe(), Options{SHA256Sums: "/tmp/SHA256SUMS"}))["release.bytes"]; c.Status != Fail {
+		t.Errorf("sums without controller: %+v", c)
+	}
+	h.files["/tmp/SHA256SUMS"] = []byte(sum + "  macserve-darwin-arm64\n" + strings.Repeat("2", 64) + "  macserve-controller-darwin-arm64\n")
+	if c := checks(Run(context.Background(), h.probe(), Options{SHA256Sums: "/tmp/SHA256SUMS"}))["release.bytes"]; c.Status != Fail || !strings.Contains(c.Detail, "controller") {
+		t.Errorf("sums with another controller: %+v", c)
 	}
 	if c := checks(Run(context.Background(), h.probe(), Options{ReleaseSHA256: strings.Repeat("1", 64)}))["release.bytes"]; c.Status != Fail {
 		t.Errorf("wrong digest: %+v", c)

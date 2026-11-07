@@ -10,7 +10,7 @@ import (
 
 func runDeployInstall(args []string, stdout, stderr io.Writer) int {
 	usage := func(w io.Writer) {
-		fmt.Fprintln(w, "Usage: macserve deploy-install --env PATH --binary PATH --sha256 LOWERCASE_HEX --assets PATH [--apply]\nDefault: safe plan; --apply requires Darwin root, protected reviewed inputs and an absent deployment. Apply preserves read-only coexistence before/after evidence. No activation, PF writes, ACL, password or GUI changes. Network isolation is not enforced in phase 1.")
+		fmt.Fprintln(w, "Usage: macserve deploy-install --env PATH --binary PATH --sha256 LOWERCASE_HEX --controller-binary PATH --controller-sha256 LOWERCASE_HEX --assets PATH [--apply]\nInstalls both release binaries, macserve and macserve-controller, root:wheel 0755 under /Library/macserve/bin.\nDefault: safe plan; --apply requires Darwin root, protected reviewed inputs and an absent deployment. Apply preserves read-only coexistence before/after evidence. No activation, PF writes, ACL, password or GUI changes. Network isolation is not enforced in phase 1.")
 	}
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
 		usage(stdout)
@@ -29,7 +29,7 @@ func runDeployInstall(args []string, stdout, stderr io.Writer) int {
 			o.Apply = true
 			continue
 		}
-		if flag != "--env" && flag != "--binary" && flag != "--sha256" && flag != "--assets" {
+		if flag != "--env" && flag != "--binary" && flag != "--sha256" && flag != "--controller-binary" && flag != "--controller-sha256" && flag != "--assets" {
 			usage(stderr)
 			return 2
 		}
@@ -39,7 +39,7 @@ func runDeployInstall(args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 		value := args[i]
-		if flag != "--sha256" {
+		if flag != "--sha256" && flag != "--controller-sha256" {
 			var err error
 			value, err = filepath.Abs(value)
 			if err != nil {
@@ -54,11 +54,15 @@ func runDeployInstall(args []string, stdout, stderr io.Writer) int {
 			o.BinaryPath = value
 		case "--sha256":
 			o.SHA256 = value
+		case "--controller-binary":
+			o.ControllerBinaryPath = value
+		case "--controller-sha256":
+			o.ControllerSHA256 = value
 		case "--assets":
 			o.AssetsPath = value
 		}
 	}
-	if o.EnvironmentPath == "" || o.BinaryPath == "" || o.SHA256 == "" || o.AssetsPath == "" {
+	if o.EnvironmentPath == "" || o.BinaryPath == "" || o.SHA256 == "" || o.ControllerBinaryPath == "" || o.ControllerSHA256 == "" || o.AssetsPath == "" {
 		usage(stderr)
 		return 2
 	}

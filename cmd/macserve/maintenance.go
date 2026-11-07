@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"syscall"
 
+	"github.com/jerryfane/macserve/internal/daemonlog"
 	"github.com/jerryfane/macserve/internal/hostguard"
 	"github.com/jerryfane/macserve/internal/maintenance"
 )
@@ -55,7 +56,7 @@ func runMaintenance(args []string, stdout, stderr io.Writer, observe bool) int {
 	}
 	path := *configPath
 	if !observe {
-		stderr = daemonStderr(stderr)
+		stderr = daemonlog.Stderr(stderr)
 	}
 	if os.Geteuid() != 0 {
 		fmt.Fprintln(stderr, "macserve maintenance: observer must run as root")

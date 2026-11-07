@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/jerryfane/macserve/internal/deploy"
 	"github.com/jerryfane/macserve/internal/setup"
 	"github.com/jerryfane/macserve/internal/setup/plan"
 	"github.com/jerryfane/macserve/internal/setup/upgrade"
@@ -33,8 +34,8 @@ func upgradeDispatch(words, args []string, stdout, stderr io.Writer) int {
 
 // upgradeFlags are macserve upgrade's flags; files are paths.
 type upgradeFlags struct {
-	plan                          bool
-	sha256, sums, tag, carryProof string
+	plan                                            bool
+	sha256, controllerSHA256, sums, tag, carryProof string
 }
 
 var upgradeDigest = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -46,6 +47,7 @@ func parseUpgradeFlags(args []string, stdout, stderr io.Writer) (upgradeFlags, i
 	flags.SetOutput(io.Discard)
 	flags.BoolVar(&f.plan, "plan", false, "")
 	flags.StringVar(&f.sha256, "sha256", "", "")
+	flags.StringVar(&f.controllerSHA256, "controller-sha256", "", "")
 	flags.StringVar(&f.sums, "sha256sums", "", "")
 	flags.StringVar(&f.tag, "tag", "", "")
 	flags.StringVar(&f.carryProof, "carry-proof", "", "")
@@ -60,10 +62,10 @@ func parseUpgradeFlags(args []string, stdout, stderr io.Writer) (upgradeFlags, i
 	switch {
 	case flags.NArg() != 0:
 		fmt.Fprintln(stderr, "macserve upgrade: unexpected arguments; see macserve upgrade --help")
-	case (f.sha256 == "") == (f.sums == ""):
-		fmt.Fprintln(stderr, "macserve upgrade: give the release digest: --sha256sums SHA256SUMS or --sha256 HEX (one of them)")
-	case f.sha256 != "" && !upgradeDigest.MatchString(f.sha256):
-		fmt.Fprintln(stderr, "macserve upgrade: --sha256 needs 64 lowercase hexadecimal characters")
+	case (f.sha256 == "") == (f.sums == "") || (f.sha256 == "") != (f.controllerSHA256 == ""):
+		fmt.Fprintln(stderr, "macserve upgrade: give the release digests: --sha256sums SHA256SUMS or --sha256 HEX --controller-sha256 HEX (one of them)")
+	case f.sha256 != "" && (!upgradeDigest.MatchString(f.sha256) || !upgradeDigest.MatchString(f.controllerSHA256)):
+		fmt.Fprintln(stderr, "macserve upgrade: --sha256 and --controller-sha256 need 64 lowercase hexadecimal characters")
 	case f.carryProof != "" && f.sums == "":
 		fmt.Fprintln(stderr, "macserve upgrade: --carry-proof needs --sha256sums: the proof must be the release's carry-proof.json, listed in its SHA256SUMS")
 	case f.tag != "" && !setup.ValidRelease(f.tag):
@@ -76,7 +78,7 @@ func parseUpgradeFlags(args []string, stdout, stderr io.Writer) (upgradeFlags, i
 
 // options reads the SHA256SUMS and carry-proof files with read.
 func (f upgradeFlags) options(read func(path string, max int64) ([]byte, error)) (upgrade.Options, error) {
-	o := upgrade.Options{SHA256: f.sha256, Tag: f.tag}
+	o := upgrade.Options{SHA256: f.sha256, ControllerSHA256: f.controllerSHA256, Tag: f.tag}
 	var err error
 	if f.sums != "" {
 		if o.SHA256Sums, err = read(f.sums, 64<<10); err != nil {
@@ -127,7 +129,7 @@ type upgradeRun struct {
 	out   io.Writer
 	euid  int
 	self  string
-	start func(path, digest string) (setupSession, error)
+	start func(path, digest, controller string) (setupSession, error)
 }
 
 func runUpgradeApply(args []string, stdout, stderr io.Writer) int {
@@ -141,7 +143,9 @@ func runUpgradeApply(args []string, stdout, stderr io.Writer) int {
 	}
 	u := &upgradeRun{
 		probe: upgrade.SystemProbe(), in: bufio.NewReader(os.Stdin), out: stdout, euid: os.Geteuid(), self: self,
-		start: func(path, digest string) (setupSession, error) { return startRootHelper(path, digest, true, stderr) },
+		start: func(path, digest, controller string) (setupSession, error) {
+			return startRootHelper(path, digest, controller, true, stderr)
+		},
 	}
 	return u.run(args, stdout, stderr)
 }
@@ -164,18 +168,25 @@ func (u *upgradeRun) run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "macserve upgrade:", err)
 		return 2
 	}
-	want := o.SHA256
+	want, wantController := o.SHA256, o.ControllerSHA256
 	if len(o.SHA256Sums) > 0 {
-		if want, err = setup.ReleaseDigest(o.SHA256Sums, setup.ReleaseAsset); err != nil {
+		if want, err = setup.ReleaseDigest(o.SHA256Sums, setup.ReleaseAsset); err == nil {
+			wantController, err = setup.ReleaseDigest(o.SHA256Sums, setup.ControllerReleaseAsset)
+		}
+		if err != nil {
 			fmt.Fprintln(stderr, "macserve upgrade: --sha256sums:", err)
 			return 2
 		}
 	}
-	// The digest comes from the release; this binary must match it before
-	// sudo is asked for, and the helper re-hashes itself.
-	if got, err := fileDigest(u.self); err != nil || got != want {
-		fmt.Fprintf(stderr, "macserve upgrade: %s has SHA-256 %s, not the release digest %s; nothing was changed (%v)\n", u.self, got, want, err)
-		return 1
+	// The digests come from the release; this binary and the
+	// macserve-controller beside it must match them before sudo is asked
+	// for, and the helper re-hashes both.
+	controller := filepath.Join(filepath.Dir(u.self), deploy.ControllerBinaryName)
+	for _, b := range []struct{ path, want string }{{u.self, want}, {controller, wantController}} {
+		if got, err := fileDigest(b.path); err != nil || got != b.want {
+			fmt.Fprintf(stderr, "macserve upgrade: %s has SHA-256 %s, not the release digest %s; nothing was changed (%v)\n", b.path, got, b.want, err)
+			return 1
+		}
 	}
 	result := upgrade.Plan(context.Background(), u.probe, o)
 	if err := upgrade.Write(u.out, result); err != nil {
@@ -191,7 +202,7 @@ func (u *upgradeRun) run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(u.out, "Nothing was changed.")
 		return 0
 	}
-	session, err := u.start(u.self, want)
+	session, err := u.start(u.self, want, wantController)
 	if err != nil {
 		fmt.Fprintln(stderr, "macserve upgrade:", err)
 		return 1

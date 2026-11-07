@@ -60,6 +60,7 @@ func TestQualificationInvalidatesChangedLiveFacts(t *testing.T) {
 		})
 	}
 }
+
 // A peer that restarts after qualification keeps the host qualified while it is
 // running (2026-11-06: a keyring redeploy closed the gate until requalification);
 // a peer that is not running, or a changed peer set, still invalidates health.

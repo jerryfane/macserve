@@ -33,7 +33,7 @@ var onboardingCommands = []struct {
 
 const setupHelp = `Usage: macserve setup --plan [--repository OWNER/NAME:ID] [--job-real-name NAME]
        macserve setup [--repository OWNER/NAME:ID] [--job-real-name NAME]
-                      [--sha256sums SHA256SUMS | --sha256 HEX]
+                      [--sha256sums SHA256SUMS | --sha256 HEX --controller-sha256 HEX]
 
 First-time setup of this Mac. Run it as yourself, not with sudo: the owner
 evidence that qualification needs is refused under sudo.
@@ -51,13 +51,17 @@ evidence that qualification needs is refused under sudo.
           Display name of the build account (default "macserve build").
   --sha256sums SHA256SUMS
           The release's SHA256SUMS file (verify the release first, see
-          docs/install.md); setup takes the macserve-darwin-arm64 digest
-          from it. Required before install, unless --sha256 is given.
-  --sha256 HEX
-          The release digest of this macserve, instead of --sha256sums.
-          Setup refuses to run or install a binary with another digest; it
-          never takes the digest from the binary itself. After install the
-          helper is the installed /Library/macserve/bin/macserve.
+          docs/install.md); setup takes the macserve-darwin-arm64 and
+          macserve-controller-darwin-arm64 digests from it. Required before
+          install, unless --sha256 and --controller-sha256 are given.
+  --sha256 HEX, --controller-sha256 HEX
+          The release digests of this macserve and of the
+          macserve-controller beside it (same directory, as the release
+          installs them), instead of --sha256sums. Setup refuses to run or
+          install a binary with another digest; it never takes a digest
+          from the binary itself. Install puts both into
+          /Library/macserve/bin; after install the helper is the installed
+          /Library/macserve/bin/macserve.
 
 Without --plan, setup runs the preflight, asks you to confirm, then asks
 for your password once (sudo) to start its root helper, and continues from
@@ -70,7 +74,7 @@ Exit status: 0 ready or stopped at a resumable point, 1 blocked or
 failed, 2 usage.
 `
 
-const setupRootHelp = `Usage: sudo macserve _setup-root [--upgrade] --sha256 HEX
+const setupRootHelp = `Usage: sudo macserve _setup-root [--upgrade] --sha256 HEX [--controller-sha256 HEX]
 
 The root helper of macserve setup (and, with --upgrade, of macserve
 upgrade), which starts it; do not run it yourself. It serves a fixed set
@@ -94,8 +98,11 @@ read root-only files report unknown; sudo runs them.
 
   --json        The same report as JSON (schema 1).
   --sha256sums SHA256SUMS, --sha256 HEX
-                Compare the installed binary with this release digest
-                instead of the one setup recorded (release.bytes).
+                Compare the installed binaries with this release's digests
+                instead of the ones setup recorded (release.bytes):
+                SHA256SUMS gives macserve and macserve-controller, --sha256
+                macserve only (the controller is then compared with setup's
+                record).
   --live        (exactly this spelling) With sudo, also run the two checks that act: Full Disk
                 Access from a transient launchd job (tcc.fda), and the
                 GitHub App's installations (github.app). Without --live
@@ -132,15 +139,18 @@ Exit status: 0 the job succeeded and its receipt verifies, 1 it did not
 (or an error), 2 usage, 3 interrupted (the job keeps running).
 `
 
-const upgradeHelp = `Usage: macserve upgrade --plan (--sha256sums SHA256SUMS | --sha256 HEX) [--tag vX.Y.Z] [--carry-proof FILE]
-       macserve upgrade (--sha256sums SHA256SUMS | --sha256 HEX) [--tag vX.Y.Z] [--carry-proof FILE]
+const upgradeHelp = `Usage: macserve upgrade --plan (--sha256sums SHA256SUMS | --sha256 HEX --controller-sha256 HEX) [--tag vX.Y.Z] [--carry-proof FILE]
+       macserve upgrade (--sha256sums SHA256SUMS | --sha256 HEX --controller-sha256 HEX) [--tag vX.Y.Z] [--carry-proof FILE]
 
 Upgrades a Mac set up by macserve setup to a newer release. Run the
 downloaded new release (macserve-darwin-arm64) as yourself, not with sudo,
-after verifying the release (gh attestation verify macserve-darwin-arm64
---repo jerryfane/macserve). Its digest always comes from the release, never
-from the file: this binary must match the macserve-darwin-arm64 line of the
-release's SHA256SUMS (or --sha256).
+with the release's macserve-controller-darwin-arm64 beside it as
+macserve-controller (as Homebrew installs them), after verifying the
+release (gh attestation verify --repo jerryfane/macserve). Their digests
+always come from the release, never from the files: this binary and the
+controller must match the macserve-darwin-arm64 and
+macserve-controller-darwin-arm64 lines of the release's SHA256SUMS (or
+--sha256 and --controller-sha256).
 
 --plan is read-only: it compares the installed and the new release, checks
 the digest, the stopped services and the build account's session, says
@@ -156,8 +166,9 @@ the setup helper (from this binary) checks everything again as root:
     no approval this setup ledger did not record.
 It then records the release in the setup ledger, writes owner.pause,
 removes the approval and activation anchor, replaces
-/Library/macserve/bin/macserve with these bytes (atomic, digest re-checked)
-and resets setup to owner-actions: run macserve setup to re-grant Full Disk
+/Library/macserve/bin/macserve-controller and then
+/Library/macserve/bin/macserve with the release's bytes (each atomic,
+digest re-checked) and resets setup to owner-actions: run macserve setup to re-grant Full Disk
 Access and requalify. An interrupted upgrade blocks setup until macserve
 upgrade with the same release finishes it.
 
@@ -169,11 +180,13 @@ upgrade with the same release finishes it.
                       installed release to this one. With it, your own
                       approval, a live build-account session, qualify
                       carry's pre-check and worker-quiescent, the approval
-                      is carried: the new binary is re-measured (job probe,
-                      qualify begin --carry, tool evidence, qualify carry).
-                      Any failure falls back to full requalification, and
-                      setup then waits for the build account to log out.
-                      Services stay stopped.
+                      is carried: the new binaries are re-measured (job
+                      probe, qualify begin --carry, tool evidence, qualify
+                      carry). An installation without
+                      bin/macserve-controller (from before it existed) is
+                      never carried. Any failure falls back to full
+                      requalification, and setup then waits for the build
+                      account to log out. Services stay stopped.
 
 Exit status: 0 upgraded (or plan without failures), 1 refused or a check
 failed, 2 usage.

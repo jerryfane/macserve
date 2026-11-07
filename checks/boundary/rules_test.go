@@ -13,7 +13,9 @@ import (
 // The fixture module mirrors the shapes the rules protect: a root package
 // (internal/worker) with B execution internals and a C observation file that
 // gets only values and capabilities, a G file in internal/maintenance, a
-// non-root C package and a banned B package.
+// non-root C package and a banned B package; a root binary (cmd/tool) and a
+// K binary (kctl) with a K library (kctl/queue, with a test and testdata)
+// that links one allowlisted B package.
 const fixtureModule = "example.com/fx"
 
 var fixtureBase = map[string]string{
@@ -135,19 +137,44 @@ var Limits = []int{1, 2}
 
 func limit() int { return 3 }
 `,
+	"cmd/tool/main.go": `package main
+
+import "example.com/fx/internal/store"
+
+func main() { _ = store.Save("/nonexistent") }
+`,
+	"kctl/main.go": `package main
+
+import (
+	"example.com/fx/internal/hostguard"
+	"example.com/fx/kctl/queue"
+)
+
+func main() { _, _ = hostguard.Check(), queue.Next() }
+`,
+	"kctl/queue/queue.go":           "package queue\n\nfunc Next() int { return 1 }\n",
+	"kctl/queue/queue_test.go":      "package queue\n\nimport \"testing\"\n\nfunc TestNext(t *testing.T) { _ = Next() }\n",
+	"kctl/queue/testdata/jobs.json": "[]\n",
 }
 
 func fixtureManifest() map[string]any {
 	return map[string]any{
-		"schema": 1,
+		"schema": 2,
 		"classes": map[string][]string{
-			"B": {"go.mod", "BOUNDARY.json", "internal/**", "internal/store/state.go"},
+			"B": {"go.mod", "BOUNDARY.json", "internal/**", "internal/store/state.go", "cmd/tool/**"},
 			"G": {"internal/maintenance/run.go"},
 			"C": {"internal/worker/observe.go", "internal/store/**"},
 			"T": {"docs/**"},
+			"K": {"kctl/**"},
 		},
-		"seams":   map[string][]string{"internal/worker": {"(*execution).invoke", "clip"}},
-		"g_calls": map[string][]string{"internal/maintenance": {"syscall.Getuid"}},
+		"seams":             map[string][]string{"internal/worker": {"(*execution).invoke", "clip"}},
+		"g_calls":           map[string][]string{"internal/maintenance": {"syscall.Getuid"}},
+		"k_packages":        []string{"kctl", "kctl/queue"},
+		"k_allowed_imports": []string{"internal/hostguard"},
+		"binaries": map[string]Binary{
+			"tool": {Package: "cmd/tool", Classes: []string{ClassB, ClassG, ClassC}},
+			"ctl":  {Package: "kctl", Classes: []string{ClassB, ClassG, ClassC, ClassK}},
+		},
 	}
 }
 
@@ -340,11 +367,12 @@ func TestCarryFileRules(t *testing.T) {
 }
 
 func TestClassifyMostSpecificFirst(t *testing.T) {
-	m, err := ParseManifest([]byte(`{"schema":1,"classes":{
+	m, err := ParseManifest([]byte(`{"schema":2,"classes":{
 		"B":["internal/**","internal/worker/*_test.go"],
 		"G":[],
 		"C":["internal/worker/job_observation.go","internal/store/**"],
-		"T":["internal/worker/job_observation_*_test.go","docs/**"]},
+		"T":["internal/worker/job_observation_*_test.go","docs/**"],
+		"K":[]},
 		"seams":{},"g_calls":{}}`))
 	if err != nil {
 		t.Fatal(err)
@@ -375,12 +403,13 @@ func TestClassifyMostSpecificFirst(t *testing.T) {
 }
 
 func TestClassifyFileLevelRules(t *testing.T) {
-	m, err := ParseManifest([]byte(`{"schema":1,"classes":{
-		"B":["go.mod","a/x*.go","internal/**"],
+	m, err := ParseManifest([]byte(`{"schema":2,"classes":{
+		"B":["go.mod","a/x*.go","internal/**","k/b.go","k/testdata/b.json"],
 		"G":[],
 		"C":["a/*x.go","internal/store/**"],
-		"T":["internal/store/store_test.go","internal/store/other_test.go","internal/worker/main.go","docs/**"]},
-		"seams":{},"g_calls":{}}`))
+		"T":["internal/store/store_test.go","internal/store/other_test.go","internal/worker/main.go","docs/**"],
+		"K":["k/**","notes/**","internal/worker/k.go"]},
+		"seams":{},"g_calls":{},"k_packages":["k"]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,10 +427,14 @@ func TestClassifyFileLevelRules(t *testing.T) {
 		"non-Go C file":       {File{"internal/store/testdata/fixture.json", "100644"}, "only Go source files can be C"},
 		"unsupported mode":    {File{"go.mod", "100664"}, "unsupported git mode"},
 		"listed twice (dupe)": {File{"go.mod", "100644"}, "listed twice"},
+		"B file in K package": {File{"k/b.go", "100644"}, "class B in K package k"},
+		"B testdata in K pkg": {File{"k/testdata/b.json", "100644"}, "class B in K package k"},
+		"K outside a package": {File{"notes/a.txt", "100644"}, "K file outside any Go package"},
+		"K in a non-K pkg":    {File{"internal/worker/k.go", "100644"}, "K file in package internal/worker, which is not in k_packages"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			files := []File{{"internal/store/store.go", "100644"}, {"internal/store/store_test.go", "100644"}, tc.file}
+			files := []File{{"internal/store/store.go", "100644"}, {"internal/store/store_test.go", "100644"}, {"k/k.go", "100644"}, tc.file}
 			if name == "listed twice (dupe)" {
 				files = append(files, tc.file)
 			}
@@ -411,7 +444,10 @@ func TestClassifyFileLevelRules(t *testing.T) {
 			}
 		})
 	}
-	_, problems := m.ClassifyFiles([]File{{"internal/store/store.go", "100644"}, {"internal/store/store_test.go", "100755"}, {"go.mod", "100644"}})
+	_, problems := m.ClassifyFiles([]File{
+		{"internal/store/store.go", "100644"}, {"internal/store/store_test.go", "100755"}, {"go.mod", "100644"},
+		{"k/k.go", "100644"}, {"k/k_test.go", "100644"}, {"k/testdata/jobs.json", "100644"}, {"k/testdata/_x/y.go", "100644"},
+	})
 	if len(problems) > 0 {
 		t.Fatalf("valid files rejected: %v", problems)
 	}
@@ -420,7 +456,8 @@ func TestClassifyFileLevelRules(t *testing.T) {
 func TestParseManifestRejectsMalformed(t *testing.T) {
 	valid := func() map[string]any { return fixtureManifest() }
 	cases := map[string]func(map[string]any){
-		"schema 2":            func(m map[string]any) { m["schema"] = 2 },
+		"schema 1":            func(m map[string]any) { m["schema"] = 1 },
+		"missing class K":     func(m map[string]any) { delete(m["classes"].(map[string][]string), "K") },
 		"unknown field":       func(m map[string]any) { m["extra"] = true },
 		"missing class":       func(m map[string]any) { delete(m["classes"].(map[string][]string), "G") },
 		"unknown class":       func(m map[string]any) { m["classes"].(map[string][]string)["X"] = nil },
@@ -431,6 +468,29 @@ func TestParseManifestRejectsMalformed(t *testing.T) {
 		"dot-dot pattern":     func(m map[string]any) { m["classes"].(map[string][]string)["T"] = []string{"docs/../go.mod"} },
 		"g_calls not pkg.Name": func(m map[string]any) {
 			m["g_calls"] = map[string][]string{"internal/maintenance": {"Getuid"}}
+		},
+		"k_packages twice":     func(m map[string]any) { m["k_packages"] = []string{"kctl", "kctl"} },
+		"k_packages dot-dot":   func(m map[string]any) { m["k_packages"] = []string{"kctl/../internal"} },
+		"allowed import is K":  func(m map[string]any) { m["k_allowed_imports"] = []string{"kctl/queue"} },
+		"allowed import twice": func(m map[string]any) { m["k_allowed_imports"] = []string{"internal/hostguard", "internal/hostguard"} },
+		"K binary main not K": func(m map[string]any) {
+			m["binaries"].(map[string]Binary)["ctl"] = Binary{"cmd/tool2", []string{ClassB, ClassK}}
+		},
+		"non-K binary main is K": func(m map[string]any) {
+			m["binaries"].(map[string]Binary)["tool"] = Binary{"kctl/queue", []string{ClassB}}
+		},
+		"binary links T": func(m map[string]any) {
+			m["binaries"].(map[string]Binary)["tool"] = Binary{"cmd/tool", []string{ClassB, ClassT}}
+		},
+		"binary class twice": func(m map[string]any) {
+			m["binaries"].(map[string]Binary)["tool"] = Binary{"cmd/tool", []string{ClassB, ClassB}}
+		},
+		"binary without classes": func(m map[string]any) { m["binaries"].(map[string]Binary)["tool"] = Binary{"cmd/tool", nil} },
+		"binaries share a package": func(m map[string]any) {
+			m["binaries"].(map[string]Binary)["tool2"] = Binary{"cmd/tool", []string{ClassB}}
+		},
+		"binary name with slash": func(m map[string]any) {
+			m["binaries"].(map[string]Binary)["a/b"] = Binary{"cmd/other", []string{ClassB}}
 		},
 	}
 	for name, mutate := range cases {
@@ -449,5 +509,100 @@ func TestParseManifestRejectsMalformed(t *testing.T) {
 	data, _ := json.Marshal(valid())
 	if _, err := ParseManifest(append(data, []byte(" {}")...)); err == nil {
 		t.Fatal("trailing data accepted")
+	}
+}
+
+// TestKRules seeds one whole-package or link-graph violation per case into
+// the clean fixture and expects the named package and importer.
+func TestKRules(t *testing.T) {
+	tests := []struct {
+		name      string
+		overrides map[string]string
+		manifest  func(map[string]any)
+		want      []string
+	}{
+		{
+			name:      "root binary links a K package",
+			overrides: map[string]string{"cmd/tool/main.go": "package main\n\nimport _ \"example.com/fx/kctl/queue\"\n\nfunc main() {}\n"},
+			want: []string{
+				"binaries tool: links K package kctl/queue (imported via cmd/tool -> kctl/queue)",
+				"cmd/tool: imports K package kctl/queue; only K packages may import K packages",
+			},
+		},
+		{
+			name:      "B package imports a K package",
+			overrides: map[string]string{"internal/hostguard/k.go": "package hostguard\n\nimport _ \"example.com/fx/kctl/queue\"\n"},
+			want:      []string{"internal/hostguard: imports K package kctl/queue; only K packages may import K packages"},
+		},
+		{
+			name:      "B test imports a K package",
+			overrides: map[string]string{"internal/hostguard/guard_test.go": "package hostguard_test\n\nimport (\n\t\"testing\"\n\n\t\"example.com/fx/kctl/queue\"\n)\n\nfunc TestQueue(t *testing.T) { _ = queue.Next() }\n"},
+			want:      []string{"internal/hostguard: imports K package kctl/queue"},
+		},
+		{
+			name:      "K binary links a module package off the allowlist",
+			overrides: map[string]string{"kctl/queue/queue.go": "package queue\n\nimport \"example.com/fx/internal/store\"\n\nfunc Next() int { _ = store.Save(\"\"); return 1 }\n"},
+			want:      []string{"binaries ctl: links module package internal/store, which is neither K nor in k_allowed_imports (imported via kctl -> kctl/queue -> internal/store)"},
+		},
+		{
+			name: "stale allowlist entry",
+			manifest: func(m map[string]any) {
+				m["k_allowed_imports"] = []string{"internal/hostguard", "internal/maintenance"}
+			},
+			want: []string{"k_allowed_imports internal/maintenance: not linked by any binary that links K"},
+		},
+		{
+			name:     "K main package not a binary",
+			manifest: func(m map[string]any) { delete(m["binaries"].(map[string]Binary), "ctl") },
+			want:     []string{"kctl: K main package is not a binary that links K"},
+		},
+		{
+			name: "binary links a class it does not list",
+			manifest: func(m map[string]any) {
+				m["binaries"].(map[string]Binary)["tool"] = Binary{"cmd/tool", []string{ClassB, ClassG}}
+			},
+			want: []string{"binaries tool: links internal/store/store.go of class C, not one of [B G] (imported via cmd/tool -> internal/store)"},
+		},
+		{
+			name: "binary package is not main",
+			manifest: func(m map[string]any) {
+				m["binaries"].(map[string]Binary)["tool"] = Binary{"internal/store", []string{ClassB, ClassC}}
+			},
+			want: []string{"binaries tool: internal/store is not a main package"},
+		},
+		{
+			name: "K pattern splits a package",
+			manifest: func(m map[string]any) {
+				m["classes"].(map[string][]string)["B"] = append(m["classes"].(map[string][]string)["B"], "kctl/queue/*_test.go")
+			},
+			want: []string{"kctl/queue/queue_test.go: class B in K package kctl/queue; every file of a K package is K"},
+		},
+		{
+			name:     "K package missing from k_packages",
+			manifest: func(m map[string]any) { m["k_packages"] = []string{"kctl"} },
+			want: []string{
+				"kctl/queue/queue.go: K file in package kctl/queue, which is not in k_packages",
+				"kctl/queue/testdata/jobs.json: K file in package kctl/queue, which is not in k_packages",
+			},
+		},
+		{
+			name:     "k_packages entry without Go files",
+			manifest: func(m map[string]any) { m["k_packages"] = []string{"kctl", "kctl/queue", "kctl/none"} },
+			want:     []string{"kctl/none: k_packages entry is not a Go package directory"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			manifest := fixtureManifest()
+			if tc.manifest != nil {
+				tc.manifest(manifest)
+			}
+			problems := runFixture(t, tc.overrides, manifest)
+			for _, want := range tc.want {
+				if !slices.ContainsFunc(problems, func(p string) bool { return strings.Contains(p, want) }) {
+					t.Errorf("want %q, got:\n%s", want, strings.Join(problems, "\n"))
+				}
+			}
+		})
 	}
 }

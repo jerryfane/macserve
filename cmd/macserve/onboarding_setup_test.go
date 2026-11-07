@@ -229,9 +229,12 @@ type wizardRun struct {
 	out     bytes.Buffer
 	stderr  bytes.Buffer
 	opens   [][]string
-	started [][2]string
+	started [][3]string
 	ran     int
 	sha     string
+	// controllerSHA is the release digest of the macserve-controller
+	// beside self.
+	controllerSHA string
 	// tokens went to the keychain; restarts are the restart kinds; owner
 	// lists the owner-side runs (control, probe) by session.
 	tokens   []string
@@ -250,16 +253,22 @@ func newWizardRun(t *testing.T, input string) *wizardRun {
 	r := &wizardRun{}
 	root := filepath.Join(t.TempDir(), "Library/macserve")
 	r.helper = &fakeHelper{t: t, root: root}
-	self := filepath.Join(t.TempDir(), "macserve-darwin-arm64")
+	dir := t.TempDir()
+	self := filepath.Join(dir, "macserve")
 	if err := os.WriteFile(self, []byte("release binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "macserve-controller"), []byte("release controller"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256([]byte("release binary"))
 	r.sha = hex.EncodeToString(sum[:])
+	sum = sha256.Sum256([]byte("release controller"))
+	r.controllerSHA = hex.EncodeToString(sum[:])
 	r.w = &setupWizard{
 		probe: fakeSetupHost(t, &r.ran), in: bufio.NewReader(strings.NewReader(input)), out: &r.out, root: root, self: self,
-		start: func(path, digest string) (setupSession, error) {
-			r.started = append(r.started, [2]string{path, digest})
+		start: func(path, digest, controller string) (setupSession, error) {
+			r.started = append(r.started, [3]string{path, digest, controller})
 			return r.helper, nil
 		},
 		open:  func(args ...string) error { r.opens = append(r.opens, args); return nil },
@@ -282,7 +291,7 @@ func newWizardRun(t *testing.T, input string) *wizardRun {
 }
 
 func (r *wizardRun) run(choices plan.Choices) int {
-	return r.w.run(choices, r.sha, &r.stderr)
+	return r.w.run(choices, r.sha, r.controllerSHA, &r.stderr)
 }
 
 func repoChoices() plan.Choices {
@@ -326,7 +335,7 @@ func TestSetupApplyRunsToRound1(t *testing.T) {
 	if got != 0 {
 		t.Fatalf("exit %d stderr %s\n%s", got, r.stderr.String(), out)
 	}
-	if len(r.started) != 1 || !r.helper.closed || r.started[0] != [2]string{r.w.self, r.sha} {
+	if len(r.started) != 1 || !r.helper.closed || r.started[0] != [3]string{r.w.self, r.sha, r.controllerSHA} {
 		t.Errorf("helper started %v, closed %v", r.started, r.helper.closed)
 	}
 	for _, want := range []string{
@@ -564,9 +573,23 @@ func TestSetupApplyDigestComesFromTheRelease(t *testing.T) {
 		t.Fatalf("no digest: exit %d started %v ran %d stderr %q", got, r.started, r.ran, r.stderr.String())
 	}
 	r.stderr.Reset()
+	sum := sha256.Sum256([]byte("release binary"))
+	sha := hex.EncodeToString(sum[:])
 	r.sha = strings.Repeat("0", 64)
 	if got := r.run(repoChoices()); got != 2 || len(r.started) != 0 || r.ran != 0 || !strings.Contains(r.stderr.String(), "not the release digest") {
 		t.Fatalf("mismatch: exit %d started %v stderr %q", got, r.started, r.stderr.String())
+	}
+	// The macserve-controller beside this binary must match its release
+	// digest too, and must be there.
+	r.stderr.Reset()
+	r.sha, r.controllerSHA = sha, strings.Repeat("0", 64)
+	if got := r.run(repoChoices()); got != 2 || len(r.started) != 0 || r.ran != 0 || !strings.Contains(r.stderr.String(), "macserve-controller has SHA-256") {
+		t.Fatalf("controller mismatch: exit %d started %v stderr %q", got, r.started, r.stderr.String())
+	}
+	r.stderr.Reset()
+	r.controllerSHA = ""
+	if got := r.run(repoChoices()); got != 2 || len(r.started) != 0 || !strings.Contains(r.stderr.String(), "--controller-sha256") {
+		t.Fatalf("no controller digest: exit %d started %v stderr %q", got, r.started, r.stderr.String())
 	}
 }
 
@@ -585,19 +608,19 @@ func TestHelperIdentityAfterInstall(t *testing.T) {
 	sum := sha256.Sum256([]byte("installed"))
 	digest := hex.EncodeToString(sum[:])
 	if os.Getuid() == 0 {
-		if path, got, err := helperIdentity(root, "/elsewhere/macserve", ""); err != nil || path != installed || got != digest {
-			t.Errorf("installed: %q %q %v", path, got, err)
+		if path, got, controller, err := helperIdentity(root, "/elsewhere/macserve", "", ""); err != nil || path != installed || got != digest || controller != "" {
+			t.Errorf("installed: %q %q %q %v", path, got, controller, err)
 		}
-		if _, _, err := helperIdentity(root, "/elsewhere/macserve", strings.Repeat("0", 64)); err == nil {
+		if _, _, _, err := helperIdentity(root, "/elsewhere/macserve", strings.Repeat("0", 64), ""); err == nil {
 			t.Error("accepted a --sha256 that does not match the installed binary")
 		}
-	} else if _, _, err := helperIdentity(root, "/elsewhere/macserve", ""); err == nil || !strings.Contains(err.Error(), "not a root-owned binary") {
+	} else if _, _, _, err := helperIdentity(root, "/elsewhere/macserve", "", ""); err == nil || !strings.Contains(err.Error(), "not a root-owned binary") {
 		t.Errorf("non-root-owned installed binary: %v", err)
 	}
 	if err := os.Chmod(installed, 0o777); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := helperIdentity(root, "/elsewhere/macserve", digest); err == nil || !strings.Contains(err.Error(), "not a root-owned binary") {
+	if _, _, _, err := helperIdentity(root, "/elsewhere/macserve", digest, ""); err == nil || !strings.Contains(err.Error(), "not a root-owned binary") {
 		t.Errorf("writable installed binary: %v", err)
 	}
 }

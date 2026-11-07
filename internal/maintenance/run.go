@@ -9,7 +9,7 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/jerryfane/macserve/internal/controller"
+	"github.com/jerryfane/macserve/internal/health"
 	"github.com/jerryfane/macserve/internal/hostguard"
 	"github.com/jerryfane/macserve/internal/worker"
 )
@@ -26,11 +26,11 @@ func Run(ctx context.Context, c Config) error {
 	if c.path == "" {
 		return errors.New("maintenance config must be loaded from a protected file")
 	}
-	const health = "/Library/macserve/health/current.json"
-	if err := hostguard.RootDirectory(filepath.Dir(health)); err != nil {
+	const healthPath = "/Library/macserve/health/current.json"
+	if err := hostguard.RootDirectory(filepath.Dir(healthPath)); err != nil {
 		return err
 	}
-	var lastValid controller.Health
+	var lastValid health.Health
 	var report healthReport
 	invalid := func(cause string) error {
 		o := Observation{}
@@ -41,7 +41,7 @@ func Run(ctx context.Context, c Config) error {
 			}
 		}
 		h, _ := Evaluate(time.Now(), Qualification{}, BoundaryEvidence{}, o)
-		if err := publish(health, h); err != nil {
+		if err := publish(healthPath, h); err != nil {
 			return err
 		}
 		report.invalid(h, lastValid, cause)
@@ -65,7 +65,7 @@ func Run(ctx context.Context, c Config) error {
 		started := time.Now()
 		current, err := LoadConfig(c.path)
 		interval := 10 * time.Second
-		var h controller.Health
+		var h health.Health
 		if err == nil {
 			interval = time.Duration(current.IntervalSeconds) * time.Second
 			probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
@@ -90,7 +90,7 @@ func Run(ctx context.Context, c Config) error {
 				h, _ = Evaluate(time.Now(), Qualification{}, BoundaryEvidence{}, Observation{})
 			}
 		}
-		if pubErr := publish(health, h); pubErr != nil {
+		if pubErr := publish(healthPath, h); pubErr != nil {
 			return pubErr
 		}
 		if err != nil {
@@ -98,7 +98,7 @@ func Run(ctx context.Context, c Config) error {
 		} else {
 			report.valid(h)
 		}
-		lastValid = controller.Health{}
+		lastValid = health.Health{}
 		if err == nil && h.BoundaryValidated {
 			lastValid = h
 		}
@@ -117,7 +117,7 @@ func Run(ctx context.Context, c Config) error {
 // devicefs changed mid-census (Xcode does this as a build finishes). Every
 // other error, and any inconclusive probe once the last valid health has
 // expired, publishes invalid health.
-func keepLastValid(err error, last controller.Health, now time.Time) bool {
+func keepLastValid(err error, last health.Health, now time.Time) bool {
 	inconclusive := errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errCoreDeviceMountChanged)
 	return inconclusive && last.BoundaryValidated && last.ExpiresAt.After(now)
 }

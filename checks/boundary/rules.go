@@ -44,14 +44,18 @@ var (
 var buildEnv = []string{"GOOS=darwin", "GOARCH=arm64", "CGO_ENABLED=0", "GOFLAGS=-mod=readonly", "GOWORK=off"}
 
 type listedPackage struct {
-	ImportPath string
-	Dir        string
-	Export     string
-	Standard   bool
-	GoFiles    []string
-	CgoFiles   []string
-	Module     *struct{ Path string }
-	Error      *struct{ Err string }
+	ImportPath   string
+	Name         string
+	Imports      []string
+	TestImports  []string
+	XTestImports []string
+	Dir          string
+	Export       string
+	Standard     bool
+	GoFiles      []string
+	CgoFiles     []string
+	Module       *struct{ Path string }
+	Error        *struct{ Err string }
 }
 
 // CheckSources applies the C/G source rules to every C/G Go file of the
@@ -130,6 +134,7 @@ func CheckSources(root string, m *Manifest, classes map[string]string) ([]string
 			c.problem(dir, "g_calls listed for a package with no G files")
 		}
 	}
+	c.problems = append(c.problems, checkLinks(module, m, classes, pkgs)...)
 	sort.Strings(c.problems)
 	return c.problems, nil
 }
@@ -156,7 +161,7 @@ func goTool() string {
 }
 
 func goList(root string) ([]listedPackage, error) {
-	cmd := exec.Command(goTool(), "list", "-e", "-export", "-deps", "-json=ImportPath,Dir,Export,Standard,GoFiles,CgoFiles,Module,Error", "./...")
+	cmd := exec.Command(goTool(), "list", "-e", "-export", "-deps", "-json=ImportPath,Name,Dir,Export,Standard,GoFiles,CgoFiles,Imports,TestImports,XTestImports,Module,Error", "./...")
 	cmd.Dir = root
 	// PWD must name root itself: the go command trusts an inherited $PWD
 	// that resolves to the same directory and reports paths through it.

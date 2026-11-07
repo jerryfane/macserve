@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jerryfane/macserve/internal/controller"
+	"github.com/jerryfane/macserve/internal/controllerconfig"
 	"github.com/jerryfane/macserve/internal/deploy"
 	"github.com/jerryfane/macserve/internal/hostguard"
 	"github.com/jerryfane/macserve/internal/maintenance"
@@ -232,7 +232,7 @@ func Begin(ctx context.Context, o BeginOptions) error {
 	if e != nil {
 		return e
 	}
-	cc, e := controller.LoadConfig(mc.ControllerConfig)
+	cc, e := controllerconfig.LoadConfig(mc.ControllerConfig)
 	if e != nil {
 		return e
 	}

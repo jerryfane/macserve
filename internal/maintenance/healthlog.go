@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jerryfane/macserve/internal/controller"
+	"github.com/jerryfane/macserve/internal/health"
 )
 
 // timeLayout is RFC 3339 in UTC with milliseconds, as the daemons' log prefix.
@@ -20,7 +20,7 @@ type healthReport struct {
 	blockers string
 }
 
-func (r *healthReport) invalid(h, lastValid controller.Health, cause string) {
+func (r *healthReport) invalid(h, lastValid health.Health, cause string) {
 	blockers, cancel := healthBlockers(h)
 	r.blockers = blockers
 	until := "none"
@@ -30,7 +30,7 @@ func (r *healthReport) invalid(h, lastValid controller.Health, cause string) {
 	log.Printf("macserve maintenance: published invalid health checked_at=%s last_valid_until=%s blockers=%s cancels_active_job=%t: %s", stamp(h.CheckedAt), until, blockers, cancel, cause)
 }
 
-func (r *healthReport) valid(h controller.Health) {
+func (r *healthReport) valid(h health.Health) {
 	blockers, cancel := healthBlockers(h)
 	if blockers == r.blockers {
 		return
@@ -42,8 +42,8 @@ func (r *healthReport) valid(h controller.Health) {
 // healthBlockers lists the blockers a controller reports for h when it reads
 // it fresh. Toolchain qualification is the controller's own comparison against
 // its profiles and is not listed.
-func healthBlockers(h controller.Health) (string, bool) {
-	found := controller.HealthBlockers(h, h.CheckedAt, h.JobUID, nil)
+func healthBlockers(h health.Health) (string, bool) {
+	found := health.HealthBlockers(h, h.CheckedAt, h.JobUID, nil)
 	if len(found) == 0 {
 		return "none", false
 	}

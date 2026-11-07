@@ -9,13 +9,15 @@ permissions:
 
 jobs:
   # An independent rebuild of the tag on a different host, OS and path. The
-  # release job publishes only if its binary is byte-identical to this one.
+  # release job publishes only if both its binaries are byte-identical to
+  # these.
   rebuild:
     runs-on: macos-latest
     env:
       GOMAXPROCS: "2"
     outputs:
       sha256: ${{ steps.build.outputs.sha256 }}
+      controller-sha256: ${{ steps.build.outputs.controller-sha256 }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -28,9 +30,12 @@ jobs:
       - name: Rebuild Darwin arm64 release
         id: build
         run: |
-          line=$(rebuild/macserve/checks/release-build.sh "$RUNNER_TEMP/rebuild")
-          echo "$line"
-          echo "sha256=${line%% *}" >> "$GITHUB_OUTPUT"
+          rebuild/macserve/checks/release-build.sh "$RUNNER_TEMP/rebuild" > "$RUNNER_TEMP/rebuild.sums"
+          cat "$RUNNER_TEMP/rebuild.sums"
+          {
+            echo "sha256=$(awk '$2 ~ /\/macserve-darwin-arm64$/ { print $1 }' "$RUNNER_TEMP/rebuild.sums")"
+            echo "controller-sha256=$(awk '$2 ~ /\/macserve-controller-darwin-arm64$/ { print $1 }' "$RUNNER_TEMP/rebuild.sums")"
+          } >> "$GITHUB_OUTPUT"
 
   release:
     needs: rebuild
@@ -60,26 +65,34 @@ jobs:
         working-directory: ${{ runner.temp }}/dist
         env:
           REBUILT_SHA256: ${{ needs.rebuild.outputs.sha256 }}
+          REBUILT_CONTROLLER_SHA256: ${{ needs.rebuild.outputs.controller-sha256 }}
         run: |
-          sha256sum macserve-darwin-arm64 > SHA256SUMS
+          sha256sum macserve-darwin-arm64 macserve-controller-darwin-arm64 > SHA256SUMS
           cat SHA256SUMS
-          echo "$REBUILT_SHA256  macserve-darwin-arm64" | sha256sum --check --strict
+          printf '%s  %s\n' \
+            "$REBUILT_SHA256" macserve-darwin-arm64 \
+            "$REBUILT_CONTROLLER_SHA256" macserve-controller-darwin-arm64 |
+            sha256sum --check --strict
       - name: Attest build provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: ${{ runner.temp }}/dist/macserve-darwin-arm64
+          subject-path: |
+            ${{ runner.temp }}/dist/macserve-darwin-arm64
+            ${{ runner.temp }}/dist/macserve-controller-darwin-arm64
       - name: Verify the attestation as a consumer would
         working-directory: ${{ runner.temp }}/dist
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh attestation verify macserve-darwin-arm64 \
-            --repo "$GH_REPO" \
-            --signer-workflow "$GH_REPO/.github/workflows/release.yml" \
-            --source-ref "$GITHUB_REF" \
-            --source-digest "$GITHUB_SHA" \
-            --deny-self-hosted-runners
+          for f in macserve-darwin-arm64 macserve-controller-darwin-arm64; do
+            gh attestation verify "$f" \
+              --repo "$GH_REPO" \
+              --signer-workflow "$GH_REPO/.github/workflows/release.yml" \
+              --source-ref "$GITHUB_REF" \
+              --source-digest "$GITHUB_SHA" \
+              --deny-self-hosted-runners
+          done
       # A release that changes only C, G and T paths (by the predecessor
       # release's BOUNDARY.json) carries qualification: macserve upgrade
       # accepts a carry only from this release's carry-proof.json asset, with
@@ -92,14 +105,18 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
           REBUILT_SHA256: ${{ needs.rebuild.outputs.sha256 }}
+          REBUILT_CONTROLLER_SHA256: ${{ needs.rebuild.outputs.controller-sha256 }}
           DIST: ${{ runner.temp }}/dist
         run: |
           # The proof must describe the commit this job built and attested.
           test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$GITHUB_SHA"
           binary=$(sha256sum "$DIST/macserve-darwin-arm64")
+          controller=$(sha256sum "$DIST/macserve-controller-darwin-arm64")
           go run ./checks/carry-proof \
             -repo "$GH_REPO" -tag "$RELEASE_TAG" \
             -binary-sha256 "${binary%% *}" -rebuilt-sha256 "$REBUILT_SHA256" \
+            -controller-binary-sha256 "${controller%% *}" \
+            -controller-rebuilt-sha256 "$REBUILT_CONTROLLER_SHA256" \
             -out "$DIST/carry-proof.json"
           subjects="$DIST/SHA256SUMS"
           if [ -f "$DIST/carry-proof.json" ]; then
@@ -111,7 +128,7 @@ jobs:
           echo "subjects=$subjects" >> "$GITHUB_OUTPUT"
       # SHA256SUMS (and carry-proof.json, when built) get their own build
       # provenance attestation, so an owner can verify the digest list and the
-      # proof macserve upgrade trusts, not only the binary.
+      # proof macserve upgrade trusts, not only the binaries.
       - name: Attest SHA256SUMS and the carry proof
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
@@ -135,7 +152,7 @@ jobs:
               --deny-self-hosted-runners
           done
       # Runs only after the byte-identical rebuild, attestation and consumer
-      # verification gates above. The formula takes its digest from the
+      # verification gates above. The formula takes both digests from the
       # SHA256SUMS that was just checked against the rebuild, and is published
       # with the release. The tap (jerryfane/homebrew-macserve) is bumped by a
       # reviewed PR that copies this asset; this workflow holds no tap token.
@@ -156,7 +173,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          assets=(macserve-darwin-arm64 SHA256SUMS macserve.rb)
+          assets=(macserve-darwin-arm64 macserve-controller-darwin-arm64 SHA256SUMS macserve.rb)
           carry="No carry-proof.json: this release changes a boundary path over its predecessor (or the change could not be proved), so it carries no qualification."
           if [ -f carry-proof.json ]; then
             assets+=(carry-proof.json)
@@ -164,4 +181,4 @@ jobs:
           fi
           gh release create "$RELEASE_TAG" "${assets[@]}" \
             --verify-tag --title "$RELEASE_TAG" \
-            --notes "Darwin arm64 macserve built by checks/release-build.sh (CGO disabled, -trimpath, -buildvcs=true), rebuilt byte-identically on a second runner, with GitHub build provenance attestations for it, SHA256SUMS and carry-proof.json when present (gh attestation verify FILE --repo $GH_REPO). Verify SHA256SUMS (and carry-proof.json) that way before macserve setup or macserve upgrade. $carry"
+            --notes "Darwin arm64 macserve and macserve-controller built by checks/release-build.sh (CGO disabled, -trimpath, -buildvcs=true), rebuilt byte-identically on a second runner, with GitHub build provenance attestations for both, SHA256SUMS and carry-proof.json when present (gh attestation verify FILE --repo $GH_REPO). Verify SHA256SUMS (and carry-proof.json) that way before macserve setup or macserve upgrade. $carry"
