@@ -46,7 +46,7 @@ const (
 // operation; they are never configuration identity.
 var mutableConfig = []string{"owner.pause", "qualification.json", "boundary-evidence.json", "activation-anchor.json"}
 
-var daemonPlists = []string{"/Library/LaunchDaemons/org.macserve.controller.plist", "/Library/LaunchDaemons/org.macserve.maintenance.plist", "/Library/LaunchDaemons/org.macserve.worker.plist"}
+var daemonPlists = []string{"/Library/LaunchDaemons/org.macserve.controller.plist", "/Library/LaunchDaemons/org.macserve.keyholder.plist", "/Library/LaunchDaemons/org.macserve.maintenance.plist", "/Library/LaunchDaemons/org.macserve.worker.plist"}
 
 type AnchorParameters struct {
 	JobUID        uint32            `json:"job_uid"`

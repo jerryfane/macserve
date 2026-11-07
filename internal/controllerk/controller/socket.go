@@ -18,7 +18,6 @@ import (
 	"github.com/jerryfane/macserve/internal/model"
 	"github.com/jerryfane/macserve/internal/protocol"
 	"github.com/jerryfane/macserve/internal/receipt"
-	"github.com/jerryfane/macserve/internal/worker"
 	"golang.org/x/sys/unix"
 )
 
@@ -119,12 +118,12 @@ func (c *Controller) handler() http.Handler {
 			respond(w, r, nil, err)
 			return
 		}
-		var result worker.Result
-		if err := decodeJSON(r.Body, 64<<20, &result); err != nil {
+		var completion protocol.Completion
+		if err := decodeJSON(r.Body, 64<<20, &completion); err != nil {
 			respond(w, r, nil, err)
 			return
 		}
-		respond(w, r, nil, c.complete(r.Context(), job, result))
+		respond(w, r, nil, c.complete(r.Context(), job, completion.Result, completion.Seal))
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authenticated, _ := r.Context().Value(peerKey{}).(bool)

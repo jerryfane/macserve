@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,5 +85,55 @@ func TestCLISignVerify(t *testing.T) {
 	}
 	if code, _, _ := cli(nil, "verify", "-pub", at("pub")); code != 2 {
 		t.Fatalf("verify usage: %d", code)
+	}
+}
+
+// The same path given for -macserve and -controller is checked against both
+// signed digests: a file matching only the controller digest is refused.
+func TestCLIVerifyChecksBothDigestsForOnePath(t *testing.T) {
+	dir := t.TempDir()
+	at := func(name string) string { return filepath.Join(dir, name) }
+	cli := func(env map[string]string, args ...string) (int, string) {
+		var stdout, stderr bytes.Buffer
+		code := run(context.Background(), args, &stdout, &stderr, func(k string) string { return env[k] })
+		return code, stderr.String()
+	}
+	if code, stderr := cli(nil, "keygen", "-seed-out", at("seed"), "-pub-out", at("pub")); code != 0 {
+		t.Fatalf("keygen: %d %s", code, stderr)
+	}
+	seed, _ := os.ReadFile(at("seed"))
+	env := map[string]string{SigningKeyEnv: string(bytes.TrimSpace(seed))}
+	binary := []byte("controller release bytes")
+	if err := os.WriteFile(at("controller"), binary, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(binary)
+	m := goldenManifest()
+	m.Binaries.Controller.SHA256 = hex.EncodeToString(sum[:])
+	if m.Binaries.Macserve.SHA256 == m.Binaries.Controller.SHA256 {
+		t.Fatal("fixture digests must differ")
+	}
+	manifest, err := Encode(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(at(ManifestAsset), manifest, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, stderr := cli(env, "sign", "-manifest", at(ManifestAsset), "-pub", at("pub"), "-out", at(SignatureAsset)); code != 0 {
+		t.Fatalf("sign: %d %s", code, stderr)
+	}
+	base := []string{"verify", "-pub", at("pub"), "-manifest", at(ManifestAsset), "-sig", at(SignatureAsset)}
+	if code, stderr := cli(nil, append(base, "-controller", at("controller"))...); code != 0 {
+		t.Fatalf("controller alone: %d %s", code, stderr)
+	}
+	for _, args := range [][]string{
+		{"-macserve", at("controller")},
+		{"-macserve", at("controller"), "-controller", at("controller")},
+		{"-controller", at("controller"), "-macserve", at("controller")},
+	} {
+		if code, stderr := cli(nil, append(base, args...)...); code != 1 || !strings.Contains(stderr, m.Binaries.Macserve.SHA256) {
+			t.Fatalf("%v: verify exit %d %s", args, code, stderr)
+		}
 	}
 }

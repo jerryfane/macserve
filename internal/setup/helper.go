@@ -110,6 +110,9 @@ type Helper struct {
 	Version func(binary []byte) (string, error)
 	// Processes lists every process with its UID and executable.
 	Processes func() ([]Process, error)
+	// Chown sets and verifies the owner of a file the keyholder migration
+	// creates for the keyholder account (ChownFile).
+	Chown func(f *os.File, uid, gid uint32) error
 
 	// started is set when this helper process started the services; it
 	// allows one release-pause in the same run (never on a later run).

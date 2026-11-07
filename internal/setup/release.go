@@ -206,6 +206,11 @@ type Release struct {
 	Carry bool `json:"carry,omitempty"`
 	// AnchorSHA256 is the activation anchor qualify carry rewrote.
 	AnchorSHA256 string `json:"anchor_sha256,omitempty"`
+	// KeyholderEnvSHA256 is the deploy.env the keyholder migration writes
+	// (the installed one with the keyholder's IDs added), recorded before
+	// it is written: until the migration records it as the install
+	// step's deploy.env, installedEnv accepts it for this release.
+	KeyholderEnvSHA256 string `json:"keyholder_env_sha256,omitempty"`
 }
 
 // PendingRelease returns the running upgrade, if any.

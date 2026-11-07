@@ -59,7 +59,8 @@ type fakeHost struct {
 func testEnv(owner Owner) string {
 	return "CONTROLLER_USER=macservectl\nCONTROLLER_UID=6201\nCONTROLLER_GID=6201\nJOB_USER=macservejob\nJOB_UID=6202\nJOB_GID=6202\n" +
 		"OWNER_USER=" + owner.Name + "\nOWNER_UID=" + itoa(owner.UID) + "\nTAILNET_IP=100.64.0.10\nPORT=8443\nPROTECTED_PORTS=8443\n" +
-		"HOST_ADDRESSES=100.64.0.10\nDEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer\nREPOSITORIES=jdoe/myapp:4242\n"
+		"HOST_ADDRESSES=100.64.0.10\nDEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer\nREPOSITORIES=jdoe/myapp:4242\n" +
+		"KEYHOLDER_UID=499\nKEYHOLDER_GID=499\nKEYRPC_GID=498\n"
 }
 
 // controllerBinary is the fixture release's macserve-controller.
@@ -160,7 +161,7 @@ func (f *fakeHost) install(o deploy.Options, stdout, _ io.Writer) error {
 		}
 	}
 	root := f.h.Root
-	for _, dir := range []string{"config", "bin", "var/controller/secrets"} {
+	for _, dir := range []string{"config", "bin", "var/controller/secrets", "var/keyholder/secrets"} {
 		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
 			return err
 		}
@@ -191,7 +192,8 @@ func (f *fakeHost) controllerConfig() controllerconfig.Config {
 		ProfilesFile: config + "/profiles.json", Listen: "100.64.0.10:8443", AllowedNetworks: []string{"100.64.0.0/10", "fd7a:115c:a1e0::/48"},
 		TLSCertificate: config + "/tls-cert.pem", TLSKey: root + "/var/controller/secrets/tls-key.pem", HealthFile: root + "/health/current.json",
 		PauseFile: config + "/owner.pause", OwnerUID: 501,
-		Receipt: controllerconfig.ReceiptConfig{KeyID: "k1", PrivateKeyFile: root + "/var/controller/secrets/receipt-key.pem", ServiceID: "svc", HostID: "host", Repositories: map[string]int64{"jdoe/myapp": 4242}},
+		Receipt:   controllerconfig.ReceiptConfig{KeyID: "k1", PrivateKeyFile: root + "/var/keyholder/secrets/receipt-key.pem", ServiceID: "svc", HostID: "host", Repositories: map[string]int64{"jdoe/myapp": 4242}},
+		Keyholder: &controllerconfig.KeyholderConfig{Socket: root + "/var/keyholder-run/keyholder.sock", UID: 499},
 	}
 }
 
@@ -211,7 +213,7 @@ func (f *fakeHost) writeController(github *controllerconfig.GitHubConfig) {
 // connectGitHub writes what connect-github leaves: the key and the github
 // section.
 func (f *fakeHost) connectGitHub() {
-	key := filepath.Join(f.h.Root, "var/controller/secrets/github-app.pem")
+	key := filepath.Join(f.h.Root, "var/keyholder/secrets/github-app.pem")
 	if err := os.WriteFile(key, []byte("pem"), 0o600); err != nil {
 		f.t.Fatal(err)
 	}

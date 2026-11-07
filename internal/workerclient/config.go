@@ -29,6 +29,31 @@ type Config struct {
 	PollSeconds           int    `json:"poll_seconds"`
 	HeartbeatSeconds      int    `json:"heartbeat_seconds"`
 	RequestTimeoutSeconds int    `json:"request_timeout_seconds"`
+	// ProfilesFile is the root-owned profile and template registry every
+	// lease is resolved against; QualificationFile is the root-owned
+	// qualification record whose profile set must equal the registry's.
+	ProfilesFile      string `json:"profiles_file,omitempty"`
+	QualificationFile string `json:"qualification_file,omitempty"`
+	// SealKeyFile is the root-only Ed25519 key the worker signs its build
+	// seals with; SealKeyID names it in the keyholder's pins.
+	SealKeyFile string `json:"seal_key_file,omitempty"`
+	SealKeyID   string `json:"seal_key_id,omitempty"`
+}
+
+// LeaseAuthority reports whether the configuration names the registry,
+// qualification record and seal key the lease path requires. Older
+// worker.json files without them still load for the root tools that only
+// need the engine options; the broker refuses to run without them.
+func (c Config) LeaseAuthority() error {
+	for name, path := range map[string]string{"profiles_file": c.ProfilesFile, "qualification_file": c.QualificationFile, "seal_key_file": c.SealKeyFile} {
+		if path == "" {
+			return fmt.Errorf("worker configuration lacks %s", name)
+		}
+	}
+	if c.SealKeyID == "" || len(c.SealKeyID) > 128 {
+		return errors.New("worker configuration lacks seal_key_id")
+	}
+	return nil
 }
 
 // EngineOptions maps the protected broker configuration to native worker
@@ -66,6 +91,11 @@ func LoadConfig(path string) (Config, error) {
 func normalize(cfg Config) (Config, error) {
 	for _, path := range []string{cfg.Socket, cfg.Root, cfg.ExportRoot, cfg.WorkspaceRoot, cfg.HelperPath, cfg.BaselinePath, cfg.PersistencePath} {
 		if !filepath.IsAbs(path) || filepath.Clean(path) != path || path == string(filepath.Separator) {
+			return cfg, fmt.Errorf("worker paths must be explicit clean absolute paths")
+		}
+	}
+	for _, path := range []string{cfg.ProfilesFile, cfg.QualificationFile, cfg.SealKeyFile} {
+		if path != "" && (!filepath.IsAbs(path) || filepath.Clean(path) != path || path == string(filepath.Separator)) {
 			return cfg, fmt.Errorf("worker paths must be explicit clean absolute paths")
 		}
 	}

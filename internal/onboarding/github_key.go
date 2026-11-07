@@ -9,11 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+
+	"github.com/jerryfane/macserve/internal/keyholder"
 )
 
-// AppKeyName is the App key's file name in the controller secrets
-// directory, the name the admin enrollment uses.
-const AppKeyName = "github-app.pem"
+// AppKeyName is the App key's file name in the keyholder's secrets
+// directory, the only name the keyholder reads.
+const AppKeyName = keyholder.AppKeyName
 
 // nofollow refuses a symlink as the final path component.
 const nofollow = syscall.O_NOFOLLOW
@@ -22,18 +24,19 @@ const nofollow = syscall.O_NOFOLLOW
 // overwritten; deleting an old one is a separate, deliberate owner action.
 var ErrKeyExists = errors.New("a GitHub App key is already installed; macserve never replaces it")
 
-// KeyTarget is where the App key is installed: <Root>/var/controller/secrets.
-// Root and Root/var must be owned by RootUID (0 outside tests) and not
-// writable by group or other; var/controller and its secrets must be
-// controller-owned 0700 directories, as deploy-install creates them.
+// KeyTarget is where the App key is installed: <Root>/var/keyholder/secrets,
+// the keyholder's, which the controller cannot open. Root and Root/var must
+// be owned by RootUID (0 outside tests) and not writable by group or
+// other; var/keyholder and its secrets must be keyholder-owned 0700
+// directories, as create-users.sh creates them.
 type KeyTarget struct {
-	Root                         string
-	RootUID                      uint32
-	ControllerUID, ControllerGID uint32
+	Root                       string
+	RootUID                    uint32
+	KeyholderUID, KeyholderGID uint32
 }
 
-// Dir is the controller secrets directory.
-func (t KeyTarget) Dir() string { return filepath.Join(t.Root, "var", "controller", "secrets") }
+// Dir is the keyholder secrets directory.
+func (t KeyTarget) Dir() string { return filepath.Join(t.Root, "var", "keyholder", "secrets") }
 
 // Path is the installed key's path, the github.private_key_file value.
 func (t KeyTarget) Path() string { return filepath.Join(t.Dir(), AppKeyName) }
@@ -73,7 +76,7 @@ func checkTrustedDir(path string, uids []uint32, allowSticky bool) error {
 	return nil
 }
 
-func checkControllerDir(path string, uid, gid uint32) (fs.FileInfo, error) {
+func checkKeyholderDir(path string, uid, gid uint32) (fs.FileInfo, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
@@ -83,7 +86,7 @@ func checkControllerDir(path string, uid, gid uint32) (fs.FileInfo, error) {
 	}
 	u, g, _, ok := owner(info)
 	if !ok || u != uid || g != gid || info.Mode().Perm() != 0o700 || info.Mode()&(fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky) != 0 {
-		return nil, fmt.Errorf("%s must be a controller-owned 0700 directory", path)
+		return nil, fmt.Errorf("%s must be a keyholder-owned 0700 directory", path)
 	}
 	return info, nil
 }
@@ -106,10 +109,10 @@ func (t KeyTarget) checkTarget() (fs.FileInfo, error) {
 			return nil, err
 		}
 	}
-	if _, err := checkControllerDir(filepath.Dir(t.Dir()), t.ControllerUID, t.ControllerGID); err != nil {
+	if _, err := checkKeyholderDir(filepath.Dir(t.Dir()), t.KeyholderUID, t.KeyholderGID); err != nil {
 		return nil, err
 	}
-	return checkControllerDir(t.Dir(), t.ControllerUID, t.ControllerGID)
+	return checkKeyholderDir(t.Dir(), t.KeyholderUID, t.KeyholderGID)
 }
 
 // KeyInstalled reports whether any entry already holds the key's name.
@@ -121,8 +124,8 @@ func (t KeyTarget) KeyInstalled() (bool, error) {
 	return err == nil, err
 }
 
-// InstallAppKey writes the App key as a controller-owned 0600 single-link
-// regular file in the secrets directory, with the properties of the admin
+// InstallAppKey writes the App key as a keyholder-owned 0600 single-link
+// regular file in the keyholder's secrets directory, with the properties of the admin
 // enrollment: exclusive create (never overwrite, never follow a symlink),
 // no symlink or untrusted ancestor, owner, group, mode and link count
 // verified on the open descriptor, and the bytes read back. A file this
@@ -149,7 +152,7 @@ func installAppKey(t KeyTarget, data []byte) (installed fs.FileInfo, err error) 
 	defer root.Close()
 	opened, err := root.Stat(".")
 	if err != nil || !os.SameFile(opened, dirInfo) {
-		return nil, errors.New("the controller secrets directory changed during validation")
+		return nil, errors.New("the keyholder secrets directory changed during validation")
 	}
 	if _, err := root.Lstat(AppKeyName); err == nil {
 		return nil, ErrKeyExists
@@ -176,14 +179,14 @@ func installAppKey(t KeyTarget, data []byte) (installed fs.FileInfo, err error) 
 		return nil, statErr
 	}
 	_, werr := f.Write(data)
-	err = errors.Join(werr, f.Chown(int(t.ControllerUID), int(t.ControllerGID)), f.Chmod(0o600), f.Sync())
+	err = errors.Join(werr, f.Chown(int(t.KeyholderUID), int(t.KeyholderGID)), f.Chmod(0o600), f.Sync())
 	info, serr := f.Stat()
 	err = errors.Join(err, serr, f.Close())
 	if err != nil {
 		return nil, fmt.Errorf("cannot write the GitHub App key: %w", err)
 	}
 	uid, gid, nlink, ok := owner(info)
-	if !ok || uid != t.ControllerUID || gid != t.ControllerGID || info.Mode() != 0o600 || nlink != 1 || info.Size() != int64(len(data)) {
+	if !ok || uid != t.KeyholderUID || gid != t.KeyholderGID || info.Mode() != 0o600 || nlink != 1 || info.Size() != int64(len(data)) {
 		return nil, errors.New("the installed GitHub App key failed owner, mode or link validation")
 	}
 	back, err := root.Open(AppKeyName)

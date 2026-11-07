@@ -87,7 +87,6 @@ func serveController(parent context.Context, config controllerconfig.Config) err
 	if err != nil {
 		return err
 	}
-	defer integrations.signer.Close()
 	sourceOptions := source.Options{Root: filepath.Join(config.Root, "source")}
 	if integrations.app != nil {
 		sourceOptions.Token = integrations.app.SourceToken
@@ -97,7 +96,7 @@ func serveController(parent context.Context, config controllerconfig.Config) err
 		return err
 	}
 	defer exporter.Close()
-	controllerOptions := controller.Options{Root: config.Root, Socket: config.Socket, BrokerUID: 0, Store: db, Source: exporter, Gate: guard.Check, BeforeDispatch: integrations.beforeDispatch, Seal: integrations.signer.Seal, PruneReceipts: integrations.pruneReceipts}
+	controllerOptions := controller.Options{Root: config.Root, Socket: config.Socket, BrokerUID: 0, Store: db, Source: exporter, Gate: guard.Check, BeforeDispatch: integrations.beforeDispatch, Seal: integrations.seal, PruneReceipts: integrations.pruneReceipts}
 	signerKey, err := signerOptions(config, &controllerOptions)
 	if err != nil {
 		return err
@@ -110,7 +109,7 @@ func serveController(parent context.Context, config controllerconfig.Config) err
 	if err := db.ReplacePrincipals(parent, config.Principals); err != nil {
 		return err
 	}
-	apiOptions := api.Options{Store: db, Profiles: registry, Status: runtime.Status, Artifact: runtime.Artifact, Receipt: runtime.Receipt, ReceiptManifest: integrations.signer.Manifest}
+	apiOptions := api.Options{Store: db, Profiles: registry, Status: runtime.Status, Artifact: runtime.Artifact, Receipt: runtime.Receipt, ReceiptManifest: integrations.keyholder.Manifest}
 	// Only the GitHub App resolves the default-branch head an ios_archive
 	// job must build; without one, archive admission is refused.
 	if integrations.app != nil {

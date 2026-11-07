@@ -69,14 +69,17 @@ func (h *Helper) readConfig(name string, max int64) ([]byte, error) {
 
 // installedEnv is the deploy.env deploy-install installed, parsed. It must
 // be byte-identical to the one install recorded, so DEVELOPER_DIR, the
-// account IDs and the repository pins are the ones the owner confirmed.
+// account IDs and the repository pins are the ones the owner confirmed,
+// or, during an upgrade, to the one the keyholder migration recorded.
 func (h *Helper) installedEnv(l *Ledger) (deploy.Environment, []byte, error) {
 	data, err := h.readConfig("deploy.env", deploy.MaxEnvironment)
 	if err != nil {
 		return deploy.Environment{}, nil, err
 	}
-	if digestHex(data) != l.record(StepInstall).Inputs["deploy.env"] {
-		return deploy.Environment{}, nil, errors.New("the installed deploy.env is not the one install recorded")
+	if d := digestHex(data); d != l.record(StepInstall).Inputs["deploy.env"] {
+		if rel := l.PendingRelease(); rel == nil || rel.KeyholderEnvSHA256 != d {
+			return deploy.Environment{}, nil, errors.New("the installed deploy.env is not the one install recorded")
+		}
 	}
 	e, err := deploy.ParseEnvironment(data)
 	return e, data, err

@@ -42,7 +42,7 @@
     {
       "id": "fs.protect",
       "status": "pass",
-      "detail": "the installation, its secrets and the service plists are protected"
+      "detail": "the installation, the controller's and the keyholder's secrets and the service plists are protected"
     },
     {
       "id": "tcc.fda",
@@ -69,7 +69,7 @@
     {
       "id": "svc.state",
       "status": "pass",
-      "detail": "the three services are loaded and enabled"
+      "detail": "the services are loaded and enabled"
     },
     {
       "id": "health",

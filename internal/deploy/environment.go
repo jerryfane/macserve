@@ -38,6 +38,11 @@ type Environment struct {
 	// system account, its dedicated primary group and the RPC group shared
 	// only with the controller. All three are zero when no signer is deployed.
 	SignerUID, SignerGID, SignRPCGID uint32
+	// KeyholderUID, KeyholderGID and KeyRPCGID are the keyholder's system
+	// account, its dedicated primary group and the RPC group shared only
+	// with the controller. deploy-install requires them; all three are zero
+	// in an installation from before the keyholder.
+	KeyholderUID, KeyholderGID, KeyRPCGID uint32
 }
 
 var accountName = regexp.MustCompile(`^[a-z][a-z0-9_]{0,30}$`)
@@ -57,7 +62,7 @@ func ParseEnvironment(data []byte) (Environment, error) {
 	for _, k := range keys {
 		allowed[k] = true
 	}
-	for _, k := range strings.Fields("COEXISTING_ANCHORS COEXISTING_SERVICES JOB_REAL_NAME SIGNER_UID SIGNER_GID SIGNRPC_GID") {
+	for _, k := range strings.Fields("COEXISTING_ANCHORS COEXISTING_SERVICES JOB_REAL_NAME SIGNER_UID SIGNER_GID SIGNRPC_GID KEYHOLDER_UID KEYHOLDER_GID KEYRPC_GID") {
 		allowed[k] = true
 	}
 	for n, line := range strings.Split(string(data), "\n") {
@@ -109,6 +114,9 @@ func ParseEnvironment(data []byte) (Environment, error) {
 		return e, errors.New("identity IDs conflict")
 	}
 	if err := parseSigner(&e, values); err != nil {
+		return e, err
+	}
+	if err := parseKeyholder(&e, values); err != nil {
 		return e, err
 	}
 	ip, err := canonicalAddress(values["TAILNET_IP"])
@@ -215,6 +223,48 @@ func parseSigner(e *Environment, values map[string]string) error {
 	}
 	if e.SignerGID == e.SignRPCGID {
 		return errors.New("SIGNER_GID and SIGNRPC_GID must differ")
+	}
+	return nil
+}
+
+// parseKeyholder reads the optional KEYHOLDER_UID, KEYHOLDER_GID and
+// KEYRPC_GID: all three or none. They are system IDs (200..499), so never a
+// service, job or owner ID; the keyholder's two groups differ from each
+// other and from the signer's, and its UID is not the signer's.
+func parseKeyholder(e *Environment, values map[string]string) error {
+	keys := []string{"KEYHOLDER_UID", "KEYHOLDER_GID", "KEYRPC_GID"}
+	present := 0
+	for _, k := range keys {
+		if _, ok := values[k]; ok {
+			present++
+		}
+	}
+	if present == 0 {
+		return nil
+	}
+	if present != len(keys) {
+		return errors.New("KEYHOLDER_UID, KEYHOLDER_GID and KEYRPC_GID are required together")
+	}
+	ids := []*uint32{&e.KeyholderUID, &e.KeyholderGID, &e.KeyRPCGID}
+	for i, k := range keys {
+		n, err := canonicalNumber(values[k], SignerMaxID)
+		if err != nil || n < SignerMinID {
+			return fmt.Errorf("invalid %s: keyholder IDs are system IDs %d..%d", k, SignerMinID, SignerMaxID)
+		}
+		*ids[i] = uint32(n)
+	}
+	for _, uid := range []uint32{e.ControllerUID, e.JobUID, e.OwnerUID, e.SignerUID} {
+		if e.KeyholderUID == uid {
+			return errors.New("KEYHOLDER_UID must differ from the controller, job, owner and signer UIDs")
+		}
+	}
+	for _, gid := range []uint32{e.ControllerGID, e.JobGID, e.SignerGID, e.SignRPCGID} {
+		if gid != 0 && (e.KeyholderGID == gid || e.KeyRPCGID == gid) {
+			return errors.New("keyholder GIDs must differ from the controller, job and signer GIDs")
+		}
+	}
+	if e.KeyholderGID == e.KeyRPCGID {
+		return errors.New("KEYHOLDER_GID and KEYRPC_GID must differ")
 	}
 	return nil
 }

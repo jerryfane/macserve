@@ -280,16 +280,18 @@ func verifyFiles(v verifyParams) (Manifest, error) {
 			}
 		}
 	}
-	for file, want := range map[string]string{v.root: m.Binaries.Macserve.SHA256, v.controller: m.Binaries.Controller.SHA256} {
-		if file == "" {
+	// Each file/digest pair is checked on its own: the same path given for
+	// both binaries must match both digests, never just one of them.
+	for _, pair := range []struct{ file, want string }{{v.root, m.Binaries.Macserve.SHA256}, {v.controller, m.Binaries.Controller.SHA256}} {
+		if pair.file == "" {
 			continue
 		}
-		got, err := fileDigest(file)
+		got, err := fileDigest(pair.file)
 		if err != nil {
 			return m, err
 		}
-		if got != want {
-			return m, fmt.Errorf("%s has sha256 %s, manifest %s", file, got, want)
+		if got != pair.want {
+			return m, fmt.Errorf("%s has sha256 %s, manifest %s", pair.file, got, pair.want)
 		}
 	}
 	return m, nil

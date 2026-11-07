@@ -6,9 +6,12 @@ This page was split out of the [README](../README.md); text is unchanged unless 
 no `controller` subcommand) requires a root-controlled configuration and
 a dedicated non-login, non-admin controller account distinct from the owner and job account. Configuration fields:
 `root`, `socket`, `job_uid`, `owner_uid`, `profiles_file`, `listen`, `tls_certificate`, `tls_key`,
-`principals`, `health_file`, `receipt`, and optional `allowed_networks`, `pause_file`, `github`.
-Profiles and the public TLS certificate are root-controlled. TLS, receipt and App private keys are separate
-controller-private files; no secret is supplied through command arguments or a worker lease.
+`principals`, `health_file`, `receipt`, `keyholder`, and optional `allowed_networks`, `pause_file`, `github`.
+Profiles and the public TLS certificate are root-controlled. The TLS private key is a controller-private file; the
+receipt and App private keys are the [keyholder](#keyholder)'s, and `receipt.private_key_file` and
+`github.private_key_file` name them only for the keyholder (exactly
+`/Library/macserve/var/keyholder/secrets/receipt-key.pem` and `.../github-app.pem`; the controller never opens
+them). No secret is supplied through command arguments or a worker lease.
 `job_uid` identifies the unprivileged execution account. The private executor socket always
 authenticates peer UID `0` in production, independently of `job_uid`.
 
@@ -18,6 +21,7 @@ wildcard or loopback listeners. Client authorization is independent of network m
 Each principal has `id`, `token_sha256`, `repositories`, `scopes`, and optional `revoked`. Scopes are
 `jobs:submit`, `jobs:read`, `jobs:cancel`, `release:archive`, `release:sign`, `service:admin`. Only SHA-256 digests are persisted; plaintext
 high-entropy bearer credentials belong in the caller's private credential storage.
+`keyholder` connects the controller to the [keyholder](#keyholder); the controller refuses to start without it.
 Optional `signer` connects the controller to the [code signer](#code-signer).
 
 - `POST /v1/jobs` requires `Idempotency-Key` and a profile-matching exact-SHA request.
@@ -178,6 +182,69 @@ Existing idempotent submissions replay read-only even when admission is unavaila
 a new submission and must pass current readiness and profiles. JSON field names are case-exact.
 Private API callers must independently approve repository-history membership of a SHA: exact-object fetch
 proves identity, not reachability from the allowlisted repository's own heads or tags.
+
+## Keyholder
+
+The keyholder (`macserve keyholder --config /Library/macserve/config/keyholder.json`, account `_macserve_key`) holds
+the receipt and GitHub App keys; see [install.md](install.md#keyholder). `deploy-install` (or the `macserve upgrade`
+migration) writes `keyholder.json`, root:wheel `0644`, unknown fields rejected:
+
+| Key | Value |
+| --- | --- |
+| `keyholder_uid`, `keyholder_gid` | the `_macserve_key` UID (`KEYHOLDER_UID`) and its dedicated primary GID (`KEYHOLDER_GID`) |
+| `rpc_gid` | the `_macserve_keyrpc` GID (`KEYRPC_GID`; members: controller and keyholder only) |
+| `controller_uid` | the only peer UID the keyholder socket serves |
+| `job_uid`, `job_gid` | the job account, which must never share a keyholder group |
+| `state_dir` | `/Library/macserve/var/keyholder`: `secrets/` (`receipt-key.pem`, `github-app.pem`), `receipts/` (full receipt manifests), `release/` (verified release provenance) |
+| `socket` | `/Library/macserve/var/keyholder-run/keyholder.sock` |
+| `controller_config` | `/Library/macserve/config/controller.json`: the receipt and github sections, service identity and repository policy |
+| `release_scope_file` | `/Library/macserve/config/release-scope.json` |
+| `seal_keys` | `{"macserve-worker-<host_id>": "<base64 Ed25519 public key>"}`: the root worker's build seal keys |
+
+Controller `keyholder` section: `{"keyholder":{"socket":"/Library/macserve/var/keyholder-run/keyholder.sock","uid":<KEYHOLDER_UID>}}`.
+The controller checks the socket peer is `uid` on every connection.
+
+`worker.json` names, for the lease path, `profiles_file` (`/Library/macserve/config/profiles.json`),
+`qualification_file` (`/Library/macserve/config/qualification.json`), `seal_key_file`
+(`/Library/macserve/var/broker/seal-key.pem`, root:wheel `0600` Ed25519 PKCS#8 PEM) and `seal_key_id`
+(`macserve-worker-<host_id>`, the `seal_keys` entry). The broker refuses to run without them; older files still
+load for the root tools that do not lease.
+
+### Release scope
+
+`/Library/macserve/config/release-scope.json` is written by the owner, root:wheel `0644`, unknown fields rejected,
+and is anchored configuration (changing it needs a new approval). Absent, the keyholder refuses every release
+receipt. It lists, per repository, every input that changes an Apple-signed build's output except its version labels:
+
+```json
+{
+  "schema": "macserve-release-scope/1",
+  "repositories": {
+    "example-org/example-app": {
+      "repository_id": 12345,
+      "profile_id": "example-app-archive-v1",
+      "profile_version": 1,
+      "profile_digest": "<64 lowercase hex: the profile's digest in profiles.json>",
+      "xcode": {"version": "16.2", "build": "16C5032a"},
+      "flutter": {"version": "3.27.1", "sdk_sha256": "<64 hex>", "ruby_sha256": "<64 hex>", "cocoapods_version": "1.16.2", "gems_sha256": "<64 hex>"},
+      "dart_defines": {"FLAVOR": "prod"}
+    }
+  }
+}
+```
+
+| Key | Value |
+| --- | --- |
+| `schema` | exactly `macserve-release-scope/1` |
+| `repositories` | keyed by the lowercase `owner/name` a release job requests |
+| `repository_id` | the numeric GitHub repository ID (also pinned in `receipt.repositories`) |
+| `profile_id`, `profile_version`, `profile_digest` | the exact profile or template identity the release must run |
+| `xcode` | `{"version","build"}` the release must use |
+| `flutter` | the Flutter pin of a Flutter release, in the profile's pin format; omitted for a non-Flutter release |
+| `dart_defines` | the exact map of Dart defines; omitted or empty for none |
+
+A release job's only free inputs are its version labels: build name `^[0-9]+(\.[0-9]+){0,2}$` and build
+number `^[0-9]{1,9}$`.
 
 ## Code signer
 

@@ -31,7 +31,7 @@ import (
 
 const Prefix = "/Library/macserve"
 
-var assetNames = []string{"create-users.sh", "qualify.sh", "launchd/org.macserve.controller.plist.tmpl", "launchd/org.macserve.worker.plist.tmpl", "launchd/org.macserve.maintenance.plist.tmpl", "launchd/org.macserve.signer.plist.tmpl"}
+var assetNames = []string{"create-users.sh", "qualify.sh", "launchd/org.macserve.controller.plist.tmpl", "launchd/org.macserve.worker.plist.tmpl", "launchd/org.macserve.maintenance.plist.tmpl", "launchd/org.macserve.signer.plist.tmpl", "launchd/org.macserve.keyholder.plist.tmpl"}
 
 type File struct {
 	Path     string
@@ -207,6 +207,9 @@ func privatePEM(key ed25519.PrivateKey) ([]byte, error) {
 // token is deliberately not a member of any persisted file or manifest.
 func makeMaterial(e Environment, envData []byte, rendered map[string][]byte, now time.Time) (Material, error) {
 	var m Material
+	if !e.Keyholder() {
+		return m, errors.New("deploy.env must name the keyholder: KEYHOLDER_UID, KEYHOLDER_GID and KEYRPC_GID")
+	}
 	token, err := opaque()
 	if err != nil {
 		return m, err
@@ -252,6 +255,15 @@ func makeMaterial(e Environment, envData []byte, rendered map[string][]byte, now
 	if err != nil {
 		return m, err
 	}
+	sealPublic, sealKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return m, err
+	}
+	sealPEM, err := privatePEM(sealKey)
+	if err != nil {
+		return m, err
+	}
+	sealKeyID := SealKeyID(hostID)
 	add := func(path string, data []byte, mode os.FileMode, uid, gid uint32) {
 		m.Files = append(m.Files, File{path, data, mode, uid, gid})
 	}
@@ -265,11 +277,14 @@ func makeMaterial(e Environment, envData []byte, rendered map[string][]byte, now
 	}
 	secrets := Prefix + "/var/controller/secrets/"
 	add(secrets+"tls-key.pem", tlsPEM, 0600, e.ControllerUID, e.ControllerGID)
-	add(secrets+"receipt-key.pem", receiptPEM, 0600, e.ControllerUID, e.ControllerGID)
+	// The receipt key belongs to the keyholder: the controller never holds
+	// a key other than its TLS key.
+	add(KeyholderReceiptKey, receiptPEM, 0600, e.KeyholderUID, e.KeyholderGID)
+	add(SealKeyPath, sealPEM, 0600, 0, 0)
 	add(Prefix+"/config/tls-cert.pem", pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0644, 0, 0)
 	add(Prefix+"/config/deploy.env", envData, 0644, 0, 0)
 	add(Prefix+"/config/profiles.json", []byte("{\"profiles\":[]}\n"), 0644, 0, 0)
-	services := []string{"controller", "worker", "maintenance"}
+	services := []string{"controller", "worker", "maintenance", "keyholder"}
 	if e.Signer() {
 		services = append(services, "signer")
 	}
@@ -282,8 +297,8 @@ func makeMaterial(e Environment, envData []byte, rendered map[string][]byte, now
 		repos = append(repos, repo)
 	}
 	sort.Strings(repos)
-	c := controllerconfig.Config{Root: Prefix + "/var/controller", Socket: Prefix + "/var/controller/run/worker.sock", JobUID: e.JobUID, ProfilesFile: Prefix + "/config/profiles.json", Listen: netip.AddrPortFrom(netip.MustParseAddr(e.TailnetIP), e.Port).String(), AllowedNetworks: []string{"100.64.0.0/10", "fd7a:115c:a1e0::/48"}, TLSCertificate: Prefix + "/config/tls-cert.pem", TLSKey: secrets + "tls-key.pem", Principals: []controllerconfig.Principal{{ID: "owner", TokenSHA256: digest([]byte(token)), Repositories: repos, Scopes: []string{"jobs:submit", "jobs:read", "jobs:cancel", "service:admin", "release:archive"}}}, HealthFile: Prefix + "/health/current.json", PauseFile: Prefix + "/config/owner.pause", OwnerUID: e.OwnerUID, Receipt: controllerconfig.ReceiptConfig{KeyID: keyID, PrivateKeyFile: secrets + "receipt-key.pem", ServiceID: serviceID, HostID: hostID, Repositories: e.Repositories, VerificationKeys: map[string]string{keyID: m.ReceiptPublicKey}}}
-	w := workerclient.Config{Socket: c.Socket, ControllerUID: e.ControllerUID, Root: Prefix + "/var/broker", ExportRoot: Prefix + "/var/exports", WorkspaceRoot: Prefix + "/var/workspaces", JobUID: e.JobUID, JobGID: e.JobGID, OwnerUID: e.OwnerUID, HelperPath: Prefix + "/bin/macserve", BaselinePath: Prefix + "/var/broker/gui-baseline.json", PersistencePath: Prefix + "/var/broker/reviewed-persistence.json", PollSeconds: 2, HeartbeatSeconds: 5, RequestTimeoutSeconds: 10}
+	c := controllerconfig.Config{Root: Prefix + "/var/controller", Socket: Prefix + "/var/controller/run/worker.sock", JobUID: e.JobUID, ProfilesFile: Prefix + "/config/profiles.json", Listen: netip.AddrPortFrom(netip.MustParseAddr(e.TailnetIP), e.Port).String(), AllowedNetworks: []string{"100.64.0.0/10", "fd7a:115c:a1e0::/48"}, TLSCertificate: Prefix + "/config/tls-cert.pem", TLSKey: secrets + "tls-key.pem", Principals: []controllerconfig.Principal{{ID: "owner", TokenSHA256: digest([]byte(token)), Repositories: repos, Scopes: []string{"jobs:submit", "jobs:read", "jobs:cancel", "service:admin", "release:archive"}}}, HealthFile: Prefix + "/health/current.json", PauseFile: Prefix + "/config/owner.pause", OwnerUID: e.OwnerUID, Receipt: controllerconfig.ReceiptConfig{KeyID: keyID, PrivateKeyFile: KeyholderReceiptKey, ServiceID: serviceID, HostID: hostID, Repositories: e.Repositories, VerificationKeys: map[string]string{keyID: m.ReceiptPublicKey}}, Keyholder: KeyholderSection(e)}
+	w := workerclient.Config{Socket: c.Socket, ControllerUID: e.ControllerUID, Root: Prefix + "/var/broker", ExportRoot: Prefix + "/var/exports", WorkspaceRoot: Prefix + "/var/workspaces", JobUID: e.JobUID, JobGID: e.JobGID, OwnerUID: e.OwnerUID, HelperPath: Prefix + "/bin/macserve", BaselinePath: Prefix + "/var/broker/gui-baseline.json", PersistencePath: Prefix + "/var/broker/reviewed-persistence.json", PollSeconds: 2, HeartbeatSeconds: 5, RequestTimeoutSeconds: 10, ProfilesFile: ProfilesPath, QualificationFile: QualificationPath, SealKeyFile: SealKeyPath, SealKeyID: sealKeyID}
 	maintenanceConfig := maintenance.Config{ControllerConfig: Prefix + "/config/controller.json", WorkerConfig: Prefix + "/config/worker.json", QualificationFile: Prefix + "/config/qualification.json", BoundaryEvidenceFile: Prefix + "/config/boundary-evidence.json", CoexistingAnchors: e.CoexistingAnchors, CoexistingServices: e.CoexistingServices, IntervalSeconds: 10}
 	for _, item := range []struct {
 		name  string
@@ -292,6 +307,9 @@ func makeMaterial(e Environment, envData []byte, rendered map[string][]byte, now
 		if err := jsonFile(Prefix+"/config/"+item.name, item.value); err != nil {
 			return m, err
 		}
+	}
+	if err := jsonFile(KeyholderConfigPath, KeyholderConfig(e, sealKeyID, base64.StdEncoding.EncodeToString(sealPublic))); err != nil {
+		return m, err
 	}
 	if e.Signer() {
 		if err := jsonFile(SignerConfigPath, signerConfig(e, hostID, keyID, m.ReceiptPublicKey)); err != nil {

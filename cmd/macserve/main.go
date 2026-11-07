@@ -61,6 +61,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "worker":
 		return runWorker(args[1:], stdout, stderr)
+	case "keyholder":
+		return runKeyholder(args[1:], stdout, stderr)
 	case "signer":
 		return runSigner(args[1:], stdout, stderr)
 	case "signer-init":
@@ -94,6 +96,7 @@ func usage(w io.Writer) {
 
 Commands:
   worker      Protected root execution broker via the private controller socket
+  keyholder   Hold the receipt and GitHub App keys for the controller as _macserve_key
   signer      Sign succeeded ios_archive jobs for the controller as _macserve_sign
   signer-init Create the signer receipt key, keychain secret and empty keychain
   worker-reset  Reset job-user persistence and record audited GUI baseline PIDs

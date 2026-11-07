@@ -96,7 +96,7 @@ func digest(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-var services = []string{"org.macserve.worker", "org.macserve.maintenance", "org.macserve.controller"}
+var services = []string{"org.macserve.worker", "org.macserve.maintenance", "org.macserve.keyholder", "org.macserve.controller"}
 
 // Plan builds the upgrade plan.
 func Plan(ctx context.Context, p Probe, o Options) Result {
@@ -211,8 +211,9 @@ func Plan(ctx context.Context, p Probe, o Options) Result {
 	r.services(ctx, p)
 	approved, _ := p.Exists(Root + "/config/activation-anchor.json")
 	jobLive := r.jobSession(ctx, p)
-	r.carry(o.CarryProof, o.SHA256Sums, from, qualification.CarryBinaries{Macserve: toSHA, Controller: toController}, approved, jobLive)
-	r.WillHappen = r.steps(approved)
+	migrate := r.keyholder(p)
+	r.carry(o.CarryProof, o.SHA256Sums, from, qualification.CarryBinaries{Macserve: toSHA, Controller: toController}, approved, jobLive, migrate)
+	r.WillHappen = r.steps(approved, migrate)
 	return r
 }
 
@@ -241,7 +242,7 @@ func (r *Result) services(ctx context.Context, p Probe) {
 		r.add("svc.stopped", Fail, "loaded: %v. Stop them first: sudo /bin/launchctl bootout system/LABEL for each; macserve upgrade never stops services or jobs", loaded)
 		return
 	}
-	r.add("svc.stopped", Pass, "the three services are not loaded; the helper also requires no controller-UID process")
+	r.add("svc.stopped", Pass, "the services are not loaded; the helper also requires no controller-UID process")
 }
 
 // jobSession reports the job-session guard and returns whether the build
@@ -266,13 +267,37 @@ func (r *Result) jobSession(ctx context.Context, p Probe) bool {
 	return live
 }
 
+// keyholder reports whether the upgrade migrates the installation to the
+// keyholder: deploy.env names no keyholder or its plist is absent.
+func (r *Result) keyholder(p Probe) bool {
+	data, err := p.ReadFile(Root+"/config/deploy.env", 64<<10)
+	var e deploy.Environment
+	if err == nil {
+		e, err = deploy.ParseEnvironment(data)
+	}
+	var plist bool
+	if err == nil {
+		plist, err = p.Exists(deploy.KeyholderPlist)
+	}
+	switch {
+	case err != nil:
+		r.add("keyholder", Fail, "cannot read the installation: %v", err)
+		return false
+	case e.KeyholderUID != 0 && plist:
+		r.add("keyholder", Pass, "the keyholder holds the receipt and GitHub App keys")
+		return false
+	}
+	r.add("keyholder", Info, "this installation predates the keyholder: the upgrade creates the %s account and moves the receipt and GitHub App keys and the receipts out of the controller's reach, so it requalifies", deploy.KeyholderAccount)
+	return true
+}
+
 // carry reports whether a release carry is possible. A carry is taken
 // only from the target release's carry-proof.json asset, listed in the
 // same SHA256SUMS that gave the binary's digest; without one, full
 // requalification is the default. The helper also runs qualify carry's
 // own pre-check (qualification.CarryPreflight) and worker-quiescent as
 // root, which the plan cannot.
-func (r *Result) carry(proof, sums []byte, from, to qualification.CarryBinaries, approved, jobLive bool) {
+func (r *Result) carry(proof, sums []byte, from, to qualification.CarryBinaries, approved, jobLive, migrate bool) {
 	if len(proof) == 0 {
 		r.add("release.carry", Info, "no carry proof given: full requalification (the default)")
 		return
@@ -286,6 +311,8 @@ func (r *Result) carry(proof, sums []byte, from, to qualification.CarryBinaries,
 		why = errors.New("no activation anchor (nothing approved to carry)")
 	} else if !jobLive {
 		why = errors.New("the build account's GUI session is not live (a carry re-measures the new binary in it)")
+	} else if migrate {
+		why = errors.New("the keyholder migration changes the installed configuration")
 	}
 	if why != nil {
 		r.add("release.carry", Warn, "carry not possible (%v): full requalification instead, which needs the build account logged out", why)
@@ -295,7 +322,7 @@ func (r *Result) carry(proof, sums []byte, from, to qualification.CarryBinaries,
 	r.add("release.carry", Pass, "the release's carry-proof.json passes qualify carry's proof checks; the helper also checks your approval, the anchor and worker-quiescent as root, and any later failure falls back to full requalification")
 }
 
-func (r Result) steps(approved bool) []string {
+func (r Result) steps(approved, migrate bool) []string {
 	out := []string{
 		"sudo starts the upgrade helper from this binary; it repeats every check above as root",
 		"record the upgrade in the setup ledger, then write owner.pause if it is absent",
@@ -312,8 +339,11 @@ func (r Result) steps(approved bool) []string {
 	if approved {
 		out = append(out, "remove the approval and the activation anchor (the new release must be qualified again)")
 	}
+	out = append(out, "replace "+Root+"/bin/macserve-controller, then "+Root+"/bin/macserve, with this release's binaries (each atomic, root:wheel 0755, digest re-checked)")
+	if migrate {
+		out = append(out, "migrate to the keyholder: add KEYHOLDER_* IDs to deploy.env, create "+deploy.KeyholderAccount+" with create-users.sh --keyholder-only, create the worker seal key, move receipt-key.pem, github-app.pem and the receipts into "+deploy.KeyholderStateDir+", write keyholder.json and the new worker.json and controller.json fields, and install the disabled "+deploy.KeyholderPlist)
+	}
 	return append(out,
-		"replace "+Root+"/bin/macserve-controller, then "+Root+"/bin/macserve, with this release's binaries (each atomic, root:wheel 0755, digest re-checked)",
 		"reset the setup ledger to owner-actions: run macserve setup to re-grant Full Disk Access and requalify (two rounds, a restart, your approval)",
 	)
 }

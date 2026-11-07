@@ -105,7 +105,10 @@ func liveGitHub(ctx context.Context) (string, error) {
 	if gh == nil || gh.AppID <= 0 {
 		return "", errors.New("no GitHub App is connected")
 	}
-	pem, err := hostguard.ReadPrivateKey(gh.PrivateKeyFile)
+	if config.Keyholder == nil {
+		return "", errors.New("controller.json has no keyholder section")
+	}
+	pem, err := hostguard.ReadOwnedPrivateKey(gh.PrivateKeyFile, config.Keyholder.UID)
 	if err != nil {
 		return "", errors.New("cannot read the GitHub App key")
 	}

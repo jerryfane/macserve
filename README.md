@@ -135,7 +135,7 @@ macserve build            # --repo from remote "origin", --sha from HEAD; --prof
 
 It reads the API token from your login keychain (item `macserve API token`, saved by `macserve setup`; never
 printed), checks `.macserve.json` without running anything, submits through `/v1/jobs` with an `Idempotency-Key`,
-prints the logs and verifies the signed receipt against `/Library/macserve/config/deployment-pins.json`. Exit 0
+prints the logs and verifies the signed receipt against `/Library/macserve/config/deployment-pins.json` (the receipt key itself is held by the keyholder daemon, never by the controller). Exit 0
 means the job succeeded and its receipt verifies. `macserve doctor` (read-only; `--json` for machine output,
 `sudo` for the root-only checks, `sudo macserve doctor --live` adds Full Disk Access and GitHub App checks)
 explains a host that does not admit jobs.

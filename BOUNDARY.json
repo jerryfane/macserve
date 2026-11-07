@@ -13,6 +13,7 @@
       "cmd/macserve/**",
       "go.mod",
       "go.sum",
+      "internal/buildseal/**",
       "internal/controllerconfig/**",
       "internal/daemonlog/**",
       "internal/deploy/**",
@@ -22,6 +23,7 @@
       "internal/githubwire/**",
       "internal/health/**",
       "internal/hostguard/**",
+      "internal/keyholder/**",
       "internal/launchctlprint/**",
       "internal/maintenance/**",
       "internal/model/**",
@@ -85,6 +87,7 @@
     "internal/controllerk/store"
   ],
   "k_allowed_imports": [
+    "internal/buildseal",
     "internal/controllerconfig",
     "internal/daemonlog",
     "internal/evidence",
@@ -92,6 +95,7 @@
     "internal/githubwire",
     "internal/health",
     "internal/hostguard",
+    "internal/keyholder",
     "internal/launchctlprint",
     "internal/model",
     "internal/peercred",

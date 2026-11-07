@@ -90,17 +90,21 @@ const (
 	ProfilesFile      = Root + "/config/profiles.json"
 	HealthFile        = Root + "/health/current.json"
 	SecretsDir        = Root + "/var/controller/secrets"
-	Qualification     = Root + "/config/qualification.json"
-	Anchor            = Root + "/config/activation-anchor.json"
-	Console           = "/dev/console"
-	launchDaemons     = "/Library/LaunchDaemons/"
+	// KeyholderDir and KeyholderSecrets are the keyholder's private state
+	// and the directory of the receipt and GitHub App keys.
+	KeyholderDir     = Root + "/var/keyholder"
+	KeyholderSecrets = KeyholderDir + "/secrets"
+	Qualification    = Root + "/config/qualification.json"
+	Anchor           = Root + "/config/activation-anchor.json"
+	Console          = "/dev/console"
+	launchDaemons    = "/Library/LaunchDaemons/"
 	// MaxBinary bounds the installed binary doctor hashes.
 	MaxBinary = 256 << 20
 	maxConfig = 1 << 20
 )
 
-// Labels are the three macserve services.
-var Labels = []string{"org.macserve.controller", "org.macserve.maintenance", "org.macserve.worker"}
+// Labels are the macserve services.
+var Labels = []string{"org.macserve.controller", "org.macserve.keyholder", "org.macserve.maintenance", "org.macserve.worker"}
 
 // Probe is every host read doctor performs. SystemProbe reads the real
 // host; tests substitute fakes.
@@ -588,6 +592,10 @@ type protected struct {
 	path    string
 	dir     bool
 	private bool // no access for others
+	// keyholder: private to the keyholder account, not the controller.
+	keyholder bool
+	// absent: must not exist (a key the controller must no longer hold).
+	absent bool
 	// binary: an installed binary, root:wheel 0755. optional: absent is
 	// fine (bin/macserve-controller of an installation from before it
 	// existed; release.bytes says whether it must exist).
@@ -603,6 +611,14 @@ var protectedPaths = []protected{
 	{path: EnvFile},
 	{path: ProfilesFile},
 	{path: SecretsDir, dir: true, private: true},
+	// The controller holds only its TLS key; the receipt and App keys are
+	// the keyholder's.
+	{path: SecretsDir + "/receipt-key.pem", absent: true},
+	{path: SecretsDir + "/github-app.pem", absent: true},
+	{path: KeyholderDir, dir: true, private: true, keyholder: true},
+	{path: KeyholderSecrets, dir: true, private: true, keyholder: true},
+	{path: deploy.KeyholderConfigPath},
+	{path: deploy.ReleaseScopePath, optional: true},
 }
 
 func (s *state) protect() {
@@ -610,13 +626,27 @@ func (s *state) protect() {
 	for _, label := range Labels {
 		paths = append(paths, protected{path: launchDaemons + label + ".plist"})
 	}
+	if s.env != nil && s.env.KeyholderUID == 0 {
+		s.set("fs.protect", Fail, "this installation has no keyholder (deploy.env lacks KEYHOLDER_UID)", "Upgrade with macserve upgrade; it moves the receipt and GitHub App keys to the keyholder.")
+		return
+	}
 	for _, want := range paths {
 		info, err := s.p.Lstat(want.path)
+		owner := uint32(0)
+		if s.env != nil {
+			owner = s.env.ControllerUID
+			if want.keyholder {
+				owner = s.env.KeyholderUID
+			}
+		}
 		switch {
 		case err != nil:
 			s.set("fs.protect", Unknown, "cannot inspect "+want.path, fixSudo)
 			return
-		case !info.Exists && want.optional:
+		case want.absent && info.Exists:
+			s.set("fs.protect", Fail, want.path+" exists: the controller must hold no key but its TLS key", "Upgrade with macserve upgrade; it moves the key to the keyholder.")
+			return
+		case want.absent || !info.Exists && want.optional:
 			continue
 		case !info.Exists:
 			s.set("fs.protect", Fail, want.path+" is missing", fixSetup)
@@ -627,12 +657,12 @@ func (s *state) protect() {
 		case info.Mode.Perm()&0o022 != 0 || want.private && info.Mode.Perm()&0o007 != 0 || want.binary && info.Mode.Perm() != 0o755:
 			s.set("fs.protect", Fail, want.path+" has mode "+fmt.Sprintf("%04o", info.Mode.Perm()), "Reinstall with macserve setup; something changed its permissions.")
 			return
-		case !want.private && info.UID != 0 || want.private && s.env != nil && info.UID != s.env.ControllerUID || !want.dir && info.Nlink != 1 || want.binary && info.GID != 0:
+		case !want.private && info.UID != 0 || want.private && s.env != nil && info.UID != owner || !want.dir && info.Nlink != 1 || want.binary && info.GID != 0:
 			s.set("fs.protect", Fail, want.path+" is not owned by root alone", "Reinstall with macserve setup; something changed its owner.")
 			return
 		}
 	}
-	s.set("fs.protect", Pass, "the installation, its secrets and the service plists are protected", "")
+	s.set("fs.protect", Pass, "the installation, the controller's and the keyholder's secrets and the service plists are protected", "")
 }
 
 func (s *state) fda() {
@@ -801,13 +831,13 @@ func (s *state) services() {
 	n := len(Labels)
 	switch {
 	case len(foreign) > 0:
-		s.set("svc.state", Fail, "foreign launchd overrides: "+strings.Join(foreign, ", "), "Remove them with sudo launchctl enable/disable; macserve installs only its three services.")
+		s.set("svc.state", Fail, "foreign launchd overrides: "+strings.Join(foreign, ", "), "Remove them with sudo launchctl enable/disable; macserve installs only its own services.")
 	case loaded == n && disabled == 0:
-		s.set("svc.state", Pass, "the three services are loaded and enabled", "")
+		s.set("svc.state", Pass, "the services are loaded and enabled", "")
 	case loaded == 0 && disabled == n:
-		s.set("svc.state", Warn, "the three services are installed and disabled", "Continue with macserve setup to start them.")
+		s.set("svc.state", Warn, "the services are installed and disabled", "Continue with macserve setup to start them.")
 	default:
-		s.set("svc.state", Fail, fmt.Sprintf("%d of %d services loaded, %d disabled", loaded, n, disabled), "Continue with macserve setup; it starts or stops all three together.")
+		s.set("svc.state", Fail, fmt.Sprintf("%d of %d services loaded, %d disabled", loaded, n, disabled), "Continue with macserve setup; it starts or stops them all together.")
 	}
 }
 

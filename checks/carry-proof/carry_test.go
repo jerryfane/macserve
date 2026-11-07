@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -328,11 +329,10 @@ func TestNoCarryProof(t *testing.T) {
 			want:    "internal/hostguard/guard.go is class B",
 		},
 		{
-			// K carry needs the keyholder and worker registry: refused
-			// until a later slice adds K to carryOK.
-			name:    "K change",
+			// A K-only release must keep the root binary byte-identical.
+			name:    "K change with a different root binary",
 			changes: map[string]*file{"internal/controllerk/store/store.go": {content: "package store\n\nfunc Name() string { return \"store2\" }\n"}},
-			want:    "internal/controllerk/store/store.go is class K",
+			want:    "changes only controller (K) code but the root macserve binary differs",
 		},
 		{
 			name:    "unlisted path",
@@ -626,5 +626,20 @@ func TestRefusalIsOneLine(t *testing.T) {
 	err := refuse("%s is class %s", "docs/a\n::error::x", "B")
 	if r := err.(*refusal).reason; strings.ContainsAny(r, "\n\r") || !strings.Contains(r, `\n::error::x`) {
 		t.Fatalf("%q", r)
+	}
+}
+
+// A controller-only (K) release carries when only the controller binary
+// changes: the root worker and the keyholder do not trust the controller.
+func TestCarryProofAcceptsControllerOnlyRelease(t *testing.T) {
+	f := newFixture(t, baseFiles(t), map[string]*file{"internal/controllerk/store/store.go": {content: "package store\n\nfunc Name() string { return \"store2\" }\n"}})
+	nextCtrl := digest("macserve-controller v0.2.0")
+	code, stdout, data := f.run("-binary-sha256", fromBinary, "-rebuilt-sha256", fromBinary, "-controller-binary-sha256", nextCtrl, "-controller-rebuilt-sha256", nextCtrl)
+	if code != 0 || data == nil {
+		t.Fatalf("K-only release refused: exit %d: %s", code, stdout)
+	}
+	proof, err := qualification.ValidateCarryProof(data, qualification.CarryBinaries{Macserve: fromBinary, Controller: ctrlBinary}, qualification.CarryBinaries{Macserve: fromBinary, Controller: nextCtrl})
+	if err != nil || !slices.Equal(proof.ClassesPresent, []string{"K"}) {
+		t.Fatalf("K carry proof: %v %+v", err, proof.ClassesPresent)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jerryfane/macserve/internal/buildseal"
 	"github.com/jerryfane/macserve/internal/controllerk/store"
 	"github.com/jerryfane/macserve/internal/evidence"
 	"github.com/jerryfane/macserve/internal/health"
@@ -300,7 +302,7 @@ func TestCompletionReparsesTestsAndRejectsForgedSummary(t *testing.T) {
 			report := []byte(`{"testPlanConfigurations":[],"devices":[],"testNodes":[{"nodeType":"Test Case","name":"testApproved","nodeIdentifier":"ExampleTests/testApproved","result":"` + outcome + `"}]}`)
 			result.Artifacts = append(result.Artifacts, f.artifact(t, lease.Job, "evidence/tests.json", report), f.artifact(t, lease.Job, "results.xcresult.tar.gz", []byte("sealed result fixture")))
 			result.Summary = &evidence.Summary{ParseStatus: "parsed", Tests: 999, Passed: 999}
-			if err := f.controller.complete(context.Background(), lease.Job, result); err != nil {
+			if err := f.controller.complete(context.Background(), lease.Job, result, buildseal.Envelope{}); err != nil {
 				t.Fatal(err)
 			}
 			job, err := f.db.Get(context.Background(), lease.Job.ID)
@@ -320,11 +322,11 @@ func TestCompletionReparsesTestsAndRejectsForgedSummary(t *testing.T) {
 			if job.State != want || saved.Result.Summary == nil || saved.Result.Summary.Tests != 1 || saved.Result.Summary.Failed != failures {
 				t.Fatalf("unverified summary accepted: %+v %+v", job, saved.Result.Summary)
 			}
-			if err := f.controller.complete(context.Background(), lease.Job, result); err != nil {
+			if err := f.controller.complete(context.Background(), lease.Job, result, buildseal.Envelope{}); err != nil {
 				t.Fatalf("identical completion retry: %v", err)
 			}
 			result.Reason = "different completion"
-			if err := f.controller.complete(context.Background(), lease.Job, result); !errors.Is(err, store.ErrConflict) {
+			if err := f.controller.complete(context.Background(), lease.Job, result, buildseal.Envelope{}); !errors.Is(err, store.ErrConflict) {
 				t.Fatalf("changed replay: %v", err)
 			}
 		})
@@ -342,7 +344,7 @@ func TestArtifactIntegrityAliasesExpiryAndQuiescentAcknowledgment(t *testing.T) 
 	if err := f.controller.putArtifact(context.Background(), lease.Job, a, strings.NewReader("wrong")); !errors.Is(err, evidence.ErrArtifact) {
 		t.Fatalf("corrupted retry accepted: %v", err)
 	}
-	if err := f.controller.complete(context.Background(), lease.Job, result); err != nil {
+	if err := f.controller.complete(context.Background(), lease.Job, result, buildseal.Envelope{}); err != nil {
 		t.Fatal(err)
 	}
 	status, err := f.controller.Status(context.Background())
@@ -401,7 +403,7 @@ func TestCancellationWinsSealRaceAndCleanupFailureQuarantines(t *testing.T) {
 			lease := f.lease(t, model.Build)
 			result := f.result(t, lease)
 			result.CleanupOK = cleanup
-			f.controller.options.Seal = func(ctx context.Context, job model.Job, value worker.Result) (json.RawMessage, error) {
+			f.controller.options.Seal = func(ctx context.Context, job model.Job, value worker.Result, _ Sealing) (json.RawMessage, error) {
 				if value.State == model.Succeeded {
 					if _, err := f.db.Cancel(ctx, job.ID, "operator cancellation", model.CancelReason{Source: model.CancelClient, Principal: "owner"}, f.now); err != nil {
 						return nil, err
@@ -411,7 +413,7 @@ func TestCancellationWinsSealRaceAndCleanupFailureQuarantines(t *testing.T) {
 					State model.State `json:"state"`
 				}{value.State})
 			}
-			if err := f.controller.complete(context.Background(), lease.Job, result); err != nil {
+			if err := f.controller.complete(context.Background(), lease.Job, result, buildseal.Envelope{}); err != nil {
 				t.Fatal(err)
 			}
 			job, _ := f.db.Get(context.Background(), lease.Job.ID)
@@ -564,7 +566,7 @@ func TestUnverifiedSuccessPredicatesAreDurableFailures(t *testing.T) {
 			case "deadline":
 				f.offset.Store(int64(601 * time.Second))
 			}
-			if err := f.controller.complete(context.Background(), lease.Job, result); err != nil {
+			if err := f.controller.complete(context.Background(), lease.Job, result, buildseal.Envelope{}); err != nil {
 				t.Fatal(err)
 			}
 			persisted, _ := f.db.Get(context.Background(), lease.Job.ID)
@@ -585,7 +587,7 @@ func TestArtifactPoolEvictsOldestTerminalBytesNotActiveOrMetadata(t *testing.T) 
 	result := f.result(t, first)
 	old := f.artifact(t, first.Job, "old.bin", []byte("123456"))
 	result.Artifacts = append(result.Artifacts, old)
-	if err := f.controller.complete(context.Background(), first.Job, result); err != nil {
+	if err := f.controller.complete(context.Background(), first.Job, result, buildseal.Envelope{}); err != nil {
 		t.Fatal(err)
 	}
 	f.offset.Store(int64(time.Second))
@@ -669,7 +671,7 @@ func TestArtifactGetterRejectsSymlinkSubstitution(t *testing.T) {
 	f := newRuntime(t)
 	lease := f.lease(t, model.Build)
 	result := f.result(t, lease)
-	if err := f.controller.complete(context.Background(), lease.Job, result); err != nil {
+	if err := f.controller.complete(context.Background(), lease.Job, result, buildseal.Envelope{}); err != nil {
 		t.Fatal(err)
 	}
 	target := filepath.Join(t.TempDir(), "secret")
@@ -687,5 +689,72 @@ func TestArtifactGetterRejectsSymlinkSubstitution(t *testing.T) {
 	if err == nil {
 		file.Close()
 		t.Fatal("symlink exported a file outside sealed storage")
+	}
+}
+
+// A definitive receipt refusal (e.g. a release outside scope) completes the
+// job unsuccessfully with the worker's confirmed cleanup: the refused
+// success becomes Failed with the refusal as its reason and gets a failure
+// receipt, or none if that is refused too. The queue is not quarantined and
+// the worker epoch stays admitted.
+func TestReceiptRefusalCompletesUnsuccessfullyKeepingCleanup(t *testing.T) {
+	for _, refuseFailure := range []bool{false, true} {
+		t.Run(map[bool]string{false: "failure-receipt", true: "no-receipt"}[refuseFailure], func(t *testing.T) {
+			f := newRuntime(t)
+			lease := f.lease(t, model.Build)
+			var asked []model.State
+			f.controller.options.Seal = func(_ context.Context, _ model.Job, value worker.Result, _ Sealing) (json.RawMessage, error) {
+				asked = append(asked, value.State)
+				if value.State == model.Succeeded || refuseFailure {
+					return nil, fmt.Errorf("%w: commit is not the default-branch head", ErrReceiptRefused)
+				}
+				return json.Marshal(struct {
+					State model.State `json:"state"`
+				}{value.State})
+			}
+			if err := f.controller.complete(context.Background(), lease.Job, f.result(t, lease), buildseal.Envelope{}); err != nil {
+				t.Fatalf("refused receipt left the job unfinished: %v", err)
+			}
+			job, err := f.db.Get(context.Background(), lease.Job.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			service, _ := f.db.ServiceState(context.Background())
+			if job.State != model.Failed || !job.CleanupOK || !strings.Contains(job.Reason, "receipt refused: commit is not the default-branch head") || service.Quarantined {
+				t.Fatalf("refusal outcome: state=%s cleanup=%v reason=%q quarantined=%v", job.State, job.CleanupOK, job.Reason, service.Quarantined)
+			}
+			if len(asked) != 2 || asked[0] != model.Succeeded || asked[1] != model.Failed {
+				t.Fatalf("receipt requests %v", asked)
+			}
+			var completion Completion
+			if err := json.Unmarshal(job.Result, &completion); err != nil {
+				t.Fatal(err)
+			}
+			if completion.Result.State != model.Failed || !completion.Result.CleanupOK || (len(completion.Receipt) == 0) != refuseFailure {
+				t.Fatalf("persisted completion %+v receipt %s", completion.Result.State, completion.Receipt)
+			}
+			f.controller.mu.Lock()
+			active, epoch := f.controller.active, f.controller.epoch
+			f.controller.mu.Unlock()
+			if active != nil || epoch == "" {
+				t.Fatalf("dispatch not released: active=%v epoch=%q", active != nil, epoch)
+			}
+		})
+	}
+}
+
+// Any other seal failure is retryable: the job stays finalizing for the
+// worker's redelivery.
+func TestReceiptFailureOtherThanRefusalIsRetryable(t *testing.T) {
+	f := newRuntime(t)
+	lease := f.lease(t, model.Build)
+	f.controller.options.Seal = func(context.Context, model.Job, worker.Result, Sealing) (json.RawMessage, error) {
+		return nil, errors.New("keyholder unreachable")
+	}
+	if err := f.controller.complete(context.Background(), lease.Job, f.result(t, lease), buildseal.Envelope{}); err == nil {
+		t.Fatal("transient seal failure completed the job")
+	}
+	if job, _ := f.db.Get(context.Background(), lease.Job.ID); job.State != model.Finalizing {
+		t.Fatalf("state %s", job.State)
 	}
 }

@@ -31,6 +31,11 @@ type Config struct {
 	Receipt         ReceiptConfig `json:"receipt"`
 	GitHub          *GitHubConfig `json:"github,omitempty"`
 	Signer          *SignerConfig `json:"signer,omitempty"`
+	// Keyholder connects the controller to the keyholder daemon, which holds
+	// the receipt and GitHub App keys named in Receipt and GitHub. The
+	// controller never opens those key files; it refuses to start without
+	// this section.
+	Keyholder *KeyholderConfig `json:"keyholder,omitempty"`
 }
 
 func LoadConfig(path string) (Config, error) {

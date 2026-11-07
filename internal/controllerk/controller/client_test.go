@@ -2,8 +2,13 @@ package controller
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
+	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"io"
 	"os"
@@ -13,6 +18,7 @@ import (
 
 	"github.com/jerryfane/macserve/internal/evidence"
 	"github.com/jerryfane/macserve/internal/model"
+	"github.com/jerryfane/macserve/internal/profiles"
 	"github.com/jerryfane/macserve/internal/worker"
 	"github.com/jerryfane/macserve/internal/workerclient"
 )
@@ -25,6 +31,7 @@ type emptyLogExecutor struct {
 func (e *emptyLogExecutor) Recover(context.Context) error               { return nil }
 func (e *emptyLogExecutor) ArtifactPath(string, string) (string, error) { return e.file, nil }
 func (e *emptyLogExecutor) RemoveExport(string) error                   { close(e.acknowledged); return nil }
+func (e *emptyLogExecutor) VerifiedTree(string) string                  { return "" }
 func (e *emptyLogExecutor) Execute(ctx context.Context, job model.Job, source worker.Source, input io.Reader, sink worker.Sink) (worker.Result, error) {
 	if err := sink.Stage(model.Running); err != nil {
 		return worker.Result{}, err
@@ -58,7 +65,11 @@ func TestWorkerClientCompletesWithEmptyLogArtifacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	engine := &emptyLogExecutor{file: file, acknowledged: make(chan struct{})}
-	client, err := workerclient.New(workerclient.Config{Root: filepath.Join(root, "control"), ExportRoot: filepath.Join(root, "exports"), WorkspaceRoot: filepath.Join(root, "workspaces"), HelperPath: filepath.Join(root, "helper"), BaselinePath: filepath.Join(root, "baseline.json"), PersistencePath: filepath.Join(root, "reviewed-persistence.json"), JobUID: uint32(os.Geteuid()) + 1000, JobGID: uint32(os.Getegid()) + 1000, OwnerUID: uint32(os.Geteuid()) + 2000, Socket: f.controller.options.Socket, ControllerUID: uint32(os.Geteuid()), PollSeconds: 1, HeartbeatSeconds: 1}, engine)
+	config := workerclient.Config{Root: filepath.Join(root, "control"), ExportRoot: filepath.Join(root, "exports"), WorkspaceRoot: filepath.Join(root, "workspaces"), HelperPath: filepath.Join(root, "helper"), BaselinePath: filepath.Join(root, "baseline.json"), PersistencePath: filepath.Join(root, "reviewed-persistence.json"), JobUID: uint32(os.Geteuid()) + 1000, JobGID: uint32(os.Getegid()) + 1000, OwnerUID: uint32(os.Geteuid()) + 2000, Socket: f.controller.options.Socket, ControllerUID: uint32(os.Geteuid()), PollSeconds: 1, HeartbeatSeconds: 1}
+	writeLeaseAuthority(t, &config, root, runtimeAdmission(model.Build).Profile)
+	// The test's non-root files stand in for the root-owned registry,
+	// qualification record and seal key.
+	client, err := workerclient.NewWithChecks(config, engine, workerclient.Checks{RootConfig: func(string) error { return nil }, ReadPrivateKey: os.ReadFile})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,4 +103,40 @@ func TestWorkerClientCompletesWithEmptyLogArtifacts(t *testing.T) {
 	if err != nil || len(data) != 0 || metadata.SizeBytes != 0 {
 		t.Fatalf("empty evidence lost: %q %+v %v", data, metadata, err)
 	}
+}
+
+// writeLeaseAuthority writes the worker's root registry of profile, a
+// qualification record of exactly it and a seal key, and names them.
+func writeLeaseAuthority(t *testing.T, config *workerclient.Config, dir string, profile model.Profile) {
+	t.Helper()
+	registry, err := profiles.New([]model.Profile{profile}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := func(name string, value any) string {
+		data, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	config.ProfilesFile = write("profiles.json", map[string]any{"profiles": []model.Profile{profile}})
+	config.QualificationFile = write("qualification.json", map[string]any{"schema": 4, "profiles": registry.Digests()})
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.SealKeyFile = filepath.Join(dir, "seal-key.pem")
+	if err := os.WriteFile(config.SealKeyFile, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	config.SealKeyID = "macserve-worker-test"
 }

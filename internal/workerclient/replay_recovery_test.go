@@ -47,7 +47,7 @@ func TestUncertainPendingCompletionReplaysBeforeRecoveryWithoutRegistration(t *t
 				cancel()
 				return worker.ErrContamination
 			}}
-			client, err := New(cfg, executor)
+			client, err := NewWithChecks(cfg, executor, testChecks)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -120,7 +120,7 @@ func TestAdmissionRefusalPreservesQueueUntilNextAdmittingPoll(t *testing.T) {
 			claims++
 			queued = false
 			deadline := time.Now().Add(time.Minute)
-			json.NewEncoder(w).Encode(protocol.Lease{Job: model.Job{ID: "admission", WorkerEpoch: r.Header.Get(protocol.EpochHeader), State: model.Preparing, Deadline: &deadline}, Token: "lease"})
+			json.NewEncoder(w).Encode(protocol.Lease{Job: admittedJob(t, "admission", r.Header.Get(protocol.EpochHeader), &deadline, fixtureRequest), Token: "lease"})
 		case protocol.Prefix + "/jobs/admission/source":
 			events = append(events, "source")
 			w.Write([]byte("source"))
@@ -167,7 +167,7 @@ func TestAdmissionRefusalPreservesQueueUntilNextAdmittingPoll(t *testing.T) {
 			return worker.Result{State: model.Succeeded, CleanupOK: true}, nil
 		},
 	}
-	client, err := New(cfg, engine)
+	client, err := NewWithChecks(cfg, engine, testChecks)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,13 +198,13 @@ func TestAdmissionStatusWriteFailurePreventsClaims(t *testing.T) {
 		t.Fatal(err)
 	}
 	recoveries := 0
-	client, err := New(cfg, &fakeExecutor{recover: func(context.Context) error {
+	client, err := NewWithChecks(cfg, &fakeExecutor{recover: func(context.Context) error {
 		recoveries++
 		if recoveries == 3 {
 			cancel()
 		}
 		return nil
-	}})
+	}}, testChecks)
 	if err != nil {
 		t.Fatal(err)
 	}

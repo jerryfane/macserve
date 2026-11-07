@@ -33,10 +33,11 @@ Creates a private GitHub App from a manifest (metadata, contents and pull
 requests read; checks write; no webhook, no events), installs it on the one
 repository you select, confirms the installation by authenticating as the
 App (the installation_id in GitHub's redirect is not trusted), installs the
-App key controller-owned 0600 in /Library/macserve/var/controller/secrets
-without overwriting any existing key, and adds the github section to
-controller.json. It then reads .macserve.json at the default branch through
-the GitHub API (no repository code runs) and suggests one if it is missing.
+App key keyholder-owned 0600 in /Library/macserve/var/keyholder/secrets
+(the controller cannot open it) without overwriting any existing key, and
+adds the github section to controller.json. It then reads .macserve.json at
+the default branch through the GitHub API (no repository code runs) and
+suggests one if it is missing.
 
 Run it with sudo from your own login at this Mac, after deploy-install and
 before qualification: it refuses a root shell without SUDO_UID, a SUDO_UID
@@ -139,7 +140,7 @@ func runConnectGitHub(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(err)
 	}
-	fmt.Fprintf(stdout, "Connected: App %d, installation %d on %s; pull requests by %s (ID %d) to %s run %s.\nThe App key is %s (controller-owned, 0600); controller.json has the github section.\n",
+	fmt.Fprintf(stdout, "Connected: App %d, installation %d on %s; pull requests by %s (ID %d) to %s run %s.\nThe App key is %s (keyholder-owned, 0600); controller.json has the github section.\n",
 		confirmed.App.ID, confirmed.Installation.ID, repo, confirmed.Author.Login, confirmed.Author.ID, confirmed.Repository.DefaultBranch, strings.Join(profileIDs, ", "), prepared.Key.Path())
 	if status == nil || !status.Found || status.Invalid != nil {
 		fmt.Fprintln(stdout, "Template builds of this repository need a valid .macserve.json on its default branch; commit one before the first template build.")

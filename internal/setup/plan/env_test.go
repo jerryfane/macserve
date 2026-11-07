@@ -11,7 +11,7 @@ import (
 
 var (
 	testOwner = Account{Name: "jdoe", UID: 501, Home: "/Users/jdoe", GIDs: []uint32{20, 80}}
-	testIDs   = IDs{ControllerUID: 6201, ControllerGID: 6201, JobUID: 6202, JobGID: 6202}
+	testIDs   = IDs{ControllerUID: 6201, ControllerGID: 6201, JobUID: 6202, JobGID: 6202, KeyholderUID: 499, KeyholderGID: 499, KeyRPCGID: 498}
 )
 
 func testFacts() EnvironmentFacts {
@@ -69,7 +69,7 @@ func TestGeneratedEnvParsesWithDeployParser(t *testing.T) {
 	}
 	want := "CONTROLLER_USER=macservectl\nCONTROLLER_UID=6201\nCONTROLLER_GID=6201\nJOB_USER=macservejob\nJOB_REAL_NAME=macserve build\nJOB_UID=6202\nJOB_GID=6202\n" +
 		"OWNER_USER=jdoe\nOWNER_UID=501\nTAILNET_IP=100.101.102.103\nPORT=8443\nPROTECTED_PORTS=8443\nHOST_ADDRESSES=100.101.102.103,192.168.1.20\n" +
-		"DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer\nREPOSITORIES=jdoe/myapp:987654321\n"
+		"DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer\nKEYHOLDER_UID=499\nKEYHOLDER_GID=499\nKEYRPC_GID=498\nREPOSITORIES=jdoe/myapp:987654321\n"
 	if string(data) != want {
 		t.Fatalf("deploy.env:\n%s\nwant:\n%s", data, want)
 	}
@@ -77,7 +77,7 @@ func TestGeneratedEnvParsesWithDeployParser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("deploy parser rejects generated deploy.env: %v", err)
 	}
-	if parsed.Repositories["jdoe/myapp"] != 987654321 || len(parsed.Repositories) != 1 || parsed.CoexistingAnchors != nil || parsed.CoexistingServices != nil {
+	if parsed.Repositories["jdoe/myapp"] != 987654321 || len(parsed.Repositories) != 1 || !parsed.Keyholder() || parsed.CoexistingAnchors != nil || parsed.CoexistingServices != nil {
 		t.Fatalf("unexpected parse %+v", parsed)
 	}
 
@@ -176,24 +176,32 @@ func TestChoicesGrammarAccepts(t *testing.T) {
 
 func TestPicksFreeIDsAndRefusesDirectoryConflicts(t *testing.T) {
 	base := Directory{
-		Users:             []DirectoryRecord{{"root", 0}, {"jdoe", 501}},
-		Groups:            []DirectoryRecord{{"wheel", 0}, {"staff", 20}, {"admin", 80}},
-		UserPrimaryGroups: []DirectoryRecord{{"root", 0}, {"jdoe", 20}},
+		Users:             []deploy.DirectoryRecord{{Name: "root", ID: 0}, {Name: "jdoe", ID: 501}},
+		Groups:            []deploy.DirectoryRecord{{Name: "wheel", ID: 0}, {Name: "staff", ID: 20}, {Name: "admin", ID: 80}},
+		UserPrimaryGroups: []deploy.DirectoryRecord{{Name: "root", ID: 0}, {Name: "jdoe", ID: 20}},
 	}
 	ids, err := PickIDs(base, DefaultChoices(), testOwner)
-	if err != nil || ids != (IDs{6201, 6201, 6202, 6202}) {
+	if err != nil || ids != (IDs{6201, 6201, 6202, 6202, 499, 499, 498}) {
 		t.Fatalf("defaults: %+v %v", ids, err)
 	}
 
 	d := base
-	d.Groups = append(d.Groups, DirectoryRecord{"other", 6201})
-	d.UserPrimaryGroups = append(d.UserPrimaryGroups, DirectoryRecord{"someone", 6203})
-	d.Users = append(d.Users, DirectoryRecord{"someone", 6204})
+	d.Groups = append(d.Groups, deploy.DirectoryRecord{Name: "other", ID: 6201})
+	d.UserPrimaryGroups = append(d.UserPrimaryGroups, deploy.DirectoryRecord{Name: "someone", ID: 6203})
+	d.Users = append(d.Users, deploy.DirectoryRecord{Name: "someone", ID: 6204})
 	owner := testOwner
 	owner.GIDs = append(owner.GIDs, 6205)
 	ids, err = PickIDs(d, DefaultChoices(), owner)
-	if err != nil || ids != (IDs{6202, 6202, 6206, 6206}) {
+	if err != nil || ids != (IDs{6202, 6202, 6206, 6206, 499, 499, 498}) {
 		t.Fatalf("taken IDs not skipped: %+v %v", ids, err)
+	}
+	// The keyholder's system IDs skip every user, group and primary group.
+	d = base
+	d.Users = append(d.Users, deploy.DirectoryRecord{Name: "_sys", ID: 499})
+	d.Groups = append(d.Groups, deploy.DirectoryRecord{Name: "_grp", ID: 497})
+	d.UserPrimaryGroups = append(d.UserPrimaryGroups, deploy.DirectoryRecord{Name: "_sys", ID: 496})
+	if ids, err = PickIDs(d, DefaultChoices(), testOwner); err != nil || ids.KeyholderUID != 498 || ids.KeyholderGID != 498 || ids.KeyRPCGID != 495 {
+		t.Fatalf("taken system IDs not skipped: %+v %v", ids, err)
 	}
 	owner = testOwner
 	owner.UID = 6201
@@ -202,8 +210,8 @@ func TestPicksFreeIDsAndRefusesDirectoryConflicts(t *testing.T) {
 	}
 
 	for name, d := range map[string]Directory{
-		"existing user":  {Users: []DirectoryRecord{{"macservejob", 7001}}},
-		"existing group": {Groups: []DirectoryRecord{{"macservectl", 7002}}},
+		"existing user":  {Users: []deploy.DirectoryRecord{{Name: "macservejob", ID: 7001}}},
+		"existing group": {Groups: []deploy.DirectoryRecord{{Name: "macservectl", ID: 7002}}},
 	} {
 		if _, err := PickIDs(d, DefaultChoices(), testOwner); err == nil {
 			t.Errorf("%s: conflict accepted", name)
@@ -221,7 +229,7 @@ func TestPicksFreeIDsAndRefusesDirectoryConflicts(t *testing.T) {
 
 	full := base
 	for id := int64(firstID); id < lastID; id++ {
-		full.Users = append(full.Users, DirectoryRecord{"u" + string(rune('a'+id%26)), id})
+		full.Users = append(full.Users, deploy.DirectoryRecord{Name: "u" + string(rune('a'+id%26)), ID: id})
 	}
 	if _, err := PickIDs(full, DefaultChoices(), testOwner); err == nil {
 		t.Error("exhausted range accepted")
@@ -229,18 +237,6 @@ func TestPicksFreeIDsAndRefusesDirectoryConflicts(t *testing.T) {
 	full.Users = full.Users[:len(full.Users)-1]
 	if _, err := PickIDs(full, DefaultChoices(), testOwner); err != nil {
 		t.Errorf("two free IDs at the end of the range refused: %v", err)
-	}
-}
-
-func TestParseDirectoryListFailsClosed(t *testing.T) {
-	records, err := ParseDirectoryList("root 0\n\njdoe   501\n_www -2\n")
-	if err != nil || len(records) != 3 || records[1] != (DirectoryRecord{"jdoe", 501}) || records[2].ID != -2 {
-		t.Fatalf("%+v %v", records, err)
-	}
-	for _, bad := range []string{"two words 5\n", "name 5 6\n", "name\n", "name x\n", "name 1.5\n"} {
-		if _, err := ParseDirectoryList(bad); err == nil {
-			t.Errorf("%q accepted", bad)
-		}
 	}
 }
 

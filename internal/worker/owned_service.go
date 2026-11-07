@@ -15,7 +15,7 @@ import (
 
 func ownedLabel(identifier string) string {
 	switch identifier {
-	case "16.org.macserve.controller", "16.org.macserve.worker", "16.org.macserve.maintenance":
+	case "16.org.macserve.controller", "16.org.macserve.worker", "16.org.macserve.maintenance", "16.org.macserve.keyholder":
 		return strings.TrimPrefix(identifier, "16.")
 	}
 	return ""

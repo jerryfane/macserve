@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jerryfane/macserve/internal/buildseal"
 	"github.com/jerryfane/macserve/internal/controllerk/store"
 	"github.com/jerryfane/macserve/internal/health"
 	"github.com/jerryfane/macserve/internal/model"
@@ -30,6 +31,11 @@ import (
 
 func lifecycleRequest(t *testing.T, c *Controller, lease protocol.Lease, route string, value any) int {
 	t.Helper()
+	// The worker reports a result with its build seal; these tests exercise
+	// the controller's completion, so the seal is empty.
+	if result, ok := value.(worker.Result); ok && route == "/complete" {
+		value = protocol.Completion{Result: result}
+	}
 	data, err := json.Marshal(value)
 	if err != nil {
 		t.Fatal(err)
@@ -83,7 +89,7 @@ func TestCleanupAndDeliveryRetainTerminalEvidence(t *testing.T) {
 			result.FinishedAt = c.options.Now()
 			proof := f.artifact(t, lease.Job, "cleanup.log", []byte("bounded cleanup proof"))
 			result.Artifacts = append(result.Artifacts, proof)
-			if err := c.complete(context.Background(), lease.Job, result); err != nil {
+			if err := c.complete(context.Background(), lease.Job, result, buildseal.Envelope{}); err != nil {
 				t.Fatal(err)
 			}
 			job, err = f.db.Get(context.Background(), lease.Job.ID)
@@ -269,7 +275,7 @@ func TestSourceCleanupDebtSurvivesRegistrationAndRestart(t *testing.T) {
 		t.Fatalf("active source intent blocked its own lease: %+v %v", service, err)
 	}
 	result := f.result(t, lease)
-	if err := c.complete(context.Background(), lease.Job, result); err != nil {
+	if err := c.complete(context.Background(), lease.Job, result, buildseal.Envelope{}); err != nil {
 		t.Fatal(err)
 	}
 	completed, err := f.db.Get(context.Background(), lease.Job.ID)
@@ -361,7 +367,7 @@ func TestSourceRecoveryCannotClearWorkerUncertainty(t *testing.T) {
 	lease := f.lease(t, model.Build)
 	result := f.result(t, lease)
 	result.CleanupOK = false
-	if err := f.controller.complete(context.Background(), lease.Job, result); err != nil {
+	if err := f.controller.complete(context.Background(), lease.Job, result, buildseal.Envelope{}); err != nil {
 		t.Fatal(err)
 	}
 	provider.fail.Store(false)
@@ -387,7 +393,7 @@ func TestRetentionReclaimsUnderDiskPressureButHonorsOwnerPause(t *testing.T) {
 			f := newRuntime(t)
 			lease := f.lease(t, model.Build)
 			result := f.result(t, lease)
-			if err := f.controller.complete(context.Background(), lease.Job, result); err != nil {
+			if err := f.controller.complete(context.Background(), lease.Job, result, buildseal.Envelope{}); err != nil {
 				t.Fatal(err)
 			}
 			f.offset.Store(int64(8 * 24 * time.Hour))

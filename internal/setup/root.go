@@ -100,7 +100,7 @@ func RootHelper(owner Owner, a RootArgs, terminal io.Writer) (*Helper, error) {
 		ConsoleUID: hostguard.ConsoleUID, ToolCheck: hostguard.ToolchainExecutable,
 		Boot: SystemBoot, Now: time.Now, Terminal: terminal, TerminalCheck: stdoutTerminal, FDAWait: 30 * time.Second,
 		Output: outputCommand, Qualify: &SystemQualifier{Root: deploy.Prefix, Staging: StagingDir},
-		Upgrade: a.Upgrade, Version: ReleaseVersion, Processes: systemProcesses,
+		Upgrade: a.Upgrade, Version: ReleaseVersion, Processes: systemProcesses, Chown: ChownFile,
 	}, nil
 }
 

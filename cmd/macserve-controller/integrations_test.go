@@ -2,11 +2,14 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/jerryfane/macserve/internal/controllerk/controller"
+	"github.com/jerryfane/macserve/internal/keyholder"
 	"github.com/jerryfane/macserve/internal/model"
 	"github.com/jerryfane/macserve/internal/profiles"
 	"github.com/jerryfane/macserve/internal/worker"
@@ -47,5 +50,20 @@ func TestReceiptExpectationUsesEffectiveRequiredTests(t *testing.T) {
 	complete(nil)
 	if _, err := receiptExpectation(nil, job); err == nil {
 		t.Fatal("template job without a recipe had an expectation")
+	}
+}
+
+// The keyholder's reasoned refusal is definitive for completion; any other
+// failure stays retryable.
+func TestReceiptErrorMarksKeyholderRefusalDefinitive(t *testing.T) {
+	refused := receiptError(fmt.Errorf("seal: %w", &keyholder.RefusalError{Reason: "commit is not the default-branch head"}))
+	if !errors.Is(refused, controller.ErrReceiptRefused) || refused.Error() != "receipt refused: commit is not the default-branch head" {
+		t.Fatalf("refusal: %v", refused)
+	}
+	if err := receiptError(errors.New("dial unix: connection refused")); errors.Is(err, controller.ErrReceiptRefused) {
+		t.Fatal("transport failure treated as a definitive refusal")
+	}
+	if receiptError(nil) != nil {
+		t.Fatal("nil error changed")
 	}
 }

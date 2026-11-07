@@ -81,15 +81,16 @@ func incomplete(p Payload) []string {
 	} else {
 		require(p.Request.Kind != model.SimulatorUITest && p.Request.Kind != model.SimulatorScript, "simulator pin")
 	}
-	// An ios_archive receipt binds its admitted release, the admission-time
-	// default-branch head its commit equals (resolved through the GitHub App,
-	// never a qualification pin) and its signing manifest; no other receipt
-	// carries any of them.
+	// An ios_archive receipt binds its admitted release, the default-branch
+	// head its commit equals (resolved through the GitHub App, never a
+	// qualification pin; since the keyholder, by the keyholder's own check
+	// before sealing, earlier receipts at admission) and its signing
+	// manifest; no other receipt carries any of them.
 	if p.Request.Kind == model.IOSArchive {
 		require(p.Request.Simulator == nil, "simulator pin")
 		require(p.Release != nil && profiles.SameRelease(p.Release, p.Request.Release) && profiles.ValidateRelease(*p.Release, p.Request.Flutter != nil) == nil, "release")
 		v := p.ReleaseProvenance
-		require(v != nil && v.Source == model.ProvenanceGitHubApp && v.RepositoryID > 0 && v.RepositoryID == p.Repository.ID && v.HeadSHA == p.Request.SHA && v.HeadSHA == p.Source.Commit && model.ValidBranch(v.DefaultBranch) && !v.ResolvedAt.IsZero() && !v.ResolvedAt.After(p.CreatedAt), "release provenance")
+		require(v != nil && v.Source == model.ProvenanceGitHubApp && v.RepositoryID > 0 && v.RepositoryID == p.Repository.ID && v.HeadSHA == p.Request.SHA && v.HeadSHA == p.Source.Commit && model.ValidBranch(v.DefaultBranch) && !v.ResolvedAt.IsZero() && !v.ResolvedAt.After(p.SealedAt), "release provenance")
 		require(validDigest(p.SigningManifestSHA256), "signing manifest digest")
 	} else {
 		require(p.Request.Release == nil && p.Release == nil && p.ReleaseProvenance == nil && p.SigningManifestSHA256 == "", "release evidence")

@@ -45,6 +45,22 @@ type Engine struct {
 	lock       *os.File
 	closed     bool
 	recording  *Result // guarded by mu; includes finalization and device cleanup
+	// verified is the last job whose source extraction verified its Git
+	// tree, and that tree; guarded by mu.
+	verified struct{ job, tree string }
+}
+
+// VerifiedTree returns the Git tree the engine computed from jobID's
+// extracted source bytes, or "" when its extraction did not verify one.
+// extractSource succeeds only when the tree it computes from the bytes it
+// wrote equals the descriptor, so the recorded value is the computed tree.
+func (e *Engine) VerifiedTree(jobID string) string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.verified.job != jobID {
+		return ""
+	}
+	return e.verified.tree
 }
 
 type manifest struct {

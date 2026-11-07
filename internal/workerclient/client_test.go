@@ -47,6 +47,7 @@ func (e *fakeExecutor) ArtifactPath(job, id string) (string, error) {
 	return path, nil
 }
 func (e *fakeExecutor) RemoveExport(id string) error { e.removed = append(e.removed, id); return nil }
+func (e *fakeExecutor) VerifiedTree(string) string   { return "" }
 
 func unixController(t *testing.T, handler http.Handler) (Config, func()) {
 	t.Helper()
@@ -70,7 +71,9 @@ func unixController(t *testing.T, handler http.Handler) (Config, func()) {
 	if err := os.Mkdir(root, 0700); err != nil {
 		t.Fatal(err)
 	}
-	return Config{Socket: socket, ControllerUID: uint32(os.Geteuid()), OwnerUID: uint32(os.Geteuid()) + 20000, JobUID: uint32(os.Geteuid()) + 10000, JobGID: 502, Root: root, ExportRoot: filepath.Join(dir, "exports"), WorkspaceRoot: filepath.Join(dir, "workspaces"), HelperPath: filepath.Join(dir, "macserve"), BaselinePath: filepath.Join(root, "gui-baseline.json"), PersistencePath: filepath.Join(root, "reviewed-persistence.json"), PollSeconds: 1, HeartbeatSeconds: 1, RequestTimeoutSeconds: 2}, func() { server.Close() }
+	cfg := Config{Socket: socket, ControllerUID: uint32(os.Geteuid()), OwnerUID: uint32(os.Geteuid()) + 20000, JobUID: uint32(os.Geteuid()) + 10000, JobGID: 502, Root: root, ExportRoot: filepath.Join(dir, "exports"), WorkspaceRoot: filepath.Join(dir, "workspaces"), HelperPath: filepath.Join(dir, "macserve"), BaselinePath: filepath.Join(root, "gui-baseline.json"), PersistencePath: filepath.Join(root, "reviewed-persistence.json"), PollSeconds: 1, HeartbeatSeconds: 1, RequestTimeoutSeconds: 2}
+	withLeaseAuthority(t, &cfg, dir)
+	return cfg, func() { server.Close() }
 }
 
 func TestWrongControllerPeerCannotRegister(t *testing.T) {
@@ -83,7 +86,7 @@ func TestWrongControllerPeerCannotRegister(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	cfg.ControllerUID++
-	client, err := New(cfg, &fakeExecutor{})
+	client, err := NewWithChecks(cfg, &fakeExecutor{}, testChecks)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,14 +114,14 @@ func TestHeartbeatCancellationCompletesWithoutAnotherExecution(t *testing.T) {
 		case protocol.Prefix + "/jobs/j_test/heartbeat":
 			json.NewEncoder(w).Encode(protocol.Heartbeat{Cancel: true, Deadline: time.Now().Add(time.Minute)})
 		case protocol.Prefix + "/jobs/j_test/complete":
-			var got worker.Result
+			var got protocol.Completion
 			if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 				t.Error(err)
 				w.WriteHeader(400)
 				return
 			}
 			mu.Lock()
-			result = got
+			result = got.Result
 			mu.Unlock()
 			close(completed)
 			w.WriteHeader(204)
@@ -136,13 +139,13 @@ func TestHeartbeatCancellationCompletesWithoutAnotherExecution(t *testing.T) {
 		cancelObserved = true
 		return worker.Result{State: model.Cancelled, CleanupOK: true}, ctx.Err()
 	}}
-	client, err := New(cfg, engine)
+	client, err := NewWithChecks(cfg, engine, testChecks)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer client.Close()
 	deadline := time.Now().Add(10 * time.Second)
-	lease := protocol.Lease{Job: model.Job{ID: "j_test", WorkerEpoch: client.epoch, State: model.Preparing, Deadline: &deadline}, Token: "lease"}
+	lease := protocol.Lease{Job: admittedJob(t, "j_test", client.epoch, &deadline, fixtureRequest), Token: "lease"}
 	if _, err := client.execute(context.Background(), lease); err != nil {
 		t.Fatal(err)
 	}
@@ -205,12 +208,12 @@ func TestCompletionRetryDoesNotRerunJob(t *testing.T) {
 		executions++
 		return worker.Result{State: model.Succeeded, CleanupOK: true, Artifacts: []evidence.Artifact{{ID: id, Name: "evidence.txt", SHA256: id, SizeBytes: int64(len(content)), ExpiresAt: time.Now().Add(time.Hour)}}}, nil
 	}}
-	client, err := New(cfg, engine)
+	client, err := NewWithChecks(cfg, engine, testChecks)
 	if err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(time.Minute)
-	lease := protocol.Lease{Job: model.Job{ID: "j_retry", WorkerEpoch: client.epoch, State: model.Preparing, Deadline: &deadline}, Token: "lease"}
+	lease := protocol.Lease{Job: admittedJob(t, "j_retry", client.epoch, &deadline, fixtureRequest), Token: "lease"}
 	if _, err := client.execute(context.Background(), lease); err == nil {
 		t.Fatal("failed completion acknowledged")
 	}
@@ -218,7 +221,7 @@ func TestCompletionRetryDoesNotRerunJob(t *testing.T) {
 	if len(engine.removed) != 0 {
 		t.Fatal("unacknowledged export removed")
 	}
-	client, err = New(cfg, engine)
+	client, err = NewWithChecks(cfg, engine, testChecks)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,14 +254,14 @@ func TestRecoveryFailureRetriesWithoutRegistrationUntilCancellation(t *testing.T
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	attempts := 0
-	client, err := New(cfg, &fakeExecutor{recover: func(context.Context) error {
+	client, err := NewWithChecks(cfg, &fakeExecutor{recover: func(context.Context) error {
 		attempts++
 		if attempts == 2 {
 			cancel()
 			return context.Canceled
 		}
 		return errors.New("temporary census command failure")
-	}})
+	}}, testChecks)
 	if err != nil {
 		t.Fatal(err)
 	}
