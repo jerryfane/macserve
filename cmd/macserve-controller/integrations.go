@@ -2,19 +2,9 @@ package main
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rsa"
-	"crypto/sha256"
-	"crypto/x509"
-	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
-	"os"
-	"path/filepath"
-	"runtime/debug"
 	"slices"
 	"strings"
 	"time"
@@ -24,19 +14,25 @@ import (
 	"github.com/jerryfane/macserve/internal/controllerk/githubpull"
 	"github.com/jerryfane/macserve/internal/controllerk/store"
 	"github.com/jerryfane/macserve/internal/githubapi"
-	"github.com/jerryfane/macserve/internal/hostguard"
+	"github.com/jerryfane/macserve/internal/keyholder"
 	"github.com/jerryfane/macserve/internal/model"
 	"github.com/jerryfane/macserve/internal/profiles"
 	"github.com/jerryfane/macserve/internal/receipt"
+	"github.com/jerryfane/macserve/internal/worker"
 )
 
 type integrations struct {
-	signer *receipt.Signer
-	app    *githubapi.Client
-	poller *githubpull.Poller
-	db     *store.Store
+	keyholder *keyholder.Client
+	app       *githubapi.Client
+	poller    *githubpull.Poller
+	db        *store.Store
 }
 
+// newIntegrations connects the controller to the keyholder, which holds the
+// receipt and GitHub App keys: the controller never opens either key file.
+// Its GitHub client is brokered (installation tokens minted per repository
+// by the keyholder), and every receipt is signed by the keyholder after it
+// verifies the root worker's build seal.
 func newIntegrations(ctx context.Context, config controllerconfig.Config, db *store.Store, registry *profiles.Registry) (*integrations, error) {
 	if err := db.InitializeGitHub(ctx); err != nil {
 		return nil, err
@@ -53,119 +49,19 @@ func newIntegrations(ctx context.Context, config controllerconfig.Config, db *st
 			}
 		}
 	}
-	data, err := hostguard.ReadPrivateKey(config.Receipt.PrivateKeyFile)
-	if err != nil {
-		return nil, err
-	}
-	key, err := receipt.ParsePrivateKey(data)
-	if err != nil {
-		return nil, err
+	if config.Keyholder == nil {
+		return nil, errors.New("controller configuration lacks the keyholder section")
 	}
 	keys, err := receipt.ParsePublicKeys(config.Receipt.VerificationKeys)
 	if err != nil {
 		return nil, err
 	}
-	public := key.Public().(ed25519.PublicKey)
-	if prior, ok := keys[config.Receipt.KeyID]; ok && !public.Equal(prior) {
-		return nil, errors.New("receipt key ID contradicts pinned verification key")
+	if _, ok := keys[config.Receipt.KeyID]; !ok {
+		return nil, errors.New("receipt key ID has no pinned verification key")
 	}
-	keys[config.Receipt.KeyID] = public
-	binary, err := os.Executable()
-	if err != nil {
-		return nil, err
-	}
-	f, err := os.Open(binary)
-	if err != nil {
-		return nil, err
-	}
-	hash := sha256.New()
-	_, hashErr := io.Copy(hash, f)
-	err = errors.Join(hashErr, f.Close())
-	if err != nil {
-		return nil, err
-	}
-	version := "development"
-	if info, ok := debug.ReadBuildInfo(); ok {
-		if info.Main.Version != "" && info.Main.Version != "(devel)" {
-			version = info.Main.Version
-		}
-		for _, setting := range info.Settings {
-			if setting.Key == "vcs.revision" {
-				version += "+" + setting.Value
-			}
-			if setting.Key == "vcs.modified" && setting.Value == "true" {
-				version += ".modified"
-			}
-		}
-	}
-	service := &integrations{db: db}
-	service.signer, err = receipt.NewSigner(receipt.Options{
-		Root: filepath.Join(config.Root, "receipts"), KeyID: config.Receipt.KeyID, PrivateKey: key,
-		Service: receipt.ServiceIdentity{ID: config.Receipt.ServiceID, HostID: config.Receipt.HostID, Version: version, BinarySHA256: hex.EncodeToString(hash.Sum(nil))},
-		Repository: func(ctx context.Context, job model.Job) (receipt.Repository, error) {
-			if id := config.Receipt.Repositories[job.Request.Repo]; id > 0 {
-				return receipt.Repository{ID: id, Name: job.Request.Repo}, nil
-			}
-			owner, _, _ := strings.Cut(job.Request.Repo, "/")
-			if service.app == nil || !slices.Contains(config.Receipt.Owners, owner) {
-				return receipt.Repository{}, errors.New("receipt repository identity is not pinned")
-			}
-			// Owner-approved repositories: the ID verified from the installation
-			// token reply when the source was fetched, re-verified if not cached.
-			id, ok := service.app.RepositoryID(job.Request.Repo)
-			if !ok {
-				repository, err := service.app.Repository(ctx, job.Request.Repo)
-				if err != nil {
-					return receipt.Repository{}, errors.New("receipt repository identity is unavailable")
-				}
-				id = repository.ID
-			}
-			return receipt.Repository{ID: id, Name: job.Request.Repo}, nil
-		},
-		Approval: func(ctx context.Context, job model.Job) (receipt.Approval, error) {
-			_, err := db.GitHubByJob(ctx, job.ID)
-			if err == nil {
-				if service.poller == nil {
-					return receipt.Approval{}, errors.New("GitHub admission policy is unavailable")
-				}
-				return service.poller.Approval(ctx, job)
-			}
-			if !errors.Is(err, store.ErrNotFound) || strings.HasPrefix(job.Principal, "github:") {
-				return receipt.Approval{}, errors.New("job admission provenance is unavailable")
-			}
-			return receipt.Approval{Intake: "private_api", Identity: job.Principal, AttemptID: job.ID}, nil
-		},
-	})
-	if err != nil {
-		return nil, err
-	}
-	complete := false
-	defer func() {
-		if !complete {
-			service.signer.Close()
-		}
-	}()
+	service := &integrations{db: db, keyholder: &keyholder.Client{Socket: config.Keyholder.Socket, KeyholderUID: config.Keyholder.UID}}
 	if cfg := config.GitHub; cfg != nil {
-		data, err := hostguard.ReadPrivateKey(cfg.PrivateKeyFile)
-		if err != nil {
-			return nil, err
-		}
-		block, rest := pem.Decode(data)
-		if block == nil || len(strings.TrimSpace(string(rest))) != 0 {
-			return nil, errors.New("invalid GitHub App private key PEM")
-		}
-		var key *rsa.PrivateKey
-		if block.Type == "RSA PRIVATE KEY" {
-			key, err = x509.ParsePKCS1PrivateKey(block.Bytes)
-		} else if block.Type == "PRIVATE KEY" {
-			var parsed any
-			parsed, err = x509.ParsePKCS8PrivateKey(block.Bytes)
-			key, _ = parsed.(*rsa.PrivateKey)
-		}
-		if err != nil || key == nil {
-			return nil, errors.New("GitHub App key must be an RSA private key")
-		}
-		service.app, err = githubapi.NewApp(githubapi.AppOptions{AppID: cfg.AppID, InstallationID: cfg.InstallationID, Installations: cfg.Installations, PrivateKey: key, Repositories: config.Receipt.Repositories, Owners: config.Receipt.Owners})
+		service.app, err = githubapi.NewBrokered(githubapi.BrokeredOptions{AppID: cfg.AppID, Tokens: service.keyholder.Token, Repositories: config.Receipt.Repositories, Owners: config.Receipt.Owners})
 		if err != nil {
 			return nil, err
 		}
@@ -186,8 +82,32 @@ func newIntegrations(ctx context.Context, config controllerconfig.Config, db *st
 			return nil, err
 		}
 	}
-	complete = true
 	return service, nil
+}
+
+// approval is the job's admission approval the receipt states: its GitHub
+// intake approval, or the private API principal.
+func (s *integrations) approval(ctx context.Context, job model.Job) (receipt.Approval, error) {
+	_, err := s.db.GitHubByJob(ctx, job.ID)
+	if err == nil {
+		if s.poller == nil {
+			return receipt.Approval{}, errors.New("GitHub admission policy is unavailable")
+		}
+		return s.poller.Approval(ctx, job)
+	}
+	if !errors.Is(err, store.ErrNotFound) || strings.HasPrefix(job.Principal, "github:") {
+		return receipt.Approval{}, errors.New("job admission provenance is unavailable")
+	}
+	return receipt.Approval{Intake: "private_api", Identity: job.Principal, AttemptID: job.ID}, nil
+}
+
+// seal asks the keyholder for the job's receipt.
+func (s *integrations) seal(ctx context.Context, job model.Job, result worker.Result, sealing controller.Sealing) (json.RawMessage, error) {
+	approval, err := s.approval(ctx, job)
+	if err != nil {
+		return nil, err
+	}
+	return s.keyholder.Seal(ctx, keyholder.SealRequest{Job: job, Worker: sealing.Worker, Result: result, Seal: sealing.Seal, Approval: approval})
 }
 
 func (s *integrations) beforeDispatch(ctx context.Context, job model.Job) error {
@@ -205,7 +125,7 @@ func (s *integrations) beforeDispatch(ctx context.Context, job model.Job) error 
 }
 
 func (s *integrations) pruneReceipts(ctx context.Context) error {
-	return s.signer.Prune(ctx, func(id string) (bool, error) {
+	return s.keyholder.Prune(ctx, func(id string) (bool, error) {
 		_, err := s.db.Get(ctx, id)
 		if errors.Is(err, store.ErrNotFound) {
 			return false, nil

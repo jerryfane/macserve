@@ -40,8 +40,11 @@ type Client struct {
 	appID, installationID int64
 	installations         map[string]int64
 	key                   *rsa.PrivateKey
-	repositories          map[string]int64
-	owners                map[string]bool
+	// mint supplies installation tokens for a brokered client, which holds
+	// no App key.
+	mint         TokenSource
+	repositories map[string]int64
+	owners       map[string]bool
 	// verified holds repository IDs learned for owner-approved repositories
 	// from installation token replies; guarded by mu.
 	verified      map[string]int64
@@ -118,26 +121,51 @@ func NewApp(o AppOptions) (*Client, error) {
 		}
 		c.installations[owner] = id
 	}
-	c.repositories = make(map[string]int64, len(o.Repositories))
-	for repo, id := range o.Repositories {
+	if err := c.setPolicy(o.Repositories, o.Owners); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// NewBrokered returns an App client that holds no App key: every
+// installation token comes from o.Tokens, and must name the approved
+// repository it was requested for.
+func NewBrokered(o BrokeredOptions) (*Client, error) {
+	if o.AppID <= 0 || o.Tokens == nil || len(o.Repositories) == 0 && len(o.Owners) == 0 {
+		return nil, errors.New("invalid brokered GitHub App configuration")
+	}
+	c, err := newClient(o.HTTP)
+	if err != nil {
+		return nil, err
+	}
+	c.appID, c.mint = o.AppID, o.Tokens
+	if err := c.setPolicy(o.Repositories, o.Owners); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func (c *Client) setPolicy(repositories map[string]int64, owners []string) error {
+	c.repositories = make(map[string]int64, len(repositories))
+	for repo, id := range repositories {
 		if !validRepo(repo) || id <= 0 {
-			return nil, errors.New("invalid approved GitHub repository")
+			return errors.New("invalid approved GitHub repository")
 		}
 		canonical := strings.ToLower(repo)
 		if _, exists := c.repositories[canonical]; exists {
-			return nil, errors.New("duplicate approved GitHub repository")
+			return errors.New("duplicate approved GitHub repository")
 		}
 		c.repositories[canonical] = id
 	}
-	c.owners = make(map[string]bool, len(o.Owners))
-	for _, owner := range o.Owners {
+	c.owners = make(map[string]bool, len(owners))
+	for _, owner := range owners {
 		if !ValidOwner(owner) || c.owners[owner] {
-			return nil, errors.New("invalid or duplicate approved GitHub owner")
+			return errors.New("invalid or duplicate approved GitHub owner")
 		}
 		c.owners[owner] = true
 	}
 	c.verified = make(map[string]int64)
-	return c, nil
+	return nil
 }
 
 // ValidOwner reports whether owner is a canonical lowercase GitHub login.
@@ -252,6 +280,9 @@ func (c *Client) repositoryToken(ctx context.Context, repo string) (string, erro
 		return c.token, nil
 	}
 	repo = strings.ToLower(repo)
+	if c.mint != nil {
+		return c.brokeredToken(ctx, repo)
+	}
 	installation, err := c.installation(repo)
 	if err != nil {
 		return "", err
@@ -328,6 +359,95 @@ func (c *Client) SourceToken(ctx context.Context, repo string) (string, error) {
 		return "", err
 	}
 	return token, nil
+}
+
+// brokeredToken returns a cached or freshly minted token for an approved
+// repo. The minted reply must name the pinned ID, or for an owner-approved
+// repository an ID consistent with the one already verified.
+func (c *Client) brokeredToken(ctx context.Context, repo string) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if t := c.tokens[repo]; t.value != "" && c.now().Add(time.Minute).Before(t.expires) {
+		return t.value, nil
+	}
+	minted, err := c.mint(ctx, repo)
+	if err != nil {
+		return "", err
+	}
+	if !validToken(minted.Token) || !c.now().Add(time.Minute).Before(minted.ExpiresAt) || minted.RepositoryID <= 0 || minted.RepositoryID > 9007199254740991 {
+		return "", errors.New("invalid brokered GitHub installation token")
+	}
+	if pinned := c.repositories[repo]; pinned > 0 {
+		if minted.RepositoryID != pinned {
+			return "", errors.New("GitHub installation token repository scope mismatch")
+		}
+	} else {
+		if prior := c.verified[repo]; prior != 0 && prior != minted.RepositoryID {
+			return "", errors.New("GitHub repository ID changed")
+		}
+		c.verified[repo] = minted.RepositoryID
+	}
+	c.tokens[repo] = cachedToken{minted.Token, minted.ExpiresAt}
+	return minted.Token, nil
+}
+
+// InstallationToken mints (or returns the cached) installation token of an
+// approved repository with this client's App key, re-verifying the
+// repository's identity. Only a client holding the App key can mint.
+func (c *Client) InstallationToken(ctx context.Context, repo string) (InstallationToken, error) {
+	if c.key == nil {
+		return InstallationToken{}, errors.New("minting requires the GitHub App key")
+	}
+	ctx, cancel := context.WithTimeout(ctx, operationTimeout)
+	defer cancel()
+	token, err := c.repositoryToken(ctx, repo)
+	if err != nil {
+		return InstallationToken{}, err
+	}
+	repository, err := c.repository(ctx, repo, token)
+	if err != nil {
+		return InstallationToken{}, err
+	}
+	c.mu.Lock()
+	cached := c.tokens[strings.ToLower(repo)]
+	c.mu.Unlock()
+	if cached.value != token {
+		return InstallationToken{}, errors.New("GitHub installation token changed while minting")
+	}
+	return InstallationToken{Token: token, ExpiresAt: cached.expires, RepositoryID: repository.ID}, nil
+}
+
+// CommitTree returns the Git tree SHA a commit of repo names, through a
+// GitHub App installation token only.
+func (c *Client) CommitTree(ctx context.Context, repo, sha string) (string, error) {
+	if c.appID == 0 {
+		return "", errors.New("commit resolution requires a GitHub App")
+	}
+	if !validSHA(sha) {
+		return "", errors.New("invalid commit SHA")
+	}
+	ctx, cancel := context.WithTimeout(ctx, operationTimeout)
+	defer cancel()
+	token, err := c.repositoryToken(ctx, repo)
+	if err != nil {
+		return "", err
+	}
+	var commit struct {
+		SHA  string `json:"sha"`
+		Tree struct {
+			SHA string `json:"sha"`
+		} `json:"tree"`
+	}
+	if _, _, err := c.request(ctx, http.MethodGet, "/repos/"+strings.ToLower(repo)+"/git/commits/"+strings.ToLower(sha), token, "", nil, &commit); err != nil {
+		return "", err
+	}
+	if !strings.EqualFold(commit.SHA, sha) || !validSHA(commit.Tree.SHA) {
+		return "", errors.New("GitHub commit does not name a tree")
+	}
+	return strings.ToLower(commit.Tree.SHA), nil
 }
 
 func (c *Client) auth(ctx context.Context, repo string) (string, error) {

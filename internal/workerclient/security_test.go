@@ -54,13 +54,13 @@ func TestSourceTransferFailureCannotInventSuccessfulCleanup(t *testing.T) {
 				case protocol.Prefix + "/jobs/j_source/source":
 					w.WriteHeader(http.StatusServiceUnavailable)
 				case protocol.Prefix + "/jobs/j_source/complete":
-					var result worker.Result
-					if err := json.NewDecoder(r.Body).Decode(&result); err != nil {
+					var completion protocol.Completion
+					if err := json.NewDecoder(r.Body).Decode(&completion); err != nil {
 						t.Error(err)
 						w.WriteHeader(400)
 						return
 					}
-					completed <- result
+					completed <- completion.Result
 					w.WriteHeader(http.StatusNoContent)
 				default:
 					t.Errorf("unexpected request %s", r.URL.Path)
@@ -74,13 +74,13 @@ func TestSourceTransferFailureCannotInventSuccessfulCleanup(t *testing.T) {
 			if uncertain {
 				engine.recoverErr = errors.New("job UID still has an escaped process")
 			}
-			client, err := New(cfg, engine)
+			client, err := NewWithChecks(cfg, engine, testChecks)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer client.Close()
 			deadline := time.Now().Add(time.Minute)
-			lease := protocol.Lease{Job: model.Job{ID: "j_source", WorkerEpoch: client.epoch, State: model.Preparing, Deadline: &deadline}, Token: "lease"}
+			lease := protocol.Lease{Job: admittedJob(t, "j_source", client.epoch, &deadline, fixtureRequest), Token: "lease"}
 			cleanupOK, err := client.execute(context.Background(), lease)
 			if err != nil || cleanupOK == uncertain {
 				t.Fatalf("cleanup continuation decision: clean=%v err=%v", cleanupOK, err)

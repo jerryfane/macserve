@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jerryfane/macserve/internal/deploy"
 	"github.com/jerryfane/macserve/internal/health"
 	"github.com/jerryfane/macserve/internal/setup"
 	"github.com/jerryfane/macserve/internal/setup/plan"
@@ -53,6 +55,9 @@ PROTECTED_PORTS=22,8443
 HOST_ADDRESSES=127.0.0.1,::1,100.64.0.10
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 REPOSITORIES=jdoe/app:12345
+KEYHOLDER_UID=499
+KEYHOLDER_GID=499
+KEYRPC_GID=498
 `)
 
 var boot = setup.Boot{Time: strings.Repeat("a", 64), SessionUUID: "11111111-2222-3333-4444-555555555555"}
@@ -105,7 +110,7 @@ func healthy(t *testing.T) *fakeHost {
 			"/usr/bin/xcode-select -p":                                               "/Applications/Xcode.app/Contents/Developer\n",
 			"/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -version": "Xcode 16.2\nBuild version 16C5032a\n",
 			"/bin/launchctl print gui/611":                                           "gui/502 = {}\n",
-			"/bin/launchctl print-disabled system":                                   "disabled services = {\n\t\"org.macserve.controller\" => enabled\n\t\"org.macserve.maintenance\" => enabled\n\t\"org.macserve.worker\" => enabled\n\t\"com.apple.ftpd\" => disabled\n}\n",
+			"/bin/launchctl print-disabled system":                                   "disabled services = {\n\t\"org.macserve.controller\" => enabled\n\t\"org.macserve.keyholder\" => enabled\n\t\"org.macserve.maintenance\" => enabled\n\t\"org.macserve.worker\" => enabled\n\t\"com.apple.ftpd\" => disabled\n}\n",
 		},
 		addrs:  []netip.Addr{netip.MustParseAddr("100.64.0.10")},
 		listen: true,
@@ -117,6 +122,8 @@ func healthy(t *testing.T) *fakeHost {
 	file := plan.FileInfo{Exists: true, Mode: 0o644, Nlink: 1}
 	for _, p := range protectedPaths {
 		switch {
+		case p.absent:
+			h.stats[p.path] = plan.FileInfo{}
 		case p.dir:
 			h.stats[p.path] = dir
 		case p.binary:
@@ -126,6 +133,8 @@ func healthy(t *testing.T) *fakeHost {
 		}
 	}
 	h.stats[SecretsDir] = plan.FileInfo{Exists: true, Mode: fs.ModeDir | 0o700, UID: 610, Nlink: 2}
+	h.stats[KeyholderDir] = plan.FileInfo{Exists: true, Mode: fs.ModeDir | 0o700, UID: 499, Nlink: 6}
+	h.stats[KeyholderSecrets] = plan.FileInfo{Exists: true, Mode: fs.ModeDir | 0o700, UID: 499, Nlink: 2}
 	for _, l := range Labels {
 		h.stats[launchDaemons+l+".plist"] = file
 	}
@@ -254,6 +263,28 @@ func TestEachCheck(t *testing.T) {
 		{"fs.protect", Fail, func(h *fakeHost) {
 			h.stats[SecretsDir] = plan.FileInfo{Exists: true, Mode: fs.ModeDir | 0o755, UID: 610}
 		}},
+		// The controller holds no key but its TLS key.
+		{"fs.protect", Fail, func(h *fakeHost) {
+			h.stats[SecretsDir+"/receipt-key.pem"] = plan.FileInfo{Exists: true, Mode: 0o600, UID: 610, Nlink: 1}
+		}},
+		{"fs.protect", Fail, func(h *fakeHost) {
+			h.stats[SecretsDir+"/github-app.pem"] = plan.FileInfo{Exists: true, Mode: 0o600, UID: 610, Nlink: 1}
+		}},
+		// The keyholder's state is the keyholder's alone.
+		{"fs.protect", Fail, func(h *fakeHost) {
+			h.stats[KeyholderSecrets] = plan.FileInfo{Exists: true, Mode: fs.ModeDir | 0o700, UID: 610, Nlink: 2}
+		}},
+		{"fs.protect", Fail, func(h *fakeHost) {
+			h.stats[KeyholderDir] = plan.FileInfo{Exists: true, Mode: fs.ModeDir | 0o705, UID: 499, Nlink: 2}
+		}},
+		{"fs.protect", Fail, func(h *fakeHost) { h.stats[deploy.KeyholderConfigPath] = plan.FileInfo{} }},
+		{"fs.protect", Fail, func(h *fakeHost) {
+			h.stats[deploy.ReleaseScopePath] = plan.FileInfo{Exists: true, Mode: 0o644, UID: 499, Nlink: 1}
+		}},
+		{"fs.protect", Pass, func(h *fakeHost) { h.stats[deploy.ReleaseScopePath] = plan.FileInfo{} }},
+		{"fs.protect", Fail, func(h *fakeHost) {
+			h.files[EnvFile] = bytes.Replace(env, []byte("KEYHOLDER_UID=499\nKEYHOLDER_GID=499\nKEYRPC_GID=498\n"), nil, 1)
+		}},
 		{"tcc.fda", Fail, func(h *fakeHost) { *h.fda = false }},
 		{"tcc.fda", Unknown, func(h *fakeHost) { h.fda = nil }},
 		{"session.job", Fail, func(h *fakeHost) { delete(h.commands, "/bin/launchctl print gui/611") }},
@@ -267,7 +298,7 @@ func TestEachCheck(t *testing.T) {
 			for _, l := range Labels {
 				delete(h.commands, "/bin/launchctl print system/"+l)
 			}
-			h.commands["/bin/launchctl print-disabled system"] = "\"org.macserve.controller\" => disabled\n\"org.macserve.maintenance\" => disabled\n\"org.macserve.worker\" => disabled\n"
+			h.commands["/bin/launchctl print-disabled system"] = "\"org.macserve.controller\" => disabled\n\"org.macserve.keyholder\" => disabled\n\"org.macserve.maintenance\" => disabled\n\"org.macserve.worker\" => disabled\n"
 		}},
 		{"svc.state", Fail, func(h *fakeHost) {
 			h.commands["/bin/launchctl print-disabled system"] += "\"org.macserve.extra\" => enabled\n"

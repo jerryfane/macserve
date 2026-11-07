@@ -90,57 +90,32 @@ func parseRepository(pin string) (string, int64, error) {
 	return m[1], id, nil
 }
 
-// DirectoryRecord is one "name id" line of `dscl -list`.
-type DirectoryRecord struct {
-	Name string
-	ID   int64
-}
-
 // Directory is what the local and search directory nodes already hold.
 type Directory struct {
-	Users             []DirectoryRecord // /Users UniqueID
-	Groups            []DirectoryRecord // /Groups PrimaryGroupID
-	UserPrimaryGroups []DirectoryRecord // /Users PrimaryGroupID
+	Users             []deploy.DirectoryRecord // /Users UniqueID
+	Groups            []deploy.DirectoryRecord // /Groups PrimaryGroupID
+	UserPrimaryGroups []deploy.DirectoryRecord // /Users PrimaryGroupID
 }
 
-// IDs are the numeric identities setup will create.
+// IDs are the numeric identities setup will create: the controller and
+// job accounts, and the keyholder's system account and RPC group.
 type IDs struct {
 	ControllerUID, ControllerGID, JobUID, JobGID uint32
-}
-
-// ParseDirectoryList parses `dscl NODE -list PATH KEY` output. Like
-// assets/create-users.sh it fails closed on a record with extra fields or
-// a non-integer value.
-func ParseDirectoryList(out string) ([]DirectoryRecord, error) {
-	var records []DirectoryRecord
-	for _, line := range strings.Split(out, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 0 {
-			continue
-		}
-		if len(fields) != 2 {
-			return nil, errors.New("ambiguous directory record; review manually")
-		}
-		id, err := strconv.ParseInt(fields[1], 10, 64)
-		if err != nil {
-			return nil, errors.New("ambiguous directory record; review manually")
-		}
-		records = append(records, DirectoryRecord{Name: fields[0], ID: id})
-	}
-	return records, nil
+	KeyholderUID, KeyholderGID, KeyRPCGID        uint32
 }
 
 // PickIDs chooses the controller and job identities: names that no user or
 // group has, and for each account one number free as a user ID, a group
 // ID, any user's primary group and any of the owner's groups. It prefers
-// 6201 and 6202. assets/create-users.sh repeats every check before it
-// creates anything; this is the proposal, not the authority.
+// 6201 and 6202. The keyholder's system IDs are free the same way
+// (deploy.PickKeyholderIDs). assets/create-users.sh repeats every check
+// before it creates anything; this is the proposal, not the authority.
 func PickIDs(d Directory, c Choices, owner Account) (IDs, error) {
 	for _, name := range []string{c.ControllerUser, c.JobUser} {
 		if name == owner.Name {
 			return IDs{}, fmt.Errorf("account name %s is your own login", name)
 		}
-		for _, list := range [][]DirectoryRecord{d.Users, d.Groups} {
+		for _, list := range [][]deploy.DirectoryRecord{d.Users, d.Groups} {
 			for _, r := range list {
 				if r.Name == name {
 					return IDs{}, fmt.Errorf("an account or group named %s already exists", name)
@@ -149,7 +124,7 @@ func PickIDs(d Directory, c Choices, owner Account) (IDs, error) {
 		}
 	}
 	taken := map[int64]bool{}
-	for _, list := range [][]DirectoryRecord{d.Users, d.Groups, d.UserPrimaryGroups} {
+	for _, list := range [][]deploy.DirectoryRecord{d.Users, d.Groups, d.UserPrimaryGroups} {
 		for _, r := range list {
 			taken[r.ID] = true
 		}
@@ -167,7 +142,11 @@ func PickIDs(d Directory, c Choices, owner Account) (IDs, error) {
 	if len(free) < 2 {
 		return IDs{}, fmt.Errorf("no two free user/group IDs in %d-%d", firstID, lastID)
 	}
-	return IDs{ControllerUID: free[0], ControllerGID: free[0], JobUID: free[1], JobGID: free[1]}, nil
+	keyholderUID, keyholderGID, keyRPCGID, err := deploy.PickKeyholderIDs(taken)
+	if err != nil {
+		return IDs{}, err
+	}
+	return IDs{ControllerUID: free[0], ControllerGID: free[0], JobUID: free[1], JobGID: free[1], KeyholderUID: keyholderUID, KeyholderGID: keyholderGID, KeyRPCGID: keyRPCGID}, nil
 }
 
 // SelectAddresses returns the Tailscale address the API binds to and the
@@ -259,6 +238,9 @@ func RenderEnvironment(f EnvironmentFacts, c Choices, ids IDs) ([]byte, error) {
 		{"PROTECTED_PORTS", port},
 		{"HOST_ADDRESSES", strings.Join(f.HostAddresses, ",")},
 		{"DEVELOPER_DIR", f.DeveloperDir},
+		{"KEYHOLDER_UID", u(ids.KeyholderUID)},
+		{"KEYHOLDER_GID", u(ids.KeyholderGID)},
+		{"KEYRPC_GID", u(ids.KeyRPCGID)},
 	}
 	repoName, repoID := pendingRepositoryName, int64(pendingRepositoryID)
 	if c.Repository != "" {
@@ -280,6 +262,7 @@ func RenderEnvironment(f EnvironmentFacts, c Choices, ids IDs) ([]byte, error) {
 		TailnetIP: f.TailnetIP.String(), Port: f.Port, ProtectedPorts: []uint16{f.Port},
 		HostAddresses: f.HostAddresses, DeveloperDir: f.DeveloperDir,
 		Repositories: map[string]int64{repoName: repoID},
+		KeyholderUID: ids.KeyholderUID, KeyholderGID: ids.KeyholderGID, KeyRPCGID: ids.KeyRPCGID,
 	}
 	if err := exactEnvironment(check, want); err != nil {
 		return nil, err

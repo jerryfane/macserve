@@ -86,7 +86,19 @@ func (c *Config) validateIntegrations() error {
 			return errors.New("signer requires socket and inbox paths, a dedicated UID and RPC group, and its pinned key")
 		}
 	}
+	if k := c.Keyholder; k != nil {
+		if !cleanAbsolute(k.Socket) || k.UID == 0 || k.UID == c.JobUID || k.UID == c.OwnerUID {
+			return errors.New("keyholder requires a socket path and a dedicated UID")
+		}
+	}
 	return nil
+}
+
+// KeyholderConfig connects the controller to the keyholder daemon: its
+// socket and account UID, checked on every connection.
+type KeyholderConfig struct {
+	Socket string `json:"socket"`
+	UID    uint32 `json:"uid"`
 }
 
 // SignerConfig connects the controller to the signer daemon: its socket

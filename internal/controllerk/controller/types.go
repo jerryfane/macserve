@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/jerryfane/macserve/internal/buildseal"
 	"github.com/jerryfane/macserve/internal/controllerk/store"
 	"github.com/jerryfane/macserve/internal/health"
 	"github.com/jerryfane/macserve/internal/model"
@@ -41,13 +42,27 @@ type Options struct {
 	DeliveryTimeout  time.Duration
 	SourceTimeout    time.Duration
 	Now              func() time.Time
-	Seal             func(context.Context, model.Job, worker.Result) (json.RawMessage, error)
-	PruneReceipts    func(context.Context) error
+	// Seal obtains the job's receipt for the normalized result. It receives
+	// the worker's exact result and signed build seal, which the keyholder
+	// verifies before it signs.
+	Seal          func(context.Context, model.Job, worker.Result, Sealing) (json.RawMessage, error)
+	PruneReceipts func(context.Context) error
 	// Signer signs succeeded ios_archive jobs; nil refuses signing.
 	Signer *SignerOptions
 }
+
+// Sealing is the worker's own report of a job: its exact result and the
+// root worker's build seal over it.
+type Sealing struct {
+	Worker worker.Result
+	Seal   buildseal.Envelope
+}
+
 type Completion struct {
 	InputDigest string          `json:"input_digest"`
 	Result      worker.Result   `json:"result"`
 	Receipt     json.RawMessage `json:"receipt,omitempty"`
+	// Seal is the worker's build seal; completions recorded before seals
+	// have none.
+	Seal *buildseal.Envelope `json:"seal,omitempty"`
 }

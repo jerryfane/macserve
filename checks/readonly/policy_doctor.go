@@ -122,7 +122,7 @@ var Doctor = Policy{
 	},
 	Pinned: map[string]string{
 		mainPkg + ".main":                SetupPlan.Pinned[mainPkg+".main"],
-		doctorFunc + "launchctlCommands": "a5e6ace2e8f83242783384fb20b2ba201ea1448033aef5d62236d5fcb57c358a",
+		doctorFunc + "launchctlCommands": "1efea01e9436c631265c4dcb6c08d4738e73f8c270d57a47d3f486c347e7306e",
 		doctorFunc + "launchctlGUI":      "a8f5ca9c4ff7da987f1dbabb562dd4064ad15d04a6e6ffc054617408e843b809",
 		doctorFunc + "doctorEnv":         "15dfb777934bca3a9f605efa35133e873a2e4f632486d5221d700e7402529b7e",
 		doctorFunc + "AllowedCommand":    "e2e28f6fd058c2eb3396098fb57eed517eae1fc3b1b828210681cbf411e03948",

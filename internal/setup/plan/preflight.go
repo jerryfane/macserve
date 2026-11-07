@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/jerryfane/macserve/internal/deploy"
 	"github.com/jerryfane/macserve/internal/setup"
 )
 
@@ -233,7 +234,7 @@ func Preflight(ctx context.Context, p Probe, c Choices) Plan {
 	var dir Directory
 	dirOK := true
 	for _, q := range []struct {
-		dst  *[]DirectoryRecord
+		dst  *[]deploy.DirectoryRecord
 		path string
 		key  string
 	}{
@@ -243,9 +244,9 @@ func Preflight(ctx context.Context, p Probe, c Choices) Plan {
 	} {
 		for _, node := range []string{"/Search", "."} {
 			out, err := run("/usr/bin/dscl", node, "-list", q.path, q.key)
-			var records []DirectoryRecord
+			var records []deploy.DirectoryRecord
 			if err == nil {
-				records, err = ParseDirectoryList(out)
+				records, err = deploy.ParseDirectoryList(out)
 			}
 			if err != nil {
 				dirOK = false
@@ -265,7 +266,7 @@ func Preflight(ctx context.Context, p Probe, c Choices) Plan {
 			add("ids.accounts", Fail, err.Error(), "Choose other account names.")
 		} else {
 			plan.IDs, idsOK = ids, true
-			add("ids.accounts", OK, fmt.Sprintf("%s uid/gid %d, %s (%q) uid/gid %d", c.ControllerUser, ids.ControllerUID, c.JobUser, c.JobRealName, ids.JobUID), "")
+			add("ids.accounts", OK, fmt.Sprintf("%s uid/gid %d, %s (%q) uid/gid %d, %s uid/gid %d with %s gid %d", c.ControllerUser, ids.ControllerUID, c.JobUser, c.JobRealName, ids.JobUID, deploy.KeyholderAccount, ids.KeyholderUID, deploy.KeyRPCGroup, ids.KeyRPCGID), "")
 		}
 	}
 

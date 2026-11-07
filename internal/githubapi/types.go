@@ -3,6 +3,7 @@
 package githubapi
 
 import (
+	"context"
 	"crypto/rsa"
 	"fmt"
 	"net/http"
@@ -28,6 +29,29 @@ type AppOptions struct {
 	Repositories          map[string]int64
 	Owners                []string
 	HTTP                  HTTPOptions
+}
+
+// InstallationToken is a short-lived installation token scoped to one
+// repository, its expiry and that repository's verified numeric ID.
+type InstallationToken struct {
+	Token        string    `json:"token"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	RepositoryID int64     `json:"repository_id"`
+}
+
+// TokenSource mints per-repository installation tokens for a client that
+// holds no App key (the keyholder mints them for the controller).
+type TokenSource func(ctx context.Context, repo string) (InstallationToken, error)
+
+// BrokeredOptions configures an App client whose tokens come from Tokens.
+// AppID still identifies the App's check runs and comments; Repositories and
+// Owners are the same approval policy as AppOptions.
+type BrokeredOptions struct {
+	AppID        int64
+	Tokens       TokenSource
+	Repositories map[string]int64
+	Owners       []string
+	HTTP         HTTPOptions
 }
 
 // Error contains no response body, URL, credential, or remote error message.

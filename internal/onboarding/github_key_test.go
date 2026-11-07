@@ -14,8 +14,8 @@ import (
 	"github.com/jerryfane/macserve/internal/profiles"
 )
 
-// installRoot builds <tmp>/macserve with var/controller/secrets owned by
-// the test user, standing in for root and the controller.
+// installRoot builds <tmp>/macserve with var/keyholder/secrets owned by
+// the test user, standing in for root and the keyholder.
 func installRoot(t *testing.T) KeyTarget {
 	t.Helper()
 	tmp, err := filepath.EvalSymlinks(t.TempDir())
@@ -26,7 +26,7 @@ func installRoot(t *testing.T) KeyTarget {
 	for _, dir := range []struct {
 		path string
 		mode os.FileMode
-	}{{root, 0o755}, {filepath.Join(root, "var"), 0o755}, {filepath.Join(root, "config"), 0o755}, {filepath.Join(root, "var", "controller"), 0o700}, {filepath.Join(root, "var", "controller", "secrets"), 0o700}} {
+	}{{root, 0o755}, {filepath.Join(root, "var"), 0o755}, {filepath.Join(root, "config"), 0o755}, {filepath.Join(root, "var", "controller"), 0o700}, {filepath.Join(root, "var", "controller", "secrets"), 0o700}, {filepath.Join(root, "var", "keyholder"), 0o700}, {filepath.Join(root, "var", "keyholder", "secrets"), 0o700}} {
 		if err := os.Mkdir(dir.path, dir.mode); err != nil {
 			t.Fatal(err)
 		}
@@ -34,10 +34,10 @@ func installRoot(t *testing.T) KeyTarget {
 			t.Fatal(err)
 		}
 	}
-	return KeyTarget{Root: root, RootUID: uint32(os.Getuid()), ControllerUID: uint32(os.Getuid()), ControllerGID: uint32(os.Getgid())}
+	return KeyTarget{Root: root, RootUID: uint32(os.Getuid()), KeyholderUID: uint32(os.Getuid()), KeyholderGID: uint32(os.Getgid())}
 }
 
-func TestAppKeyInstalledControllerOwned0600(t *testing.T) {
+func TestAppKeyInstalledKeyholderOwned0600(t *testing.T) {
 	target := installRoot(t)
 	_, pemBytes := appKey(t)
 	if err := InstallAppKey(target, pemBytes); err != nil {
@@ -48,7 +48,7 @@ func TestAppKeyInstalledControllerOwned0600(t *testing.T) {
 		t.Fatal(err)
 	}
 	uid, gid, nlink, _ := owner(info)
-	if info.Mode() != 0o600 || uid != target.ControllerUID || gid != target.ControllerGID || nlink != 1 {
+	if info.Mode() != 0o600 || uid != target.KeyholderUID || gid != target.KeyholderGID || nlink != 1 {
 		t.Fatalf("mode %v uid %d gid %d links %d", info.Mode(), uid, gid, nlink)
 	}
 	if data, _ := os.ReadFile(target.Path()); !bytes.Equal(data, pemBytes) {
@@ -113,10 +113,10 @@ func TestAppKeyWriteRefusesOverwriteSymlinkAndWrongOwner(t *testing.T) {
 			t.Fatal("accepted a symlinked install root")
 		}
 	})
-	t.Run("wrong controller owner", func(t *testing.T) {
+	t.Run("wrong keyholder owner", func(t *testing.T) {
 		target := installRoot(t)
-		target.ControllerUID++
-		if err := InstallAppKey(target, pemBytes); err == nil || !strings.Contains(err.Error(), "controller-owned 0700") {
+		target.KeyholderUID++
+		if err := InstallAppKey(target, pemBytes); err == nil || !strings.Contains(err.Error(), "keyholder-owned 0700") {
 			t.Fatal(err)
 		}
 	})
@@ -164,8 +164,8 @@ func controllerFixture(t *testing.T, target KeyTarget) ConfigFile {
 	c := controllerconfig.Config{
 		Root: target.Root + "/var/controller", Socket: target.Root + "/var/controller/run/worker.sock", JobUID: 611,
 		ProfilesFile: config + "/profiles.json", Listen: "100.64.0.10:9443", AllowedNetworks: []string{"100.64.0.0/10", "fd7a:115c:a1e0::/48"},
-		TLSCertificate: config + "/tls-cert.pem", TLSKey: target.Dir() + "/tls-key.pem", HealthFile: target.Root + "/health/current.json",
-		PauseFile: config + "/owner.pause", OwnerUID: 501,
+		TLSCertificate: config + "/tls-cert.pem", TLSKey: target.Root + "/var/controller/secrets/tls-key.pem", HealthFile: target.Root + "/health/current.json",
+		PauseFile: config + "/owner.pause", OwnerUID: 501, Keyholder: &controllerconfig.KeyholderConfig{Socket: target.Root + "/var/keyholder-run/keyholder.sock", UID: 411},
 		Receipt: controllerconfig.ReceiptConfig{KeyID: "k1", PrivateKeyFile: target.Dir() + "/receipt-key.pem", ServiceID: "svc", HostID: "host", Repositories: map[string]int64{"jdoe/myapp": 4242}},
 	}
 	data, err := json.MarshalIndent(c, "", "  ")
@@ -349,6 +349,9 @@ PROTECTED_PORTS=22,9443
 HOST_ADDRESSES=127.0.0.1,::1,100.64.0.10
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 REPOSITORIES=jdoe/myapp:4242
+KEYHOLDER_UID=411
+KEYHOLDER_GID=411
+KEYRPC_GID=412
 `
 
 func hostFixture(t *testing.T) (Host, KeyTarget) {
@@ -371,7 +374,7 @@ func TestPrepareAcceptsFreshDeployInstall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.OwnerUID != 501 || p.Key.ControllerUID != 610 || p.Key.Path() != target.Path() {
+	if p.OwnerUID != 501 || p.Key.KeyholderUID != 411 || p.Key.KeyholderGID != 411 || p.Key.Path() != target.Path() || !strings.HasSuffix(p.Key.Path(), "/var/keyholder/secrets/github-app.pem") {
 		t.Fatalf("%+v", p)
 	}
 	if repo, id, err := p.Repository(""); err != nil || repo != "jdoe/myapp" || id != 4242 {
@@ -402,6 +405,14 @@ func TestPrepareRefusals(t *testing.T) {
 		"approved": {func(h *Host, k KeyTarget) {
 			_ = os.WriteFile(filepath.Join(k.Root, "config", "activation-anchor.json"), []byte("{}"), 0o644)
 		}, "requalification"},
+		"no keyholder": {func(h *Host, k KeyTarget) {
+			env := strings.Replace(fixtureEnv, "KEYHOLDER_UID=411\nKEYHOLDER_GID=411\nKEYRPC_GID=412\n", "", 1)
+			_ = os.WriteFile(filepath.Join(k.Root, "config", "deploy.env"), []byte(env), 0o644)
+		}, "macserve upgrade"},
+		"other keyholder": {func(h *Host, k KeyTarget) {
+			env := strings.Replace(fixtureEnv, "KEYHOLDER_UID=411", "KEYHOLDER_UID=413", 1)
+			_ = os.WriteFile(filepath.Join(k.Root, "config", "deploy.env"), []byte(env), 0o644)
+		}, "keyholder section"},
 		"existing key": {func(h *Host, k KeyTarget) {
 			_ = os.WriteFile(k.Path(), []byte("old"), 0o600)
 		}, "already installed"},

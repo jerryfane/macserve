@@ -4,6 +4,7 @@ package protocol
 import (
 	"time"
 
+	"github.com/jerryfane/macserve/internal/buildseal"
 	"github.com/jerryfane/macserve/internal/model"
 	"github.com/jerryfane/macserve/internal/worker"
 )
@@ -38,4 +39,12 @@ type Stage struct {
 type Log struct {
 	Stream string `json:"stream"`
 	Data   []byte `json:"data"`
+}
+
+// Completion is the worker's final report: its result and the root
+// worker's signed build seal over that result, which the controller passes
+// to the keyholder unchanged.
+type Completion struct {
+	Result worker.Result      `json:"result"`
+	Seal   buildseal.Envelope `json:"seal"`
 }

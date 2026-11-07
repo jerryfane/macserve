@@ -215,22 +215,46 @@ When binaries are installed Developer ID signed, root-owned `config/installed-bi
 digest to its release digest; native checks compare on-disk bytes to `installed_sha256` and release provenance to
 `release_sha256` (absent file: the installed bytes are the release bytes).
 
-**Threat model of K, and why it is not yet carry-safe.** The goal of class K is that a controller-only release can
-be installed by an agent without the owner, without a reboot and without restarting running jobs, because nothing
-the root worker, the signer or the boundary relies on is decided by K code. K may choose scheduling, queue state,
-API behaviour and version labels (BuildName/BuildNumber) for an otherwise fully scoped release; it must not be
-able to change what is built, with which toolchain and inputs, or what gets signed. That is **not true today**:
+**Threat model of K (design r3 item 1, amended by r4).** K code is trusted only as far as merge, review and the
+CI release key. A controller-only (K) release is carryable: `checks/carry-proof` accepts K paths, and
+`qualification.ValidateCarryProof` refuses a K-only proof whose root `macserve` binary is not byte-identical to the
+predecessor's. Arbitrary K code **can**: read or exfiltrate what the controller holds (the TLS private key, API
+bearer verifiers, and the short-lived per-repository GitHub installation tokens it asked the keyholder for);
+fabricate or drop queue records; admit jobs for any registered profile; choose the source bytes a job builds; forge
+or withhold *non-release* receipts (the keyholder signs what the root worker sealed, but the commit-to-bytes binding
+of a non-release job is K's statement); deny service; corrupt the queue database. For an otherwise fully scoped
+release K may choose the version labels BuildName and BuildNumber, and nothing else that changes the build output.
+It **cannot**: run as root or as the owner; change what a profile executes; read the receipt or GitHub App
+long-lived keys; obtain Apple signing for anything outside the root release scope; or change any B artifact.
 
-- the controller holds the receipt Ed25519 key, the GitHub App key and the TLS key, and builds
-  `ReleaseProvenance` (`internal/controllerk/api`), which the signer accepts on the strength of that receipt key;
-- the worker validates a lease only for self-consistency (`profiles.ForSnapshot` of the controller-sent profile),
-  not against the root-owned profile registry;
-- completion acceptance and receipt sealing (`internal/controllerk/controller/completion.go`,
-  `signing.go`) run in the controller.
+That rests on B processes, not on the controller:
 
-A keyholder daemon (holding the receipt and App keys and re-checking release scope) and worker resolution from the
-root registry plus a worker build seal are later changes. Until they land, K is a code-organisation boundary only:
-`checks/carry-proof` treats any K change as boundary-changing, and releases that change K need a full sitting.
+- **Worker registry.** The root worker resolves every lease against the root-owned registry
+  (`worker.json` `profiles_file`, `/Library/macserve/config/profiles.json`) exactly as admission does, and refuses a
+  lease whose profile snapshot, digest, repository or request differs, or whose registry profile set differs from
+  the qualified one (`qualification_file`). Template snapshots and replays resolve identically, since a replay is
+  the stored first admission.
+- **Worker build seal.** The root worker signs, with a root-only Ed25519 key (`/Library/macserve/var/broker/seal-key.pem`,
+  public key pinned in `keyholder.json`), a canonical record of what it built: the request, its own registry
+  resolution (profile id/version/digest, Xcode and DeveloperDir, Flutter pin), the snapshot and recipe digests, the
+  Git tree it computed from the bytes it extracted, the result digest and the archive and signing-manifest digests.
+  The seal travels through the controller with the completion; a signature, not a channel, authenticates it, so K
+  can withhold it but not forge or alter it, and a pending completion survives a worker restart sealed.
+- **Keyholder.** `org.macserve.keyholder` runs as the non-login `_macserve_key`, holds the receipt and GitHub App
+  keys in its own `0700` directory, and answers only the controller UID on its socket (the client equally checks
+  the keyholder UID). It mints short-lived installation tokens only for repositories in the root-owned policy
+  (`controller.json` `receipt.repositories` and `receipt.owners`). It signs a receipt only after verifying the worker
+  seal and that the job record and result are the sealed ones (the controller may only drop unverified artifacts,
+  shorten expiry, mark logs truncated, add a test summary or downgrade the state). A success receipt needs the
+  worker's registry resolution. A **release** receipt additionally needs the root-owned
+  `/Library/macserve/config/release-scope.json` entry for the repository to match the seal exactly (profile
+  id/version/digest, Xcode and Flutter pins, the exact Dart defines map; BuildName `^[0-9]+(\.[0-9]+){0,2}$`,
+  BuildNumber `^[0-9]{1,9}$`), and the keyholder's own GitHub check that the repository ID is the scoped one, the
+  commit is the default-branch head and the commit's tree equals the worker-computed tree. The receipt's
+  `release_provenance` is the keyholder's check; controller-supplied provenance is ignored. The signer keeps
+  accepting only receipts signed with the (keyholder-held) receipt key.
+- **Accepted limit.** The TLS key stays with the controller: K code can impersonate the private API endpoint to
+  clients that trust its certificate. Rollback of a bad K release is best-effort against a malicious K.
 
 ## Code signer boundary
 

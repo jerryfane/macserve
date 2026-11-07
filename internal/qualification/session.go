@@ -211,7 +211,7 @@ func Begin(ctx context.Context, o BeginOptions) error {
 	if canaryInfo.Mode().Perm() != 0644 {
 		return errors.New("owner canary must be mode 0644 so denial tests the home boundary, not file-only permissions")
 	}
-	private := []string{"/Library/macserve/var/controller", "/Library/macserve/var/broker", "/Library/macserve/var/exports", "/Library/macserve/var/controller/secrets"}
+	private := []string{"/Library/macserve/var/controller", "/Library/macserve/var/broker", "/Library/macserve/var/exports", "/Library/macserve/var/controller/secrets", "/Library/macserve/var/keyholder", "/Library/macserve/var/keyholder/secrets"}
 	if o.PrivatePaths != "" {
 		private = append(private, strings.Split(o.PrivatePaths, ",")...)
 	}

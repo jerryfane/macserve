@@ -40,7 +40,9 @@ const (
 )
 
 // carryClasses are the BOUNDARY.json classes a carried release may change.
-var carryClasses = []string{"C", "G", "T"}
+// K is controller-only code: no root-run binary links it, so a release that
+// changes only K (and T) must leave the root macserve binary byte-identical.
+var carryClasses = []string{"C", "G", "K", "T"}
 
 // CarryRelease identifies one side of the proved release delta.
 type CarryRelease struct {
@@ -309,6 +311,9 @@ func ValidateCarryProof(raw []byte, from, to CarryBinaries) (CarryProof, error) 
 	slices.Sort(classes)
 	if !slices.Equal(slices.Compact(classes), p.ClassesPresent) {
 		return p, errors.New("carry proof classes_present differs from its changes")
+	}
+	if slices.Contains(p.ClassesPresent, "K") && !slices.Contains(p.ClassesPresent, "C") && !slices.Contains(p.ClassesPresent, "G") && p.From.BinarySHA256 != p.To.BinarySHA256 {
+		return p, errors.New("carry proof changes only controller (K) code but the root macserve binary differs")
 	}
 	return p, nil
 }

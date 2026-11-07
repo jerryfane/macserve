@@ -35,8 +35,9 @@ import (
 // recovery commands. owner.pause is removed afterwards, as a separate
 // logged action, once health is valid (decision D15).
 
-// serviceLabels are macserve's three launchd services, in start order.
-var serviceLabels = []string{"org.macserve.worker", "org.macserve.maintenance", "org.macserve.controller"}
+// serviceLabels are macserve's launchd services, in start order: the
+// keyholder before the controller, which refuses to start without it.
+var serviceLabels = []string{"org.macserve.worker", "org.macserve.maintenance", "org.macserve.keyholder", "org.macserve.controller"}
 
 func (h *Helper) daemonPlist(label string) string {
 	return filepath.Join(h.Store.Top, "Library", "LaunchDaemons", label+".plist")

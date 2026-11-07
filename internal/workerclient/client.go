@@ -4,6 +4,7 @@ package workerclient
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -19,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jerryfane/macserve/internal/buildseal"
 	"github.com/jerryfane/macserve/internal/model"
 	"github.com/jerryfane/macserve/internal/peercred"
 	"github.com/jerryfane/macserve/internal/protocol"
@@ -30,14 +32,19 @@ type Executor interface {
 	Execute(context.Context, model.Job, worker.Source, io.Reader, worker.Sink) (worker.Result, error)
 	ArtifactPath(string, string) (string, error)
 	RemoveExport(string) error
+	// VerifiedTree is the Git tree computed from a job's extracted source
+	// bytes, or "" when extraction did not verify one.
+	VerifiedTree(string) string
 }
 
 type Client struct {
-	config Config
-	engine Executor
-	http   *http.Client
-	root   *os.Root
-	epoch  string
+	config  Config
+	engine  Executor
+	http    *http.Client
+	root    *os.Root
+	epoch   string
+	sealKey ed25519.PrivateKey
+	checks  Checks
 }
 
 var ErrPeerIdentity = errors.New("controller Unix peer UID mismatch")
@@ -57,13 +64,30 @@ func statusError(resp *http.Response) *HTTPError {
 	return &HTTPError{Status: resp.StatusCode, Method: resp.Request.Method, Path: resp.Request.URL.Path}
 }
 
+// New requires the lease authority (root registry, qualification record and
+// seal key): a broker never executes a lease it resolved only from the
+// controller's snapshot, and never reports a result without its seal.
 func New(config Config, engine Executor) (*Client, error) {
+	return NewWithChecks(config, engine, Checks{})
+}
+
+// NewWithChecks is New with the given host checks of the lease authority
+// files.
+func NewWithChecks(config Config, engine Executor, checks Checks) (*Client, error) {
+	checks = checks.withDefaults()
 	config, err := normalize(config)
 	if err != nil {
 		return nil, err
 	}
 	if engine == nil {
 		return nil, errors.New("worker executor required")
+	}
+	if err := config.LeaseAuthority(); err != nil {
+		return nil, err
+	}
+	sealKey, err := loadSealKey(checks, config.SealKeyFile)
+	if err != nil {
+		return nil, err
 	}
 	root, err := os.OpenRoot(config.Root)
 	if err != nil {
@@ -92,7 +116,7 @@ func New(config Config, engine Executor) (*Client, error) {
 			return conn, nil
 		},
 	}
-	return &Client{config: config, engine: engine, root: root, epoch: epoch, http: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("worker redirects are forbidden") }}}, nil
+	return &Client{config: config, engine: engine, root: root, epoch: epoch, sealKey: sealKey, checks: checks, http: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("worker redirects are forbidden") }}}, nil
 }
 
 func (c *Client) Close() error { c.http.CloseIdleConnections(); return c.root.Close() }
@@ -257,10 +281,17 @@ func (c *Client) Run(ctx context.Context) (returned error) {
 	}
 }
 
+// pending is a final result awaiting durable acknowledgement. Resolution
+// and SourceTree are the worker's own lease resolution and computed source
+// tree; Seal is the signed build seal over them and the result. A pending
+// file written before seals existed has none and is sealed on delivery.
 type pending struct {
-	Epoch  string         `json:"epoch"`
-	Lease  protocol.Lease `json:"lease"`
-	Result worker.Result  `json:"result"`
+	Epoch      string                `json:"epoch"`
+	Lease      protocol.Lease        `json:"lease"`
+	Result     worker.Result         `json:"result"`
+	Resolution *buildseal.Resolution `json:"resolution,omitempty"`
+	SourceTree string                `json:"source_tree,omitempty"`
+	Seal       *buildseal.Envelope   `json:"seal,omitempty"`
 }
 
 func safeID(value string) bool {
@@ -318,18 +349,24 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 	sink := &remoteSink{client: c, ctx: ctx, jobID: lease.Job.ID, lease: lease.Token, cancel: cancel}
 	result := worker.Result{State: model.Failed, Reason: "source transfer failed", Source: lease.Source, StartedAt: time.Now().UTC()}
 	executed := false
-	req, err := c.request(ctx, http.MethodGet, "/jobs/"+lease.Job.ID+"/source", c.epoch, lease.Token, nil)
-	if err == nil {
-		var resp *http.Response
-		resp, err = c.http.Do(req)
+	resolution, err := c.resolveLease(lease.Job)
+	if err != nil {
+		result.Reason = worker.PublicReason(err)
+	} else {
+		var req *http.Request
+		req, err = c.request(ctx, http.MethodGet, "/jobs/"+lease.Job.ID+"/source", c.epoch, lease.Token, nil)
 		if err == nil {
-			if resp.StatusCode != http.StatusOK {
-				err = statusError(resp)
-			} else {
-				executed = true
-				result, err = c.engine.Execute(ctx, lease.Job, lease.Source, resp.Body, sink)
+			var resp *http.Response
+			resp, err = c.http.Do(req)
+			if err == nil {
+				if resp.StatusCode != http.StatusOK {
+					err = statusError(resp)
+				} else {
+					executed = true
+					result, err = c.engine.Execute(ctx, lease.Job, lease.Source, resp.Body, sink)
+				}
+				resp.Body.Close()
 			}
-			resp.Body.Close()
 		}
 	}
 	if !executed {
@@ -366,7 +403,15 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 	if !result.CleanupOK {
 		result.State = model.Failed
 	}
-	saved := pending{Epoch: c.epoch, Lease: lease, Result: result}
+	saved := pending{Epoch: c.epoch, Lease: lease, Result: result, Resolution: resolution}
+	if executed {
+		saved.SourceTree = c.engine.VerifiedTree(lease.Job.ID)
+	}
+	seal, err := c.seal(saved)
+	if err != nil {
+		return false, err
+	}
+	saved.Seal = &seal
 	if err := c.savePending(saved); err != nil {
 		return false, err
 	}
@@ -556,7 +601,17 @@ func (c *Client) deliver(ctx context.Context, saved pending) error {
 			return statusError(resp)
 		}
 	}
-	status, err := c.json(ctx, http.MethodPost, "/jobs/"+jobID+"/complete", saved.Epoch, saved.Lease.Token, saved.Result, nil)
+	if saved.Seal == nil {
+		// A pending completion from before seals: the lease was never
+		// resolved against the registry here, so the seal carries no
+		// resolution or tree and supports no success receipt.
+		seal, err := c.seal(pending{Lease: saved.Lease, Result: saved.Result})
+		if err != nil {
+			return err
+		}
+		saved.Seal = &seal
+	}
+	status, err := c.json(ctx, http.MethodPost, "/jobs/"+jobID+"/complete", saved.Epoch, saved.Lease.Token, protocol.Completion{Result: saved.Result, Seal: *saved.Seal}, nil)
 	if err != nil && status != http.StatusGone {
 		return err
 	}

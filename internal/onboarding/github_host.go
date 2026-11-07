@@ -55,7 +55,7 @@ type Prepared struct {
 func Prepare(h Host) (Prepared, error) {
 	var p Prepared
 	if h.EUID != int(h.RootUID) {
-		return p, errors.New("run it with sudo: it installs the App key controller-owned and edits the root-owned controller.json")
+		return p, errors.New("run it with sudo: it installs the App key keyholder-owned and edits the root-owned controller.json")
 	}
 	uid, err := strconv.ParseUint(h.SudoUID, 10, 32)
 	if h.SudoUID == "" || err != nil || uid == 0 || strconv.FormatUint(uid, 10) != h.SudoUID {
@@ -77,6 +77,9 @@ func Prepare(h Host) (Prepared, error) {
 	if env.OwnerUID != p.OwnerUID {
 		return p, errors.New("SUDO_UID is not the OWNER_UID of deploy.env")
 	}
+	if !env.Keyholder() {
+		return p, errors.New("this installation has no keyholder (deploy.env lacks KEYHOLDER_UID); upgrade it with macserve upgrade first, which moves the keys to the keyholder")
+	}
 	for _, name := range []string{"activation-anchor.json", "qualification.json"} {
 		if _, err := os.Lstat(filepath.Join(config, name)); err == nil {
 			return p, errors.New("qualification is already approved; adding the App now changes controller.json and needs requalification, which connect-github does not do")
@@ -91,7 +94,10 @@ func Prepare(h Host) (Prepared, error) {
 	if p.Controller.OwnerUID != p.OwnerUID {
 		return p, errors.New("SUDO_UID is not the owner_uid of controller.json")
 	}
-	p.Key = KeyTarget{Root: h.Root, RootUID: h.RootUID, ControllerUID: env.ControllerUID, ControllerGID: env.ControllerGID}
+	if c := p.Controller.Keyholder; c == nil || c.UID != env.KeyholderUID {
+		return p, errors.New("controller.json has no keyholder section for deploy.env's KEYHOLDER_UID")
+	}
+	p.Key = KeyTarget{Root: h.Root, RootUID: h.RootUID, KeyholderUID: env.KeyholderUID, KeyholderGID: env.KeyholderGID}
 	if exists, err := p.Key.KeyInstalled(); err != nil {
 		return p, err
 	} else if exists {

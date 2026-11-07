@@ -43,7 +43,9 @@ func TestTemplateJobCompletesWithSignedReceipt(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { signer.Close() })
-	c.options.Seal = signer.Seal
+	c.options.Seal = func(ctx context.Context, job model.Job, result worker.Result, _ Sealing) (json.RawMessage, error) {
+		return signer.Seal(ctx, job, result)
+	}
 	lease := f.dispatch(t)
 	config := model.RepoConfig{Version: 1, WorkDir: "ios", Project: "App.xcodeproj", Scheme: "App"}
 	derived, err := profiles.Derive(lease.Job.Profile, config)
@@ -127,7 +129,9 @@ func TestTemplateTestJobsCompleteWithSignedReceipt(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { signer.Close() })
-			c.options.Seal = signer.Seal
+			c.options.Seal = func(ctx context.Context, job model.Job, result worker.Result, _ Sealing) (json.RawMessage, error) {
+				return signer.Seal(ctx, job, result)
+			}
 			lease := f.dispatch(t)
 			shards := &model.TestShards{Shards: map[string][]string{"terminal": tc.selectors}}
 			config := model.RepoConfig{Version: 1, WorkDir: ".", Project: "Herdr.xcodeproj", Scheme: "Herdr", UITest: shards, UnitTest: shards}

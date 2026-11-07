@@ -8,9 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/jerryfane/macserve/internal/deploy"
 	"github.com/jerryfane/macserve/internal/qualification"
 	"github.com/jerryfane/macserve/internal/setup"
 )
@@ -22,7 +24,7 @@ const (
 	installedController = "macserve-controller release v0.1.0"
 	target              = "macserve release v0.2.0"
 	targetController    = "macserve-controller release v0.2.0"
-	env                 = "CONTROLLER_USER=macservectl\nCONTROLLER_UID=6201\nCONTROLLER_GID=6201\nJOB_USER=macservejob\nJOB_UID=6202\nJOB_GID=6202\nOWNER_USER=jdoe\nOWNER_UID=501\nTAILNET_IP=100.64.0.10\nPORT=8443\nPROTECTED_PORTS=8443\nHOST_ADDRESSES=100.64.0.10\nDEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer\nREPOSITORIES=jdoe/myapp:4242\n"
+	env                 = "CONTROLLER_USER=macservectl\nCONTROLLER_UID=6201\nCONTROLLER_GID=6201\nJOB_USER=macservejob\nJOB_UID=6202\nJOB_GID=6202\nOWNER_USER=jdoe\nOWNER_UID=501\nTAILNET_IP=100.64.0.10\nPORT=8443\nPROTECTED_PORTS=8443\nHOST_ADDRESSES=100.64.0.10\nDEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer\nREPOSITORIES=jdoe/myapp:4242\nKEYHOLDER_UID=499\nKEYHOLDER_GID=499\nKEYRPC_GID=498\n"
 )
 
 func sum(s string) string {
@@ -40,7 +42,7 @@ type host struct {
 
 func newHost() *host {
 	return &host{
-		files: map[string]string{self: target, selfController: targetController, Root + "/bin/macserve": installed, Root + "/bin/macserve-controller": installedController, Root + "/config/deploy.env": env, setup.LedgerPath: "{}", Root + "/config/activation-anchor.json": "{}"},
+		files: map[string]string{self: target, selfController: targetController, Root + "/bin/macserve": installed, Root + "/bin/macserve-controller": installedController, Root + "/config/deploy.env": env, setup.LedgerPath: "{}", Root + "/config/activation-anchor.json": "{}", deploy.KeyholderPlist: "plist"},
 		ok:    map[string]bool{},
 	}
 }
@@ -105,12 +107,15 @@ func status(r Result, id string) string {
 func TestPlanFullRequalification(t *testing.T) {
 	h := newHost()
 	r := Plan(context.Background(), h.probe(), Options{SHA256Sums: sums(nil)})
-	if !r.Ready() || r.From != "v0.1.0" || r.To != "v0.2.0" || r.Carry || status(r, "release.digest") != Pass || status(r, "svc.stopped") != Pass || status(r, "session.job") != Pass {
+	if !r.Ready() || r.From != "v0.1.0" || r.To != "v0.2.0" || r.Carry || status(r, "release.digest") != Pass || status(r, "svc.stopped") != Pass || status(r, "session.job") != Pass || status(r, "keyholder") != Pass {
 		t.Fatalf("%+v", r)
 	}
 	var b bytes.Buffer
-	if err := Write(&b, r); err != nil || !strings.Contains(b.String(), "reset the setup ledger to owner-actions") || !strings.Contains(b.String(), "remove the approval") || !strings.Contains(b.String(), "bin/macserve-controller, then") {
+	if err := Write(&b, r); err != nil || !strings.Contains(b.String(), "reset the setup ledger to owner-actions") || !strings.Contains(b.String(), "remove the approval") || !strings.Contains(b.String(), "bin/macserve-controller, then") || strings.Contains(b.String(), "migrate to the keyholder") {
 		t.Fatalf("%v\n%s", err, b.String())
+	}
+	if !slices.Contains(h.commands, "/bin/launchctl print system/org.macserve.keyholder") {
+		t.Fatalf("the stopped gate does not cover the keyholder: %q", h.commands)
 	}
 	// Only doctor's read-only commands, and only reads.
 	for _, c := range h.commands {
@@ -200,6 +205,21 @@ func TestPlanCarry(t *testing.T) {
 	delete(pre.files, Root+"/bin/macserve-controller")
 	if r := Plan(context.Background(), pre.probe(), Options{SHA256Sums: sums(p), CarryProof: p}); r.Carry || !r.Ready() || status(r, "release.carry") != Warn || status(r, "release.installed") != Info {
 		t.Fatalf("pre-split carry: %+v", r.Checks)
+	}
+	// An installation from before the keyholder: it is migrated, so no
+	// carry, and the plan names the migration.
+	for name, prepare := range map[string]func(*host){
+		"no IDs":   func(h *host) { h.files[Root+"/config/deploy.env"] = strings.Split(env, "KEYHOLDER_UID")[0] },
+		"no plist": func(h *host) { delete(h.files, deploy.KeyholderPlist) },
+	} {
+		old := newHost()
+		old.ok["/bin/launchctl print gui/6202"] = true
+		prepare(old)
+		r := Plan(context.Background(), old.probe(), Options{SHA256Sums: sums(p), CarryProof: p})
+		var b bytes.Buffer
+		if err := Write(&b, r); err != nil || r.Carry || !r.Ready() || status(r, "release.carry") != Warn || status(r, "keyholder") != Info || !strings.Contains(b.String(), "migrate to the keyholder") {
+			t.Fatalf("%s: %+v\n%s", name, r.Checks, b.String())
+		}
 	}
 	// No live session: no carry.
 	delete(h.ok, "/bin/launchctl print gui/6202")

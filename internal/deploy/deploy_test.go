@@ -37,6 +37,9 @@ PROTECTED_PORTS=22,9443
 HOST_ADDRESSES=127.0.0.1,::1,100.64.0.10,192.0.2.10
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 REPOSITORIES=example-org/example-app:12345
+KEYHOLDER_UID=411
+KEYHOLDER_GID=411
+KEYRPC_GID=412
 `
 
 func fixture(t *testing.T) (Environment, map[string][]byte) {
@@ -286,11 +289,20 @@ func TestMaterialHasValidCryptoConsumerConfigsAndPrivateIntent(t *testing.T) {
 		if bytes.Contains(f.Data, []byte(m.Token)) {
 			t.Fatalf("plaintext token persisted at %s", f.Path)
 		}
-		if strings.Contains(f.Path, "/secrets/") {
+		switch {
+		case strings.HasPrefix(f.Path, Prefix+"/var/controller/secrets/"):
 			if f.Mode != 0600 || f.UID != e.ControllerUID || f.GID != e.ControllerGID {
 				t.Fatal("private key is not controller-private")
 			}
-		} else if f.UID != 0 || f.GID != 0 || f.Mode != 0644 {
+		case strings.HasPrefix(f.Path, KeyholderSecretsDir+"/"):
+			if f.Mode != 0600 || f.UID != e.KeyholderUID || f.GID != e.KeyholderGID {
+				t.Fatal("private key is not keyholder-private")
+			}
+		case f.Path == SealKeyPath:
+			if f.Mode != 0600 || f.UID != 0 || f.GID != 0 {
+				t.Fatal("seal key is not root-private")
+			}
+		case f.UID != 0 || f.GID != 0 || f.Mode != 0644:
 			t.Fatal("public config is not root-controlled")
 		}
 		if err := os.WriteFile(filepath.Join(stage, filepath.Base(f.Path)), f.Data, 0600); err != nil {

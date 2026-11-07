@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jerryfane/macserve/internal/buildseal"
 	"github.com/jerryfane/macserve/internal/controllerk/store"
 	"github.com/jerryfane/macserve/internal/evidence"
 	"github.com/jerryfane/macserve/internal/model"
@@ -28,7 +29,7 @@ func completionDigest(result worker.Result) (string, error) {
 	return hex.EncodeToString(digest[:]), nil
 }
 
-func (c *Controller) complete(ctx context.Context, job model.Job, result worker.Result) error {
+func (c *Controller) complete(ctx context.Context, job model.Job, result worker.Result, seal buildseal.Envelope) error {
 	ctx, cancel := context.WithTimeout(ctx, c.options.DeliveryTimeout)
 	defer cancel()
 	if result.State != model.Succeeded && result.State != model.Failed && result.State != model.Cancelled && result.State != model.TimedOut || len(result.Reason) > 4096 {
@@ -90,8 +91,11 @@ func (c *Controller) complete(ctx context.Context, job model.Job, result worker.
 		}
 		normalizeCancellation(&normalized, current, c.options.Now())
 		completion := Completion{InputDigest: digest, Result: normalized}
+		if len(seal.Seal) > 0 {
+			completion.Seal = &seal
+		}
 		if c.options.Seal != nil {
-			receipt, err := c.options.Seal(ctx, current, normalized)
+			receipt, err := c.options.Seal(ctx, current, normalized, Sealing{Worker: result, Seal: seal})
 			if err != nil {
 				return err
 			}

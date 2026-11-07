@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jerryfane/macserve/internal/buildseal"
 	"github.com/jerryfane/macserve/internal/controllerk/store"
 	"github.com/jerryfane/macserve/internal/evidence"
 	"github.com/jerryfane/macserve/internal/health"
@@ -300,7 +301,7 @@ func TestCompletionReparsesTestsAndRejectsForgedSummary(t *testing.T) {
 			report := []byte(`{"testPlanConfigurations":[],"devices":[],"testNodes":[{"nodeType":"Test Case","name":"testApproved","nodeIdentifier":"ExampleTests/testApproved","result":"` + outcome + `"}]}`)
 			result.Artifacts = append(result.Artifacts, f.artifact(t, lease.Job, "evidence/tests.json", report), f.artifact(t, lease.Job, "results.xcresult.tar.gz", []byte("sealed result fixture")))
 			result.Summary = &evidence.Summary{ParseStatus: "parsed", Tests: 999, Passed: 999}
-			if err := f.controller.complete(context.Background(), lease.Job, result); err != nil {
+			if err := f.controller.complete(context.Background(), lease.Job, result, buildseal.Envelope{}); err != nil {
 				t.Fatal(err)
 			}
 			job, err := f.db.Get(context.Background(), lease.Job.ID)
@@ -320,11 +321,11 @@ func TestCompletionReparsesTestsAndRejectsForgedSummary(t *testing.T) {
 			if job.State != want || saved.Result.Summary == nil || saved.Result.Summary.Tests != 1 || saved.Result.Summary.Failed != failures {
 				t.Fatalf("unverified summary accepted: %+v %+v", job, saved.Result.Summary)
 			}
-			if err := f.controller.complete(context.Background(), lease.Job, result); err != nil {
+			if err := f.controller.complete(context.Background(), lease.Job, result, buildseal.Envelope{}); err != nil {
 				t.Fatalf("identical completion retry: %v", err)
 			}
 			result.Reason = "different completion"
-			if err := f.controller.complete(context.Background(), lease.Job, result); !errors.Is(err, store.ErrConflict) {
+			if err := f.controller.complete(context.Background(), lease.Job, result, buildseal.Envelope{}); !errors.Is(err, store.ErrConflict) {
 				t.Fatalf("changed replay: %v", err)
 			}
 		})
@@ -342,7 +343,7 @@ func TestArtifactIntegrityAliasesExpiryAndQuiescentAcknowledgment(t *testing.T) 
 	if err := f.controller.putArtifact(context.Background(), lease.Job, a, strings.NewReader("wrong")); !errors.Is(err, evidence.ErrArtifact) {
 		t.Fatalf("corrupted retry accepted: %v", err)
 	}
-	if err := f.controller.complete(context.Background(), lease.Job, result); err != nil {
+	if err := f.controller.complete(context.Background(), lease.Job, result, buildseal.Envelope{}); err != nil {
 		t.Fatal(err)
 	}
 	status, err := f.controller.Status(context.Background())
@@ -401,7 +402,7 @@ func TestCancellationWinsSealRaceAndCleanupFailureQuarantines(t *testing.T) {
 			lease := f.lease(t, model.Build)
 			result := f.result(t, lease)
 			result.CleanupOK = cleanup
-			f.controller.options.Seal = func(ctx context.Context, job model.Job, value worker.Result) (json.RawMessage, error) {
+			f.controller.options.Seal = func(ctx context.Context, job model.Job, value worker.Result, _ Sealing) (json.RawMessage, error) {
 				if value.State == model.Succeeded {
 					if _, err := f.db.Cancel(ctx, job.ID, "operator cancellation", model.CancelReason{Source: model.CancelClient, Principal: "owner"}, f.now); err != nil {
 						return nil, err
@@ -411,7 +412,7 @@ func TestCancellationWinsSealRaceAndCleanupFailureQuarantines(t *testing.T) {
 					State model.State `json:"state"`
 				}{value.State})
 			}
-			if err := f.controller.complete(context.Background(), lease.Job, result); err != nil {
+			if err := f.controller.complete(context.Background(), lease.Job, result, buildseal.Envelope{}); err != nil {
 				t.Fatal(err)
 			}
 			job, _ := f.db.Get(context.Background(), lease.Job.ID)
@@ -564,7 +565,7 @@ func TestUnverifiedSuccessPredicatesAreDurableFailures(t *testing.T) {
 			case "deadline":
 				f.offset.Store(int64(601 * time.Second))
 			}
-			if err := f.controller.complete(context.Background(), lease.Job, result); err != nil {
+			if err := f.controller.complete(context.Background(), lease.Job, result, buildseal.Envelope{}); err != nil {
 				t.Fatal(err)
 			}
 			persisted, _ := f.db.Get(context.Background(), lease.Job.ID)
@@ -585,7 +586,7 @@ func TestArtifactPoolEvictsOldestTerminalBytesNotActiveOrMetadata(t *testing.T) 
 	result := f.result(t, first)
 	old := f.artifact(t, first.Job, "old.bin", []byte("123456"))
 	result.Artifacts = append(result.Artifacts, old)
-	if err := f.controller.complete(context.Background(), first.Job, result); err != nil {
+	if err := f.controller.complete(context.Background(), first.Job, result, buildseal.Envelope{}); err != nil {
 		t.Fatal(err)
 	}
 	f.offset.Store(int64(time.Second))
@@ -669,7 +670,7 @@ func TestArtifactGetterRejectsSymlinkSubstitution(t *testing.T) {
 	f := newRuntime(t)
 	lease := f.lease(t, model.Build)
 	result := f.result(t, lease)
-	if err := f.controller.complete(context.Background(), lease.Job, result); err != nil {
+	if err := f.controller.complete(context.Background(), lease.Job, result, buildseal.Envelope{}); err != nil {
 		t.Fatal(err)
 	}
 	target := filepath.Join(t.TempDir(), "secret")

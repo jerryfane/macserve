@@ -38,6 +38,9 @@ var SetupPlan = Policy{
 	Imports: []string{module + "/internal/deploy", module + "/internal/setup"},
 	Seams: []string{
 		module + "/internal/deploy.ParseEnvironment",
+		// Pure: dscl output parsing and the keyholder's system ID choice.
+		module + "/internal/deploy.ParseDirectoryList",
+		module + "/internal/deploy.PickKeyholderIDs",
 		mainPkg + ".usage",
 	},
 	// The command table (see Table): its "setup" entry runs runSetup, a

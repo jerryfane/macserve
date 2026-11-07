@@ -147,8 +147,9 @@ func (q *SystemQualifier) Health(ctx context.Context) ([]string, error) {
 	return state.Blockers, err
 }
 
-// app is the controller's GitHub App client, from controller.json and the
-// installed App key, as macserve-controller builds it.
+// app is the GitHub App client, from controller.json and the App key the
+// keyholder holds (root reads it: owned by the keyholder UID, 0600, below
+// root- or keyholder-owned directories), as the keyholder builds it.
 func (q *SystemQualifier) app() (*githubapi.Client, error) {
 	c, err := controllerconfig.LoadConfig(q.config("controller.json"))
 	if err != nil {
@@ -157,10 +158,10 @@ func (q *SystemQualifier) app() (*githubapi.Client, error) {
 	if c.GitHub == nil || c.GitHub.AppID == 0 {
 		return nil, errors.New("controller.json has no GitHub App")
 	}
-	if err := hostguard.PrivateFile(c.GitHub.PrivateKeyFile); err != nil {
-		return nil, err
+	if c.Keyholder == nil {
+		return nil, errors.New("controller.json has no keyholder section; the GitHub App key is the keyholder's")
 	}
-	pem, err := readBounded(c.GitHub.PrivateKeyFile, 64<<10)
+	pem, err := hostguard.ReadOwnedPrivateKey(c.GitHub.PrivateKeyFile, c.Keyholder.UID)
 	if err != nil {
 		return nil, err
 	}

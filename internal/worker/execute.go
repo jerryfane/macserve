@@ -122,6 +122,7 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 	}
 	e.recording = &result
 	defer func() { e.recording = nil }()
+	e.verified.job, e.verified.tree = job.ID, ""
 	job, err := validateJob(job, source)
 	if err != nil {
 		return result, err
@@ -301,6 +302,9 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 		return result, err
 	}
 	err = extractSource(prepareCtx, checkout, archive, source, e.options.MaxWorkspaceBytes)
+	if err == nil {
+		e.verified.tree = source.Tree
+	}
 	if err == nil && x.job.Profile.Template != nil {
 		// Template jobs: the recipe is derived from the repository's
 		// .macserve.json, and a Flutter job's lockfiles preflighted, before

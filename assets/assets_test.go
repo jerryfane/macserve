@@ -670,3 +670,174 @@ main "$@"`
 		t.Fatalf("signer-only apply should reach the Darwin gate without a terminal: %v", err)
 	}
 }
+
+func TestKeyholderLaunchDaemon(t *testing.T) {
+	data := render(t, "launchd/org.macserve.keyholder.plist.tmpl")
+	var root plistNode
+	if err := xml.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	if root.XMLName.Local != "plist" || len(root.Children) != 1 {
+		t.Fatal("invalid plist root")
+	}
+	fields := dictionary(t, root.Children[0])
+	if fields["Disabled"].XMLName.Local != "true" || fields["RunAtLoad"].XMLName.Local != "false" {
+		t.Fatal("keyholder must remain disabled")
+	}
+	keepAlive := dictionary(t, fields["KeepAlive"])
+	if len(keepAlive) != 1 || keepAlive["SuccessfulExit"].XMLName.Local != "false" {
+		t.Fatal("keyholder restarts only after a failed exit")
+	}
+	state := "/Library/macserve/var/keyholder"
+	for key, want := range map[string]string{
+		"Label": "org.macserve.keyholder", "UserName": "_macserve_key", "GroupName": "_macserve_key",
+		"WorkingDirectory": state, "ProcessType": "Background",
+		"StandardOutPath": state + "/log/keyholder.out.log", "StandardErrorPath": state + "/log/keyholder.err.log",
+	} {
+		if fields[key].XMLName.Local != "string" || fields[key].Text != want {
+			t.Fatalf("%s = %+v, want %s", key, fields[key], want)
+		}
+	}
+	args := fields["ProgramArguments"]
+	want := []string{"/Library/macserve/bin/macserve", "keyholder", "--config", "/Library/macserve/config/keyholder.json"}
+	if args.XMLName.Local != "array" || len(args.Children) != len(want) {
+		t.Fatal("invalid keyholder arguments")
+	}
+	for i, arg := range args.Children {
+		if arg.XMLName.Local != "string" || arg.Text != want[i] {
+			t.Fatalf("argument %d = %+v", i, arg)
+		}
+	}
+	if n, err := strconv.Atoi(fields["Umask"].Text); err != nil || fields["Umask"].XMLName.Local != "integer" || n != 63 {
+		t.Fatalf("unsafe Umask: %+v", fields["Umask"])
+	}
+	env := dictionary(t, fields["EnvironmentVariables"])
+	if len(env) != 2 || env["PATH"].Text != "/usr/bin:/bin:/usr/sbin:/sbin" || env["HOME"].Text != state {
+		t.Fatal("unsafe keyholder environment")
+	}
+}
+
+func keyholderArgs() []string {
+	return append(scriptArgs(), "--keyholder-uid", "401", "--keyholder-gid", "401", "--keyrpc-gid", "402")
+}
+
+func TestKeyholderPlanAndInputRefusals(t *testing.T) {
+	for _, args := range [][]string{keyholderArgs(), append(keyholderArgs(), "--keyholder-only")} {
+		output, err := runScript(t, args)
+		if err != nil {
+			t.Fatalf("keyholder plan refused: %v: %s", err, output)
+		}
+		for _, want := range []string{"_macserve_key uid=401", "_macserve_keyrpc gid=402", "members servicecontrol and _macserve_key only", "var/keyholder/secrets", "var/keyholder/receipts", "var/keyholder/release", "var/keyholder-run"} {
+			if !strings.Contains(output, want) {
+				t.Fatalf("plan lacks %q: %s", want, output)
+			}
+		}
+	}
+	if output, err := runScript(t, append(keyholderArgs(), "--keyholder-only")); err != nil || !strings.Contains(output, "re-verify") {
+		t.Fatalf("keyholder-only plan does not name the resume: %v: %s", err, output)
+	}
+	if output, err := runScript(t, scriptArgs()); err != nil || strings.Contains(output, "_macserve_key") {
+		t.Fatalf("plan without keyholder IDs mentions the keyholder: %v: %s", err, output)
+	}
+	both := append(signerArgs(), "--keyholder-uid", "411", "--keyholder-gid", "411", "--keyrpc-gid", "412")
+	if output, err := runScript(t, both); err != nil || !strings.Contains(output, "_macserve_sign uid=401") || !strings.Contains(output, "_macserve_key uid=411") {
+		t.Fatalf("signer and keyholder plan: %v: %s", err, output)
+	}
+	base := scriptArgs()
+	for name, args := range map[string][]string{
+		"partial":              append(base, "--keyholder-uid", "401", "--keyholder-gid", "401"),
+		"only-without-ids":     append(base, "--keyholder-only"),
+		"duplicate-only":       append(keyholderArgs(), "--keyholder-only", "--keyholder-only"),
+		"shared-groups":        append(base, "--keyholder-uid", "401", "--keyholder-gid", "402", "--keyrpc-gid", "402"),
+		"below-range":          append(base, "--keyholder-uid", "199", "--keyholder-gid", "401", "--keyrpc-gid", "402"),
+		"service-range":        append(base, "--keyholder-uid", "501", "--keyholder-gid", "401", "--keyrpc-gid", "402"),
+		"leading-zero":         append(base, "--keyholder-uid", "0401", "--keyholder-gid", "401", "--keyrpc-gid", "402"),
+		"injected":             append(base, "--keyholder-uid", "401;id", "--keyholder-gid", "401", "--keyrpc-gid", "402"),
+		"duplicate-rpc-gid":    append(keyholderArgs(), "--keyrpc-gid", "403"),
+		"signer-uid":           append(signerArgs(), "--keyholder-uid", "401", "--keyholder-gid", "411", "--keyrpc-gid", "412"),
+		"signer-gid":           append(signerArgs(), "--keyholder-uid", "411", "--keyholder-gid", "402", "--keyrpc-gid", "412"),
+		"signer-rpc-gid":       append(signerArgs(), "--keyholder-uid", "411", "--keyholder-gid", "411", "--keyrpc-gid", "401"),
+		"only-with-signer":     append(append(signerArgs(), "--keyholder-uid", "411", "--keyholder-gid", "411", "--keyrpc-gid", "412"), "--keyholder-only"),
+		"only-with-signeronly": append(append(signerArgs(), "--keyholder-uid", "411", "--keyholder-gid", "411", "--keyrpc-gid", "412"), "--keyholder-only", "--signer-only"),
+	} {
+		if output, err := runScript(t, args); err == nil {
+			t.Fatalf("%s: unsafe keyholder input accepted: %s", name, output)
+		}
+	}
+}
+
+// keyholderDirectoryFixture is signerDirectoryFixture for the keyholder:
+// the same directory model with the keyholder's names, scenarios and
+// functions, plus a recorded /usr/bin/install for its directories.
+var keyholderDirectoryFixture = strings.NewReplacer(
+	"_macserve_signrpc", "_macserve_keyrpc",
+	"_macserve_sign", "_macserve_key",
+	"signer", "keyholder",
+	"main \"$@\" >/dev/null", "function /usr/bin/install() { printf '%s\\n' \"$*\" >> installed-dirs; }\nmain \"$@\" >/dev/null",
+	"validate_signer_accounts\n", "validate_keyholder_accounts\nprovision_keyholder_directories\n",
+).Replace(signerDirectoryFixture)
+
+func TestCreatedKeyholderAccounts(t *testing.T) {
+	script, err := filepath.Abs("create-users.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		scenario string
+		refuse   bool
+	}{
+		{"normal", false},
+		{"wrong-shell", true},
+		{"job-in-rpc", true},
+		{"job-in-keyholder", true},
+		{"keyholder-staff", true},
+		{"keyholder-job-group", true},
+		{"controller-in-keyholder", true},
+		{"extra-member", true},
+		{"keyholder-group-member", true},
+		{"add-error", true},
+	} {
+		t.Run(tc.scenario, func(t *testing.T) {
+			args := append([]string{"-c", keyholderDirectoryFixture, "keyholder-test", script, tc.scenario}, append(keyholderArgs(), "--keyholder-only")...)
+			cmd := exec.Command("/bin/bash", args...)
+			cmd.Dir = t.TempDir()
+			cmd.Env = []string{"PATH=/nonexistent", "HOME=" + cmd.Dir}
+			out, err := cmd.CombinedOutput()
+			if (err != nil) != tc.refuse {
+				t.Fatalf("refuse=%v, err=%v: %s", tc.refuse, err, out)
+			}
+			if _, readyErr := os.Stat(filepath.Join(cmd.Dir, "keyholder-ready")); (readyErr == nil) == tc.refuse {
+				t.Fatalf("provisioning gate did not match refusal: %v", readyErr)
+			}
+			if tc.refuse {
+				return
+			}
+			dirs, err := os.ReadFile(filepath.Join(cmd.Dir, "installed-dirs"))
+			want := "-d -o 401 -g 401 -m 0700 /Library/macserve/var/keyholder /Library/macserve/var/keyholder/secrets /Library/macserve/var/keyholder/receipts /Library/macserve/var/keyholder/release /Library/macserve/var/keyholder/log\n" +
+				"-d -o 401 -g 402 -m 0750 /Library/macserve/var/keyholder-run\n"
+			if err != nil || string(dirs) != want {
+				t.Fatalf("keyholder directories %q %v, want %q", dirs, err, want)
+			}
+		})
+	}
+}
+
+func TestKeyholderOnlyApplyNeedsNoTerminalButRefusesOffDarwin(t *testing.T) {
+	script, err := filepath.Abs("create-users.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	program := `source "$1"; shift
+function /usr/bin/uname() { printf queried > host-inspected; printf 'Linux\n'; }
+main "$@"`
+	args := append([]string{"-c", program, "keyholder-only-test", script}, append(keyholderArgs(), "--keyholder-only", "--apply")...)
+	cmd := exec.Command("/bin/bash", args...)
+	cmd.Dir = t.TempDir()
+	cmd.Env = []string{"PATH=/nonexistent", "HOME=" + cmd.Dir}
+	if out, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(out), "requires Darwin") {
+		t.Fatalf("keyholder-only apply off Darwin: err=%v output=%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(cmd.Dir, "host-inspected")); err != nil {
+		t.Fatalf("keyholder-only apply should reach the Darwin gate without a terminal: %v", err)
+	}
+}

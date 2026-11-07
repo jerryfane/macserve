@@ -25,13 +25,25 @@ requires `framework_version` and `cocoapods` to equal the pin and the other two 
 jobs have no `flutter` key, and a receipt for a non-Flutter recipe with a Flutter request or observation is refused.
 An `ios_archive` receipt says tests were not run and carries three fields no other receipt has: `release` (the
 admitted `build_name`, `build_number` and `dart_defines`, equal to `request.release`), `release_provenance`
-(`repository_id`, `default_branch`, `head_sha`, `resolved_at` and `source`, resolved at admission through the
-controller's GitHub App) and `signing_manifest_sha256`, the SHA-256 of the `signing-manifest.json` artifact. Success
+(`repository_id`, `default_branch`, `head_sha`, `resolved_at` and `source`, resolved by the keyholder's own
+GitHub App check before it signs; receipts from before the keyholder carry the admission-time resolution) and
+`signing_manifest_sha256`, the SHA-256 of the `signing-manifest.json` artifact. Success
 requires `source` `github_app`, `repository_id` equal to the receipt's repository, `head_sha` equal to the request
-and source commit, a `resolved_at` not after creation, both required artifacts `App.xcarchive.tar` and
+and source commit, a `resolved_at` not after sealing, both required artifacts `App.xcarchive.tar` and
 `signing-manifest.json`, and the manifest digest equal to that artifact's. A receipt of any other kind with one of
 these fields is refused; their absence keeps other receipts' bytes unchanged. The receipt proves an unsigned
 archive of a default-branch head; it does not sign or upload anything.
+
+Receipts are signed by the keyholder (`org.macserve.keyholder`, account `_macserve_key`), which alone holds the
+receipt key; the controller asks for each one and never reads the key. The keyholder first verifies the root
+worker's build seal over the job and its result (docs/architecture.md, K threat model). It signs an `ios_archive`
+success receipt only when the seal matches the repository's entry in the root-owned
+`/Library/macserve/config/release-scope.json` (profile id, version and digest, Xcode and Flutter pins, the exact
+`dart_defines` map; `build_name` `^[0-9]+(\.[0-9]+){0,2}$`, `build_number` `^[0-9]{1,9}$`) and its own GitHub check
+finds the scoped repository ID, the commit at the default-branch head and that commit's tree equal to the tree the
+worker computed from the bytes it built; the controller's admission-time provenance is ignored. Without a release
+scope entry no release receipt is signed. `service.binary_sha256` is the SHA-256 of the root `macserve` binary
+that runs the keyholder.
 The controller logs a refused or failed worker request with its method, route and job ID; a receipt refusal
 returns HTTP 422.
 Submodules and Git LFS are unsupported and rejected, not silently omitted.

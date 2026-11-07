@@ -5,7 +5,7 @@ export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 umask 077
 fail() { printf 'REFUSED: %s\n' "$*" >&2; exit 1; }
 usage() {
-    printf '%s\n' 'Usage: /bin/bash assets/create-users.sh --controller-user NAME --controller-uid UID --controller-gid GID --job-user NAME [--job-real-name NAME] --job-uid UID --job-gid GID --owner-user NAME --owner-uid UID [--signer-uid UID --signer-gid GID --signrpc-gid GID [--signer-only]] [--apply]' '--signer-only adds the signer account, groups and directories to an existing installation of the same named accounts.'
+    printf '%s\n' 'Usage: /bin/bash assets/create-users.sh --controller-user NAME --controller-uid UID --controller-gid GID --job-user NAME [--job-real-name NAME] --job-uid UID --job-gid GID --owner-user NAME --owner-uid UID [--signer-uid UID --signer-gid GID --signrpc-gid GID [--signer-only]] [--keyholder-uid UID --keyholder-gid GID --keyrpc-gid GID [--keyholder-only]] [--apply]' '--signer-only adds the signer account, groups and directories to an existing installation of the same named accounts.' '--keyholder-only adds the keyholder account, groups and directories to an existing installation, or re-verifies them and their directories when the keyholder account already exists.'
 }
 # Pure membership check, also usable by callers that already resolved group IDs.
 validate_account_groups() {
@@ -95,43 +95,51 @@ create_signer() {
     /usr/sbin/dseditgroup -o edit -a "$signer_user" -t user "$signrpc_group"
 }
 validate_signer_accounts() {
+    validate_daemon_accounts signer "$signer_user" "$signer_uid" "$signer_gid" "$signrpc_group" "$signrpc_gid" "$prefix/var/signer"
+}
+# A daemon account (signer or keyholder): exact UID, primary group, shell
+# and home; no privileged, job or controller group; in its RPC group, which
+# holds exactly the controller and the daemon; the controller is not in the
+# daemon's own group and the job account is in neither.
+validate_daemon_accounts() {
+    local role=$1 daemon_user=$2 daemon_uid=$3 daemon_gid=$4 rpc_group=$5 rpc_gid=$6 daemon_home=$7
     local record actual gid has_rpc memberships group members found=false
-    [ "$(/usr/bin/id -u "$signer_user")" = "$signer_uid" ] || fail "incorrect UID for $signer_user"
-    [ "$(/usr/bin/id -g "$signer_user")" = "$signer_gid" ] || fail "incorrect primary group for $signer_user"
-    record=$(/usr/bin/dscl . -read "/Users/$signer_user" UserShell) || fail 'cannot read signer shell'
-    [ "$record" = 'UserShell: /usr/bin/false' ] || fail 'incorrect signer shell record'
-    record=$(/usr/bin/dscl . -read "/Users/$signer_user" NFSHomeDirectory) || fail 'cannot read signer home'
-    [ "$record" = "NFSHomeDirectory: $prefix/var/signer" ] || fail 'incorrect signer home record'
-    actual=$(/usr/bin/id -G "$signer_user") || fail "cannot resolve groups for $signer_user"
+    [ "$(/usr/bin/id -u "$daemon_user")" = "$daemon_uid" ] || fail "incorrect UID for $daemon_user"
+    [ "$(/usr/bin/id -g "$daemon_user")" = "$daemon_gid" ] || fail "incorrect primary group for $daemon_user"
+    record=$(/usr/bin/dscl . -read "/Users/$daemon_user" UserShell) || fail "cannot read $role shell"
+    [ "$record" = 'UserShell: /usr/bin/false' ] || fail "incorrect $role shell record"
+    record=$(/usr/bin/dscl . -read "/Users/$daemon_user" NFSHomeDirectory) || fail "cannot read $role home"
+    [ "$record" = "NFSHomeDirectory: $daemon_home" ] || fail "incorrect $role home record"
+    actual=$(/usr/bin/id -G "$daemon_user") || fail "cannot resolve groups for $daemon_user"
     has_rpc=false
     for gid in $actual; do
-        case "$gid" in 0|20|80|"$job_gid"|"$controller_gid") fail "privileged/shared supplementary group for $signer_user; keep services disabled and reconcile manually" ;; esac
-        if [ "$gid" = "$signrpc_gid" ]; then has_rpc=true; fi
+        case "$gid" in 0|20|80|"$job_gid"|"$controller_gid") fail "privileged/shared supplementary group for $daemon_user; keep services disabled and reconcile manually" ;; esac
+        if [ "$gid" = "$rpc_gid" ]; then has_rpc=true; fi
     done
-    [ "$has_rpc" = true ] || fail "$signer_user is not a member of $signrpc_group"
+    [ "$has_rpc" = true ] || fail "$daemon_user is not a member of $rpc_group"
     actual=$(/usr/bin/id -G "$controller_user") || fail "cannot resolve groups for $controller_user"
     has_rpc=false
     for gid in $actual; do
-        [ "$gid" != "$signer_gid" ] || fail "$controller_user must not belong to $signer_user"
-        if [ "$gid" = "$signrpc_gid" ]; then has_rpc=true; fi
+        [ "$gid" != "$daemon_gid" ] || fail "$controller_user must not belong to $daemon_user"
+        if [ "$gid" = "$rpc_gid" ]; then has_rpc=true; fi
     done
-    [ "$has_rpc" = true ] || fail "$controller_user is not a member of $signrpc_group"
+    [ "$has_rpc" = true ] || fail "$controller_user is not a member of $rpc_group"
     actual=$(/usr/bin/id -G "$job_user") || fail "cannot resolve groups for $job_user"
     for gid in $actual; do
-        case "$gid" in "$signer_gid"|"$signrpc_gid") fail "job user belongs to a signer group; keep services disabled and reconcile manually" ;; esac
+        case "$gid" in "$daemon_gid"|"$rpc_gid") fail "job user belongs to a $role group; keep services disabled and reconcile manually" ;; esac
     done
-    # Exact recorded membership: the controller and the signer, nobody else.
-    memberships=$(/usr/bin/dscl . -list /Groups GroupMembership) || fail 'cannot enumerate signer group membership'
+    # Exact recorded membership: the controller and the daemon, nobody else.
+    memberships=$(/usr/bin/dscl . -list /Groups GroupMembership) || fail "cannot enumerate $role group membership"
     while read -r group members; do
-        if [ "$group" = "$signrpc_group" ]; then
-            [ "$found" = false ] || fail "ambiguous $signrpc_group membership"
+        if [ "$group" = "$rpc_group" ]; then
+            [ "$found" = false ] || fail "ambiguous $rpc_group membership"
             found=true
-            [ "$members" = "$controller_user $signer_user" ] || fail "unexpected $signrpc_group membership"
-        elif [ "$group" = "$signer_user" ] && [ -n "$members" ]; then
-            fail "unexpected $signer_user group membership"
+            [ "$members" = "$controller_user $daemon_user" ] || fail "unexpected $rpc_group membership"
+        elif [ "$group" = "$daemon_user" ] && [ -n "$members" ]; then
+            fail "unexpected $daemon_user group membership"
         fi
     done <<< "$memberships"
-    [ "$found" = true ] || fail "cannot find $signrpc_group membership"
+    [ "$found" = true ] || fail "cannot find $rpc_group membership"
 }
 provision_signer_directories() {
     /usr/bin/install -d -o root -g wheel -m 0755 "$prefix/signer-profiles"
@@ -139,11 +147,43 @@ provision_signer_directories() {
     /usr/bin/install -d -o "$signer_uid" -g "$signrpc_gid" -m 0750 "$prefix/var/signer-run"
     /usr/bin/install -d -o "$controller_uid" -g "$signrpc_gid" -m 0750 "$prefix/var/signer-inbox"
 }
+# The keyholder is a hidden nonlogin system account with its own primary
+# group; it holds the job receipt key and the GitHub App key. The RPC group
+# admits exactly the controller and the keyholder to its socket directory.
+# The job account belongs to neither group.
+create_keyholder() {
+    create_identity "$keyholder_user" "$keyholder_uid" "$keyholder_gid" /usr/bin/false "$prefix/var/keyholder"
+    /usr/bin/dscl . -create "/Users/$keyholder_user" Password '*'
+    /usr/bin/dscl . -create "/Users/$keyholder_user" IsHidden 1
+    create_group "$keyrpc_group" "$keyrpc_gid"
+    /usr/sbin/dseditgroup -o edit -a "$controller_user" -t user "$keyrpc_group"
+    /usr/sbin/dseditgroup -o edit -a "$keyholder_user" -t user "$keyrpc_group"
+}
+validate_keyholder_accounts() {
+    validate_daemon_accounts keyholder "$keyholder_user" "$keyholder_uid" "$keyholder_gid" "$keyrpc_group" "$keyrpc_gid" "$prefix/var/keyholder"
+}
+# The keyholder's directories; install -d also re-applies owner and mode to
+# a directory a resumed --keyholder-only run finds (never a symlink).
+keyholder_directories() {
+    printf '%s\n' "$prefix/var/keyholder" "$prefix/var/keyholder/secrets" "$prefix/var/keyholder/receipts" "$prefix/var/keyholder/release" "$prefix/var/keyholder/log" "$prefix/var/keyholder-run"
+}
+provision_keyholder_directories() {
+    local path
+    for path in $(keyholder_directories); do
+        if [ -L "$path" ] || { [ -e "$path" ] && [ ! -d "$path" ]; }; then
+            fail "unsafe keyholder directory: $path"
+        fi
+    done
+    /usr/bin/install -d -o "$keyholder_uid" -g "$keyholder_gid" -m 0700 "$prefix/var/keyholder" "$prefix/var/keyholder/secrets" "$prefix/var/keyholder/receipts" "$prefix/var/keyholder/release" "$prefix/var/keyholder/log"
+    /usr/bin/install -d -o "$keyholder_uid" -g "$keyrpc_gid" -m 0750 "$prefix/var/keyholder-run"
+}
 main() {
-apply=false signer_only=false
+apply=false signer_only=false keyholder_only=false
 controller_user='' controller_uid='' controller_gid='' job_user='' job_uid='' job_gid='' owner_user='' owner_uid=''
 signer_uid='' signer_gid='' signrpc_gid=''
 signer_user=_macserve_sign signrpc_group=_macserve_signrpc
+keyholder_uid='' keyholder_gid='' keyrpc_gid=''
+keyholder_user=_macserve_key keyrpc_group=_macserve_keyrpc
 job_real_name='macserve build'
 seen=' '
 while [ "$#" -gt 0 ]; do
@@ -152,7 +192,8 @@ while [ "$#" -gt 0 ]; do
         --help) usage; exit 0 ;;
         --apply) [ "$apply" = false ] || fail 'duplicate --apply'; apply=true; continue ;;
         --signer-only) [ "$signer_only" = false ] || fail 'duplicate --signer-only'; signer_only=true; continue ;;
-        --controller-user|--controller-uid|--controller-gid|--job-user|--job-real-name|--job-uid|--job-gid|--owner-user|--owner-uid|--signer-uid|--signer-gid|--signrpc-gid) ;;
+        --keyholder-only) [ "$keyholder_only" = false ] || fail 'duplicate --keyholder-only'; keyholder_only=true; continue ;;
+        --controller-user|--controller-uid|--controller-gid|--job-user|--job-real-name|--job-uid|--job-gid|--owner-user|--owner-uid|--signer-uid|--signer-gid|--signrpc-gid|--keyholder-uid|--keyholder-gid|--keyrpc-gid) ;;
         *) fail "unknown option: $flag" ;;
     esac
     case "$seen" in *" $flag "*) fail "duplicate option: $flag" ;; esac
@@ -166,6 +207,7 @@ while [ "$#" -gt 0 ]; do
         --owner-user) owner_user=$value ;; --owner-uid) owner_uid=$value ;;
         --job-real-name) job_real_name=$value ;;
         --signer-uid) signer_uid=$value ;; --signer-gid) signer_gid=$value ;; --signrpc-gid) signrpc_gid=$value ;;
+        --keyholder-uid) keyholder_uid=$value ;; --keyholder-gid) keyholder_gid=$value ;; --keyrpc-gid) keyrpc_gid=$value ;;
     esac
 done
 [ -n "$job_real_name" ] || fail 'job real name must not be empty'
@@ -197,10 +239,31 @@ fi
 if [ "$signer_only" = true ] && [ "$signer" = false ]; then
     fail '--signer-only requires --signer-uid, --signer-gid and --signrpc-gid'
 fi
+# The keyholder is all-or-nothing too, with IDs distinct from the signer's.
+keyholder=false
+if [ -n "$keyholder_uid$keyholder_gid$keyrpc_gid" ]; then
+    for number in "$keyholder_uid" "$keyholder_gid" "$keyrpc_gid"; do
+        [[ "$number" =~ ^[2-4][0-9]{2}$ ]] || fail 'keyholder IDs must be canonical decimal system IDs 200..499'
+    done
+    [ "$keyholder_gid" != "$keyrpc_gid" ] || fail 'keyholder and keyholder RPC GIDs must differ'
+    if [ "$signer" = true ]; then
+        [ "$keyholder_uid" != "$signer_uid" ] || fail 'keyholder and signer UIDs must differ'
+        for number in "$keyholder_gid" "$keyrpc_gid"; do
+            case "$number" in "$signer_gid"|"$signrpc_gid") fail 'keyholder and signer GIDs must differ' ;; esac
+        done
+    fi
+    keyholder=true
+fi
+if [ "$keyholder_only" = true ] && [ "$keyholder" = false ]; then
+    fail '--keyholder-only requires --keyholder-uid, --keyholder-gid and --keyrpc-gid'
+fi
+if [ "$keyholder_only" = true ] && { [ "$signer_only" = true ] || [ "$signer" = true ]; }; then
+    fail '--keyholder-only adds only the keyholder; add the signer in a separate run'
+fi
 prefix=/Library/macserve
 home=/Users/$job_user
 # Names and numbers this run creates; every one must be unused.
-if [ "$signer_only" = true ]; then
+if [ "$signer_only" = true ] || [ "$keyholder_only" = true ]; then
     new_names='' new_uids='' new_gids=''
 else
     new_names="$controller_user $job_user" new_uids="$controller_uid $job_uid" new_gids="$controller_gid $job_gid"
@@ -208,7 +271,12 @@ fi
 if [ "$signer" = true ]; then
     new_names="$new_names $signer_user $signrpc_group" new_uids="$new_uids $signer_uid" new_gids="$new_gids $signer_gid $signrpc_gid"
 fi
-if [ "$signer_only" = true ]; then
+if [ "$keyholder" = true ]; then
+    new_names="$new_names $keyholder_user $keyrpc_group" new_uids="$new_uids $keyholder_uid" new_gids="$new_gids $keyholder_gid $keyrpc_gid"
+fi
+if [ "$keyholder_only" = true ]; then
+    printf 'PLAN ONLY until explicit --apply: add the keyholder to the existing installation of controller %s uid=%s gid=%s, job %s uid=%s gid=%s, owner %s uid=%s; when %s already exists, re-verify it and its directories instead\n' "$controller_user" "$controller_uid" "$controller_gid" "$job_user" "$job_uid" "$job_gid" "$owner_user" "$owner_uid" "$keyholder_user"
+elif [ "$signer_only" = true ]; then
     printf 'PLAN ONLY until explicit --apply: add the signer to the existing installation of controller %s uid=%s gid=%s, job %s uid=%s gid=%s, owner %s uid=%s\n' "$controller_user" "$controller_uid" "$controller_gid" "$job_user" "$job_uid" "$job_gid" "$owner_user" "$owner_uid"
 else
     printf 'PLAN ONLY until explicit --apply: controller %s uid=%s primary-group=%s gid=%s (nonlogin); job %s uid=%s primary-group=%s gid=%s; existing owner %s uid=%s\n' "$controller_user" "$controller_uid" "$controller_user" "$controller_gid" "$job_user" "$job_uid" "$job_user" "$job_gid" "$owner_user" "$owner_uid"
@@ -218,10 +286,14 @@ if [ "$signer" = true ]; then
     printf 'Create signer %s uid=%s primary-group=%s gid=%s (hidden, nonlogin, password disabled); RPC group %s gid=%s with members %s and %s only; the job account joins neither group.\n' "$signer_user" "$signer_uid" "$signer_user" "$signer_gid" "$signrpc_group" "$signrpc_gid" "$controller_user" "$signer_user"
     printf '%s\n' 'Create root:wheel 0755 signer-profiles; signer-owned 0700 var/signer, var/signer/keychain, var/signer/key, var/signer/work, var/signer/log.' "Create $signer_user:$signrpc_group 0750 var/signer-run and $controller_user:$signrpc_group 0750 var/signer-inbox."
 fi
+if [ "$keyholder" = true ]; then
+    printf 'Create keyholder %s uid=%s primary-group=%s gid=%s (hidden, nonlogin, password disabled); RPC group %s gid=%s with members %s and %s only; the job account joins neither group.\n' "$keyholder_user" "$keyholder_uid" "$keyholder_user" "$keyholder_gid" "$keyrpc_group" "$keyrpc_gid" "$controller_user" "$keyholder_user"
+    printf '%s\n' 'Create keyholder-owned 0700 var/keyholder, var/keyholder/secrets, var/keyholder/receipts, var/keyholder/release, var/keyholder/log.' "Create $keyholder_user:$keyrpc_group 0750 var/keyholder-run."
+fi
 printf '%s\n' 'No services, PF, owner ACLs, FileVault, auto-login, or GUI login changed. Plan performs no account/home/service inspection.'
 [ "$apply" = true ] || return 0
 # Gate BEFORE any host account or filesystem inspection.
-if [ "$signer_only" = false ]; then
+if [ "$signer_only" = false ] && [ "$keyholder_only" = false ]; then
     [ -t 0 ] || fail '--apply requires interactive stdin for the sysadminctl password prompt'
 fi
 [ "$(/usr/bin/uname -s)" = Darwin ] || fail '--apply requires Darwin'
@@ -229,6 +301,13 @@ fi
 for tool in /usr/bin/dscl /usr/sbin/sysadminctl /usr/sbin/dseditgroup /usr/bin/dscacheutil /usr/bin/id /usr/bin/stat /usr/bin/install /bin/ls; do
     [ -x "$tool" ] || fail "required system tool unavailable: $tool"
 done
+# A resumed --keyholder-only run finds the keyholder it created: nothing is
+# created again, the account is re-verified and its directories re-applied.
+keyholder_resume=false
+if [ "$keyholder_only" = true ] && /usr/bin/dscl . -read "/Users/$keyholder_user" UniqueID >/dev/null 2>&1; then
+    keyholder_resume=true
+    new_names='' new_uids='' new_gids=''
+fi
 # Query the search node as well as the local directory: fail closed on directory errors.
 users=$(/usr/bin/dscl /Search -list /Users UniqueID) || fail 'cannot enumerate users'
 groups=$(/usr/bin/dscl /Search -list /Groups PrimaryGroupID) || fail 'cannot enumerate groups'
@@ -297,7 +376,7 @@ check_parent() {
         case "$entry" in *" deny "*) ;; *) fail "parent ACL requires separate manual review: $path" ;; esac
     done <<< "$acl"
 }
-if [ "$signer_only" = true ]; then
+if [ "$signer_only" = true ] || [ "$keyholder_only" = true ]; then
     # The existing installation and its named accounts are the reviewed ones.
     for path in /Library "$prefix" "$prefix/var"; do check_parent "$path"; done
     [ "$(/usr/bin/id -u "$controller_user")" = "$controller_uid" ] || fail 'controller identity mismatch'
@@ -312,6 +391,9 @@ fi
 if [ "$signer" = true ]; then
     targets="$targets $prefix/signer-profiles $prefix/var/signer $prefix/var/signer-run $prefix/var/signer-inbox"
 fi
+if [ "$keyholder" = true ] && [ "$keyholder_resume" = false ]; then
+    targets="$targets $prefix/var/keyholder $prefix/var/keyholder-run"
+fi
 for path in $targets; do
     if [ -e "$path" ] || [ -L "$path" ]; then
         fail "existing path: $path"
@@ -325,7 +407,7 @@ report_partial_failure() {
     fi
 }
 trap 'report_partial_failure "$?"' EXIT
-if [ "$signer_only" = false ]; then
+if [ "$signer_only" = false ] && [ "$keyholder_only" = false ]; then
     create_accounts
     validate_created_accounts
     /usr/bin/install -d -o root -g wheel -m 0755 "$prefix" "$prefix/bin" "$prefix/health"
@@ -341,6 +423,14 @@ if [ "$signer" = true ]; then
     validate_signer_accounts
     provision_signer_directories
     printf '%s\n' "Created hidden nonlogin $signer_user, its group and $signrpc_group (members $controller_user and $signer_user only) and empty signer directories. Verified the job account belongs to neither group."
+fi
+if [ "$keyholder" = true ]; then
+    if [ "$keyholder_resume" = false ]; then
+        create_keyholder
+    fi
+    validate_keyholder_accounts
+    provision_keyholder_directories
+    printf '%s\n' "Verified hidden nonlogin $keyholder_user, its group and $keyrpc_group (members $controller_user and $keyholder_user only) and the keyholder directories. Verified the job account belongs to neither group."
 fi
 printf '%s\n' 'Install reviewed inputs separately and qualify before enabling anything.'
 }

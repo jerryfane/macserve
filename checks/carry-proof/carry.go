@@ -47,10 +47,14 @@ const (
 )
 
 var (
-	hex64   = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	semver  = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
-	repoRE  = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
-	carryOK = []string{boundary.ClassC, boundary.ClassG, boundary.ClassT}
+	hex64  = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	semver = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+	repoRE = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
+	// K (controller-only) is carryable: the controller is untrusted by the
+	// root worker and the keyholder (docs/architecture.md, K threat model),
+	// and a K-only release keeps the root binary byte-identical, which
+	// qualification.ValidateCarryProof enforces on the generated proof.
+	carryOK = []string{boundary.ClassC, boundary.ClassG, boundary.ClassK, boundary.ClassT}
 )
 
 // refusal is a release that cannot carry qualification: the release still

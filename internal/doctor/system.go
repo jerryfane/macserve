@@ -29,6 +29,7 @@ import (
 // checked by launchctlGUI. checks/readonly pins this list.
 var launchctlCommands = [][]string{
 	{"/bin/launchctl", "print", "system/org.macserve.controller"},
+	{"/bin/launchctl", "print", "system/org.macserve.keyholder"},
 	{"/bin/launchctl", "print", "system/org.macserve.maintenance"},
 	{"/bin/launchctl", "print", "system/org.macserve.worker"},
 	{"/bin/launchctl", "print-disabled", "system"},

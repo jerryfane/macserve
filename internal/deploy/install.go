@@ -12,13 +12,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/jerryfane/macserve/internal/controllerconfig"
 	"github.com/jerryfane/macserve/internal/hostguard"
+	"github.com/jerryfane/macserve/internal/keyholder"
 	"github.com/jerryfane/macserve/internal/maintenance"
 	"github.com/jerryfane/macserve/internal/profiles"
 	"github.com/jerryfane/macserve/internal/signer"
@@ -76,6 +76,9 @@ func Install(o Options, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if !e.Keyholder() {
+		return errors.New("deploy.env must name the keyholder's system IDs: KEYHOLDER_UID, KEYHOLDER_GID and KEYRPC_GID (docs/install.md)")
+	}
 	if err := verifyBinary(o.BinaryPath, o.SHA256, nil); err != nil {
 		return err
 	}
@@ -102,6 +105,9 @@ func Install(o Options, stdout, stderr io.Writer) error {
 	}
 	if !o.Apply {
 		_, err := fmt.Fprintf(stdout, "PLAN ONLY: verified binary SHA256 %s; verified controller binary SHA256 %s.\nController: %s uid=%d gid=%d\nJob GUI: %s uid=%d gid=%d real-name=%q\nOwner: %s uid=%d\nTLS listener: %s port=%d\nInformational probe ports: %v\nInformational host addresses: %v\nDeveloper directory: %s\nRepository numeric pins: %v\nWould preflight root-controlled inputs and absent targets, preserve read-only coexistence before any deployment mutation and after (including failures), run create-users --apply, install /Library/macserve, generate TLS/receipt keys and a hash-only API credential, and install the disabled launchd plists.\nProfiles remain empty; qualification/health absent; owner.pause set. Network isolation is not enforced in phase 1. No accounts, owner homes, services, PF, ACLs, passwords or GUI sessions inspected or changed. Apply requires an exclusive reviewed administration window.\n", o.SHA256, o.ControllerSHA256, e.ControllerUser, e.ControllerUID, e.ControllerGID, e.JobUser, e.JobUID, e.JobGID, e.JobRealName, e.OwnerUser, e.OwnerUID, e.TailnetIP, e.Port, e.ProtectedPorts, e.HostAddresses, e.DeveloperDir, e.Repositories)
+		if err == nil {
+			_, err = fmt.Fprintf(stdout, "Keyholder: %s uid=%d gid=%d; RPC group %s gid=%d (members %s and %s only).\nWould create the keyholder account, groups and directories, install %s, a worker seal key and a disabled %s. The receipt key is keyholder-owned 0600 in %s; the controller holds only its TLS key. The owner writes %s before release receipts are possible.\n", KeyholderAccount, e.KeyholderUID, e.KeyholderGID, KeyRPCGroup, e.KeyRPCGID, e.ControllerUser, KeyholderAccount, KeyholderConfigPath, KeyholderPlist, KeyholderSecretsDir, ReleaseScopePath)
+		}
 		if err == nil && e.Signer() {
 			_, err = fmt.Fprintf(stdout, "Code signer: %s uid=%d gid=%d; RPC group %s gid=%d (members %s and %s only).\nWould create the signer account, groups and directories, install %s and a disabled %s, and run signer-init as %s; it prints the controller.json \"signer\" section. The owner writes %s and imports the Apple Distribution identity separately.\n", SignerAccount, e.SignerUID, e.SignerGID, SignRPCGroup, e.SignRPCGID, e.ControllerUser, SignerAccount, SignerConfigPath, SignerPlist, SignerAccount, SignerPolicyPath)
 		}
@@ -167,7 +173,7 @@ func requireAbsent(paths []string) error {
 	return nil
 }
 func apply(o Options, e Environment, envData []byte, assets, rendered map[string][]byte, stdout, stderr io.Writer) (result error) {
-	targets := []string{Prefix, "/Users/" + e.JobUser, "/Library/LaunchDaemons/org.macserve.controller.plist", "/Library/LaunchDaemons/org.macserve.worker.plist", "/Library/LaunchDaemons/org.macserve.maintenance.plist"}
+	targets := []string{Prefix, "/Users/" + e.JobUser, "/Library/LaunchDaemons/org.macserve.controller.plist", "/Library/LaunchDaemons/org.macserve.worker.plist", "/Library/LaunchDaemons/org.macserve.maintenance.plist", KeyholderPlist}
 	if e.Signer() {
 		targets = append(targets, SignerPlist)
 	}
@@ -268,6 +274,10 @@ func apply(o Options, e Environment, envData []byte, assets, rendered map[string
 			if _, err := signer.LoadConfig(path); err != nil {
 				return err
 			}
+		case "keyholder.json":
+			if _, err := keyholder.LoadConfig(path); err != nil {
+				return err
+			}
 		case "profiles.json":
 			if _, err := profiles.Load(path); err != nil {
 				return err
@@ -297,8 +307,8 @@ func apply(o Options, e Environment, envData []byte, assets, rendered map[string
 			result = fmt.Errorf("PARTIAL FAILURE: %w; no rollback attempted; do not rerun. Keep services disabled and manually reconcile the named accounts, job home, /Library/macserve and the macserve launchd plists. %s", result, credential)
 		}
 	}()
-	args := []string{script, "--controller-user", e.ControllerUser, "--controller-uid", strconv.FormatUint(uint64(e.ControllerUID), 10), "--controller-gid", strconv.FormatUint(uint64(e.ControllerGID), 10), "--job-user", e.JobUser, "--job-real-name", e.JobRealName, "--job-uid", strconv.FormatUint(uint64(e.JobUID), 10), "--job-gid", strconv.FormatUint(uint64(e.JobGID), 10), "--owner-user", e.OwnerUser, "--owner-uid", strconv.FormatUint(uint64(e.OwnerUID), 10)}
-	args = append(append(args, signerArgs(e)...), "--apply")
+	args := append([]string{script}, CreateUsersArgs(e)...)
+	args = append(append(append(args, signerArgs(e)...), KeyholderArgs(e)...), "--apply")
 	if err := nativeCommand(2*time.Minute, stderr, "/bin/bash", args...); err != nil {
 		return err
 	}
@@ -419,19 +429,31 @@ func installBinary(name, source, sha string) error {
 	}
 	return errors.Join(err, f.Close())
 }
+
+// ancestorOwner is the owner create-users.sh gives an installation
+// directory: the controller below var/controller, the keyholder below
+// var/keyholder, root elsewhere.
+func ancestorOwner(dir string, e Environment) uint32 {
+	within := func(root string) bool { return dir == root || strings.HasPrefix(dir, root+"/") }
+	switch {
+	case within(Prefix + "/var/controller"):
+		return e.ControllerUID
+	case within(KeyholderStateDir):
+		return e.KeyholderUID
+	}
+	return 0
+}
 func installFile(item File, e Environment) error {
 	// Traverse every ancestor without following links, including the private
-	// controller-owned subtree created by create-users. No caller-provided roots.
+	// controller- and keyholder-owned subtrees created by create-users. No
+	// caller-provided roots.
 	for current := filepath.Dir(item.Path); ; current = filepath.Dir(current) {
 		info, err := os.Lstat(current)
 		if err != nil {
 			return err
 		}
 		stat, ok := info.Sys().(*syscall.Stat_t)
-		uid := uint32(0)
-		if current == Prefix+"/var/controller" || strings.HasPrefix(current, Prefix+"/var/controller/") {
-			uid = e.ControllerUID
-		}
+		uid := ancestorOwner(current, e)
 		if !ok || !info.IsDir() || stat.Uid != uid || info.Mode().Perm()&0022 != 0 {
 			return fmt.Errorf("unsafe installation parent: %s", current)
 		}

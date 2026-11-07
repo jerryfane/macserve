@@ -149,7 +149,7 @@ func TestArchiveReceiptRefusesUnprovenRelease(t *testing.T) {
 		"empty default branch":      func(j *model.Job, _ *worker.Result) { j.ReleaseProvenance.DefaultBranch = "" },
 		"lock default branch":       func(j *model.Job, _ *worker.Result) { j.ReleaseProvenance.DefaultBranch = "release/main.lock" },
 		"traversing default branch": func(j *model.Job, _ *worker.Result) { j.ReleaseProvenance.DefaultBranch = "main/../dev" },
-		"resolved after admission":  func(j *model.Job, _ *worker.Result) { j.ReleaseProvenance.ResolvedAt = j.CreatedAt.Add(time.Second) },
+		"resolved after sealing":    func(j *model.Job, _ *worker.Result) { j.ReleaseProvenance.ResolvedAt = j.CreatedAt.AddDate(10, 0, 0) },
 		"never resolved":            func(j *model.Job, _ *worker.Result) { j.ReleaseProvenance.ResolvedAt = time.Time{} },
 		"signing manifest missing":  func(_ *model.Job, r *worker.Result) { r.Artifacts = r.Artifacts[:3] },
 		"archive missing":           func(_ *model.Job, r *worker.Result) { r.Artifacts = slices.Delete(r.Artifacts, 2, 3) },
@@ -309,5 +309,16 @@ func TestInputDigestUnchangedWithoutReleaseProvenance(t *testing.T) {
 	_, _, second := sealFixture(t, options, archiveJob, archiveResult)
 	if first.InputDigest == second.InputDigest {
 		t.Fatal("release provenance does not change the input digest")
+	}
+}
+
+// The keyholder resolves release provenance itself, after the build and
+// before sealing; a receipt binding that check validates.
+func TestArchiveReceiptAcceptsProvenanceResolvedBeforeSealing(t *testing.T) {
+	options, job, result, expected := archiveTemplateFixture(t, true)
+	job.ReleaseProvenance.ResolvedAt = result.FinishedAt
+	_, _, p := sealFixture(t, options, job, result)
+	if err := ValidateSuccess(p, expected); err != nil || !p.ReleaseProvenance.ResolvedAt.After(p.CreatedAt) || p.ReleaseProvenance.ResolvedAt.After(p.SealedAt) {
+		t.Fatalf("provenance resolved before sealing: %+v %v", p.ReleaseProvenance, err)
 	}
 }

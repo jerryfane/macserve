@@ -34,13 +34,15 @@ import (
 //	replace   bin/macserve-controller, then bin/macserve, with the
 //	          verified release bytes, each atomically (root:wheel 0755),
 //	          and re-hash each installed file
+//	(full)    move an installation from before the keyholder to it
+//	          (keyholder.go); such an installation is never carried
 //	(carry)   the N3 verbs with the new binary; any failure falls back
 //	          to the full path
 //	finish    record the effect; the full path resets the ledger to
 //	          owner-actions, so macserve setup resumes guided
 //	          qualification (Full Disk Access is granted per build)
 //
-// Before anything changes it requires the stopped gate (the three services
+// Before anything changes it requires the stopped gate (macserve's services
 // booted out, no controller-UID process and no process running an installed
 // binary) and, unless the release is carried, no job GUI session. It never
 // stops, signals or logs out anything itself. An installation from before
@@ -243,12 +245,12 @@ func (h *Helper) upgrade(r Request) (Response, error) {
 		// account may still be logged in from the carry, so setup must see
 		// it log out first; any other resume applies the guard again.
 		if rel.Carry {
-			return h.requalify(ctx, l, loc, bins, e.ControllerUID, "the carry was interrupted; full requalification instead", true)
+			return h.requalify(ctx, l, loc, bins, e, "the carry was interrupted; full requalification instead", true)
 		}
 		if err := h.jobSessionGuard(e.JobUID); err != nil {
 			return Response{}, err
 		}
-		return h.requalify(ctx, l, loc, bins, e.ControllerUID, "", false)
+		return h.requalify(ctx, l, loc, bins, e, "", false)
 	}
 	if _, _, err := l.Next(); err != nil {
 		return Response{}, err
@@ -293,8 +295,16 @@ func (h *Helper) upgrade(r Request) (Response, error) {
 	}
 	next := Release{Status: StatusRunning, Started: h.Now().UTC(), Boot: boot, From: from, To: to, FromSHA256: fromSHA, SHA256: h.SHA256, FromControllerSHA256: fromController, ControllerSHA256: h.ControllerSHA256}
 	carry, abandoned := false, ""
+	migrated, err := h.keyholderMigrated(e)
+	if err != nil {
+		return Response{}, err
+	}
 	if r.Proof != "" {
 		next.CarryProofSHA256 = digestHex([]byte(r.Proof))
+	}
+	if r.Proof != "" && !migrated {
+		abandoned = "carry not possible: the keyholder migration changes the installed configuration, so this release needs requalification"
+	} else if r.Proof != "" {
 		if err := h.carryPossible(ctx, l, e.JobUID, []byte(r.Proof), []byte(r.Sums), next); err != nil {
 			abandoned = "carry not possible: " + err.Error()
 		} else {
@@ -324,7 +334,7 @@ func (h *Helper) upgrade(r Request) (Response, error) {
 	}
 	h.audit(VerbUpgrade, "release "+from+" to "+to+" recorded", nil)
 	if !carry {
-		return h.requalify(ctx, l, loc, bins, e.ControllerUID, abandoned, false)
+		return h.requalify(ctx, l, loc, bins, e, abandoned, false)
 	}
 	return h.carry(ctx, l, loc, bins, e, []byte(r.Proof))
 }
@@ -350,7 +360,7 @@ func (h *Helper) ownAnchor(l *Ledger) error {
 	return nil
 }
 
-// stoppedGate requires the three services booted out, no controller-UID
+// stoppedGate requires macserve's services booted out, no controller-UID
 // process and no process running an installed binary (bin/macserve or
 // bin/macserve-controller). A live process whose executable is unknown is
 // refused too: it could be either.
@@ -639,24 +649,29 @@ func (h *Helper) invalidate() error {
 
 // requalify is the full path: owner.pause, the invalidation (before the
 // replace, so the new binaries never meet the old approval), the replace
-// of both binaries and the ledger reset to guided requalification.
+// of both binaries, the keyholder migration of an installation from before
+// the keyholder (keyholder.go) and the ledger reset to guided
+// requalification.
 // jobLogout records that the job-session guard was not applied (a carry
 // was attempted), so setup must see the build account logged out before
 // it counts a job login.
-func (h *Helper) requalify(ctx context.Context, l *Ledger, loc LedgerLocation, bins releaseBytes, controllerUID uint32, abandoned string, jobLogout bool) (Response, error) {
+func (h *Helper) requalify(ctx context.Context, l *Ledger, loc LedgerLocation, bins releaseBytes, e deploy.Environment, abandoned string, jobLogout bool) (Response, error) {
 	if err := h.writePause(); err != nil {
 		return Response{}, fmt.Errorf("owner.pause: %w", err)
 	}
 	if err := h.invalidate(); err != nil {
 		return Response{}, fmt.Errorf("remove the approval: %w", err)
 	}
-	if err := h.replaceBinaries(ctx, controllerUID, bins); err != nil {
+	if err := h.replaceBinaries(ctx, e.ControllerUID, bins); err != nil {
 		return Response{}, err
 	}
 	if rel := l.PendingRelease(); rel != nil && rel.FromControllerSHA256 == "" {
 		if err := h.migrateControllerPlist(); err != nil {
 			return Response{}, fmt.Errorf("migrate the controller plist: %w", err)
 		}
+	}
+	if err := h.migrateKeyholder(ctx, l, loc, e); err != nil {
+		return Response{}, fmt.Errorf("keyholder migration (run macserve upgrade again to resume): %w", err)
 	}
 	if err := l.FinishRelease(EffectRequalify, abandoned, "", jobLogout, h.Now()); err != nil {
 		return Response{}, err
@@ -683,7 +698,7 @@ func (h *Helper) requalify(ctx context.Context, l *Ledger, loc LedgerLocation, b
 func (h *Helper) carry(ctx context.Context, l *Ledger, loc LedgerLocation, bins releaseBytes, e deploy.Environment, proof []byte) (Response, error) {
 	fallback := func(step string, cause error) (Response, error) {
 		h.audit(VerbUpgrade, "carry abandoned at "+step, cause)
-		return h.requalify(ctx, l, loc, bins, e.ControllerUID, reason(fmt.Errorf("carry abandoned at %s: %w", step, cause)), true)
+		return h.requalify(ctx, l, loc, bins, e, reason(fmt.Errorf("carry abandoned at %s: %w", step, cause)), true)
 	}
 	if err := h.writePause(); err != nil {
 		return fallback("owner.pause", err)
