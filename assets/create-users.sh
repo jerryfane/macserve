@@ -151,13 +151,60 @@ provision_signer_directories() {
 # group; it holds the job receipt key and the GitHub App key. The RPC group
 # admits exactly the controller and the keyholder to its socket directory.
 # The job account belongs to neither group.
+# Every step converges (dscl -create sets an attribute; a member is added
+# only when absent), so a run interrupted between Directory Services writes
+# is completed by running create_keyholder again.
 create_keyholder() {
+    local member
     create_identity "$keyholder_user" "$keyholder_uid" "$keyholder_gid" /usr/bin/false "$prefix/var/keyholder"
     /usr/bin/dscl . -create "/Users/$keyholder_user" Password '*'
     /usr/bin/dscl . -create "/Users/$keyholder_user" IsHidden 1
     create_group "$keyrpc_group" "$keyrpc_gid"
-    /usr/sbin/dseditgroup -o edit -a "$controller_user" -t user "$keyrpc_group"
-    /usr/sbin/dseditgroup -o edit -a "$keyholder_user" -t user "$keyrpc_group"
+    for member in "$controller_user" "$keyholder_user"; do
+        /usr/sbin/dseditgroup -o checkmember -m "$member" "$keyrpc_group" >/dev/null 2>&1 ||
+            /usr/sbin/dseditgroup -o edit -a "$member" -t user "$keyrpc_group"
+    done
+}
+# Provisioning progress. A root-only marker naming this run's IDs is written
+# before the first Directory Services write and removed only after the
+# account, groups and directories verify. Its presence means records may be
+# partial and belong to this provisioning; no record existence (UniqueID
+# included) is taken as completion.
+keyholder_marker() { printf '%s\n' "$prefix/var/.keyholder-provisioning"; }
+# keyholder_progress prints fresh (nothing created), partial (an interrupted
+# provisioning of these IDs) or complete (provisioned and verified before).
+keyholder_progress() {
+    local marker recorded
+    marker=$(keyholder_marker)
+    if [ -L "$marker" ] || { [ -e "$marker" ] && [ ! -f "$marker" ]; }; then
+        fail "unsafe keyholder provisioning marker: $marker"
+    fi
+    if [ -f "$marker" ]; then
+        IFS= read -r recorded < "$marker" || fail "unreadable keyholder provisioning marker: $marker"
+        [ "$recorded" = "$keyholder_uid $keyholder_gid $keyrpc_gid" ] || fail "interrupted keyholder provisioning used other IDs ($recorded); reconcile manually"
+        printf '%s\n' partial
+    elif /usr/bin/dscl . -read "/Users/$keyholder_user" UniqueID >/dev/null 2>&1; then
+        printf '%s\n' complete
+    else
+        printf '%s\n' fresh
+    fi
+}
+# apply_keyholder creates or completes the keyholder by progress, then
+# verifies it and re-applies its directories; the marker goes last.
+apply_keyholder() {
+    local marker
+    marker=$(keyholder_marker)
+    case "$1" in
+        fresh)
+            printf '%s\n' "$keyholder_uid $keyholder_gid $keyrpc_gid" > "$marker"
+            create_keyholder ;;
+        partial) create_keyholder ;;
+        complete) ;;
+        *) fail "unknown keyholder progress: $1" ;;
+    esac
+    validate_keyholder_accounts
+    provision_keyholder_directories
+    [ ! -e "$marker" ] || /bin/rm -f "$marker"
 }
 validate_keyholder_accounts() {
     validate_daemon_accounts keyholder "$keyholder_user" "$keyholder_uid" "$keyholder_gid" "$keyrpc_group" "$keyrpc_gid" "$prefix/var/keyholder"
@@ -298,15 +345,16 @@ if [ "$signer_only" = false ] && [ "$keyholder_only" = false ]; then
 fi
 [ "$(/usr/bin/uname -s)" = Darwin ] || fail '--apply requires Darwin'
 [ "$EUID" -eq 0 ] || fail '--apply requires root'
-for tool in /usr/bin/dscl /usr/sbin/sysadminctl /usr/sbin/dseditgroup /usr/bin/dscacheutil /usr/bin/id /usr/bin/stat /usr/bin/install /bin/ls; do
+for tool in /usr/bin/dscl /usr/sbin/sysadminctl /usr/sbin/dseditgroup /usr/bin/dscacheutil /usr/bin/id /usr/bin/stat /usr/bin/install /bin/ls /bin/rm; do
     [ -x "$tool" ] || fail "required system tool unavailable: $tool"
 done
-# A resumed --keyholder-only run finds the keyholder it created: nothing is
-# created again, the account is re-verified and its directories re-applied.
-keyholder_resume=false
-if [ "$keyholder_only" = true ] && /usr/bin/dscl . -read "/Users/$keyholder_user" UniqueID >/dev/null 2>&1; then
-    keyholder_resume=true
-    new_names='' new_uids='' new_gids=''
+# A resumed --keyholder-only run completes an interrupted provisioning of
+# the same IDs, or re-verifies a finished one; neither re-checks the
+# keyholder's own names and IDs for collisions.
+keyholder_state=fresh
+if [ "$keyholder_only" = true ]; then
+    keyholder_state=$(keyholder_progress)
+    [ "$keyholder_state" = fresh ] || new_names='' new_uids='' new_gids=''
 fi
 # Query the search node as well as the local directory: fail closed on directory errors.
 users=$(/usr/bin/dscl /Search -list /Users UniqueID) || fail 'cannot enumerate users'
@@ -391,7 +439,7 @@ fi
 if [ "$signer" = true ]; then
     targets="$targets $prefix/signer-profiles $prefix/var/signer $prefix/var/signer-run $prefix/var/signer-inbox"
 fi
-if [ "$keyholder" = true ] && [ "$keyholder_resume" = false ]; then
+if [ "$keyholder" = true ] && [ "$keyholder_state" = fresh ]; then
     targets="$targets $prefix/var/keyholder $prefix/var/keyholder-run"
 fi
 for path in $targets; do
@@ -425,11 +473,7 @@ if [ "$signer" = true ]; then
     printf '%s\n' "Created hidden nonlogin $signer_user, its group and $signrpc_group (members $controller_user and $signer_user only) and empty signer directories. Verified the job account belongs to neither group."
 fi
 if [ "$keyholder" = true ]; then
-    if [ "$keyholder_resume" = false ]; then
-        create_keyholder
-    fi
-    validate_keyholder_accounts
-    provision_keyholder_directories
+    apply_keyholder "$keyholder_state"
     printf '%s\n' "Verified hidden nonlogin $keyholder_user, its group and $keyrpc_group (members $controller_user and $keyholder_user only) and the keyholder directories. Verified the job account belongs to neither group."
 fi
 printf '%s\n' 'Install reviewed inputs separately and qualify before enabling anything.'

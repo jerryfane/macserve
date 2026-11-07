@@ -175,7 +175,9 @@ function /usr/bin/dscl() {
             # Only sysadminctl may create/write job user authentication.
             [ "$3" != /Users/servicejob ] || return 92
             case "$#" in
-                3) put_record "$3" exists yes ;;
+                3)
+                    [ "$scenario:$3" != interrupt:/Groups/_macserve_signrpc ] || return 1
+                    put_record "$3" exists yes ;;
                 5) put_record "$3" "$4" "$5" ;;
                 *) return 93 ;;
             esac ;;
@@ -240,6 +242,12 @@ function /usr/bin/id() {
     esac
 }
 function /usr/sbin/dseditgroup() {
+    if [ "$#" -eq 5 ] && [ "$1 $2 $3" = '-o checkmember -m' ]; then
+        local members=''
+        members=$(get_record "/Groups/$5" members) || members=''
+        case " $members " in *" $4 "*) return 0 ;; esac
+        return 67
+    fi
     [ "$#" -eq 7 ] && [ "$*" = '-o edit -d servicejob -t user staff' ] || return 61
     printf attempted > staff-cleanup
     [ "$scenario" != staff-command-error ] || return 62
@@ -554,7 +562,9 @@ function /usr/bin/dscl() {
     case "$2" in
         -create)
             case "$#" in
-                3) put_record "$3" exists yes ;;
+                3)
+                    [ "$scenario:$3" != interrupt:/Groups/_macserve_signrpc ] || return 1
+                    put_record "$3" exists yes ;;
                 5)
                     if [ "$scenario" = wrong-shell ] && [ "$4" = UserShell ]; then put_record "$3" "$4" /bin/zsh; else put_record "$3" "$4" "$5"; fi ;;
                 *) return 93 ;;
@@ -574,6 +584,12 @@ function /usr/bin/dscl() {
     esac
 }
 function /usr/sbin/dseditgroup() {
+    if [ "$#" -eq 5 ] && [ "$1 $2 $3" = '-o checkmember -m' ]; then
+        local members=''
+        members=$(get_record "/Groups/$5" members) || members=''
+        case " $members " in *" $4 "*) return 0 ;; esac
+        return 67
+    fi
     [ "$#" -eq 7 ] && [ "$1 $2 $3 $5 $6" = '-o edit -a -t user' ] || return 61
     [ "$scenario" != add-error ] || return 62
     local current=''
@@ -839,5 +855,70 @@ main "$@"`
 	}
 	if _, err := os.Stat(filepath.Join(cmd.Dir, "host-inspected")); err != nil {
 		t.Fatalf("keyholder-only apply should reach the Darwin gate without a terminal: %v", err)
+	}
+}
+
+// A --keyholder-only run interrupted between Directory Services writes (the
+// account exists, its RPC group does not) is completed by the next run, which
+// finds the provisioning marker, not taken as done because the UniqueID
+// exists; a finished run is re-verified without adding members twice, and a
+// marker for other IDs is refused.
+func TestKeyholderProvisioningResumesAfterInterruption(t *testing.T) {
+	script, err := filepath.Abs("create-users.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, _, ok := strings.Cut(keyholderDirectoryFixture, "create_keyholder\n")
+	if !ok {
+		t.Fatal("fixture layout changed")
+	}
+	fixture := head + `prefix=$PWD/prefix
+[ -d "$prefix/var" ] || /bin/mkdir -p "$prefix/var"
+state=$(keyholder_progress)
+printf '%s\n' "$state" >> progress
+apply_keyholder "$state"
+printf verified > keyholder-ready
+`
+	dir := t.TempDir()
+	run := func(scenario string) ([]byte, error) {
+		cmd := exec.Command("/bin/bash", append([]string{"-c", fixture, "keyholder-test", script, scenario}, append(keyholderArgs(), "--keyholder-only")...)...)
+		cmd.Dir = dir
+		cmd.Env = []string{"PATH=/nonexistent", "HOME=" + dir}
+		return cmd.CombinedOutput()
+	}
+	read := func(name string) string {
+		data, _ := os.ReadFile(filepath.Join(dir, name))
+		return strings.TrimSpace(string(data))
+	}
+	marker := filepath.Join(dir, "prefix", "var", ".keyholder-provisioning")
+	if out, err := run("interrupt"); err == nil {
+		t.Fatalf("interrupted run succeeded: %s", out)
+	}
+	if read("_Users__macserve_key.UniqueID") != "401" || read("_Groups__macserve_keyrpc.exists") != "" {
+		t.Fatal("interruption did not fall between the account and its RPC group")
+	}
+	if data, err := os.ReadFile(marker); err != nil || string(data) != "401 401 402\n" {
+		t.Fatalf("provisioning marker after interruption: %q %v", data, err)
+	}
+	if out, err := run("normal"); err != nil {
+		t.Fatalf("resume refused: %v: %s", err, out)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("marker left after verified provisioning: %v", err)
+	}
+	if read("_Groups__macserve_keyrpc.PrimaryGroupID") != "402" || read("_Groups__macserve_keyrpc.members") != "servicecontrol _macserve_key" || read("_Users__macserve_key.IsHidden") != "1" {
+		t.Fatal("resumed run did not complete the records")
+	}
+	if out, err := run("normal"); err != nil {
+		t.Fatalf("re-verification refused: %v: %s", err, out)
+	}
+	if read("progress") != "fresh\npartial\ncomplete" || read("_Groups__macserve_keyrpc.members") != "servicecontrol _macserve_key" {
+		t.Fatalf("progress %q members %q", read("progress"), read("_Groups__macserve_keyrpc.members"))
+	}
+	if err := os.WriteFile(marker, []byte("411 411 412\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run("normal"); err == nil || !strings.Contains(string(out), "used other IDs") {
+		t.Fatalf("marker for other IDs accepted: %v: %s", err, out)
 	}
 }

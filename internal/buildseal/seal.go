@@ -75,10 +75,12 @@ type Seal struct {
 }
 
 // Envelope carries the exact signed seal bytes and the Ed25519 signature.
+// Seal is an opaque byte string (base64 in JSON): embedded as raw JSON it
+// would be re-encoded on every hop (HTML escaping) and stop verifying.
 type Envelope struct {
-	Seal      json.RawMessage `json:"seal"`
-	KeyID     string          `json:"key_id"`
-	Signature string          `json:"signature"`
+	Seal      []byte `json:"seal"`
+	KeyID     string `json:"key_id"`
+	Signature string `json:"signature"`
 }
 
 // Digest is the SHA-256 of a value's encoding/json form, the encoding the

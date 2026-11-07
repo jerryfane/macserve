@@ -45,15 +45,18 @@ type request struct {
 	JobIDs []string     `json:"job_ids,omitempty"`
 }
 
-// response is the keyholder's single JSON line.
+// response is the keyholder's single JSON line. Receipt and Manifest are
+// signed canonical bytes: they travel as opaque byte strings (base64), never
+// as embedded JSON, which encoding/json would re-encode (HTML-escaping '<',
+// '>' and '&') and so change the authenticated bytes.
 type response struct {
 	OK       bool                         `json:"ok"`
 	Error    string                       `json:"error,omitempty"`
 	Refused  bool                         `json:"refused,omitempty"`
 	NotFound bool                         `json:"not_found,omitempty"`
 	Token    *githubapi.InstallationToken `json:"token,omitempty"`
-	Receipt  json.RawMessage              `json:"receipt,omitempty"`
-	Manifest json.RawMessage              `json:"manifest,omitempty"`
+	Receipt  []byte                       `json:"receipt,omitempty"`
+	Manifest []byte                       `json:"manifest,omitempty"`
 	JobIDs   []string                     `json:"job_ids,omitempty"`
 }
 
@@ -323,7 +326,7 @@ func (c *Client) Seal(ctx context.Context, req SealRequest) (json.RawMessage, er
 	if len(resp.Receipt) == 0 {
 		return nil, errors.New("keyholder seal response lacks a receipt")
 	}
-	return resp.Receipt, nil
+	return json.RawMessage(resp.Receipt), nil
 }
 
 // Manifest returns a job's immutable full receipt manifest.
@@ -332,7 +335,7 @@ func (c *Client) Manifest(ctx context.Context, jobID, digest string) (json.RawMe
 	if err != nil {
 		return nil, err
 	}
-	return resp.Manifest, nil
+	return json.RawMessage(resp.Manifest), nil
 }
 
 // Prune drops the keyholder's receipt manifests and release provenance of

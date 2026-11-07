@@ -42,7 +42,9 @@ success receipt only when the seal matches the repository's entry in the root-ow
 `dart_defines` map; `build_name` `^[0-9]+(\.[0-9]+){0,2}$`, `build_number` `^[0-9]{1,9}$`) and its own GitHub check
 finds the scoped repository ID, the commit at the default-branch head and that commit's tree equal to the tree the
 worker computed from the bytes it built; the controller's admission-time provenance is ignored. Without a release
-scope entry no release receipt is signed. `service.binary_sha256` is the SHA-256 of the root `macserve` binary
+scope entry no release receipt is signed. A refusal is definitive: the controller records the job as `failed` with
+the refusal as its reason, keeping the worker's cleanup proof, and asks for that failure receipt instead; signed
+receipt and manifest bytes cross the keyholder socket as opaque byte strings, never re-encoded. `service.binary_sha256` is the SHA-256 of the root `macserve` binary
 that runs the keyholder.
 The controller logs a refused or failed worker request with its method, route and job ID; a receipt refusal
 returns HTTP 422.

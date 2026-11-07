@@ -208,7 +208,12 @@ func (e *Engine) Seal(ctx context.Context, req SealRequest) (json.RawMessage, er
 		}
 		job.ReleaseProvenance = provenance
 	}
-	return e.options.Signer.Seal(context.WithValue(ctx, approvalKey{}, req.Approval), job, req.Result)
+	raw, err := e.options.Signer.Seal(context.WithValue(ctx, approvalKey{}, req.Approval), job, req.Result)
+	if errors.Is(err, receipt.ErrInvalid) {
+		// Evidence the signer will never sign as presented: definitive.
+		return nil, refusal("receipt: %v", err)
+	}
+	return raw, err
 }
 
 // bindSeal checks that the seal is the worker's report of exactly this job

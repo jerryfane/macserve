@@ -107,7 +107,19 @@ func (s *integrations) seal(ctx context.Context, job model.Job, result worker.Re
 	if err != nil {
 		return nil, err
 	}
-	return s.keyholder.Seal(ctx, keyholder.SealRequest{Job: job, Worker: sealing.Worker, Result: result, Seal: sealing.Seal, Approval: approval})
+	raw, err := s.keyholder.Seal(ctx, keyholder.SealRequest{Job: job, Worker: sealing.Worker, Result: result, Seal: sealing.Seal, Approval: approval})
+	return raw, receiptError(err)
+}
+
+// receiptError marks the keyholder's reasoned refusal as definitive, so
+// completion records an unsuccessful result instead of retrying; transport
+// and other failures stay retryable.
+func receiptError(err error) error {
+	var refused *keyholder.RefusalError
+	if errors.As(err, &refused) {
+		return fmt.Errorf("%w: %s", controller.ErrReceiptRefused, refused.Reason)
+	}
+	return err
 }
 
 func (s *integrations) beforeDispatch(ctx context.Context, job model.Job) error {

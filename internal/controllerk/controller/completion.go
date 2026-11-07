@@ -95,14 +95,14 @@ func (c *Controller) complete(ctx context.Context, job model.Job, result worker.
 			completion.Seal = &seal
 		}
 		if c.options.Seal != nil {
-			receipt, err := c.options.Seal(ctx, current, normalized, Sealing{Worker: result, Seal: seal})
+			receipt, err := c.receipt(ctx, current, &normalized, Sealing{Worker: result, Seal: seal})
 			if err != nil {
 				return err
 			}
 			if len(receipt) > 0 && !json.Valid(receipt) {
 				return errors.New("seal returned invalid receipt JSON")
 			}
-			completion.Receipt = receipt
+			completion.Result, completion.Receipt = normalized, receipt
 		}
 		var encoded bytes.Buffer
 		encoder := json.NewEncoder(&encoded)
@@ -131,6 +131,28 @@ func (c *Controller) complete(ctx context.Context, job model.Job, result worker.
 		}
 	}
 	return store.ErrTransition
+}
+
+// receipt obtains the receipt of result. A definitive refusal of a success
+// receipt downgrades result to Failed with the refusal as its reason and
+// asks for that receipt instead; a definitive refusal of an unsuccessful
+// receipt (the worker's seal itself refused) completes without one. Either
+// way the job reaches a terminal state with the worker's cleanup proof, so a
+// refusal neither loses the cleanup nor holds the queue until a deadline.
+// Other errors are retryable and leave the job finalizing.
+func (c *Controller) receipt(ctx context.Context, job model.Job, result *worker.Result, sealing Sealing) (json.RawMessage, error) {
+	raw, err := c.options.Seal(ctx, job, *result, sealing)
+	if errors.Is(err, ErrReceiptRefused) && result.State == model.Succeeded {
+		result.State, result.Reason = model.Failed, err.Error()
+		if len(result.Reason) > 4096 {
+			result.Reason = result.Reason[:4096]
+		}
+		raw, err = c.options.Seal(ctx, job, *result, sealing)
+	}
+	if errors.Is(err, ErrReceiptRefused) {
+		return nil, nil
+	}
+	return raw, err
 }
 
 func normalizeCancellation(result *worker.Result, job model.Job, now time.Time) {

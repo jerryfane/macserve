@@ -17,6 +17,11 @@ import (
 var (
 	ErrNotReady = errors.New("evidence not ready")
 	ErrExpired  = errors.New("evidence bytes expired")
+	// ErrReceiptRefused is a definitive refusal by the receipt authority:
+	// the same inputs will never be signed. The Seal hook wraps it so
+	// completion records an unsuccessful terminal result, keeping the
+	// worker's cleanup proof, instead of leaving the job unfinished.
+	ErrReceiptRefused = errors.New("receipt refused")
 )
 
 type SourceProvider interface {
