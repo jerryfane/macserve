@@ -110,9 +110,10 @@ digest in the base `SHA256SUMS`, and **publishes those bytes** as this release's
 - the full boundary check (classification, C/G source rules, link graph) passes on the new tree.
 
 `carry-proof.json` (qualification carry for `macserve upgrade`) is generated independently and usually refuses a
-carry release, because it does not treat K paths as carryable. `macserve setup` and `macserve upgrade` refuse a
-controller-carry release (its root binary reports the base tag, not the release tag); controller-carry releases
-are for the administrator's carry verb only. The off-host rebuild of a carry tag reproduces its
+carry release, because it does not treat K paths as carryable. Controller-carry releases are for the
+administrator's carry verb only; do not install them with `macserve setup` or `macserve upgrade`. Their root
+binary reports the base tag, so `macserve upgrade` refuses one when the base release or a later one is installed
+("already installed" / "never downgrades"). The off-host rebuild of a carry tag reproduces its
 `macserve-controller`; its `macserve` is reproduced by rebuilding the base tag.
 
 ## Verifying a manifest

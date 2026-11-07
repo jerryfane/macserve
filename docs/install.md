@@ -39,7 +39,7 @@ gh attestation verify macserve-deploy-kit/macserve-darwin-arm64 --repo jerryfane
 
 The rebuilt sha256 of each binary must equal `EXPECTED_SHA256` / `EXPECTED_CONTROLLER_SHA256` and the downloaded binary's digest. The release ships two binaries: `macserve` (every root, worker, signer and owner role) and `macserve-controller` (the controller daemon only); both install root:wheel `0755` under `/Library/macserve/bin` (see [architecture](architecture.md#two-binaries-and-class-k)).
 
-Every release also publishes `release-manifest.json` and `release-manifest.json.sig`, signed by the CI release key and listed in `SHA256SUMS` (see [releases](releases.md)). A release whose manifest has `"kind": "controller-carry"` republishes its base tag's `macserve-darwin-arm64` byte for byte and is installed only by the administrator's carry verb; `macserve setup` and `macserve upgrade` take full releases. For such a release, rebuild `macserve` from the manifest's `base_tag`, not from the release tag.
+Every release also publishes `release-manifest.json` and `release-manifest.json.sig`, signed by the CI release key and listed in `SHA256SUMS` (see [releases](releases.md)). A release whose manifest has `"kind": "controller-carry"` republishes its base tag's `macserve-darwin-arm64` byte for byte and is for the administrator's carry verb only: install full releases with `macserve setup` and `macserve upgrade`. For such a release, rebuild `macserve` from the manifest's `base_tag`, not from the release tag.
 
 #### Homebrew formula (release asset)
 
