@@ -509,6 +509,67 @@ func (h *Helper) replaceBinaries(ctx context.Context, controllerUID uint32, bins
 	return syncDir(filepath.Dir(path))
 }
 
+// Controller plist ProgramArguments before and after the controller binary
+// split, exactly as deploy-install rendered them.
+const (
+	legacyControllerArgs = `<string>/Library/macserve/bin/macserve</string><string>controller</string><string>--config</string>`
+	controllerArgs       = `<string>/Library/macserve/bin/macserve-controller</string><string>--config</string>`
+)
+
+// staleTempPlist is the temporary file Store.writeFile leaves beside the
+// controller plist when the helper stopped between create and rename.
+var staleTempPlist = regexp.MustCompile(`^\.org\.macserve\.controller\.plist\.[0-9a-f]{16}$`)
+
+// migrateControllerPlist rewrites a pre-split installation's
+// org.macserve.controller plist, which runs "macserve controller", to run
+// bin/macserve-controller; nothing else in it changes. It is atomic (a
+// temporary file beside it, then rename) and idempotent: a plist that
+// already runs macserve-controller is left alone, so a resumed upgrade
+// repeats it safely. Any other plist content is refused for hand
+// reconciliation. Services are stopped (the upgrade's stopped gate).
+func (h *Helper) migrateControllerPlist() error {
+	path := h.daemonPlist("org.macserve.controller")
+	if err := h.Store.checkAncestors(filepath.Dir(path)); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	uid, _, nlink, ok := statOwner(info)
+	if !ok || !info.Mode().IsRegular() || uid != h.Store.RootUID || info.Mode().Perm()&0o022 != 0 || nlink != 1 || info.Size() > 64<<10 {
+		return fmt.Errorf("%s must be a root-owned single-link regular file", path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	text := string(data)
+	switch {
+	case strings.Count(text, controllerArgs) == 1 && !strings.Contains(text, legacyControllerArgs):
+		return nil
+	case strings.Count(text, legacyControllerArgs) != 1 || strings.Contains(text, controllerArgs):
+		return fmt.Errorf("%s does not hold the ProgramArguments deploy-install wrote; reconcile it by hand to run /Library/macserve/bin/macserve-controller --config /Library/macserve/config/controller.json", path)
+	}
+	// An interrupted earlier write may have left its temporary file.
+	stale, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".org.macserve.controller.plist.*"))
+	if err != nil {
+		return err
+	}
+	for _, p := range stale {
+		if staleTempPlist.MatchString(filepath.Base(p)) {
+			if err := os.Remove(p); err != nil {
+				return err
+			}
+		}
+	}
+	if err := h.Store.writeFile(path, []byte(strings.Replace(text, legacyControllerArgs, controllerArgs, 1)), info.Mode().Perm()); err != nil {
+		return err
+	}
+	h.audit(VerbUpgrade, "org.macserve.controller.plist now runs bin/macserve-controller", nil)
+	return nil
+}
+
 // replaceBinary atomically replaces the installed binary path with data
 // (root:wheel 0755), which must have the verified digest verified, and
 // re-hashes the installed file. It first repeats the stopped gate (closing
@@ -591,6 +652,11 @@ func (h *Helper) requalify(ctx context.Context, l *Ledger, loc LedgerLocation, b
 	}
 	if err := h.replaceBinaries(ctx, controllerUID, bins); err != nil {
 		return Response{}, err
+	}
+	if rel := l.PendingRelease(); rel != nil && rel.FromControllerSHA256 == "" {
+		if err := h.migrateControllerPlist(); err != nil {
+			return Response{}, fmt.Errorf("migrate the controller plist: %w", err)
+		}
 	}
 	if err := l.FinishRelease(EffectRequalify, abandoned, "", jobLogout, h.Now()); err != nil {
 		return Response{}, err

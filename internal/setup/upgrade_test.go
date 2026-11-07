@@ -843,6 +843,32 @@ func (u *upgradeHost) preSplit() {
 	if err := u.h.Store.Save(l, LedgerInstalled); err != nil {
 		u.t.Fatal(err)
 	}
+	writeRoot(u.t, u.h.daemonPlist("org.macserve.controller"), []byte(legacyControllerPlist), 0o644)
+}
+
+// legacyControllerPlist is the org.macserve.controller plist deploy-install
+// rendered before the controller binary existed.
+const legacyControllerPlist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>org.macserve.controller</string>
+<key>ProgramArguments</key><array><string>/Library/macserve/bin/macserve</string><string>controller</string><string>--config</string><string>/Library/macserve/config/controller.json</string></array>
+<key>UserName</key><string>_macserve</string>
+<key>Disabled</key><true/>
+<key>RunAtLoad</key><false/>
+</dict></plist>
+`
+
+// migratedControllerPlist is legacyControllerPlist after the upgrade.
+var migratedControllerPlist = strings.Replace(legacyControllerPlist, "<string>/Library/macserve/bin/macserve</string><string>controller</string>", "<string>/Library/macserve/bin/macserve-controller</string>", 1)
+
+func (u *upgradeHost) controllerPlist() string {
+	u.t.Helper()
+	data, err := os.ReadFile(u.h.daemonPlist("org.macserve.controller"))
+	if err != nil {
+		u.t.Fatal(err)
+	}
+	return string(data)
 }
 
 // TestUpgradeFromBeforeTheControllerBinary: an installation without
@@ -871,6 +897,52 @@ func TestUpgradeFromBeforeTheControllerBinary(t *testing.T) {
 	u.wantRequalified("")
 	if rel := u.ledger().Releases[0]; rel.FromControllerSHA256 != "" || rel.ControllerSHA256 != u.h.ControllerSHA256 {
 		t.Fatalf("release %+v", rel)
+	}
+	if got := u.controllerPlist(); got != migratedControllerPlist {
+		t.Fatalf("controller plist not migrated to macserve-controller:\n%s", got)
+	}
+}
+
+// TestUpgradeFromBeforeTheControllerBinaryMigratesPlistOnResume: a
+// pre-split upgrade interrupted after both binaries were replaced (and
+// with a temporary plist left behind) migrates the controller plist when it
+// resumes, and a second migration is a no-op; a plist other than the one
+// deploy-install wrote is refused and the release stays pending.
+func TestUpgradeFromBeforeTheControllerBinaryMigratesPlistOnResume(t *testing.T) {
+	u := newUpgradeHost(t)
+	u.preSplit()
+	l := u.ledger()
+	boot, _ := u.h.Boot()
+	rel := Release{Status: StatusRunning, Started: u.h.Now(), Boot: boot, From: "v0.1.0", To: "v0.2.0", FromSHA256: u.installed(), SHA256: u.h.SHA256, ControllerSHA256: u.h.ControllerSHA256}
+	if err := l.BeginRelease(rel); err != nil {
+		t.Fatal(err)
+	}
+	if err := u.h.Store.Save(l, LedgerInstalled); err != nil {
+		t.Fatal(err)
+	}
+	writeRoot(t, u.h.installedControllerPath(), []byte(newController), 0o755)
+	writeRoot(t, u.h.installedPath(), []byte(newRelease), 0o755)
+	temp := filepath.Join(filepath.Dir(u.h.daemonPlist("org.macserve.controller")), ".org.macserve.controller.plist.0123456789abcdef")
+	writeRoot(t, temp, []byte("partial"), 0o600)
+
+	plist := u.h.daemonPlist("org.macserve.controller")
+	writeRoot(t, plist, []byte(strings.Replace(legacyControllerPlist, "--config", "--cfg", 1)), 0o644)
+	if r := u.upgrade(Request{}); !strings.Contains(r.Error, "reconcile it by hand") || u.ledger().PendingRelease() == nil {
+		t.Fatalf("hand-edited plist %+v", r)
+	}
+	writeRoot(t, plist, []byte(legacyControllerPlist), 0o644)
+	if r := u.upgrade(Request{}); r.Error != "" || !r.Done {
+		t.Fatalf("resume %+v", r)
+	}
+	u.wantRequalified("")
+	if got := u.controllerPlist(); got != migratedControllerPlist {
+		t.Fatalf("controller plist not migrated on resume:\n%s", got)
+	}
+	if _, err := os.Lstat(temp); err == nil {
+		t.Fatal("stale temporary plist kept")
+	}
+	if err := u.h.migrateControllerPlist(); err != nil || u.controllerPlist() != migratedControllerPlist {
+		t.Fatalf("second migration: %v", err)
 	}
 }
 
