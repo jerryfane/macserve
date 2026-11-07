@@ -92,7 +92,7 @@ Details: [architecture](docs/architecture.md) · [receipts and GitHub](docs/rece
 
 **1. Install on the Mac.** Each release ships a CGO-disabled, `-trimpath` Darwin arm64 binary and `SHA256SUMS`;
 no Go toolchain is needed on the host. Check out the reviewed release tag for its install assets, download the
-binary, and set `EXPECTED_SHA256` to the reviewed digest (a checksum downloaded beside a binary detects corruption,
+binary, and set `EXPECTED_SHA256` and `EXPECTED_CONTROLLER_SHA256` to the reviewed digests of `macserve` and `macserve-controller` (a checksum downloaded beside a binary detects corruption,
 not a compromised release). Write `deploy.env` from the documented sample, then run the installer; by default it
 is a nonprivileged plan that verifies the binary digest without creating accounts or installation files:
 
@@ -100,9 +100,10 @@ is a nonprivileged plan that verifies the binary digest without creating account
 git clone --depth 1 --branch "$RELEASE_TAG" https://github.com/jerryfane/macserve.git macserve-deploy-kit
 cd macserve-deploy-kit
 gh release download "$RELEASE_TAG" --repo jerryfane/macserve \
-  --pattern macserve-darwin-arm64 --pattern SHA256SUMS
+  --pattern macserve-darwin-arm64 --pattern macserve-controller-darwin-arm64 --pattern SHA256SUMS
 /bin/bash assets/install.sh --env deploy.env \
-  --binary macserve-darwin-arm64 --sha256 "$EXPECTED_SHA256"
+  --binary macserve-darwin-arm64 --sha256 "$EXPECTED_SHA256" \
+  --controller-binary macserve-controller-darwin-arm64 --controller-sha256 "$EXPECTED_CONTROLLER_SHA256"
 ```
 
 Applying the install, creating the job account, qualifying the host and enabling the services are separate

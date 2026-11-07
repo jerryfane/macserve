@@ -5,6 +5,8 @@ This page was split out of the [README](../README.md); text is unchanged unless 
 ## Components
 
 - `controller` (runs as a dedicated non-login service user): queue (SQLite), GitHub poller, API, receipt signer.
+  It is its own binary, `macserve-controller`; every other role runs from `macserve` (see
+  [Two binaries and class K](#two-binaries-and-class-k)).
 - `worker` (protected root execution broker): owns leases, control records and exports; executes tools only after
   dropping supplementary groups/GID/UID into the dedicated non-admin job account's existing GUI domain.
   The controller authenticates the broker's root Unix peer identity, never the job UID.
@@ -36,7 +38,7 @@ PF enforcement may be a separately reviewed future opt-in; it is not implemented
   admission, pinned Xcode/runtime matching, timeout limits and SHA-256 recipe digests. Relative paths cannot
   contain `..`; command placeholders are limited to `CHECKOUT`, `WORKSPACE`, `DERIVED_DATA`, `RESULT_BUNDLE`,
   `SIMULATOR_ID`, `JOB_ID` and `DEVELOPER_DIR`, each written `${NAME}`. Test profiles require explicit test scope.
-- `internal/store`: SQLite WAL queue with principal-scoped idempotency, FIFO admission, database-enforced single
+- `internal/controllerk/store`: SQLite WAL queue with principal-scoped idempotency, FIFO admission, database-enforced single
   active execution, lease-checked transitions and active-execution log writes, persistent pause/drain,
   cancellation and retention. Terminal logs and results cannot be amended by a late worker.
   Interrupted execution or uncertain cleanup quarantines dispatch. Clearing quarantine requires a caller-proven
@@ -69,13 +71,13 @@ PF enforcement may be a separately reviewed future opt-in; it is not implemented
 - `internal/source`: isolated controller-side Git fetch, exact commit/tree verification and bounded deterministic
   full-tree tar export. Git archive attributes cannot omit or substitute committed bytes. Links, submodules and
   Git LFS requirements are rejected explicitly. Source exports default to a 2 GiB limit.
-- `internal/controller`: Unix peer-UID authentication, asynchronous preparation, heartbeat/deadline fencing,
+- `internal/controllerk/controller`: Unix peer-UID authentication, asynchronous preparation, heartbeat/deadline fencing,
   independently parsed test evidence, immutable artifact storage, bounded retention and fail-closed host guards.
-- `internal/api`: persisted bearer digests, repository/scoped authorization, idempotent admission, status,
+- `internal/controllerk/api`: persisted bearer digests, repository/scoped authorization, idempotent admission, status,
   paged/SSE logs, JSON/JUnit results, range downloads and persisted administrative pause/resume.
 - `internal/githubapi`: selected-repository App tokens, fresh repository-ID checks, bounded pagination,
   deadlines and rate-limit handling. Redirects cannot forward credentials to another origin.
-- `internal/githubpull`: automatic exact-head enrollment, durable request/attempt correlations, explicit bounded
+- `internal/controllerk/githubpull`: automatic exact-head enrollment, durable request/attempt correlations, explicit bounded
   reruns, dispatch revalidation and a transactional publication outbox.
 - `internal/receipt`: Ed25519 signatures over RFC 8785 canonical JSON, pinned-key verification, evidence policy
   validation and immutable digest-addressed full manifests. Actual command records omit environment secrets.
@@ -185,6 +187,48 @@ and trusted GUI services do not provide VM reset isolation. Root/GUI deployment,
 background UI operation still require separate host qualification before enrollment.
 
 The reviewed registration (persistence) policy is described in [persistence-policy.md](persistence-policy.md).
+
+## Two binaries and class K
+
+Releases ship two Darwin arm64 binaries, installed root:wheel `0755` under `/Library/macserve/bin`:
+
+- `macserve-controller` runs only the controller daemon (`org.macserve.controller`, as the controller service
+  user) and `macserve-controller version --json`, which prints `{"version","commit","store_schema_version"}`
+  without opening the store or reading secrets.
+- `macserve` runs every other role: the root worker, maintenance, the signer, qualification, deploy, setup,
+  upgrade, doctor and the owner commands (`wait`, `testflight-upload`). It has no `controller` subcommand.
+
+`BOUNDARY.json` (schema 2) adds class **K**: the controller-only packages `internal/controllerk/...` (controller
+runtime, API, SQLite store, GitHub poller) and `cmd/macserve-controller`. K is classified per whole package, not
+per file. `go test ./checks/boundary` (run in CI) enforces the link graph: `go list -deps ./cmd/macserve` contains
+no K package, no non-K package imports a K package, and `macserve-controller` links only K packages, the standard
+library, third-party modules and an explicit allowlist of B leaf packages. The types root code shares with the
+controller live in B packages with unchanged JSON: `internal/controllerconfig` (`controller.json` and its
+principals), `internal/health` (the health record and readiness gate), `internal/githubwire` (pull-request policy,
+evidence packet) and `internal/daemonlog`.
+
+The activation anchor (schema 3) binds both binaries; a release carry may rebind either or both, and
+`macserve qualify rebind-controller` rebinds a controller-only change installed by the administrator.
+When binaries are installed Developer ID signed, root-owned `config/installed-binaries.json` maps each installed
+digest to its release digest; native checks compare on-disk bytes to `installed_sha256` and release provenance to
+`release_sha256` (absent file: the installed bytes are the release bytes).
+
+**Threat model of K, and why it is not yet carry-safe.** The goal of class K is that a controller-only release can
+be installed by an agent without the owner, without a reboot and without restarting running jobs, because nothing
+the root worker, the signer or the boundary relies on is decided by K code. K may choose scheduling, queue state,
+API behaviour and version labels (BuildName/BuildNumber) for an otherwise fully scoped release; it must not be
+able to change what is built, with which toolchain and inputs, or what gets signed. That is **not true today**:
+
+- the controller holds the receipt Ed25519 key, the GitHub App key and the TLS key, and builds
+  `ReleaseProvenance` (`internal/controllerk/api`), which the signer accepts on the strength of that receipt key;
+- the worker validates a lease only for self-consistency (`profiles.ForSnapshot` of the controller-sent profile),
+  not against the root-owned profile registry;
+- completion acceptance and receipt sealing (`internal/controllerk/controller/completion.go`,
+  `signing.go`) run in the controller.
+
+A keyholder daemon (holding the receipt and App keys and re-checking release scope) and worker resolution from the
+root registry plus a worker build seal are later changes. Until they land, K is a code-organisation boundary only:
+`checks/carry-proof` treats any K change as boundary-changing, and releases that change K need a full sitting.
 
 ## Code signer boundary
 

@@ -2,7 +2,8 @@
 
 This page was split out of the [README](../README.md); text is unchanged unless noted. Installed values are listed in [install.md](install.md#2-supply-matching-protected-configurations).
 
-`macserve controller --config /absolute/path/to/controller.json` requires a root-controlled configuration and
+`macserve-controller --config /absolute/path/to/controller.json` (the separate controller binary; `macserve` has
+no `controller` subcommand) requires a root-controlled configuration and
 a dedicated non-login, non-admin controller account distinct from the owner and job account. Configuration fields:
 `root`, `socket`, `job_uid`, `owner_uid`, `profiles_file`, `listen`, `tls_certificate`, `tls_key`,
 `principals`, `health_file`, `receipt`, and optional `allowed_networks`, `pause_file`, `github`.
