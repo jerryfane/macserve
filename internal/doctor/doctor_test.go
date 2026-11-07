@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/macserve/internal/controller"
+	"github.com/jerryfane/macserve/internal/health"
 	"github.com/jerryfane/macserve/internal/setup"
 	"github.com/jerryfane/macserve/internal/setup/plan"
 )
@@ -57,7 +57,7 @@ type fakeHost struct {
 
 func healthy(t *testing.T) *fakeHost {
 	t.Helper()
-	health, _ := json.Marshal(controller.Health{
+	health, _ := json.Marshal(health.Health{
 		Schema: 3, JobUID: 611, BoundaryReceiptSHA256: strings.Repeat("b", 64), BoundaryValidated: true,
 		CheckedAt: now.Add(-10 * time.Second), ExpiresAt: now.Add(30 * time.Second), AccountedBytes: 10 << 30,
 		PersistenceLastVerified: now.Add(-time.Minute), PersistenceValid: true,
@@ -214,7 +214,7 @@ func TestEachCheck(t *testing.T) {
 		{"tcc.fda", Unknown, func(h *fakeHost) { h.fda = nil }},
 		{"session.job", Fail, func(h *fakeHost) { delete(h.commands, "/bin/launchctl print gui/611") }},
 		{"session.job", Fail, func(h *fakeHost) { h.stats[Console] = plan.FileInfo{Exists: true, UID: 611} }},
-		{"persistence", Fail, func(h *fakeHost) { h.setHealth(t, func(x *controller.Health) { x.PersistenceNeedsReview = true }) }},
+		{"persistence", Fail, func(h *fakeHost) { h.setHealth(t, func(x *health.Health) { x.PersistenceNeedsReview = true }) }},
 		{"qual.state", Fail, func(h *fakeHost) { h.stats[Anchor] = plan.FileInfo{} }},
 		{"qual.state", Warn, func(h *fakeHost) {
 			h.setLedger(t, func(l *setup.Ledger) { l.Approval.Boot.SessionUUID = "99999999-2222-3333-4444-555555555555" })
@@ -231,17 +231,17 @@ func TestEachCheck(t *testing.T) {
 		{"svc.state", Fail, func(h *fakeHost) { delete(h.commands, "/bin/launchctl print system/org.macserve.worker") }},
 		{"svc.state", Unknown, func(h *fakeHost) { delete(h.commands, "/bin/launchctl print-disabled system") }},
 		{"health", Fail, func(h *fakeHost) {
-			h.setHealth(t, func(x *controller.Health) {
+			h.setHealth(t, func(x *health.Health) {
 				x.CheckedAt = now.Add(-time.Minute)
 				x.ExpiresAt = now.Add(-15 * time.Second)
 			})
 		}},
-		{"health", Fail, func(h *fakeHost) { h.setHealth(t, func(x *controller.Health) { x.MemoryPressure = true }) }},
+		{"health", Fail, func(h *fakeHost) { h.setHealth(t, func(x *health.Health) { x.MemoryPressure = true }) }},
 		{"health", Unknown, func(h *fakeHost) { h.euid = 501; h.fileErr[HealthFile] = fs.ErrPermission }},
 		{"github.app", Fail, func(h *fakeHost) { h.github = errors.New("installation 7 no longer grants jdoe/app") }},
 		{"github.app", Unknown, func(h *fakeHost) { h.fda = nil }},
-		{"disk", Fail, func(h *fakeHost) { h.setHealth(t, func(x *controller.Health) { x.AccountedBytes = 81 << 30 }) }},
-		{"disk", Warn, func(h *fakeHost) { h.setHealth(t, func(x *controller.Health) { x.AccountedBytes = 60 << 30 }) }},
+		{"disk", Fail, func(h *fakeHost) { h.setHealth(t, func(x *health.Health) { x.AccountedBytes = 81 << 30 }) }},
+		{"disk", Warn, func(h *fakeHost) { h.setHealth(t, func(x *health.Health) { x.AccountedBytes = 60 << 30 }) }},
 		{"setup.ledger", Fail, func(h *fakeHost) {
 			h.setLedger(t, func(l *setup.Ledger) { l.Records[6].Status = setup.StatusFailed })
 		}},
@@ -267,8 +267,8 @@ func TestEachCheck(t *testing.T) {
 	}
 }
 
-func (h *fakeHost) setHealth(t *testing.T, f func(*controller.Health)) {
-	var x controller.Health
+func (h *fakeHost) setHealth(t *testing.T, f func(*health.Health)) {
+	var x health.Health
 	if err := json.Unmarshal(h.files[HealthFile], &x); err != nil {
 		t.Fatal(err)
 	}

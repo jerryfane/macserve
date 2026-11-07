@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/user"
@@ -84,6 +85,26 @@ func nonLoginAccount(role string) (*user.User, error) {
 
 // PrivateFile protects controller secrets independently of public root config.
 func PrivateFile(path string) error { return privatePath(path, false) }
+
+// ReadPrivateKey reads a bounded private key file that PrivateFile accepts.
+func ReadPrivateKey(path string) ([]byte, error) {
+	if err := PrivateFile(path); err != nil {
+		return nil, err
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, (64<<10)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > 64<<10 {
+		return nil, errors.New("private key exceeds size limit")
+	}
+	return data, nil
+}
 
 func PrivateDirectory(path string) error { return privatePath(path, true) }
 

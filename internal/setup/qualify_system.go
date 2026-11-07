@@ -16,8 +16,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jerryfane/macserve/internal/controller"
+	"github.com/jerryfane/macserve/internal/controllerconfig"
 	"github.com/jerryfane/macserve/internal/githubapi"
+	"github.com/jerryfane/macserve/internal/health"
 	"github.com/jerryfane/macserve/internal/hostguard"
 	"github.com/jerryfane/macserve/internal/model"
 	"github.com/jerryfane/macserve/internal/onboarding"
@@ -130,7 +131,7 @@ func (q *SystemQualifier) ActivationCheck(ctx context.Context) error {
 // Health is the controller's readiness gate, built as `macserve
 // controller` builds it.
 func (q *SystemQualifier) Health(ctx context.Context) ([]string, error) {
-	c, err := controller.LoadConfig(q.config("controller.json"))
+	c, err := controllerconfig.LoadConfig(q.config("controller.json"))
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +139,7 @@ func (q *SystemQualifier) Health(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	guard, err := controller.NewGuard(controller.GuardOptions{Root: c.Root, HealthFile: c.HealthFile, PauseFile: c.PauseFile, JobUID: c.JobUID, OwnerUID: c.OwnerUID, Profiles: registry.Digests()})
+	guard, err := health.NewGuard(health.GuardOptions{Root: c.Root, HealthFile: c.HealthFile, PauseFile: c.PauseFile, JobUID: c.JobUID, OwnerUID: c.OwnerUID, Profiles: registry.Digests()})
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +150,7 @@ func (q *SystemQualifier) Health(ctx context.Context) ([]string, error) {
 // app is the controller's GitHub App client, from controller.json and the
 // installed App key, as `macserve controller` builds it.
 func (q *SystemQualifier) app() (*githubapi.Client, error) {
-	c, err := controller.LoadConfig(q.config("controller.json"))
+	c, err := controllerconfig.LoadConfig(q.config("controller.json"))
 	if err != nil {
 		return nil, err
 	}

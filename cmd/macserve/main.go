@@ -61,8 +61,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "worker":
 		return runWorker(args[1:], stdout, stderr)
-	case "controller":
-		return runController(args[1:], stdout, stderr)
 	case "signer":
 		return runSigner(args[1:], stdout, stderr)
 	case "signer-init":
@@ -95,7 +93,6 @@ func usage(w io.Writer) {
 	fmt.Fprint(w, `Usage: macserve <command>
 
 Commands:
-  controller  Private API, durable queue and worker coordination
   worker      Protected root execution broker via the private controller socket
   signer      Sign succeeded ios_archive jobs for the controller as _macserve_sign
   signer-init Create the signer receipt key, keychain secret and empty keychain

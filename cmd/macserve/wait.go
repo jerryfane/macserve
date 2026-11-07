@@ -89,7 +89,7 @@ func runWait(args []string, stdout, stderr io.Writer) int {
 	if pins.Request.SHA != "" && pins.Request.SHA != sha {
 		return fail(errors.New("requested SHA contradicts pinned SHA"))
 	}
-	keys, err := publicKeys(pins.VerificationKeys)
+	keys, err := receipt.ParsePublicKeys(pins.VerificationKeys)
 	if err != nil {
 		return fail(err)
 	}

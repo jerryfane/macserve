@@ -17,7 +17,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jerryfane/macserve/internal/controller"
+	"github.com/jerryfane/macserve/internal/controllerconfig"
 	"github.com/jerryfane/macserve/internal/hostguard"
 	"github.com/jerryfane/macserve/internal/maintenance"
 	"github.com/jerryfane/macserve/internal/profiles"
@@ -243,7 +243,7 @@ func apply(o Options, e Environment, envData []byte, assets, rendered map[string
 		}
 		switch filepath.Base(path) {
 		case "controller.json":
-			if _, err := controller.LoadConfig(path); err != nil {
+			if _, err := controllerconfig.LoadConfig(path); err != nil {
 				return err
 			}
 		case "worker.json":

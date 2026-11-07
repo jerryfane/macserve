@@ -19,7 +19,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jerryfane/macserve/internal/controller"
+	"github.com/jerryfane/macserve/internal/controllerconfig"
 	"github.com/jerryfane/macserve/internal/profiles"
 	"github.com/jerryfane/macserve/internal/qualification"
 )
@@ -230,7 +230,7 @@ func plistTop(data []byte) (map[string]string, error) {
 // The summary shows it, the approval records it and the start compares
 // it before, during and after, in every run.
 func (h *Helper) pauseBinding() (string, error) {
-	c, err := controller.LoadConfig(h.configPath("controller.json"))
+	c, err := controllerconfig.LoadConfig(h.configPath("controller.json"))
 	if err != nil {
 		return "", err
 	}
@@ -313,7 +313,7 @@ func (h *Helper) summary(l *Ledger) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
-	c, err := controller.LoadConfig(h.configPath("controller.json"))
+	c, err := controllerconfig.LoadConfig(h.configPath("controller.json"))
 	if err != nil {
 		return "", "", err
 	}

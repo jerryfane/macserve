@@ -22,8 +22,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jerryfane/macserve/internal/controller"
 	"github.com/jerryfane/macserve/internal/deploy"
+	"github.com/jerryfane/macserve/internal/health"
 	"github.com/jerryfane/macserve/internal/hostguard"
 	"github.com/jerryfane/macserve/internal/model"
 	"github.com/jerryfane/macserve/internal/setup"
@@ -162,7 +162,7 @@ type state struct {
 	results  map[string]Check
 	env      *deploy.Environment
 	envErr   error
-	health   *controller.Health
+	health   *health.Health
 	hErr     error
 	ledger   *setup.Ledger
 	ledgErr  error
@@ -238,7 +238,7 @@ func (s *state) load() {
 	if data, err := s.p.ReadFile(HealthFile, maxConfig); err != nil {
 		s.hErr = err
 	} else {
-		var h controller.Health
+		var h health.Health
 		if err := json.Unmarshal(data, &h); err != nil {
 			s.hErr = errors.New("invalid health file")
 		} else {
@@ -590,14 +590,14 @@ func (s *state) healthChecks() {
 		blockers = append(blockers, "worker_admission_inconclusive")
 	}
 	switch {
-	case h.AccountedBytes < 0 || h.AccountedBytes > controller.ServiceBudgetBytes:
+	case h.AccountedBytes < 0 || h.AccountedBytes > health.ServiceBudgetBytes:
 		blockers = append(blockers, "service_disk_budget_exceeded")
-		s.set("disk", Fail, fmt.Sprintf("macserve accounts %d GiB of its %d GiB budget", h.AccountedBytes>>30, controller.ServiceBudgetBytes>>30), "Remove old jobs' evidence or wait for retention cleanup.")
-	case h.AccountedBytes > controller.ServiceBudgetBytes-controller.JobReservationBytes:
+		s.set("disk", Fail, fmt.Sprintf("macserve accounts %d GiB of its %d GiB budget", h.AccountedBytes>>30, health.ServiceBudgetBytes>>30), "Remove old jobs' evidence or wait for retention cleanup.")
+	case h.AccountedBytes > health.ServiceBudgetBytes-health.JobReservationBytes:
 		blockers = append(blockers, "service_disk_reservation_unavailable")
-		s.set("disk", Warn, fmt.Sprintf("macserve accounts %d GiB of its %d GiB budget; no room for one more job", h.AccountedBytes>>30, controller.ServiceBudgetBytes>>30), "Wait for retention cleanup before the next build.")
+		s.set("disk", Warn, fmt.Sprintf("macserve accounts %d GiB of its %d GiB budget; no room for one more job", h.AccountedBytes>>30, health.ServiceBudgetBytes>>30), "Wait for retention cleanup before the next build.")
 	default:
-		s.set("disk", Pass, fmt.Sprintf("macserve accounts %d GiB of its %d GiB budget", h.AccountedBytes>>30, controller.ServiceBudgetBytes>>30), "")
+		s.set("disk", Pass, fmt.Sprintf("macserve accounts %d GiB of its %d GiB budget", h.AccountedBytes>>30, health.ServiceBudgetBytes>>30), "")
 	}
 	if h.MemoryPressure {
 		blockers = append(blockers, "host_memory_pressure")

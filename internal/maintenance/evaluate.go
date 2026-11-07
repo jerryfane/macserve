@@ -8,7 +8,7 @@ import (
 	"maps"
 	"time"
 
-	"github.com/jerryfane/macserve/internal/controller"
+	"github.com/jerryfane/macserve/internal/health"
 	"github.com/jerryfane/macserve/internal/worker"
 )
 
@@ -84,8 +84,8 @@ func validDigest(s string) bool {
 
 // Evaluate does no I/O. Every rejected observation returns an explicitly invalid
 // health record suitable for immediate atomic publication.
-func Evaluate(now time.Time, q Qualification, e BoundaryEvidence, o Observation) (controller.Health, error) {
-	h := controller.Health{Schema: 3, JobUID: o.JobUID, CheckedAt: now, ExpiresAt: now.Add(healthLifetime), AccountedBytes: -1, MemoryPressure: true}
+func Evaluate(now time.Time, q Qualification, e BoundaryEvidence, o Observation) (health.Health, error) {
+	h := health.Health{Schema: 3, JobUID: o.JobUID, CheckedAt: now, ExpiresAt: now.Add(healthLifetime), AccountedBytes: -1, MemoryPressure: true}
 	h.PersistenceLastVerified = o.Persistence.LastVerified
 	h.PersistenceValid = o.Persistence.Valid
 	h.PersistenceNeedsReview = o.Persistence.NeedsReview
@@ -93,7 +93,7 @@ func Evaluate(now time.Time, q Qualification, e BoundaryEvidence, o Observation)
 	if o.AdmissionInconclusive != nil {
 		h.AdmissionInconclusive = o.AdmissionInconclusive.Reason
 	}
-	fail := func() (controller.Health, error) {
+	fail := func() (health.Health, error) {
 		return h, errors.New("maintenance qualification or live observation mismatch")
 	}
 	if !o.Persistence.Valid || o.Persistence.NeedsReview || !o.Persistence.RevokedAt.IsZero() || o.Persistence.LastVerified.IsZero() || o.Persistence.LastVerified.After(now) {

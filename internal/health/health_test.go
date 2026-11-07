@@ -1,0 +1,131 @@
+package health
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+)
+
+func readyGuard(t *testing.T) (*Guard, *Health, *int64) {
+	t.Helper()
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	digest := strings.Repeat("a", 64)
+	g, err := NewGuard(GuardOptions{Root: "/service/data", HealthFile: "/service/config/health.json", JobUID: 502, OwnerUID: 501, Profiles: map[string]string{"unit": digest}, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &Health{Schema: 3, JobUID: 502, BoundaryReceiptSHA256: digest, BoundaryValidated: true, CheckedAt: now, ExpiresAt: now.Add(30 * time.Second), AccountedBytes: 10 << 30, QualifiedProfiles: map[string]string{"unit": digest}}
+	h.PersistenceValid = true
+	h.PersistenceLastVerified = now
+	free := int64(200 << 30)
+	g.readHealth = func(string) (Health, error) { return *h, nil }
+	g.freeBytes = func(string) (int64, error) { return free, nil }
+	return g, h, &free
+}
+func TestSchema3HealthAdmitsWithoutInterfaceBinding(t *testing.T) {
+	g, _, _ := readyGuard(t)
+	state, err := g.Check(context.Background())
+	if err != nil || !state.Ready || state.CancelActive || len(state.Blockers) != 0 {
+		t.Fatalf("fresh qualified health refused: %+v %v", state, err)
+	}
+}
+func TestReadinessRequiresCurrentQualifiedBoundary(t *testing.T) {
+	for _, scenario := range []string{"stale", "future", "expiry", "unsigned qualification", "schema 1", "schema 2", "wrong worker", "invalid receipt", "profile changed", "unreadable"} {
+		t.Run(scenario, func(t *testing.T) {
+			g, h, _ := readyGuard(t)
+			switch scenario {
+			case "stale":
+				h.CheckedAt = h.CheckedAt.Add(-time.Minute)
+			case "future":
+				h.CheckedAt = h.CheckedAt.Add(time.Minute)
+			case "expiry":
+				h.ExpiresAt = h.CheckedAt
+			case "unsigned qualification":
+				h.BoundaryValidated = false
+			case "schema 1":
+				h.Schema = 1
+			case "schema 2":
+				h.Schema = 2
+			case "wrong worker":
+				h.JobUID = 503
+			case "invalid receipt":
+				h.BoundaryReceiptSHA256 = ""
+			case "profile changed":
+				h.QualifiedProfiles["unit"] = strings.Repeat("b", 64)
+			case "unreadable":
+				g.readHealth = func(string) (Health, error) { return Health{}, errors.New("denied") }
+			}
+			state, err := g.Check(context.Background())
+			if err != nil || state.Ready || !state.CancelActive {
+				t.Fatalf("unsafe boundary admitted: %+v %v", state, err)
+			}
+		})
+	}
+}
+func TestPersistenceAttestationPausesAdmission(t *testing.T) {
+	for _, scenario := range []string{"missing", "revoked", "review", "future"} {
+		t.Run(scenario, func(t *testing.T) {
+			g, h, _ := readyGuard(t)
+			switch scenario {
+			case "missing":
+				h.PersistenceLastVerified = time.Time{}
+			case "revoked":
+				h.PersistenceValid = false
+			case "review":
+				h.PersistenceNeedsReview = true
+			case "future":
+				h.PersistenceLastVerified = h.CheckedAt.Add(time.Minute)
+			}
+			state, err := g.Check(context.Background())
+			if err != nil || state.Ready || state.CancelActive {
+				t.Fatalf("attestation must pause admission without cancelling a job: %+v %v", state, err)
+			}
+		})
+	}
+}
+
+// A worker that keeps refusing admission because a child of a tolerated launch
+// persists is reported in admin state, without cancelling work.
+func TestAdmissionInconclusiveHealthBlocksWithReason(t *testing.T) {
+	g, h, _ := readyGuard(t)
+	h.AdmissionInconclusive = "a child process of a tolerated launchd service outlived the admission wait; retry admission"
+	state, err := g.Check(context.Background())
+	if err != nil || state.Ready || state.CancelActive || len(state.Blockers) != 1 || state.Blockers[0] != "worker_admission_inconclusive" {
+		t.Fatalf("inconclusive admission not reported: %+v %v", state, err)
+	}
+	h.AdmissionInconclusive = ""
+	if state, err := g.Check(context.Background()); err != nil || !state.Ready {
+		t.Fatalf("cleared record still blocks: %+v %v", state, err)
+	}
+}
+func TestDiskReservationAndEmergencyHaveDifferentCancellationSemantics(t *testing.T) {
+	g, h, free := readyGuard(t)
+	for _, tc := range []struct {
+		free, used    int64
+		ready, cancel bool
+	}{{150 << 30, 50 << 30, true, false}, {(150 << 30) - 1, 50 << 30, false, false}, {100 << 30, 50 << 30, false, false}, {(100 << 30) - 1, 50 << 30, false, true}, {200 << 30, 51 << 30, false, false}, {200 << 30, 81 << 30, false, true}} {
+		*free = tc.free
+		h.AccountedBytes = tc.used
+		state, err := g.Check(context.Background())
+		if err != nil || state.Ready != tc.ready || state.CancelActive != tc.cancel {
+			t.Fatalf("free=%d used=%d: %+v %v", tc.free, tc.used, state, err)
+		}
+	}
+}
+func TestOwnerPauseDoesNotCancelDrainingWork(t *testing.T) {
+	g, h, _ := readyGuard(t)
+	g.options.PauseFile = "/service/control/pause"
+	g.pause = func(string, uint32) (bool, error) { return true, nil }
+	state, err := g.Check(context.Background())
+	if err != nil || state.Ready || state.CancelActive {
+		t.Fatalf("pause did not drain: %+v %v", state, err)
+	}
+	g.options.PauseFile = ""
+	h.MemoryPressure = true
+	state, err = g.Check(context.Background())
+	if err != nil || state.Ready || state.CancelActive {
+		t.Fatalf("memory pressure did not stop admission: %+v %v", state, err)
+	}
+}

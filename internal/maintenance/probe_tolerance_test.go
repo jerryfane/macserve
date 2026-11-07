@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/macserve/internal/controller"
+	"github.com/jerryfane/macserve/internal/health"
 )
 
 // A probe that only ran out of time while a build loads the host is
@@ -17,21 +17,21 @@ import (
 // invalid health at once.
 func TestKeepLastValidOnlyForTimeoutsWithinLifetime(t *testing.T) {
 	now := time.Date(2026, 11, 1, 21, 9, 0, 0, time.UTC)
-	valid := controller.Health{BoundaryValidated: true, CheckedAt: now.Add(-12 * time.Second), ExpiresAt: now.Add(18 * time.Second)}
+	valid := health.Health{BoundaryValidated: true, CheckedAt: now.Add(-12 * time.Second), ExpiresAt: now.Add(18 * time.Second)}
 	// Exactly the error the Studio produced: Inspect's own 8 s deadline,
 	// wrapped by the census, while the outer probe context was still live.
 	inner := fmt.Errorf("mutable census /Users/macservejob: %w", context.DeadlineExceeded)
 	for _, tc := range []struct {
 		name string
 		err  error
-		last controller.Health
+		last health.Health
 		at   time.Time
 		want bool
 	}{
 		{"inner Inspect deadline within lifetime", inner, valid, now, true},
 		{"timeout after expiry", inner, valid, valid.ExpiresAt, false},
-		{"timeout without prior valid health", inner, controller.Health{}, now, false},
-		{"prior health invalid", inner, controller.Health{ExpiresAt: now.Add(time.Minute)}, now, false},
+		{"timeout without prior valid health", inner, health.Health{}, now, false},
+		{"prior health invalid", inner, health.Health{ExpiresAt: now.Add(time.Minute)}, now, false},
 		{"real finding", errors.New("GUI baseline process changed; worker-reset required"), valid, now, false},
 		{"permission failure", errors.New(`mutable census /Library/macserve/var: "controller/Library/Mail": operation not permitted`), valid, now, false},
 		// Studio, 2026-11-02, as a real build finished: the accepted
@@ -51,7 +51,7 @@ func TestKeepLastValidOnlyForTimeoutsWithinLifetime(t *testing.T) {
 // gateAccepts mirrors the controller's freshness rule for published health
 // (internal/controller/guards.go): checked no more than 45 s ago, not expired,
 // and a lifetime of at most 45 s.
-func gateAccepts(h controller.Health, now time.Time) bool {
+func gateAccepts(h health.Health, now time.Time) bool {
 	return h.BoundaryValidated && now.Sub(h.CheckedAt) <= 45*time.Second && h.ExpiresAt.After(now) &&
 		h.ExpiresAt.Sub(h.CheckedAt) <= 45*time.Second
 }
@@ -63,8 +63,8 @@ func gateAccepts(h controller.Health, now time.Time) bool {
 func replayProbes(t *testing.T, durations []int, lifetime time.Duration) (lapse time.Duration, lapsed bool) {
 	t.Helper()
 	start := time.Date(2026, 11, 2, 14, 56, 0, 0, time.UTC)
-	var published, last controller.Health
-	publishAt := map[time.Duration]controller.Health{}
+	var published, last health.Health
+	publishAt := map[time.Duration]health.Health{}
 	for i, d := range durations {
 		at := start.Add(time.Duration(i) * 10 * time.Second)
 		done := at.Add(time.Duration(d) * time.Second)
@@ -73,11 +73,11 @@ func replayProbes(t *testing.T, durations []int, lifetime time.Duration) (lapse 
 			if keepLastValid(err, last, done) {
 				continue
 			}
-			publishAt[done.Sub(start)] = controller.Health{}
-			last = controller.Health{}
+			publishAt[done.Sub(start)] = health.Health{}
+			last = health.Health{}
 			continue
 		}
-		h := controller.Health{BoundaryValidated: true, CheckedAt: at, ExpiresAt: at.Add(lifetime)}
+		h := health.Health{BoundaryValidated: true, CheckedAt: at, ExpiresAt: at.Add(lifetime)}
 		publishAt[done.Sub(start)] = h
 		last = h
 	}

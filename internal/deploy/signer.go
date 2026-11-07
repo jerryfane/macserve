@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/jerryfane/macserve/internal/controller"
+	"github.com/jerryfane/macserve/internal/controllerconfig"
 	"github.com/jerryfane/macserve/internal/signer"
 )
 
@@ -107,8 +107,8 @@ func signerSection(output []byte, e Environment) ([]byte, error) {
 		return nil, errors.New("signer-init output lacks a key_id and an Ed25519 public_key")
 	}
 	section := struct {
-		Signer controller.SignerConfig `json:"signer"`
-	}{controller.SignerConfig{Socket: SignerSocket, UID: e.SignerUID, RPCGID: e.SignRPCGID, Inbox: SignerInbox, KeyID: result.KeyID, PublicKey: result.PublicKey}}
+		Signer controllerconfig.SignerConfig `json:"signer"`
+	}{controllerconfig.SignerConfig{Socket: SignerSocket, UID: e.SignerUID, RPCGID: e.SignRPCGID, Inbox: SignerInbox, KeyID: result.KeyID, PublicKey: result.PublicKey}}
 	return json.Marshal(section)
 }
 

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/macserve/internal/controller"
+	"github.com/jerryfane/macserve/internal/health"
 )
 
 // This file is class B in BOUNDARY.json. It pins the invariants that health
@@ -35,7 +35,7 @@ func TestMaintenanceInvariantsHealthLifetime(t *testing.T) {
 
 func TestMaintenanceInvariantsKeepLastValid(t *testing.T) {
 	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
-	valid := controller.Health{BoundaryValidated: true, CheckedAt: now.Add(-10 * time.Second), ExpiresAt: now.Add(30 * time.Second)}
+	valid := health.Health{BoundaryValidated: true, CheckedAt: now.Add(-10 * time.Second), ExpiresAt: now.Add(30 * time.Second)}
 	inconclusive := []error{
 		context.DeadlineExceeded,
 		fmt.Errorf("census: %w", context.DeadlineExceeded),
@@ -53,7 +53,7 @@ func TestMaintenanceInvariantsKeepLastValid(t *testing.T) {
 		if !keepLastValid(err, valid, now) {
 			t.Errorf("%v: inconclusive probe replaced valid health", err)
 		}
-		for name, last := range map[string]controller.Health{
+		for name, last := range map[string]health.Health{
 			"none":         {},
 			"invalid":      {ExpiresAt: valid.ExpiresAt, CheckedAt: valid.CheckedAt},
 			"expired":      {BoundaryValidated: true, CheckedAt: now.Add(-50 * time.Second), ExpiresAt: now.Add(-10 * time.Second)},

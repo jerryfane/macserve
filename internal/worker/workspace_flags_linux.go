@@ -3,8 +3,9 @@
 package worker
 
 import (
-	"golang.org/x/sys/unix"
 	"os"
+
+	"golang.org/x/sys/unix"
 )
 
 // Linux has no Darwin user-settable st_flags. Its privileged filesystem flags

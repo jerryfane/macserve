@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/jerryfane/macserve/internal/githubapi"
-	"github.com/jerryfane/macserve/internal/githubpull"
+	"github.com/jerryfane/macserve/internal/githubwire"
 	"github.com/jerryfane/macserve/internal/model"
 	"github.com/jerryfane/macserve/internal/receipt"
 	"github.com/jerryfane/macserve/internal/waiter"
@@ -63,16 +63,16 @@ func newWire(t *testing.T) *wire {
 	return f
 }
 
-func (f *wire) packet() githubpull.Packet {
+func (f *wire) packet() githubwire.Packet {
 	digest, err := receipt.Digest(f.raw)
 	if err != nil {
 		f.t.Fatal(err)
 	}
 	bodyDigest := sha256.Sum256([]byte(f.postedBody))
-	return githubpull.Packet{Schema: 1, JobID: fixtureJob, AttemptID: fixtureAttempt, Requests: []githubpull.Correlation{{CommentID: fixtureCommentID, RequestID: fixtureRequest, BodySHA256: hex.EncodeToString(bodyDigest[:])}}, Receipt: f.raw, ReceiptDigest: digest}
+	return githubwire.Packet{Schema: 1, JobID: fixtureJob, AttemptID: fixtureAttempt, Requests: []githubwire.Correlation{{CommentID: fixtureCommentID, RequestID: fixtureRequest, BodySHA256: hex.EncodeToString(bodyDigest[:])}}, Receipt: f.raw, ReceiptDigest: digest}
 }
 
-func packetText(t *testing.T, packet githubpull.Packet) string {
+func packetText(t *testing.T, packet githubwire.Packet) string {
 	t.Helper()
 	var body bytes.Buffer
 	encoder := json.NewEncoder(&body)
@@ -220,35 +220,35 @@ func TestWaiterPostsExactRequestAndVerifiesPaginatedCurrentEvidence(t *testing.T
 func TestWaiterRejectsUntrustedOrMismatchedEvidence(t *testing.T) {
 	tests := []struct {
 		name   string
-		change func(*wire, map[string]any, *githubpull.Packet)
+		change func(*wire, map[string]any, *githubwire.Packet)
 	}{
-		{"wrong-app-on-detail", func(f *wire, c map[string]any, p *githubpull.Packet) {
+		{"wrong-app-on-detail", func(f *wire, c map[string]any, p *githubwire.Packet) {
 			c["app"] = map[string]any{"id": fixtureAppID + 1}
 		}},
-		{"wrong-name-on-detail", func(f *wire, c map[string]any, p *githubpull.Packet) { c["name"] = "mac-evidence/not-the-profile" }},
-		{"wrong-check-id", func(f *wire, c map[string]any, p *githubpull.Packet) { c["id"] = fixtureCheckID + 1 }},
-		{"wrong-check-head", func(f *wire, c map[string]any, p *githubpull.Packet) { c["head_sha"] = strings.Repeat("e", 40) }},
-		{"wrong-external-id", func(f *wire, c map[string]any, p *githubpull.Packet) { c["external_id"] = "different-job" }},
-		{"wrong-request-id", func(f *wire, c map[string]any, p *githubpull.Packet) { p.Requests[0].RequestID = "actions:123456:2" }},
-		{"wrong-body-digest", func(f *wire, c map[string]any, p *githubpull.Packet) {
+		{"wrong-name-on-detail", func(f *wire, c map[string]any, p *githubwire.Packet) { c["name"] = "mac-evidence/not-the-profile" }},
+		{"wrong-check-id", func(f *wire, c map[string]any, p *githubwire.Packet) { c["id"] = fixtureCheckID + 1 }},
+		{"wrong-check-head", func(f *wire, c map[string]any, p *githubwire.Packet) { c["head_sha"] = strings.Repeat("e", 40) }},
+		{"wrong-external-id", func(f *wire, c map[string]any, p *githubwire.Packet) { c["external_id"] = "different-job" }},
+		{"wrong-request-id", func(f *wire, c map[string]any, p *githubwire.Packet) { p.Requests[0].RequestID = "actions:123456:2" }},
+		{"wrong-body-digest", func(f *wire, c map[string]any, p *githubwire.Packet) {
 			p.Requests[0].BodySHA256 = strings.Repeat("0", 64)
 		}},
-		{"duplicate-correlation", func(f *wire, c map[string]any, p *githubpull.Packet) { p.Requests = append(p.Requests, p.Requests[0]) }},
-		{"wrong-packet-job", func(f *wire, c map[string]any, p *githubpull.Packet) {
+		{"duplicate-correlation", func(f *wire, c map[string]any, p *githubwire.Packet) { p.Requests = append(p.Requests, p.Requests[0]) }},
+		{"wrong-packet-job", func(f *wire, c map[string]any, p *githubwire.Packet) {
 			p.JobID = "another-job"
 			c["external_id"] = p.JobID
 		}},
-		{"wrong-packet-attempt", func(f *wire, c map[string]any, p *githubpull.Packet) { p.AttemptID = "attempt-2" }},
-		{"missing-receipt", func(f *wire, c map[string]any, p *githubpull.Packet) { p.Receipt = nil }},
-		{"null-receipt", func(f *wire, c map[string]any, p *githubpull.Packet) { p.Receipt = json.RawMessage("null") }},
-		{"wrong-receipt-digest", func(f *wire, c map[string]any, p *githubpull.Packet) { p.ReceiptDigest = strings.Repeat("0", 64) }},
-		{"tampered-signed-payload", func(f *wire, c map[string]any, p *githubpull.Packet) {
+		{"wrong-packet-attempt", func(f *wire, c map[string]any, p *githubwire.Packet) { p.AttemptID = "attempt-2" }},
+		{"missing-receipt", func(f *wire, c map[string]any, p *githubwire.Packet) { p.Receipt = nil }},
+		{"null-receipt", func(f *wire, c map[string]any, p *githubwire.Packet) { p.Receipt = json.RawMessage("null") }},
+		{"wrong-receipt-digest", func(f *wire, c map[string]any, p *githubwire.Packet) { p.ReceiptDigest = strings.Repeat("0", 64) }},
+		{"tampered-signed-payload", func(f *wire, c map[string]any, p *githubwire.Packet) {
 			p.Receipt = bytes.Replace(p.Receipt, []byte(fixtureAttempt), []byte("attempt-9"), 1)
 		}},
-		{"unknown-key", func(f *wire, c map[string]any, p *githubpull.Packet) {
+		{"unknown-key", func(f *wire, c map[string]any, p *githubwire.Packet) {
 			p.Receipt = bytes.Replace(p.Receipt, []byte(`"key_id":"fixture-key"`), []byte(`"key_id":"revoked-key"`), 1)
 		}},
-		{"trailing-publication", func(f *wire, c map[string]any, p *githubpull.Packet) {
+		{"trailing-publication", func(f *wire, c map[string]any, p *githubwire.Packet) {
 			c["output"] = githubapi.CheckOutput{Text: packetText(t, *p) + "{}"}
 		}},
 	}

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/jerryfane/macserve/internal/daemonlog"
 	"github.com/jerryfane/macserve/internal/hostguard"
 	"github.com/jerryfane/macserve/internal/worker"
 	"github.com/jerryfane/macserve/internal/workerclient"
@@ -54,7 +55,7 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 	if done {
 		return status
 	}
-	stderr = daemonStderr(stderr)
+	stderr = daemonlog.Stderr(stderr)
 	if err := hostguard.Worker(path); err != nil {
 		fmt.Fprintf(stderr, "macserve worker: %v\n", err)
 		return 1

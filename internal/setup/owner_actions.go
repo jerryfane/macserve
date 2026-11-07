@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jerryfane/macserve/internal/controller"
+	"github.com/jerryfane/macserve/internal/controllerconfig"
 	"github.com/jerryfane/macserve/internal/hostguard"
 )
 
@@ -35,7 +35,7 @@ func (h *Helper) github(l *Ledger, loc LedgerLocation) (Response, error) {
 	if err != nil {
 		return Response{}, err
 	}
-	c, err := controller.LoadConfig(h.configPath("controller.json"))
+	c, err := controllerconfig.LoadConfig(h.configPath("controller.json"))
 	if err != nil {
 		return Response{}, fmt.Errorf("controller.json: %w", err)
 	}

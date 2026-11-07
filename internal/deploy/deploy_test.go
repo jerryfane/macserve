@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/macserve/internal/controller"
+	"github.com/jerryfane/macserve/internal/controllerconfig"
 	"github.com/jerryfane/macserve/internal/maintenance"
 	"github.com/jerryfane/macserve/internal/profiles"
 	"github.com/jerryfane/macserve/internal/workerclient"
@@ -285,7 +285,7 @@ func TestMaterialHasValidCryptoConsumerConfigsAndPrivateIntent(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	c, err := controller.LoadConfig(filepath.Join(stage, "controller.json"))
+	c, err := controllerconfig.LoadConfig(filepath.Join(stage, "controller.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -20,7 +20,7 @@ import (
 	"time"
 
 	"github.com/jerryfane/macserve/assets"
-	"github.com/jerryfane/macserve/internal/controller"
+	"github.com/jerryfane/macserve/internal/controllerconfig"
 	"github.com/jerryfane/macserve/internal/deploy"
 	"github.com/jerryfane/macserve/internal/onboarding"
 )
@@ -167,19 +167,19 @@ func (f *fakeHost) install(o deploy.Options, stdout, _ io.Writer) error {
 	return err
 }
 
-func (f *fakeHost) controllerConfig() controller.Config {
+func (f *fakeHost) controllerConfig() controllerconfig.Config {
 	root := f.h.Root
 	config := root + "/config"
-	return controller.Config{
+	return controllerconfig.Config{
 		Root: root + "/var/controller", Socket: root + "/var/controller/run/worker.sock", JobUID: 6202,
 		ProfilesFile: config + "/profiles.json", Listen: "100.64.0.10:8443", AllowedNetworks: []string{"100.64.0.0/10", "fd7a:115c:a1e0::/48"},
 		TLSCertificate: config + "/tls-cert.pem", TLSKey: root + "/var/controller/secrets/tls-key.pem", HealthFile: root + "/health/current.json",
 		PauseFile: config + "/owner.pause", OwnerUID: 501,
-		Receipt: controller.ReceiptConfig{KeyID: "k1", PrivateKeyFile: root + "/var/controller/secrets/receipt-key.pem", ServiceID: "svc", HostID: "host", Repositories: map[string]int64{"jdoe/myapp": 4242}},
+		Receipt: controllerconfig.ReceiptConfig{KeyID: "k1", PrivateKeyFile: root + "/var/controller/secrets/receipt-key.pem", ServiceID: "svc", HostID: "host", Repositories: map[string]int64{"jdoe/myapp": 4242}},
 	}
 }
 
-func (f *fakeHost) writeController(github *controller.GitHubConfig) {
+func (f *fakeHost) writeController(github *controllerconfig.GitHubConfig) {
 	c := f.controllerConfig()
 	c.GitHub = github
 	data, err := json.MarshalIndent(c, "", "  ")

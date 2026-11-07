@@ -11,9 +11,10 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/jerryfane/macserve/internal/controller"
+	"github.com/jerryfane/macserve/internal/controllerconfig"
 	"github.com/jerryfane/macserve/internal/doctor"
 	"github.com/jerryfane/macserve/internal/githubapi"
+	"github.com/jerryfane/macserve/internal/hostguard"
 	"github.com/jerryfane/macserve/internal/onboarding"
 	"github.com/jerryfane/macserve/internal/setup"
 )
@@ -96,7 +97,7 @@ func liveGitHub(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", errors.New("cannot read controller.json")
 	}
-	var config controller.Config
+	var config controllerconfig.Config
 	if err := json.Unmarshal(data, &config); err != nil {
 		return "", errors.New("invalid controller.json")
 	}
@@ -104,7 +105,7 @@ func liveGitHub(ctx context.Context) (string, error) {
 	if gh == nil || gh.AppID <= 0 {
 		return "", errors.New("no GitHub App is connected")
 	}
-	pem, err := privateKeyBytes(gh.PrivateKeyFile)
+	pem, err := hostguard.ReadPrivateKey(gh.PrivateKeyFile)
 	if err != nil {
 		return "", errors.New("cannot read the GitHub App key")
 	}

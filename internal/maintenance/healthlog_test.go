@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jerryfane/macserve/internal/controller"
+	"github.com/jerryfane/macserve/internal/health"
 )
 
 // Every invalid publication is logged with the controller blockers it
@@ -28,7 +28,7 @@ func TestHealthReportLogsInvalidHealthAndBlockerChanges(t *testing.T) {
 	}
 	var r healthReport
 	startup, _ := Evaluate(now.Add(-time.Second), Qualification{}, BoundaryEvidence{}, Observation{})
-	r.invalid(startup, controller.Health{}, "maintenance starting")
+	r.invalid(startup, health.Health{}, "maintenance starting")
 	r.valid(valid)
 	r.valid(valid)
 	pressured := valid
