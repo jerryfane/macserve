@@ -148,7 +148,7 @@ func (q *SystemQualifier) Health(ctx context.Context) ([]string, error) {
 }
 
 // app is the controller's GitHub App client, from controller.json and the
-// installed App key, as `macserve controller` builds it.
+// installed App key, as macserve-controller builds it.
 func (q *SystemQualifier) app() (*githubapi.Client, error) {
 	c, err := controllerconfig.LoadConfig(q.config("controller.json"))
 	if err != nil {
@@ -304,6 +304,6 @@ func verifyArchive(path string, want worker.Source) error {
 	return nil
 }
 
-func (q *SystemQualifier) CarryPreflight(ctx context.Context, proof []byte, target string) error {
+func (q *SystemQualifier) CarryPreflight(ctx context.Context, proof []byte, target qualification.CarryBinaries) error {
 	return qualification.CarryPreflight(ctx, proof, target)
 }

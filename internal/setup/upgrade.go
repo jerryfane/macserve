@@ -16,21 +16,24 @@ import (
 	"time"
 
 	"github.com/jerryfane/macserve/internal/deploy"
+	"github.com/jerryfane/macserve/internal/qualification"
 )
 
 // macserve upgrade (design NEW-USER-ONBOARDING.md §5, BOUNDARY-PRESERVING-
 // RELEASES.md §3-§6). The owner runs the downloaded new release; the
-// wizard verifies its bytes against the release's SHA256SUMS (or --sha256)
-// and starts it as the upgrade helper, `sudo NEW _setup-root --upgrade
-// --sha256 DIGEST`: the same root helper, lock, socket and peer-UID check
-// as macserve setup, serving only the upgrade verb. As root it repeats
-// every check, then, in this order:
+// wizard verifies its bytes and the macserve-controller beside it against
+// the release's SHA256SUMS (or --sha256 and --controller-sha256) and starts
+// it as the upgrade helper, `sudo NEW _setup-root --upgrade --sha256 DIGEST
+// --controller-sha256 DIGEST`: the same root helper, lock, socket and
+// peer-UID check as macserve setup, serving only the upgrade verb. As root
+// it repeats every check, then, in this order:
 //
 //	record    the running release in the setup ledger (resumable)
 //	pause     write owner.pause when it is absent
 //	(full)    remove the approval and the activation anchor
-//	replace   bin/macserve with its own verified bytes, atomically
-//	          (root:wheel 0755), and re-hash the installed file
+//	replace   bin/macserve-controller, then bin/macserve, with the
+//	          verified release bytes, each atomically (root:wheel 0755),
+//	          and re-hash each installed file
 //	(carry)   the N3 verbs with the new binary; any failure falls back
 //	          to the full path
 //	finish    record the effect; the full path resets the ledger to
@@ -38,9 +41,11 @@ import (
 //	          qualification (Full Disk Access is granted per build)
 //
 // Before anything changes it requires the stopped gate (the three services
-// booted out, no controller-UID process and no process running the
-// installed binary) and, unless the release is carried, no job GUI session.
-// It never stops, signals or logs out anything itself.
+// booted out, no controller-UID process and no process running an installed
+// binary) and, unless the release is carried, no job GUI session. It never
+// stops, signals or logs out anything itself. An installation from before
+// the controller binary (no bin/macserve-controller) upgrades by full
+// requalification only: a carry rebinds both binaries.
 
 // upgradeAbsent is the stopped-gate exit status of `launchctl print` for a
 // service that is not loaded.
@@ -81,14 +86,22 @@ type Process struct {
 
 func (h *Helper) installedPath() string { return filepath.Join(h.Root, "bin", "macserve") }
 
+func (h *Helper) installedControllerPath() string {
+	return filepath.Join(h.Root, "bin", deploy.ControllerBinaryName)
+}
+
 // checkUpgradeStart: the upgrade helper is the verified new release (not
-// the installed binary), on a Mac with a native setup ledger of this owner.
+// the installed binary) with its verified macserve-controller beside it,
+// on a Mac with a native setup ledger of this owner.
 func (h *Helper) checkUpgradeStart() error {
 	if _, err := h.selfBytes(); err != nil {
 		return err
 	}
 	if h.Executable == h.installedPath() {
 		return fmt.Errorf("macserve upgrade runs from the downloaded new release, not from %s", h.Executable)
+	}
+	if _, err := h.controllerBytes(); err != nil {
+		return err
 	}
 	l, _, err := h.load()
 	if err != nil {
@@ -115,6 +128,37 @@ func (h *Helper) selfBytes() ([]byte, error) {
 	return data, nil
 }
 
+// controllerBytes reads the macserve-controller beside the helper's
+// executable (the same release) and requires the verified digest.
+func (h *Helper) controllerBytes() ([]byte, error) {
+	if !sha256Hex.MatchString(h.ControllerSHA256) {
+		return nil, errors.New("expected macserve-controller digest missing")
+	}
+	path := h.controllerPath()
+	data, err := readBinary(path)
+	if err != nil {
+		return nil, fmt.Errorf("the release's macserve-controller must be beside %s: %w", h.Executable, err)
+	}
+	if got := digestHex(data); got != h.ControllerSHA256 {
+		return nil, fmt.Errorf("%s has SHA-256 %s, not the verified %s; nothing was changed", path, got, h.ControllerSHA256)
+	}
+	return data, nil
+}
+
+// installedControllerDigest is bin/macserve-controller's digest with
+// installedController's checks, or "" when it is absent (an installation
+// from before the controller binary).
+func (h *Helper) installedControllerDigest() (string, error) {
+	got, err := h.installedController()
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	return got, err
+}
+
+// releaseBytes are the verified bytes of the release being installed.
+type releaseBytes struct{ macserve, controller []byte }
+
 // installedBytes reads the installed binary with installedBinary's checks.
 func (h *Helper) installedBytes() ([]byte, error) {
 	if _, err := h.installedBinary(); err != nil {
@@ -130,12 +174,20 @@ func (h *Helper) upgrade(r Request) (Response, error) {
 	if err != nil {
 		return Response{}, err
 	}
+	controller, err := h.controllerBytes()
+	if err != nil {
+		return Response{}, err
+	}
+	bins := releaseBytes{macserve: self, controller: controller}
 	if r.SHA256 != h.SHA256 {
 		return Response{}, errors.New("the release digest you verified is not this helper's; nothing was changed")
 	}
 	if r.Sums != "" {
 		if listed, err := ReleaseDigest([]byte(r.Sums), ReleaseAsset); err != nil || listed != h.SHA256 {
 			return Response{}, errors.Join(errors.New("the SHA256SUMS you gave does not list this helper's digest; nothing was changed"), err)
+		}
+		if listed, err := ReleaseDigest([]byte(r.Sums), ControllerReleaseAsset); err != nil || listed != h.ControllerSHA256 {
+			return Response{}, errors.Join(errors.New("the SHA256SUMS you gave does not list this release's macserve-controller digest; nothing was changed"), err)
 		}
 	}
 	to, err := h.Version(self)
@@ -161,27 +213,42 @@ func (h *Helper) upgrade(r Request) (Response, error) {
 		return Response{}, err
 	}
 	installedSHA := digestHex(installed)
+	installedController, err := h.installedControllerDigest()
+	if err != nil {
+		return Response{}, err
+	}
 	if err := h.stoppedGate(ctx, e.ControllerUID); err != nil {
 		return Response{Items: h.stopCommands()}, err
 	}
 	if rel := l.PendingRelease(); rel != nil {
-		if rel.To != to || rel.SHA256 != h.SHA256 {
+		if rel.To != to || rel.SHA256 != h.SHA256 || rel.ControllerSHA256 != h.ControllerSHA256 {
 			return Response{}, fmt.Errorf("the upgrade to %s (%s) was interrupted; finish it first by running that release's macserve upgrade", rel.To, rel.SHA256)
 		}
-		if installedSHA != rel.FromSHA256 && installedSHA != rel.SHA256 {
-			return Response{}, fmt.Errorf("%s changed during the interrupted upgrade (SHA-256 %s); reconcile by hand", h.installedPath(), installedSHA)
+		// Either binary may be the old or the new one: the replace is
+		// per file, controller first. The new one is the release's own
+		// bytes; the old one may be signed (installed-binaries.json).
+		for _, b := range []struct{ name, path, onDisk, from, to string }{
+			{deploy.ControllerBinaryName, h.installedControllerPath(), installedController, rel.FromControllerSHA256, rel.ControllerSHA256},
+			{deploy.BinaryName, h.installedPath(), installedSHA, rel.FromSHA256, rel.SHA256},
+		} {
+			if b.onDisk == b.to {
+				continue
+			}
+			if got, err := h.releaseDigest(b.name, b.onDisk); err != nil || got != b.from {
+				return Response{}, errors.Join(fmt.Errorf("%s changed during the interrupted upgrade (SHA-256 %q); reconcile by hand", b.path, b.onDisk), err)
+			}
 		}
 		// An interrupted carry is not resumed: its sitting cannot be
 		// trusted, so it completes as full requalification. The build
 		// account may still be logged in from the carry, so setup must see
 		// it log out first; any other resume applies the guard again.
 		if rel.Carry {
-			return h.requalify(ctx, l, loc, self, e.ControllerUID, "the carry was interrupted; full requalification instead", true)
+			return h.requalify(ctx, l, loc, bins, e.ControllerUID, "the carry was interrupted; full requalification instead", true)
 		}
 		if err := h.jobSessionGuard(e.JobUID); err != nil {
 			return Response{}, err
 		}
-		return h.requalify(ctx, l, loc, self, e.ControllerUID, "", false)
+		return h.requalify(ctx, l, loc, bins, e.ControllerUID, "", false)
 	}
 	if _, _, err := l.Next(); err != nil {
 		return Response{}, err
@@ -189,8 +256,26 @@ func (h *Helper) upgrade(r Request) (Response, error) {
 	if l.record(StepInstall).Status != StatusDone {
 		return Response{}, errors.New("setup has not installed macserve yet; run macserve setup")
 	}
-	if want := l.InstalledBinary(); installedSHA != want {
-		return Response{}, fmt.Errorf("%s has SHA-256 %s, not %s, the one setup recorded; nothing was changed", h.installedPath(), installedSHA, want)
+	fromSHA, err := h.releaseDigest(deploy.BinaryName, installedSHA)
+	if err != nil {
+		return Response{}, err
+	}
+	fromController, err := h.releaseDigest(deploy.ControllerBinaryName, installedController)
+	if err != nil {
+		return Response{}, err
+	}
+	if want := l.InstalledBinary(); fromSHA != want {
+		return Response{}, fmt.Errorf("%s is release SHA-256 %s, not %s, the one setup recorded; nothing was changed", h.installedPath(), fromSHA, want)
+	}
+	if want := l.InstalledController(); fromController != want {
+		switch {
+		case want == "":
+			return Response{}, fmt.Errorf("%s exists (release SHA-256 %s), but setup installed no macserve-controller; nothing was changed", h.installedControllerPath(), fromController)
+		case fromController == "":
+			return Response{}, fmt.Errorf("%s is missing; setup installed it with SHA-256 %s; nothing was changed", h.installedControllerPath(), want)
+		default:
+			return Response{}, fmt.Errorf("%s is release SHA-256 %s, not %s, the one setup recorded; nothing was changed", h.installedControllerPath(), fromController, want)
+		}
 	}
 	from, err := h.Version(installed)
 	if err != nil {
@@ -206,7 +291,7 @@ func (h *Helper) upgrade(r Request) (Response, error) {
 	if err != nil {
 		return Response{}, fmt.Errorf("boot identity: %w", err)
 	}
-	next := Release{Status: StatusRunning, Started: h.Now().UTC(), Boot: boot, From: from, To: to, FromSHA256: installedSHA, SHA256: h.SHA256}
+	next := Release{Status: StatusRunning, Started: h.Now().UTC(), Boot: boot, From: from, To: to, FromSHA256: fromSHA, SHA256: h.SHA256, FromControllerSHA256: fromController, ControllerSHA256: h.ControllerSHA256}
 	carry, abandoned := false, ""
 	if r.Proof != "" {
 		next.CarryProofSHA256 = digestHex([]byte(r.Proof))
@@ -239,9 +324,9 @@ func (h *Helper) upgrade(r Request) (Response, error) {
 	}
 	h.audit(VerbUpgrade, "release "+from+" to "+to+" recorded", nil)
 	if !carry {
-		return h.requalify(ctx, l, loc, self, e.ControllerUID, abandoned, false)
+		return h.requalify(ctx, l, loc, bins, e.ControllerUID, abandoned, false)
 	}
-	return h.carry(ctx, l, loc, self, e, []byte(r.Proof))
+	return h.carry(ctx, l, loc, bins, e, []byte(r.Proof))
 }
 
 // ownAnchor refuses an approval this ledger did not record: an activation
@@ -266,8 +351,9 @@ func (h *Helper) ownAnchor(l *Ledger) error {
 }
 
 // stoppedGate requires the three services booted out, no controller-UID
-// process and no process running the installed binary. A live process
-// whose executable is unknown is refused too: it could be either.
+// process and no process running an installed binary (bin/macserve or
+// bin/macserve-controller). A live process whose executable is unknown is
+// refused too: it could be either.
 func (h *Helper) stoppedGate(ctx context.Context, controllerUID uint32) error {
 	var loaded []string
 	for _, label := range serviceLabels {
@@ -297,8 +383,8 @@ func (h *Helper) stoppedGate(ctx context.Context, controllerUID uint32) error {
 		if p.Executable == "" {
 			return fmt.Errorf("process %d (uid %d) has no readable executable path; the stopped gate cannot rule it out", p.PID, p.UID)
 		}
-		if p.UID == controllerUID || filepath.Clean(p.Executable) == h.installedPath() {
-			return fmt.Errorf("process %d (%s, uid %d) still runs as the controller or from %s; wait for it to exit", p.PID, p.Executable, p.UID, h.installedPath())
+		if exe := filepath.Clean(p.Executable); p.UID == controllerUID || exe == h.installedPath() || exe == h.installedControllerPath() {
+			return fmt.Errorf("process %d (%s, uid %d) still runs as the controller or from %s; wait for it to exit", p.PID, p.Executable, p.UID, filepath.Dir(h.installedPath()))
 		}
 	}
 	return nil
@@ -351,21 +437,23 @@ func (h *Helper) jobSessionGuard(jobUID uint32) error {
 // and before the job-session guard is skipped. It is at least as strict as
 // qualify carry's checks of the proof and the anchor: the proof is the
 // target release's SHA256SUMS-listed carry-proof.json and passes
-// qualification.ValidateCarryProof from the installed to the target binary
-// (CheckCarryProof); this ledger's own approval is complete; then
-// qualification.CarryPreflight (a schema-2 anchor equal to the live
-// configuration with the installed binary anchored, the carry cap, the
-// same proof check and the predecessor's activation check); the build
-// account's session is live (a carry keeps it); and worker-quiescent with
-// the installed binary passes.
+// qualification.ValidateCarryProof from the installed to the target
+// binaries, both bin/macserve and bin/macserve-controller (CheckCarryProof;
+// an installation without bin/macserve-controller is refused); this
+// ledger's own approval is complete; then qualification.CarryPreflight (a
+// schema-3 anchor equal to the live configuration with both installed
+// binaries anchored, the carry cap, the same proof check and the
+// predecessor's activation check); the build account's session is live (a
+// carry keeps it); and worker-quiescent with the installed binary passes.
 func (h *Helper) carryPossible(ctx context.Context, l *Ledger, jobUID uint32, proof, sums []byte, next Release) error {
-	if _, err := CheckCarryProof(proof, sums, next.From, next.FromSHA256, next.To, next.SHA256); err != nil {
+	target := qualification.CarryBinaries{Macserve: next.SHA256, Controller: next.ControllerSHA256}
+	if _, err := CheckCarryProof(proof, sums, next.From, next.To, qualification.CarryBinaries{Macserve: next.FromSHA256, Controller: next.FromControllerSHA256}, target); err != nil {
 		return err
 	}
 	if !ownApproval(l) || l.record(StepApproveAndStart).Status != StatusDone || l.AnchorSHA256() == "" {
 		return errors.New("this setup ledger has no completed approval to carry")
 	}
-	if err := h.Qualify.CarryPreflight(ctx, proof, next.SHA256); err != nil {
+	if err := h.Qualify.CarryPreflight(ctx, proof, target); err != nil {
 		return fmt.Errorf("qualify carry would refuse: %w", err)
 	}
 	live, err := h.jobGUILive(jobUID)
@@ -397,22 +485,44 @@ func (h *Helper) writePause() error {
 
 // staleTemp is a temporary file Store.writeFile leaves in bin/ when the
 // helper stopped between its create and its rename.
-var staleTemp = regexp.MustCompile(`^\.macserve\.[0-9a-f]{16}$`)
+var staleTemp = regexp.MustCompile(`^\.macserve(-controller)?\.[0-9a-f]{16}$`)
 
-// replaceBinary atomically replaces bin/macserve with data (root:wheel
-// 0755) and re-hashes the installed file. It first repeats the stopped
-// gate (closing the window since the first check) and removes temporaries
-// an interrupted replace left in bin/. It is a no-op when the file already
-// holds data.
-func (h *Helper) replaceBinary(ctx context.Context, controllerUID uint32, data []byte) error {
+// replaceBinaries replaces bin/macserve-controller, then bin/macserve,
+// with the verified release (replaceBinary each), then removes
+// config/installed-binaries.json: the installed bytes are now the
+// release's own, so the administrator's signed-digest map no longer holds
+// (absent, on-disk and release digests are equal).
+func (h *Helper) replaceBinaries(ctx context.Context, controllerUID uint32, bins releaseBytes) error {
+	if err := h.replaceBinary(ctx, controllerUID, h.installedControllerPath(), bins.controller, h.ControllerSHA256); err != nil {
+		return err
+	}
+	if err := h.replaceBinary(ctx, controllerUID, h.installedPath(), bins.macserve, h.SHA256); err != nil {
+		return err
+	}
+	path := h.configPath(installedBinariesName)
+	if err := os.Remove(path); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	h.audit(VerbUpgrade, "config/"+installedBinariesName+" removed", nil)
+	return syncDir(filepath.Dir(path))
+}
+
+// replaceBinary atomically replaces the installed binary path with data
+// (root:wheel 0755), which must have the verified digest verified, and
+// re-hashes the installed file. It first repeats the stopped gate (closing
+// the window since the first check) and removes temporaries an interrupted
+// replace left in bin/. It is a no-op when the file already holds data.
+func (h *Helper) replaceBinary(ctx context.Context, controllerUID uint32, path string, data []byte, verified string) error {
 	want := digestHex(data)
-	if want != h.SHA256 {
+	if want != verified {
 		return errors.New("the bytes to install are not the verified release")
 	}
-	if got, err := h.installedBinary(); err == nil && got == want {
+	if got, err := h.installedFile(path); err == nil && got == want {
 		return nil
 	}
-	dir := filepath.Dir(h.installedPath())
+	dir := filepath.Dir(path)
 	if err := h.Store.checkAncestors(dir); err != nil {
 		return err
 	}
@@ -430,17 +540,17 @@ func (h *Helper) replaceBinary(ctx context.Context, controllerUID uint32, data [
 			}
 		}
 	}
-	if err := h.Store.writeFile(h.installedPath(), data, 0o755); err != nil {
-		return fmt.Errorf("replace %s: %w", h.installedPath(), err)
+	if err := h.Store.writeFile(path, data, 0o755); err != nil {
+		return fmt.Errorf("replace %s: %w", path, err)
 	}
-	got, err := h.installedBinary()
+	got, err := h.installedFile(path)
 	if err != nil {
 		return err
 	}
 	if got != want {
-		return fmt.Errorf("%s has SHA-256 %s after the replace, not %s; reconcile by hand", h.installedPath(), got, want)
+		return fmt.Errorf("%s has SHA-256 %s after the replace, not %s; reconcile by hand", path, got, want)
 	}
-	h.audit(VerbUpgrade, "bin/macserve replaced", nil)
+	h.audit(VerbUpgrade, "bin/"+filepath.Base(path)+" replaced", nil)
 	return nil
 }
 
@@ -467,18 +577,19 @@ func (h *Helper) invalidate() error {
 }
 
 // requalify is the full path: owner.pause, the invalidation (before the
-// replace, so the new binary never meets the old approval), the replace
-// and the ledger reset to guided requalification. jobLogout records that
-// the job-session guard was not applied (a carry was attempted), so setup
-// must see the build account logged out before it counts a job login.
-func (h *Helper) requalify(ctx context.Context, l *Ledger, loc LedgerLocation, self []byte, controllerUID uint32, abandoned string, jobLogout bool) (Response, error) {
+// replace, so the new binaries never meet the old approval), the replace
+// of both binaries and the ledger reset to guided requalification.
+// jobLogout records that the job-session guard was not applied (a carry
+// was attempted), so setup must see the build account logged out before
+// it counts a job login.
+func (h *Helper) requalify(ctx context.Context, l *Ledger, loc LedgerLocation, bins releaseBytes, controllerUID uint32, abandoned string, jobLogout bool) (Response, error) {
 	if err := h.writePause(); err != nil {
 		return Response{}, fmt.Errorf("owner.pause: %w", err)
 	}
 	if err := h.invalidate(); err != nil {
 		return Response{}, fmt.Errorf("remove the approval: %w", err)
 	}
-	if err := h.replaceBinary(ctx, controllerUID, self); err != nil {
+	if err := h.replaceBinaries(ctx, controllerUID, bins); err != nil {
 		return Response{}, err
 	}
 	if err := l.FinishRelease(EffectRequalify, abandoned, "", jobLogout, h.Now()); err != nil {
@@ -498,20 +609,20 @@ func (h *Helper) requalify(ctx context.Context, l *Ledger, loc LedgerLocation, s
 	return Response{Done: true, Detail: detail, Items: []string{EffectRequalify}}, nil
 }
 
-// carry runs the N3 verbs with the new binary after the replace: the job
+// carry runs the N3 verbs with the new binaries after the replace: the job
 // probe self-test, qualify begin --carry (strict persistence rebind), the
 // job probe, tool evidence and qualify carry. Any failure falls back to the
 // full path, with the reason recorded and the build account's logout
 // required (the guard was not applied). Services are never started.
-func (h *Helper) carry(ctx context.Context, l *Ledger, loc LedgerLocation, self []byte, e deploy.Environment, proof []byte) (Response, error) {
+func (h *Helper) carry(ctx context.Context, l *Ledger, loc LedgerLocation, bins releaseBytes, e deploy.Environment, proof []byte) (Response, error) {
 	fallback := func(step string, cause error) (Response, error) {
 		h.audit(VerbUpgrade, "carry abandoned at "+step, cause)
-		return h.requalify(ctx, l, loc, self, e.ControllerUID, reason(fmt.Errorf("carry abandoned at %s: %w", step, cause)), true)
+		return h.requalify(ctx, l, loc, bins, e.ControllerUID, reason(fmt.Errorf("carry abandoned at %s: %w", step, cause)), true)
 	}
 	if err := h.writePause(); err != nil {
 		return fallback("owner.pause", err)
 	}
-	if err := h.replaceBinary(ctx, e.ControllerUID, self); err != nil {
+	if err := h.replaceBinaries(ctx, e.ControllerUID, bins); err != nil {
 		return fallback("replace", err)
 	}
 	proofPath := h.Store.staged(CarryProofAsset)

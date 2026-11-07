@@ -84,6 +84,9 @@ func TestLaunchDaemonsRemainDisabledAndSeparated(t *testing.T) {
 			}
 			args := fields["ProgramArguments"]
 			want := []string{"/Library/macserve/bin/macserve", role, "--config", "/Library/macserve/config/" + role + ".json"}
+			if role == "controller" {
+				want = []string{"/Library/macserve/bin/macserve-controller", "--config", "/Library/macserve/config/controller.json"}
+			}
 			if args.XMLName.Local != "array" || len(args.Children) != len(want) {
 				t.Fatal("invalid daemon arguments")
 			}

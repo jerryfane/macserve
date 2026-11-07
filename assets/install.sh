@@ -5,10 +5,10 @@ export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 umask 077
 fail() { printf 'REFUSED: %s\n' "$*" >&2; exit 1; }
 usage() {
-    printf '%s\n' 'Usage: /bin/bash install.sh --env PATH --binary PATH --sha256 LOWERCASE_HEX [--assets PATH] [--apply]' 'Default is a nonprivileged plan. Apply requires Darwin root and root-controlled reviewed env/assets. The expected digest must come from a trusted release channel.'
+    printf '%s\n' 'Usage: /bin/bash install.sh --env PATH --binary PATH --sha256 LOWERCASE_HEX --controller-binary PATH --controller-sha256 LOWERCASE_HEX [--assets PATH] [--apply]' 'Default is a nonprivileged plan. Apply requires Darwin root and root-controlled reviewed env/assets. The expected digests must come from a trusted release channel.'
 }
 apply=false
-env_file='' binary='' sha='' assets=''
+env_file='' binary='' sha='' controller_binary='' controller_sha='' assets=''
 seen=' '
 while [ "$#" -gt 0 ]; do
     flag=$1; shift
@@ -19,7 +19,7 @@ while [ "$#" -gt 0 ]; do
             fi
             usage; exit 0 ;;
         --apply) [ "$apply" = false ] || fail 'duplicate --apply'; apply=true; continue ;;
-        --env|--binary|--sha256|--assets) ;;
+        --env|--binary|--sha256|--controller-binary|--controller-sha256|--assets) ;;
         *) fail "unknown option: $flag" ;;
     esac
     case "$seen" in *" $flag "*) fail "duplicate option: $flag" ;; esac
@@ -30,13 +30,16 @@ while [ "$#" -gt 0 ]; do
     case "$flag" in
         --env) env_file=$value ;; --binary) binary=$value ;;
         --sha256) sha=$value ;; --assets) assets=$value ;;
+        --controller-binary) controller_binary=$value ;;
+        --controller-sha256) controller_sha=$value ;;
     esac
 done
-if [ -z "$env_file" ] || [ -z "$binary" ] || [ -z "$sha" ]; then
+if [ -z "$env_file" ] || [ -z "$binary" ] || [ -z "$sha" ] || [ -z "$controller_binary" ] || [ -z "$controller_sha" ]; then
     usage >&2
     exit 2
 fi
 [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || fail 'SHA256 must be 64 lowercase hexadecimal characters'
+[[ "$controller_sha" =~ ^[0-9a-f]{64}$ ]] || fail 'controller SHA256 must be 64 lowercase hexadecimal characters'
 if [ "$apply" = true ]; then
     [ "$(/usr/bin/uname -s)" = Darwin ] || fail '--apply requires Darwin'
     if [ "$EUID" -ne 0 ] || [ "$(/usr/bin/id -ru)" -ne 0 ]; then
@@ -46,10 +49,13 @@ fi
 [ -n "$assets" ] || assets=$(CDPATH='' cd -- "$(/usr/bin/dirname -- "$0")" && pwd -P)
 case "$env_file" in /*) ;; *) env_file="$PWD/$env_file" ;; esac
 case "$binary" in /*) ;; *) binary="$PWD/$binary" ;; esac
+case "$controller_binary" in /*) ;; *) controller_binary="$PWD/$controller_binary" ;; esac
 case "$assets" in /*) ;; *) assets="$PWD/$assets" ;; esac
-if [ ! -f "$binary" ] || [ -L "$binary" ]; then
-    fail 'binary must be a nonsymlink regular file'
-fi
+for file in "$binary" "$controller_binary"; do
+    if [ ! -f "$file" ] || [ -L "$file" ]; then
+        fail 'binary must be a nonsymlink regular file'
+    fi
+done
 [ -x /usr/bin/shasum ] || fail 'required /usr/bin/shasum unavailable'
 if [ "$EUID" -eq 0 ]; then
     [ "$(/usr/bin/uname -s)" = Darwin ] || fail 'run non-Darwin plans without root'
@@ -76,19 +82,24 @@ fi
 trap '/bin/rm -rf -- "$stage"' EXIT
 /bin/chmod 0700 "$stage"
 # Bound a changing source too: never copy an arbitrary-sized file as root.
-if ! /bin/dd if="$binary" of="$stage/macserve" bs=1048576 count=257 2>"$stage/copy.log"; then
-    /bin/cat "$stage/copy.log" >&2
-    fail 'binary copy failed; binary not executed'
-fi
-binary_size=$(/usr/bin/wc -c < "$stage/macserve")
-(( binary_size > 0 && binary_size <= 268435456 )) || fail 'binary must be 1..256 MiB'
-/bin/chmod 0600 "$stage/macserve"
-actual=$(/usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/shasum -a 256 "$stage/macserve")
-actual=${actual%% *}
-[ "$actual" = "$sha" ] || fail 'binary SHA-256 mismatch; binary not executed'
+# stage_binary SOURCE NAME SHA copies SOURCE to $stage/NAME and verifies it.
+stage_binary() {
+    if ! /bin/dd if="$1" of="$stage/$2" bs=1048576 count=257 2>"$stage/copy.log"; then
+        /bin/cat "$stage/copy.log" >&2
+        fail "$2 copy failed; binary not executed"
+    fi
+    binary_size=$(/usr/bin/wc -c < "$stage/$2")
+    (( binary_size > 0 && binary_size <= 268435456 )) || fail "$2 must be 1..256 MiB"
+    /bin/chmod 0600 "$stage/$2"
+    actual=$(/usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/shasum -a 256 "$stage/$2")
+    actual=${actual%% *}
+    [ "$actual" = "$3" ] || fail "$2 SHA-256 mismatch; binary not executed"
+}
+stage_binary "$binary" macserve "$sha"
+stage_binary "$controller_binary" macserve-controller "$controller_sha"
 /bin/chmod 0700 "$stage/macserve"
 if [ "$apply" = true ]; then
-    /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin GOMAXPROCS=2 HOME=/private/var/root "$stage/macserve" deploy-install --env "$env_file" --binary "$stage/macserve" --sha256 "$sha" --assets "$assets" --apply
+    /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin GOMAXPROCS=2 HOME=/private/var/root "$stage/macserve" deploy-install --env "$env_file" --binary "$stage/macserve" --sha256 "$sha" --controller-binary "$stage/macserve-controller" --controller-sha256 "$controller_sha" --assets "$assets" --apply
 else
-    /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin GOMAXPROCS=2 "$stage/macserve" deploy-install --env "$env_file" --binary "$stage/macserve" --sha256 "$sha" --assets "$assets"
+    /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin GOMAXPROCS=2 "$stage/macserve" deploy-install --env "$env_file" --binary "$stage/macserve" --sha256 "$sha" --controller-binary "$stage/macserve-controller" --controller-sha256 "$controller_sha" --assets "$assets"
 fi

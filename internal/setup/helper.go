@@ -64,6 +64,12 @@ type Helper struct {
 	// SHA256 is the digest the wizard expects of the macserve binary that
 	// install stages and deploy-install verifies.
 	SHA256 string
+	// ControllerSHA256 is the digest the wizard expects of the
+	// macserve-controller beside Executable, from the same release: install
+	// and upgrade install it as bin/macserve-controller. Empty once install
+	// is done (the helper is then the installed binary and checks the
+	// installed controller against the ledger).
+	ControllerSHA256 string
 	// Executable is the running macserve binary, copied for install.
 	Executable string
 	// Assets are the deploy-install assets at their relative paths.
@@ -195,10 +201,12 @@ func (h *Helper) CheckStart() error {
 
 // checkExecutable re-hashes the helper's own executable and refuses a
 // digest other than SHA256, the digest the owner verified before sudo
-// (from the release's SHA256SUMS or --sha256). Once install is done the
-// helper must be the installed /Library/macserve/bin/macserve and SHA256
-// the digest install recorded, so a resumed setup runs only the binary
-// deploy-install installed.
+// (from the release's SHA256SUMS or --sha256). Before install it also
+// requires the macserve-controller beside it to have ControllerSHA256.
+// Once install is done the helper must be the installed
+// /Library/macserve/bin/macserve and SHA256 the digest install recorded,
+// and bin/macserve-controller the one recorded with it, so a resumed setup
+// runs only the binaries deploy-install (or the last upgrade) installed.
 func (h *Helper) checkExecutable(l *Ledger) error {
 	if !sha256Hex.MatchString(h.SHA256) {
 		return errors.New("expected macserve digest missing")
@@ -211,13 +219,33 @@ func (h *Helper) checkExecutable(l *Ledger) error {
 		return fmt.Errorf("%s has SHA-256 %s, not the verified %s; nothing was changed", h.Executable, got, h.SHA256)
 	}
 	if l == nil || l.record(StepInstall).Status != StatusDone {
-		return nil
+		_, err := h.controllerBytes()
+		return err
 	}
 	if h.Executable != filepath.Join(h.Root, "bin", "macserve") {
 		return fmt.Errorf("after install the setup helper must be %s/bin/macserve, not %s", h.Root, h.Executable)
 	}
-	if want := l.InstalledBinary(); h.SHA256 != want {
-		return fmt.Errorf("the installed macserve has SHA-256 %s, not %s, the one install recorded (or the last macserve upgrade)", h.SHA256, want)
+	// The ledger records release digests; signed installed bytes map to
+	// them through installed-binaries.json.
+	release, err := h.releaseDigest(deploy.BinaryName, h.SHA256)
+	if err != nil {
+		return err
+	}
+	if want := l.InstalledBinary(); release != want {
+		return fmt.Errorf("the installed macserve is release SHA-256 %s, not %s, the one install recorded (or the last macserve upgrade)", release, want)
+	}
+	if want := l.InstalledController(); want != "" {
+		onDisk, err := h.installedController()
+		if err != nil {
+			return fmt.Errorf("macserve-controller: %w", err)
+		}
+		got, err := h.releaseDigest(deploy.ControllerBinaryName, onDisk)
+		if err != nil {
+			return err
+		}
+		if got != want {
+			return fmt.Errorf("the installed macserve-controller is release SHA-256 %s, not %s, the one install recorded (or the last macserve upgrade)", got, want)
+		}
 	}
 	return nil
 }

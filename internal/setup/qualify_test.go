@@ -188,11 +188,12 @@ func (q *fakeQualifier) ActivationCheck(context.Context) error { return q.call("
 // CarryPreflight stands in for qualification.CarryPreflight: the proof
 // must pass qualification.ValidateCarryProof to target from the binary
 // the fake anchor binds (the installed one at approval).
-func (q *fakeQualifier) CarryPreflight(_ context.Context, proof []byte, target string) error {
+func (q *fakeQualifier) CarryPreflight(_ context.Context, proof []byte, target qualification.CarryBinaries) error {
 	if err := q.call("CarryPreflight"); err != nil {
 		return err
 	}
-	_, err := qualification.ValidateCarryProof(proof, digestHex([]byte("macserve binary")), target)
+	from := qualification.CarryBinaries{Macserve: digestHex([]byte("macserve binary")), Controller: digestHex([]byte(controllerBinary))}
+	_, err := qualification.ValidateCarryProof(proof, from, target)
 	return err
 }
 

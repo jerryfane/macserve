@@ -34,7 +34,7 @@ func TestOnboardingCommandsHelpExitZero(t *testing.T) {
 // TestOnboardingNamesDoNotShadowCommands: the hook runs only in the
 // default branch, and no onboarding name equals an existing command.
 func TestOnboardingNamesDoNotShadowCommands(t *testing.T) {
-	for _, existing := range []string{"controller", "worker", "deploy-install", "qualify", "wait", "maintenance-observe", "worker-persistence", "worker-reset"} {
+	for _, existing := range []string{"worker", "deploy-install", "qualify", "wait", "maintenance-observe", "worker-persistence", "worker-reset"} {
 		if _, ok := onboardingCommand(existing); ok {
 			t.Errorf("onboarding table shadows %s", existing)
 		}

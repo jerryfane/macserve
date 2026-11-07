@@ -16,10 +16,13 @@ import (
 )
 
 const (
-	self      = "/Users/jdoe/Downloads/macserve-darwin-arm64"
-	installed = "macserve release v0.1.0"
-	target    = "macserve release v0.2.0"
-	env       = "CONTROLLER_USER=macservectl\nCONTROLLER_UID=6201\nCONTROLLER_GID=6201\nJOB_USER=macservejob\nJOB_UID=6202\nJOB_GID=6202\nOWNER_USER=jdoe\nOWNER_UID=501\nTAILNET_IP=100.64.0.10\nPORT=8443\nPROTECTED_PORTS=8443\nHOST_ADDRESSES=100.64.0.10\nDEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer\nREPOSITORIES=jdoe/myapp:4242\n"
+	self                = "/opt/homebrew/bin/macserve"
+	selfController      = "/opt/homebrew/bin/macserve-controller"
+	installed           = "macserve release v0.1.0"
+	installedController = "macserve-controller release v0.1.0"
+	target              = "macserve release v0.2.0"
+	targetController    = "macserve-controller release v0.2.0"
+	env                 = "CONTROLLER_USER=macservectl\nCONTROLLER_UID=6201\nCONTROLLER_GID=6201\nJOB_USER=macservejob\nJOB_UID=6202\nJOB_GID=6202\nOWNER_USER=jdoe\nOWNER_UID=501\nTAILNET_IP=100.64.0.10\nPORT=8443\nPROTECTED_PORTS=8443\nHOST_ADDRESSES=100.64.0.10\nDEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer\nREPOSITORIES=jdoe/myapp:4242\n"
 )
 
 func sum(s string) string {
@@ -37,7 +40,7 @@ type host struct {
 
 func newHost() *host {
 	return &host{
-		files: map[string]string{self: target, Root + "/bin/macserve": installed, Root + "/config/deploy.env": env, setup.LedgerPath: "{}", Root + "/config/activation-anchor.json": "{}"},
+		files: map[string]string{self: target, selfController: targetController, Root + "/bin/macserve": installed, Root + "/bin/macserve-controller": installedController, Root + "/config/deploy.env": env, setup.LedgerPath: "{}", Root + "/config/activation-anchor.json": "{}"},
 		ok:    map[string]bool{},
 	}
 }
@@ -72,9 +75,9 @@ func (h *host) probe() Probe {
 
 func proof() []byte {
 	p := qualification.CarryProof{
-		Schema: 1, Kind: "release-carry-proof", ReleaseEffect: "QualificationCarried",
-		From:                 qualification.CarryRelease{Tag: "v0.1.0", Commit: "c1", BinarySHA256: sum(installed)},
-		To:                   qualification.CarryRelease{Tag: "v0.2.0", Commit: "c2", BinarySHA256: sum(target)},
+		Schema: 2, Kind: "release-carry-proof", ReleaseEffect: "QualificationCarried",
+		From:                 qualification.CarryRelease{Tag: "v0.1.0", Commit: "c1", BinarySHA256: sum(installed), ControllerBinarySHA256: sum(installedController)},
+		To:                   qualification.CarryRelease{Tag: "v0.2.0", Commit: "c2", BinarySHA256: sum(target), ControllerBinarySHA256: sum(targetController)},
 		BoundaryManifestBlob: "b", ClassesPresent: []string{"T"},
 		Changed: []qualification.CarryChange{{Path: "docs/install.md", Class: "T", Old: []string{"100644", "a"}, New: []string{"100644", "b"}}},
 	}
@@ -83,7 +86,7 @@ func proof() []byte {
 }
 
 func sums(proof []byte) []byte {
-	s := sum(target) + "  " + setup.ReleaseAsset + "\n"
+	s := sum(target) + "  " + setup.ReleaseAsset + "\n" + sum(targetController) + "  " + setup.ControllerReleaseAsset + "\n"
 	if proof != nil {
 		s += sum(string(proof)) + "  " + setup.CarryProofAsset + "\n"
 	}
@@ -106,7 +109,7 @@ func TestPlanFullRequalification(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 	var b bytes.Buffer
-	if err := Write(&b, r); err != nil || !strings.Contains(b.String(), "reset the setup ledger to owner-actions") || !strings.Contains(b.String(), "remove the approval") {
+	if err := Write(&b, r); err != nil || !strings.Contains(b.String(), "reset the setup ledger to owner-actions") || !strings.Contains(b.String(), "remove the approval") || !strings.Contains(b.String(), "bin/macserve-controller, then") {
 		t.Fatalf("%v\n%s", err, b.String())
 	}
 	// Only doctor's read-only commands, and only reads.
@@ -123,13 +126,19 @@ func TestPlanRefusals(t *testing.T) {
 		prepare  func(h *host, o *Options)
 	}{
 		{"digest mismatch", "release.digest", func(h *host, o *Options) { h.files[self] = "tampered" }},
+		{"controller mismatch", "release.digest", func(h *host, o *Options) { h.files[selfController] = "tampered" }},
+		{"controller not beside", "release.digest", func(h *host, o *Options) { delete(h.files, selfController) }},
+		{"sums lacks controller", "release.digest", func(h *host, o *Options) { o.SHA256Sums = []byte(sum(target) + "  " + setup.ReleaseAsset + "\n") }},
+		{"signed without map", "release.installed", func(h *host, o *Options) {
+			h.files[Root+"/config/installed-binaries.json"] = "{}"
+		}},
 		{"sums lacks binary", "release.digest", func(h *host, o *Options) { o.SHA256Sums = []byte(sum("x") + "  other\n") }},
 		{"wrong tag", "release.version", func(h *host, o *Options) { o.Tag = "v0.3.0" }},
 		{"same version", "release.version", func(h *host, o *Options) { h.files[Root+"/bin/macserve"] = target; h.files[self] = target }},
 		{"downgrade", "release.version", func(h *host, o *Options) { h.files[Root+"/bin/macserve"] = "macserve release v0.3.0" }},
 		{"dev build", "release.version", func(h *host, o *Options) {
 			h.files[self] = "dev"
-			o.SHA256Sums = []byte(sum("dev") + "  " + setup.ReleaseAsset + "\n")
+			o.SHA256Sums = []byte(sum("dev") + "  " + setup.ReleaseAsset + "\n" + sum(targetController) + "  " + setup.ControllerReleaseAsset + "\n")
 		}},
 		{"no ledger", "setup.ledger", func(h *host, o *Options) { delete(h.files, setup.LedgerPath) }},
 		{"service loaded", "svc.stopped", func(h *host, o *Options) { h.ok["/bin/launchctl print system/org.macserve.worker"] = true }},
@@ -163,7 +172,9 @@ func TestPlanCarry(t *testing.T) {
 		options func() Options
 	}{
 		{"not in sums", func() Options { return Options{SHA256Sums: sums(nil), CarryProof: p} }},
-		{"no sums", func() Options { return Options{SHA256: sum(target), CarryProof: p} }},
+		{"no sums", func() Options {
+			return Options{SHA256: sum(target), ControllerSHA256: sum(targetController), CarryProof: p}
+		}},
 		{"other bytes", func() Options {
 			q := append([]byte{}, p...)
 			q = append(q, ' ')
@@ -182,6 +193,13 @@ func TestPlanCarry(t *testing.T) {
 		if r.Carry || status(r, "release.carry") != Warn {
 			t.Errorf("%s: %+v", tc.name, r.Checks)
 		}
+	}
+	// An installation from before the controller binary: no carry.
+	pre := newHost()
+	pre.ok["/bin/launchctl print gui/6202"] = true
+	delete(pre.files, Root+"/bin/macserve-controller")
+	if r := Plan(context.Background(), pre.probe(), Options{SHA256Sums: sums(p), CarryProof: p}); r.Carry || !r.Ready() || status(r, "release.carry") != Warn || status(r, "release.installed") != Info {
+		t.Fatalf("pre-split carry: %+v", r.Checks)
 	}
 	// No live session: no carry.
 	delete(h.ok, "/bin/launchctl print gui/6202")

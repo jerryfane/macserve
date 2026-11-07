@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jerryfane/macserve/internal/deploy"
 	"github.com/jerryfane/macserve/internal/qualification"
 )
 
@@ -31,7 +32,10 @@ type upgradeHost struct {
 	atReplace []bool
 }
 
-const newRelease = "macserve binary release v0.2.0"
+const (
+	newRelease    = "macserve binary release v0.2.0"
+	newController = "macserve-controller binary release v0.2.0"
+)
 
 // fakeVersion stands in for ReleaseVersion: the installed test binary is
 // v0.1.0, a downloaded one names its release.
@@ -52,9 +56,16 @@ func newUpgradeHost(t *testing.T) *upgradeHost {
 	f.through(StepFirstBuild)
 	f.loaded = map[string]bool{}
 	u := &upgradeHost{fakeHost: f, execErr: map[string]error{}}
-	exe := filepath.Join(f.top, "macserve-v0.2.0")
+	// The downloaded release: macserve with its macserve-controller beside
+	// it, as Homebrew installs them.
+	dir := filepath.Join(f.top, "v0.2.0")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(dir, "macserve")
 	writeRoot(t, exe, []byte(newRelease), 0o755)
-	f.h.Executable, f.h.SHA256, f.h.Upgrade = exe, digestHex([]byte(newRelease)), true
+	writeRoot(t, filepath.Join(dir, "macserve-controller"), []byte(newController), 0o755)
+	f.h.Executable, f.h.SHA256, f.h.ControllerSHA256, f.h.Upgrade = exe, digestHex([]byte(newRelease)), digestHex([]byte(newController)), true
 	f.h.Version = fakeVersion
 	f.h.Processes = func() ([]Process, error) {
 		u.procCalls++
@@ -119,9 +130,9 @@ func (u *upgradeHost) installed() string {
 
 func (u *upgradeHost) proof() string {
 	p := qualification.CarryProof{
-		Schema: 1, Kind: "release-carry-proof", ReleaseEffect: "QualificationCarried",
-		From:                 qualification.CarryRelease{Tag: "v0.1.0", Commit: "c1", BinarySHA256: digestHex([]byte("macserve binary"))},
-		To:                   qualification.CarryRelease{Tag: "v0.2.0", Commit: "c2", BinarySHA256: u.h.SHA256},
+		Schema: 2, Kind: "release-carry-proof", ReleaseEffect: "QualificationCarried",
+		From:                 qualification.CarryRelease{Tag: "v0.1.0", Commit: "c1", BinarySHA256: digestHex([]byte("macserve binary")), ControllerBinarySHA256: digestHex([]byte(controllerBinary))},
+		To:                   qualification.CarryRelease{Tag: "v0.2.0", Commit: "c2", BinarySHA256: u.h.SHA256, ControllerBinarySHA256: u.h.ControllerSHA256},
 		BoundaryManifestBlob: "b", ClassesPresent: []string{"T"},
 		Changed: []qualification.CarryChange{{Path: "docs/install.md", Class: "T", Old: []string{"100644", "a"}, New: []string{"100644", "b"}}},
 	}
@@ -142,7 +153,7 @@ func (u *upgradeHost) gui() []Process {
 
 // sums is the release's SHA256SUMS listing the binary and proof.
 func (u *upgradeHost) sums(proof string) string {
-	return u.h.SHA256 + "  " + ReleaseAsset + "\n" + digestHex([]byte(proof)) + "  " + CarryProofAsset + "\n"
+	return u.h.SHA256 + "  " + ReleaseAsset + "\n" + u.h.ControllerSHA256 + "  " + ControllerReleaseAsset + "\n" + digestHex([]byte(proof)) + "  " + CarryProofAsset + "\n"
 }
 
 // carryRequest is an upgrade request with the release's proof and sums.
@@ -210,8 +221,11 @@ func (u *upgradeHost) wantRequalified(abandoned string) {
 	if !strings.Contains(l.Releases[0].CarryAbandoned, abandoned) || (abandoned == "") != (l.Releases[0].CarryAbandoned == "") {
 		u.t.Fatalf("carry abandoned %q, want %q", l.Releases[0].CarryAbandoned, abandoned)
 	}
-	if l.Approval != nil || l.InstalledBinary() != u.h.SHA256 {
-		u.t.Fatalf("approval %+v installed %s", l.Approval, l.InstalledBinary())
+	if l.Approval != nil || l.InstalledBinary() != u.h.SHA256 || l.InstalledController() != u.h.ControllerSHA256 {
+		u.t.Fatalf("approval %+v installed %s %s", l.Approval, l.InstalledBinary(), l.InstalledController())
+	}
+	if got := u.installedController(); got != u.h.ControllerSHA256 {
+		u.t.Fatalf("installed controller %s, want %s", got, u.h.ControllerSHA256)
 	}
 	u.wantNext(StepOwnerActions)
 	for _, s := range RequalifySteps {
@@ -355,21 +369,28 @@ func TestUpgradeVerbOnlyOnUpgradeHelper(t *testing.T) {
 func TestUpgradeReplaceIsAtomicAndRechecked(t *testing.T) {
 	u := newUpgradeHost(t)
 	ctx := context.Background()
-	if err := u.h.replaceBinary(ctx, 6201, []byte("other")); err == nil {
+	if err := u.h.replaceBinary(ctx, 6201, u.h.installedPath(), []byte("other"), u.h.SHA256); err == nil {
 		t.Fatal("replaced with unverified bytes")
 	}
 	stale := filepath.Join(filepath.Dir(u.h.installedPath()), ".macserve.0123456789abcdef")
 	writeRoot(t, stale, []byte("partial"), 0o600)
 	u.loaded["org.macserve.worker"] = true
-	if err := u.h.replaceBinary(ctx, 6201, []byte(newRelease)); err == nil || u.installed() == u.h.SHA256 {
+	if err := u.h.replaceBinary(ctx, 6201, u.h.installedPath(), []byte(newRelease), u.h.SHA256); err == nil || u.installed() == u.h.SHA256 {
 		t.Fatalf("replace passed a loaded service: %v", err)
 	}
 	u.loaded = map[string]bool{}
-	if err := u.h.replaceBinary(ctx, 6201, []byte(newRelease)); err != nil {
+	if err := u.h.replaceBinary(ctx, 6201, u.h.installedPath(), []byte(newRelease), u.h.SHA256); err != nil {
 		t.Fatal(err)
 	}
 	if got := u.installed(); got != u.h.SHA256 {
 		t.Fatalf("installed %s", got)
+	}
+	writeRoot(t, filepath.Join(filepath.Dir(u.h.installedPath()), ".macserve-controller.0123456789abcdef"), []byte("partial"), 0o600)
+	if err := u.h.replaceBinaries(ctx, 6201, releaseBytes{macserve: []byte(newRelease), controller: []byte(newController)}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := u.h.installedController(); err != nil || got != u.h.ControllerSHA256 {
+		t.Fatalf("installed controller %s %v", got, err)
 	}
 	entries, _ := os.ReadDir(filepath.Dir(u.h.installedPath()))
 	for _, e := range entries {
@@ -429,7 +450,7 @@ func TestUpgradeResumesInterrupted(t *testing.T) {
 			u := newUpgradeHost(t)
 			l := u.ledger()
 			boot, _ := u.h.Boot()
-			rel := Release{Status: StatusRunning, Started: u.h.Now(), Boot: boot, From: "v0.1.0", To: "v0.2.0", FromSHA256: u.installed(), SHA256: u.h.SHA256}
+			rel := Release{Status: StatusRunning, Started: u.h.Now(), Boot: boot, From: "v0.1.0", To: "v0.2.0", FromSHA256: u.installed(), SHA256: u.h.SHA256, FromControllerSHA256: u.installedController(), ControllerSHA256: u.h.ControllerSHA256}
 			if tc.carry {
 				rel.Carry, rel.CarryProofSHA256 = true, digestHex([]byte(u.proof()))
 			}
@@ -443,7 +464,12 @@ func TestUpgradeResumesInterrupted(t *testing.T) {
 				t.Fatalf("setup not blocked: %v", err)
 			}
 			if tc.swapped {
-				writeRoot(t, u.h.installedPath(), []byte(newRelease), 0o755)
+				// The controller is replaced first: interrupted between
+				// the two replaces.
+				writeRoot(t, u.h.installedControllerPath(), []byte(newController), 0o755)
+				if tc.name != "after swap" {
+					writeRoot(t, u.h.installedPath(), []byte(newRelease), 0o755)
+				}
 			}
 			if tc.live {
 				u.procs = u.gui()
@@ -482,16 +508,35 @@ func TestUpgradeResumesInterrupted(t *testing.T) {
 	u := newUpgradeHost(t)
 	l := u.ledger()
 	boot, _ := u.h.Boot()
-	if err := l.BeginRelease(Release{Status: StatusRunning, Started: u.h.Now(), Boot: boot, From: "v0.1.0", To: "v0.2.0", FromSHA256: u.installed(), SHA256: u.h.SHA256}); err != nil {
+	if err := l.BeginRelease(Release{Status: StatusRunning, Started: u.h.Now(), Boot: boot, From: "v0.1.0", To: "v0.2.0", FromSHA256: u.installed(), SHA256: u.h.SHA256, FromControllerSHA256: u.installedController(), ControllerSHA256: u.h.ControllerSHA256}); err != nil {
 		t.Fatal(err)
 	}
 	if err := u.h.Store.Save(l, LedgerInstalled); err != nil {
 		t.Fatal(err)
 	}
+	installed := u.installed()
 	writeRoot(t, u.h.installedPath(), []byte("macserve binary release v0.1.5"), 0o755)
 	if r := u.upgrade(Request{}); !strings.Contains(r.Error, "changed during the interrupted upgrade") {
 		t.Fatalf("%+v", r)
 	}
+	// So is a controller changed during the interruption.
+	writeRoot(t, u.h.installedPath(), []byte("macserve binary"), 0o755)
+	if u.installed() != installed {
+		t.Fatal("fixture")
+	}
+	writeRoot(t, u.h.installedControllerPath(), []byte("another controller"), 0o755)
+	if r := u.upgrade(Request{}); !strings.Contains(r.Error, "macserve-controller changed during the interrupted upgrade") {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func (u *upgradeHost) installedController() string {
+	u.t.Helper()
+	d, err := u.h.installedController()
+	if err != nil {
+		u.t.Fatal(err)
+	}
+	return d
 }
 
 func TestUpgradeCarry(t *testing.T) {
@@ -587,7 +632,9 @@ func TestUpgradeCarryRefused(t *testing.T) {
 		{"unknown field", func(u *upgradeHost, r *Request) {
 			u.reproof(r, func(s string) string { return strings.Replace(s, `{`, `{"extra":1,`, 1) })
 		}, "carry proof"},
-		{"proof not in SHA256SUMS", func(u *upgradeHost, r *Request) { r.Sums = strings.Split(r.Sums, "\n")[0] + "\n" }, "publishes no carry-proof.json"},
+		{"proof not in SHA256SUMS", func(u *upgradeHost, r *Request) {
+			r.Sums = strings.Join(strings.Split(r.Sums, "\n")[:2], "\n") + "\n"
+		}, "publishes no carry-proof.json"},
 		{"proof not the asset", func(u *upgradeHost, r *Request) { r.Proof += " " }, "not the release's carry-proof.json"},
 		{"qualify carry pre-check", func(u *upgradeHost, r *Request) { u.q.errs["CarryPreflight"] = errors.New("anchor schema 1") }, "qualify carry would refuse"},
 		{"not quiescent", func(u *upgradeHost, r *Request) { u.quiescent = 1 }, "worker-quiescent"},
@@ -687,7 +734,7 @@ func TestReleaseChain(t *testing.T) {
 	}
 	l := u.ledger()
 	boot, _ := u.h.Boot()
-	next := Release{Status: StatusRunning, Started: u.h.Now(), Boot: boot, From: "v0.2.0", To: "v0.3.0", FromSHA256: strings.Repeat("e", 64), SHA256: strings.Repeat("f", 64)}
+	next := Release{Status: StatusRunning, Started: u.h.Now(), Boot: boot, From: "v0.2.0", To: "v0.3.0", FromSHA256: strings.Repeat("e", 64), SHA256: strings.Repeat("f", 64), FromControllerSHA256: u.h.ControllerSHA256, ControllerSHA256: strings.Repeat("c", 64)}
 	if err := l.BeginRelease(next); err == nil || !strings.Contains(err.Error(), "does not continue") {
 		t.Fatalf("chain %v", err)
 	}
@@ -697,8 +744,23 @@ func TestReleaseChain(t *testing.T) {
 	}
 	l = u.ledger()
 	l.Releases[0].FromSHA256 = strings.Repeat("d", 64)
-	if err := l.validate(); err == nil || !strings.Contains(err.Error(), "installed binary") {
+	if err := l.validate(); err == nil || !strings.Contains(err.Error(), "installed binaries") {
 		t.Fatalf("first release %v", err)
+	}
+	l = u.ledger()
+	l.Releases[0].FromControllerSHA256 = strings.Repeat("d", 64)
+	if err := l.validate(); err == nil || !strings.Contains(err.Error(), "installed binaries") {
+		t.Fatalf("first release controller %v", err)
+	}
+	// The release recorded both binaries; a later release must continue
+	// from the controller it installed.
+	l = u.ledger()
+	if r := l.Releases[0]; r.ControllerSHA256 != u.h.ControllerSHA256 || r.FromControllerSHA256 != digestHex([]byte(controllerBinary)) || l.InstalledController() != u.h.ControllerSHA256 {
+		t.Fatalf("release record %+v", r)
+	}
+	next.FromSHA256, next.From, next.FromControllerSHA256 = u.h.SHA256, "v0.2.0", strings.Repeat("e", 64)
+	if err := l.BeginRelease(next); err == nil || !strings.Contains(err.Error(), "does not continue") {
+		t.Fatalf("chain from another controller %v", err)
 	}
 }
 
@@ -766,5 +828,105 @@ func TestUpgradeRefusesSumsWithoutOwnDigest(t *testing.T) {
 	}
 	if u.installed() != before || len(u.ledger().Releases) != 0 || len(u.carried) != 0 {
 		t.Fatal("refused upgrade changed something")
+	}
+}
+
+// preSplit turns the fixture into an installation from before the
+// controller binary: no bin/macserve-controller and no recorded digest.
+func (u *upgradeHost) preSplit() {
+	u.t.Helper()
+	if err := os.Remove(u.h.installedControllerPath()); err != nil {
+		u.t.Fatal(err)
+	}
+	l := u.ledger()
+	delete(l.record(StepInstall).Inputs, ControllerInput)
+	if err := u.h.Store.Save(l, LedgerInstalled); err != nil {
+		u.t.Fatal(err)
+	}
+}
+
+// TestUpgradeFromBeforeTheControllerBinary: an installation without
+// bin/macserve-controller upgrades by full requalification, installing the
+// controller; a carry proof is refused with a clear reason and nothing
+// changes while the build account is logged in.
+func TestUpgradeFromBeforeTheControllerBinary(t *testing.T) {
+	u := newUpgradeHost(t)
+	u.preSplit()
+	u.procs = u.gui()
+	before := u.installed()
+	r := u.upgrade(u.carryRequest(true))
+	if !strings.Contains(r.Error, "predates the controller binary") || !strings.Contains(r.Error, "GUI session is live") {
+		t.Fatalf("carry from a pre-split install %+v", r)
+	}
+	if u.installed() != before || len(u.ledger().Releases) != 0 || len(u.carried) != 0 {
+		t.Fatal("a refused carry changed something")
+	}
+	if _, err := os.Lstat(u.h.installedControllerPath()); err == nil {
+		t.Fatal("a refused carry installed the controller")
+	}
+	u.procs = nil
+	if r := u.upgrade(Request{}); r.Error != "" || !r.Done {
+		t.Fatalf("requalify %+v", r)
+	}
+	u.wantRequalified("")
+	if rel := u.ledger().Releases[0]; rel.FromControllerSHA256 != "" || rel.ControllerSHA256 != u.h.ControllerSHA256 {
+		t.Fatalf("release %+v", rel)
+	}
+}
+
+// TestUpgradeRefusesUnrecordedController: bin/macserve-controller must be
+// the one setup recorded (or absent when setup recorded none).
+func TestUpgradeRefusesUnrecordedController(t *testing.T) {
+	u := newUpgradeHost(t)
+	writeRoot(t, u.h.installedControllerPath(), []byte("another controller"), 0o755)
+	if r := u.upgrade(Request{}); !strings.Contains(r.Error, "not "+digestHex([]byte(controllerBinary))) {
+		t.Fatalf("%+v", r)
+	}
+	u = newUpgradeHost(t)
+	if err := os.Remove(u.h.installedControllerPath()); err != nil {
+		t.Fatal(err)
+	}
+	if r := u.upgrade(Request{}); !strings.Contains(r.Error, "is missing") {
+		t.Fatalf("%+v", r)
+	}
+	if len(u.ledger().Releases) != 0 {
+		t.Fatal("a refused upgrade recorded a release")
+	}
+}
+
+// TestUpgradeMapsSignedBinaries: with installed-binaries.json the signed
+// installed bytes map to the release digests the ledger recorded, and the
+// upgrade, installing unsigned release bytes, removes the stale map.
+func TestUpgradeMapsSignedBinaries(t *testing.T) {
+	u := newUpgradeHost(t)
+	writeRoot(t, u.h.installedPath(), []byte("signed macserve"), 0o755)
+	writeRoot(t, u.h.installedControllerPath(), []byte("signed controller"), 0o755)
+	if r := u.upgrade(Request{}); !strings.Contains(r.Error, "not "+digestHex([]byte("macserve binary"))) {
+		t.Fatalf("signed bytes without the map %+v", r)
+	}
+	inv := deploy.InstalledBinaries{Schema: "macserve-installed-binaries/1", Binaries: map[string]deploy.InstalledBinary{
+		"macserve":            {ReleaseSHA256: digestHex([]byte("macserve binary")), InstalledSHA256: digestHex([]byte("signed macserve")), Identifier: "app.themartian.macserve"},
+		"macserve-controller": {ReleaseSHA256: digestHex([]byte(controllerBinary)), InstalledSHA256: digestHex([]byte("signed controller")), Identifier: "app.themartian.macserve-controller"},
+	}}
+	data, err := json.Marshal(inv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeRoot(t, u.h.configPath(installedBinariesName), data, 0o644)
+	// fakeVersion names the signed bytes' release by the release digest.
+	u.h.Version = func(b []byte) (string, error) {
+		if string(b) == "signed macserve" {
+			return "v0.1.0", nil
+		}
+		return fakeVersion(b)
+	}
+	if r := u.upgrade(Request{}); r.Error != "" || !r.Done {
+		t.Fatalf("upgrade %+v", r)
+	}
+	if rel := u.ledger().Releases[0]; rel.FromSHA256 != digestHex([]byte("macserve binary")) || rel.FromControllerSHA256 != digestHex([]byte(controllerBinary)) {
+		t.Fatalf("release from %+v", rel)
+	}
+	if _, err := os.Lstat(u.h.configPath(installedBinariesName)); err == nil {
+		t.Fatal("stale installed-binaries.json kept after installing unsigned release bytes")
 	}
 }

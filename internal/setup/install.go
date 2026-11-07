@@ -22,9 +22,10 @@ import (
 const maxBinary = 256 << 20
 
 // install runs the install step: the deploy.env recorded at preflight,
-// this macserve binary (its digest must equal SHA256) and the embedded
-// assets are staged root-only, then deploy.Install applies them exactly as
-// `deploy-install --apply` does, with the owner's terminal for the job
+// this macserve binary (its digest must equal SHA256), the
+// macserve-controller beside it (its digest must equal ControllerSHA256)
+// and the embedded assets are staged root-only, then deploy.Install
+// applies them exactly as `deploy-install --apply` does, with the owner's terminal for the job
 // password prompt. deploy-install's one-time API token line is taken out
 // of that output (tokenFilter) and returned in the response only, for the
 // wizard to put into the owner's login keychain (decision D11); it is
@@ -48,7 +49,7 @@ func (h *Helper) install(l *Ledger, loc LedgerLocation) (Response, error) {
 	if digestHex(env) != l.record(StepPreflight).Inputs["deploy.env"] {
 		return Response{}, errors.New("the staged deploy.env is not the one preflight recorded")
 	}
-	if err := h.stageBinary(); err != nil {
+	if err := h.stageBinaries(); err != nil {
 		return Response{}, err
 	}
 	if !slices.Equal(sortedKeys(h.Assets), slices.Sorted(slices.Values(assets.DeployNames))) {
@@ -62,11 +63,13 @@ func (h *Helper) install(l *Ledger, loc LedgerLocation) (Response, error) {
 		return Response{}, err
 	}
 	opts := deploy.Options{
-		EnvironmentPath: h.Store.staged(stagedEnv),
-		BinaryPath:      h.Store.staged(stagedBinary),
-		SHA256:          h.SHA256,
-		AssetsPath:      h.Store.staged(stagedAssets),
-		Apply:           true,
+		EnvironmentPath:      h.Store.staged(stagedEnv),
+		BinaryPath:           h.Store.staged(stagedBinary),
+		SHA256:               h.SHA256,
+		ControllerBinaryPath: h.Store.staged(stagedController),
+		ControllerSHA256:     h.ControllerSHA256,
+		AssetsPath:           h.Store.staged(stagedAssets),
+		Apply:                true,
 	}
 	stdout := &tokenFilter{out: h.Terminal}
 	err = h.Install(opts, stdout, h.Terminal)
@@ -79,7 +82,7 @@ func (h *Helper) install(l *Ledger, loc LedgerLocation) (Response, error) {
 	if resp.Token == "" {
 		return Response{}, h.fail(l, loc, StepInstall, errors.New("deploy-install finished without the one-time API token; reconcile by hand"))
 	}
-	inputs := map[string]string{"deploy.env": digestHex(env), "macserve": h.SHA256, "assets": assetsDigest(h.Assets)}
+	inputs := map[string]string{"deploy.env": digestHex(env), "macserve": h.SHA256, ControllerInput: h.ControllerSHA256, "assets": assetsDigest(h.Assets)}
 	if err := h.complete(l, LedgerStaged, StepInstall, boot, inputs); err != nil {
 		return resp, err
 	}
@@ -184,28 +187,46 @@ func assetsDigest(assets map[string][]byte) string {
 	return digestHex([]byte(b.String()))
 }
 
-// stageBinary copies Executable, without following links and bounded,
-// into Staging as root-only 0700 and requires its digest to be SHA256.
-func (h *Helper) stageBinary() error {
+// controllerPath is the macserve-controller beside the running macserve: a
+// release installs both binaries into the same directory.
+func (h *Helper) controllerPath() string {
+	return filepath.Join(filepath.Dir(h.Executable), deploy.ControllerBinaryName)
+}
+
+// stageBinaries stages Executable (digest SHA256) and the
+// macserve-controller beside it (digest ControllerSHA256).
+func (h *Helper) stageBinaries() error {
 	if !sha256Hex.MatchString(h.SHA256) {
 		return errors.New("expected macserve digest missing")
+	}
+	if !sha256Hex.MatchString(h.ControllerSHA256) {
+		return errors.New("expected macserve-controller digest missing")
 	}
 	if err := h.Store.EnsureStaging(); err != nil {
 		return err
 	}
-	info, err := os.Lstat(h.Executable)
+	if err := h.stageBinary(h.Executable, "the running macserve", stagedBinary, h.SHA256); err != nil {
+		return err
+	}
+	return h.stageBinary(h.controllerPath(), h.controllerPath(), stagedController, h.ControllerSHA256)
+}
+
+// stageBinary copies source, without following links and bounded, into
+// Staging as name, root-only 0700, and requires its digest to be want.
+func (h *Helper) stageBinary(source, what, name, want string) error {
+	info, err := os.Lstat(source)
 	if err != nil {
 		return err
 	}
 	if !info.Mode().IsRegular() || info.Size() == 0 || info.Size() > maxBinary {
-		return errors.New("the running macserve is not a bounded regular file")
+		return fmt.Errorf("%s is not a bounded regular file", what)
 	}
-	src, err := os.OpenFile(h.Executable, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	src, err := os.OpenFile(source, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return err
 	}
 	defer src.Close()
-	target := h.Store.staged(stagedBinary)
+	target := h.Store.staged(name)
 	if err := os.Remove(target); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -217,10 +238,10 @@ func (h *Helper) stageBinary() error {
 	n, cerr := io.Copy(io.MultiWriter(dst, hash), io.LimitReader(src, maxBinary+1))
 	err = errors.Join(cerr, dst.Chown(int(h.Store.RootUID), int(h.Store.RootGID)), dst.Chmod(0o700), dst.Sync(), dst.Close())
 	if err == nil && (n > maxBinary || n != info.Size()) {
-		err = errors.New("the running macserve changed while it was copied")
+		err = fmt.Errorf("%s changed while it was copied", what)
 	}
-	if err == nil && hex.EncodeToString(hash.Sum(nil)) != h.SHA256 {
-		err = fmt.Errorf("the running macserve does not have the expected SHA-256 %s; nothing was installed", h.SHA256)
+	if err == nil && hex.EncodeToString(hash.Sum(nil)) != want {
+		err = fmt.Errorf("%s does not have the expected SHA-256 %s; nothing was installed", what, want)
 	}
 	if err != nil {
 		_ = os.Remove(target)

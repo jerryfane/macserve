@@ -37,12 +37,17 @@ func (s *fakeUpgradeSession) Close() error { return nil }
 func newUpgradeRun(t *testing.T, answer string, binary string) (*upgradeRun, *[]string, *fakeUpgradeSession, string) {
 	t.Helper()
 	dir := t.TempDir()
-	self := filepath.Join(dir, "macserve-darwin-arm64")
+	self := filepath.Join(dir, "macserve")
 	if err := os.WriteFile(self, []byte(binary), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	controller := filepath.Join(dir, "macserve-controller")
+	if err := os.WriteFile(controller, []byte(newController), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	files := map[string]string{
-		self: binary, upgrade.Root + "/bin/macserve": "macserve release v0.1.0", setup.LedgerPath: "{}",
+		self: binary, controller: newController, setup.LedgerPath: "{}",
+		upgrade.Root + "/bin/macserve": "macserve release v0.1.0", upgrade.Root + "/bin/macserve-controller": "macserve-controller release v0.1.0",
 		upgrade.Root + "/config/deploy.env": "CONTROLLER_USER=macservectl\nCONTROLLER_UID=6201\nCONTROLLER_GID=6201\nJOB_USER=macservejob\nJOB_UID=6202\nJOB_GID=6202\nOWNER_USER=jdoe\nOWNER_UID=501\nTAILNET_IP=100.64.0.10\nPORT=8443\nPROTECTED_PORTS=8443\nHOST_ADDRESSES=100.64.0.10\nDEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer\nREPOSITORIES=jdoe/myapp:4242\n",
 	}
 	probe := upgrade.Probe{
@@ -66,23 +71,31 @@ func newUpgradeRun(t *testing.T, answer string, binary string) (*upgradeRun, *[]
 	session := &fakeUpgradeSession{resp: setup.Response{Done: true, Detail: "installed", Items: []string{setup.EffectRequalify}}}
 	u := &upgradeRun{
 		probe: probe, in: bufio.NewReader(strings.NewReader(answer)), out: &bytes.Buffer{}, euid: 501, self: self,
-		start: func(path, digest string) (setupSession, error) {
-			*started = append(*started, path+" "+digest)
+		start: func(path, digest, controller string) (setupSession, error) {
+			*started = append(*started, path+" "+digest+" "+controller)
 			return session, nil
 		},
 	}
 	return u, started, session, dir
 }
 
+// newController is the downloaded release's macserve-controller.
+const newController = "macserve-controller release v0.2.0"
+
 func TestUpgradeApplyDigestComesFromTheRelease(t *testing.T) {
 	binary := "macserve release v0.2.0"
 	u, started, session, _ := newUpgradeRun(t, "yes\n", binary)
 	var stderr bytes.Buffer
-	if got := u.run([]string{"--sha256", strings.Repeat("0", 64)}, &bytes.Buffer{}, &stderr); got != 1 || len(*started) != 0 || !strings.Contains(stderr.String(), "not the release digest") {
+	ctl := digestOf(newController)
+	if got := u.run([]string{"--sha256", strings.Repeat("0", 64), "--controller-sha256", ctl}, &bytes.Buffer{}, &stderr); got != 1 || len(*started) != 0 || !strings.Contains(stderr.String(), "not the release digest") {
 		t.Fatalf("mismatched digest: exit %d started %q: %s", got, *started, stderr.String())
 	}
 	digest := digestOf(binary)
-	if got := u.run([]string{"--sha256", digest, "--tag", "v0.2.0"}, &bytes.Buffer{}, &stderr); got != 0 || len(*started) != 1 || !strings.HasSuffix((*started)[0], " "+digest) {
+	stderr.Reset()
+	if got := u.run([]string{"--sha256", digest, "--controller-sha256", strings.Repeat("0", 64)}, &bytes.Buffer{}, &stderr); got != 1 || len(*started) != 0 || !strings.Contains(stderr.String(), "macserve-controller has SHA-256") {
+		t.Fatalf("mismatched controller digest: exit %d started %q: %s", got, *started, stderr.String())
+	}
+	if got := u.run([]string{"--sha256", digest, "--controller-sha256", ctl, "--tag", "v0.2.0"}, &bytes.Buffer{}, &stderr); got != 0 || len(*started) != 1 || !strings.HasSuffix((*started)[0], " "+digest+" "+ctl) {
 		t.Fatalf("exit %d started %q: %s", got, *started, stderr.String())
 	}
 	if c := session.calls[0]; c.Verb != setup.VerbUpgrade || c.SHA256 != digest || c.Tag != "v0.2.0" || c.Proof != "" || c.Sums != "" {
@@ -92,7 +105,7 @@ func TestUpgradeApplyDigestComesFromTheRelease(t *testing.T) {
 
 func TestUpgradeApplyRefusals(t *testing.T) {
 	binary := "macserve release v0.2.0"
-	digest := digestOf(binary)
+	digest, ctl := digestOf(binary), digestOf(newController)
 	for _, tc := range []struct {
 		name   string
 		args   []string
@@ -100,13 +113,15 @@ func TestUpgradeApplyRefusals(t *testing.T) {
 		answer string
 		code   int
 	}{
-		{"sudo", []string{"--sha256", digest}, 0, "yes\n", 2},
-		{"plan flag", []string{"--plan", "--sha256", digest}, 501, "yes\n", 2},
+		{"sudo", []string{"--sha256", digest, "--controller-sha256", ctl}, 0, "yes\n", 2},
+		{"plan flag", []string{"--plan", "--sha256", digest, "--controller-sha256", ctl}, 501, "yes\n", 2},
 		{"no digest", nil, 501, "yes\n", 2},
-		{"both digests", []string{"--sha256", digest, "--sha256sums", "x"}, 501, "yes\n", 2},
-		{"proof without sums", []string{"--sha256", digest, "--carry-proof", "x"}, 501, "yes\n", 2},
-		{"bad tag", []string{"--sha256", digest, "--tag", "0.2"}, 501, "yes\n", 2},
-		{"not confirmed", []string{"--sha256", digest}, 501, "no\n", 0},
+		{"no controller digest", []string{"--sha256", digest}, 501, "yes\n", 2},
+		{"controller digest alone", []string{"--controller-sha256", ctl}, 501, "yes\n", 2},
+		{"both digests", []string{"--sha256", digest, "--controller-sha256", ctl, "--sha256sums", "x"}, 501, "yes\n", 2},
+		{"proof without sums", []string{"--sha256", digest, "--controller-sha256", ctl, "--carry-proof", "x"}, 501, "yes\n", 2},
+		{"bad tag", []string{"--sha256", digest, "--controller-sha256", ctl, "--tag", "0.2"}, 501, "yes\n", 2},
+		{"not confirmed", []string{"--sha256", digest, "--controller-sha256", ctl}, 501, "no\n", 0},
 	} {
 		u, started, _, _ := newUpgradeRun(t, tc.answer, binary)
 		u.euid = tc.euid
@@ -124,7 +139,7 @@ func TestUpgradeApplySendsReleaseProof(t *testing.T) {
 	proof := filepath.Join(dir, "carry-proof.json")
 	sums := filepath.Join(dir, "SHA256SUMS")
 	os.WriteFile(proof, []byte("{}"), 0o644)
-	os.WriteFile(sums, []byte(digestOf(binary)+"  macserve-darwin-arm64\n"+digestOf("{}")+"  carry-proof.json\n"), 0o644)
+	os.WriteFile(sums, []byte(digestOf(binary)+"  macserve-darwin-arm64\n"+digestOf(newController)+"  macserve-controller-darwin-arm64\n"+digestOf("{}")+"  carry-proof.json\n"), 0o644)
 	var stderr bytes.Buffer
 	if got := u.run([]string{"--sha256sums", sums, "--carry-proof", proof}, &bytes.Buffer{}, &stderr); got != 0 {
 		t.Fatalf("exit %d: %s", got, stderr.String())

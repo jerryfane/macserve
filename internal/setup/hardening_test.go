@@ -157,14 +157,37 @@ func TestCheckExecutable(t *testing.T) {
 		t.Errorf("mismatch: %v", err)
 	}
 	f.h.SHA256 = good
+	// The macserve-controller beside it must be the verified one.
+	goodController := f.h.ControllerSHA256
+	f.h.ControllerSHA256 = strings.Repeat("0", 64)
+	if err := f.h.CheckStart(); err == nil || !strings.Contains(err.Error(), "macserve-controller has SHA-256") {
+		t.Errorf("controller mismatch: %v", err)
+	}
+	f.h.ControllerSHA256 = ""
+	if err := f.h.CheckStart(); err == nil || !strings.Contains(err.Error(), "macserve-controller digest missing") {
+		t.Errorf("no controller digest: %v", err)
+	}
+	f.h.ControllerSHA256 = goodController
 	f.through(StepGitHub)
 	if err := f.h.CheckStart(); err == nil || !strings.Contains(err.Error(), "must be") {
 		t.Errorf("downloaded binary after install: %v", err)
 	}
 	installed := filepath.Join(f.h.Root, "bin", "macserve")
-	f.h.Executable = installed
+	// After install the helper needs no controller digest: it checks the
+	// installed bin/macserve-controller against the ledger.
+	f.h.Executable, f.h.ControllerSHA256 = installed, ""
 	if err := f.h.CheckStart(); err != nil {
 		t.Errorf("installed binary: %v", err)
+	}
+	controller := filepath.Join(f.h.Root, "bin", "macserve-controller")
+	if err := os.WriteFile(controller, []byte("replaced controller"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.h.CheckStart(); err == nil || !strings.Contains(err.Error(), "macserve-controller is release SHA-256") {
+		t.Errorf("replaced installed controller: %v", err)
+	}
+	if err := os.WriteFile(controller, []byte(controllerBinary), 0o755); err != nil {
+		t.Fatal(err)
 	}
 	if err := os.WriteFile(installed, []byte("replaced"), 0o755); err != nil {
 		t.Fatal(err)

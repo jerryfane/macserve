@@ -27,8 +27,17 @@ import (
 
 type Options struct {
 	EnvironmentPath, BinaryPath, SHA256, AssetsPath string
-	Apply                                           bool
+	// ControllerBinaryPath and ControllerSHA256 name the macserve-controller
+	// release binary installed next to macserve.
+	ControllerBinaryPath, ControllerSHA256 string
+	Apply                                  bool
 }
+
+// Installed binary names under Prefix+"/bin".
+const (
+	BinaryName           = "macserve"
+	ControllerBinaryName = "macserve-controller"
+)
 
 // Install has no test bypass, alternate prefix, or injected native executor.
 func Install(o Options, stdout, stderr io.Writer) error {
@@ -38,7 +47,10 @@ func Install(o Options, stdout, stderr io.Writer) error {
 	if !validDigest(o.SHA256) {
 		return errors.New("--sha256 requires a lowercase SHA-256 digest")
 	}
-	for _, path := range []string{o.EnvironmentPath, o.BinaryPath, o.AssetsPath} {
+	if !validDigest(o.ControllerSHA256) {
+		return errors.New("--controller-sha256 requires a lowercase SHA-256 digest")
+	}
+	for _, path := range []string{o.EnvironmentPath, o.BinaryPath, o.ControllerBinaryPath, o.AssetsPath} {
 		if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 			return errors.New("input paths must be clean absolute paths")
 		}
@@ -47,7 +59,7 @@ func Install(o Options, stdout, stderr io.Writer) error {
 		if err := nativeCommand(5*time.Second, stderr, "/bin/bash", "-c", "test -t 0"); err != nil {
 			return errors.New("--apply requires an interactive terminal for the job password")
 		}
-		for _, path := range []string{o.EnvironmentPath, o.BinaryPath} {
+		for _, path := range []string{o.EnvironmentPath, o.BinaryPath, o.ControllerBinaryPath} {
 			if err := hostguard.CheckProtectedPath(path, false); err != nil {
 				return err
 			}
@@ -66,6 +78,9 @@ func Install(o Options, stdout, stderr io.Writer) error {
 	}
 	if err := verifyBinary(o.BinaryPath, o.SHA256, nil); err != nil {
 		return err
+	}
+	if err := verifyBinary(o.ControllerBinaryPath, o.ControllerSHA256, nil); err != nil {
+		return fmt.Errorf("controller binary: %w", err)
 	}
 	assets := map[string][]byte{}
 	for _, name := range assetNames {
@@ -86,7 +101,7 @@ func Install(o Options, stdout, stderr io.Writer) error {
 		return err
 	}
 	if !o.Apply {
-		_, err := fmt.Fprintf(stdout, "PLAN ONLY: verified binary SHA256 %s.\nController: %s uid=%d gid=%d\nJob GUI: %s uid=%d gid=%d real-name=%q\nOwner: %s uid=%d\nTLS listener: %s port=%d\nInformational probe ports: %v\nInformational host addresses: %v\nDeveloper directory: %s\nRepository numeric pins: %v\nWould preflight root-controlled inputs and absent targets, preserve read-only coexistence before any deployment mutation and after (including failures), run create-users --apply, install /Library/macserve, generate TLS/receipt keys and a hash-only API credential, and install the disabled launchd plists.\nProfiles remain empty; qualification/health absent; owner.pause set. Network isolation is not enforced in phase 1. No accounts, owner homes, services, PF, ACLs, passwords or GUI sessions inspected or changed. Apply requires an exclusive reviewed administration window.\n", o.SHA256, e.ControllerUser, e.ControllerUID, e.ControllerGID, e.JobUser, e.JobUID, e.JobGID, e.JobRealName, e.OwnerUser, e.OwnerUID, e.TailnetIP, e.Port, e.ProtectedPorts, e.HostAddresses, e.DeveloperDir, e.Repositories)
+		_, err := fmt.Fprintf(stdout, "PLAN ONLY: verified binary SHA256 %s; verified controller binary SHA256 %s.\nController: %s uid=%d gid=%d\nJob GUI: %s uid=%d gid=%d real-name=%q\nOwner: %s uid=%d\nTLS listener: %s port=%d\nInformational probe ports: %v\nInformational host addresses: %v\nDeveloper directory: %s\nRepository numeric pins: %v\nWould preflight root-controlled inputs and absent targets, preserve read-only coexistence before any deployment mutation and after (including failures), run create-users --apply, install /Library/macserve, generate TLS/receipt keys and a hash-only API credential, and install the disabled launchd plists.\nProfiles remain empty; qualification/health absent; owner.pause set. Network isolation is not enforced in phase 1. No accounts, owner homes, services, PF, ACLs, passwords or GUI sessions inspected or changed. Apply requires an exclusive reviewed administration window.\n", o.SHA256, o.ControllerSHA256, e.ControllerUser, e.ControllerUID, e.ControllerGID, e.JobUser, e.JobUID, e.JobGID, e.JobRealName, e.OwnerUser, e.OwnerUID, e.TailnetIP, e.Port, e.ProtectedPorts, e.HostAddresses, e.DeveloperDir, e.Repositories)
 		if err == nil && e.Signer() {
 			_, err = fmt.Fprintf(stdout, "Code signer: %s uid=%d gid=%d; RPC group %s gid=%d (members %s and %s only).\nWould create the signer account, groups and directories, install %s and a disabled %s, and run signer-init as %s; it prints the controller.json \"signer\" section. The owner writes %s and imports the Apple Distribution identity separately.\n", SignerAccount, e.SignerUID, e.SignerGID, SignRPCGroup, e.SignRPCGID, e.ControllerUser, SignerAccount, SignerConfigPath, SignerPlist, SignerAccount, SignerPolicyPath)
 		}
@@ -218,18 +233,13 @@ func apply(o Options, e Environment, envData []byte, assets, rendered map[string
 	if err := os.Chmod(stage, 0700); err != nil {
 		return err
 	}
-	stagedBinary := filepath.Join(stage, "macserve")
-	f, err := os.OpenFile(stagedBinary, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0700)
-	if err != nil {
+	stagedBinary := filepath.Join(stage, BinaryName)
+	if err := stageBinary(o.BinaryPath, o.SHA256, stagedBinary); err != nil {
 		return err
 	}
-	err = verifyBinary(o.BinaryPath, o.SHA256, f)
-	if err == nil {
-		err = f.Sync()
-	}
-	err = errors.Join(err, f.Close())
-	if err != nil {
-		return err
+	stagedController := filepath.Join(stage, ControllerBinaryName)
+	if err := stageBinary(o.ControllerBinaryPath, o.ControllerSHA256, stagedController); err != nil {
+		return fmt.Errorf("controller binary: %w", err)
 	}
 	m, err := makeMaterial(e, envData, rendered, time.Now().UTC())
 	if err != nil {
@@ -292,7 +302,10 @@ func apply(o Options, e Environment, envData []byte, assets, rendered map[string
 	if err := nativeCommand(2*time.Minute, stderr, "/bin/bash", args...); err != nil {
 		return err
 	}
-	if err := installBinary(stagedBinary, o.SHA256); err != nil {
+	if err := installBinary(BinaryName, stagedBinary, o.SHA256); err != nil {
+		return err
+	}
+	if err := installBinary(ControllerBinaryName, stagedController, o.ControllerSHA256); err != nil {
 		return err
 	}
 	if err := installFile(File{Prefix + "/bin/qualify.sh", assets["qualify.sh"], 0755, 0, 0}, e); err != nil {
@@ -371,11 +384,26 @@ func nativeCommand(timeout time.Duration, output io.Writer, path string, args ..
 	}
 	return nil
 }
-func installBinary(source, sha string) error {
+
+// stageBinary copies a verified binary into the root-private stage.
+func stageBinary(source, sha, staged string) error {
+	f, err := os.OpenFile(staged, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0700)
+	if err != nil {
+		return err
+	}
+	err = verifyBinary(source, sha, f)
+	if err == nil {
+		err = f.Sync()
+	}
+	return errors.Join(err, f.Close())
+}
+
+// installBinary installs the staged binary as Prefix/bin/<name>, root:wheel 0755.
+func installBinary(name, source, sha string) error {
 	if err := hostguard.CheckProtectedPath(Prefix+"/bin", true); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(Prefix+"/bin/macserve", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0700)
+	f, err := os.OpenFile(Prefix+"/bin/"+name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0700)
 	if err != nil {
 		return err
 	}

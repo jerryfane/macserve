@@ -43,8 +43,9 @@ type setupWizard struct {
 	root string
 	// self is this binary's resolved path.
 	self string
-	// start runs `sudo path _setup-root --sha256 digest` and connects to it.
-	start func(path, digest string) (setupSession, error)
+	// start runs `sudo path _setup-root --sha256 digest
+	// [--controller-sha256 controller]` and connects to it.
+	start func(path, digest, controller string) (setupSession, error)
 	// open runs /usr/bin/open as the owner with fixed arguments.
 	open  func(args ...string) error
 	sleep func(time.Duration)
@@ -76,11 +77,12 @@ func runSetupApply(args []string, stdout, stderr io.Writer) int {
 	flags.SetOutput(io.Discard)
 	choices := plan.DefaultChoices()
 	var planOnly bool
-	var sha, sums string
+	var sha, controllerSHA, sums string
 	flags.BoolVar(&planOnly, "plan", false, "")
 	flags.StringVar(&choices.Repository, "repository", "", "")
 	flags.StringVar(&choices.JobRealName, "job-real-name", choices.JobRealName, "")
 	flags.StringVar(&sha, "sha256", "", "")
+	flags.StringVar(&controllerSHA, "controller-sha256", "", "")
 	flags.StringVar(&sums, "sha256sums", "", "")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -94,18 +96,26 @@ func runSetupApply(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "macserve setup: unexpected arguments; see macserve setup --help")
 		return 2
 	}
-	if sha != "" && !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(sha) {
-		fmt.Fprintln(stderr, "macserve setup: --sha256 needs 64 lowercase hexadecimal characters")
+	hex64 := regexp.MustCompile(`^[0-9a-f]{64}$`)
+	if sha != "" && !hex64.MatchString(sha) || controllerSHA != "" && !hex64.MatchString(controllerSHA) {
+		fmt.Fprintln(stderr, "macserve setup: --sha256 and --controller-sha256 need 64 lowercase hexadecimal characters")
 		return 2
 	}
-	if sha != "" && sums != "" {
-		fmt.Fprintln(stderr, "macserve setup: give --sha256 or --sha256sums, not both")
+	if (sha != "" || controllerSHA != "") && sums != "" {
+		fmt.Fprintln(stderr, "macserve setup: give --sha256 (and --controller-sha256) or --sha256sums, not both")
+		return 2
+	}
+	if controllerSHA != "" && sha == "" {
+		fmt.Fprintln(stderr, "macserve setup: --controller-sha256 goes with --sha256")
 		return 2
 	}
 	if sums != "" {
 		data, err := readSmallFile(sums, 64<<10)
 		if err == nil {
 			sha, err = setup.ReleaseDigest(data, setup.ReleaseAsset)
+		}
+		if err == nil {
+			controllerSHA, err = setup.ReleaseDigest(data, setup.ControllerReleaseAsset)
 		}
 		if err != nil {
 			fmt.Fprintln(stderr, "macserve setup: --sha256sums:", err)
@@ -135,8 +145,10 @@ func runSetupApply(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "macserve setup:", err)
 		return 1
 	}
-	w.start = func(path, digest string) (setupSession, error) { return startRootHelper(path, digest, false, stderr) }
-	return w.run(choices, sha, stderr)
+	w.start = func(path, digest, controller string) (setupSession, error) {
+		return startRootHelper(path, digest, controller, false, stderr)
+	}
+	return w.run(choices, sha, controllerSHA, stderr)
 }
 
 func (w *setupWizard) say(format string, args ...any) { fmt.Fprintf(w.out, format+"\n", args...) }
@@ -154,7 +166,7 @@ func (w *setupWizard) ask(prompt string) string {
 // errStopped is a resumable stop the owner chose.
 var errStopped = errors.New("stopped")
 
-func (w *setupWizard) run(choices plan.Choices, sha string, stderr io.Writer) int {
+func (w *setupWizard) run(choices plan.Choices, sha, controllerSHA string, stderr io.Writer) int {
 	fail := func(err error) int {
 		fmt.Fprintln(stderr, "macserve setup:", err)
 		return 1
@@ -163,7 +175,7 @@ func (w *setupWizard) run(choices plan.Choices, sha string, stderr io.Writer) in
 		fmt.Fprintln(stderr, "macserve setup: run it as yourself, not with sudo; qualification refuses owner evidence gathered under sudo, and setup asks for your password once when it needs it.")
 		return 2
 	}
-	helper, digest, err := helperIdentity(w.root, w.self, sha)
+	helper, digest, controllerDigest, err := helperIdentity(w.root, w.self, sha, controllerSHA)
 	if err != nil {
 		fmt.Fprintln(stderr, "macserve setup:", err)
 		return 2
@@ -189,7 +201,7 @@ func (w *setupWizard) run(choices plan.Choices, sha string, stderr io.Writer) in
 	} else if err != nil {
 		return fail(err)
 	}
-	session, err := w.start(helper, digest)
+	session, err := w.start(helper, digest, controllerDigest)
 	if err != nil {
 		return fail(err)
 	}
@@ -258,7 +270,7 @@ func (w *setupWizard) call(s setupSession, r setup.Request) (setup.Response, err
 }
 
 func (w *setupWizard) install(s setupSession) error {
-	w.say("\nInstall (as root, through deploy-install): creates the controller and build accounts, /Library/macserve, TLS and receipt keys and three launchd services, all disabled, with owner.pause set.")
+	w.say("\nInstall (as root, through deploy-install): creates the controller and build accounts, /Library/macserve with this release's macserve and macserve-controller, TLS and receipt keys and three launchd services, all disabled, with owner.pause set.")
 	w.say("sysadminctl asks for the build account's password: choose one and keep it; you log in to that account later.")
 	resp, err := w.call(s, setup.Request{Verb: setup.VerbInstall})
 	if resp.Token != "" {
@@ -465,53 +477,100 @@ func readSmallFile(path string, max int64) ([]byte, error) {
 	return data, err
 }
 
-// helperIdentity picks the binary sudo runs as the root helper and the
-// digest it is started with; the helper re-hashes itself and refuses a
+// helperIdentity picks the binary sudo runs as the root helper, the
+// digest it is started with and, before install, the release digest of the
+// macserve-controller beside it; the helper re-hashes both and refuses a
 // mismatch.
 //   - After install it is the root-owned root/bin/macserve. Its digest
 //     identifies it; the helper requires that digest to be the one install
-//     recorded. A given --sha256 must match too.
-//   - Before install it is this binary, which the owner downloaded. Its
-//     digest is never taken from the file itself: want must come from the
-//     release (--sha256 or --sha256sums), and this binary must match it
-//     before sudo is asked for.
-func helperIdentity(root, self, want string) (string, string, error) {
+//     recorded (and checks bin/macserve-controller itself). A given
+//     --sha256 or --controller-sha256 must match too (signed installed
+//     bytes are mapped to their release digests through
+//     installed-binaries.json).
+//   - Before install it is this binary, which the owner downloaded, with
+//     the macserve-controller of the same release beside it. Their digests
+//     are never taken from the files themselves: want and wantController
+//     must come from the release (--sha256 and --controller-sha256, or
+//     --sha256sums), and both files must match before sudo is asked for.
+func helperIdentity(root, self, want, wantController string) (string, string, string, error) {
 	installed := filepath.Join(root, "bin", "macserve")
 	if info, err := os.Lstat(installed); err == nil {
 		st, ok := info.Sys().(*syscall.Stat_t)
 		if !info.Mode().IsRegular() || !ok || st.Uid != 0 || info.Mode().Perm()&0o022 != 0 {
-			return "", "", fmt.Errorf("%s is not a root-owned binary; macserve setup does not run it", installed)
+			return "", "", "", fmt.Errorf("%s is not a root-owned binary; macserve setup does not run it", installed)
 		}
 		digest, err := fileDigest(installed)
 		if err != nil {
-			return "", "", err
+			return "", "", "", err
 		}
-		if want != "" && digest != want {
-			return "", "", fmt.Errorf("%s has SHA-256 %s, not the one you gave; nothing was changed", installed, digest)
+		if want == "" && wantController == "" {
+			return installed, digest, "", nil
 		}
-		return installed, digest, nil
+		inv, err := installedBinaries(root)
+		if err != nil {
+			return "", "", "", err
+		}
+		if release, err := inv.ReleaseDigest(deploy.BinaryName, digest); err != nil || release != want {
+			return "", "", "", errors.Join(fmt.Errorf("%s has SHA-256 %s, not the one you gave; nothing was changed", installed, digest), err)
+		}
+		if wantController != "" {
+			controller := filepath.Join(root, "bin", deploy.ControllerBinaryName)
+			onDisk, err := fileDigest(controller)
+			if err != nil {
+				return "", "", "", err
+			}
+			if release, err := inv.ReleaseDigest(deploy.ControllerBinaryName, onDisk); err != nil || release != wantController {
+				return "", "", "", errors.Join(fmt.Errorf("%s has SHA-256 %s, not the one you gave; nothing was changed", controller, onDisk), err)
+			}
+		}
+		return installed, digest, "", nil
 	} else if !errors.Is(err, fs.ErrNotExist) {
-		return "", "", err
+		return "", "", "", err
 	}
-	if want == "" {
-		return "", "", fmt.Errorf("before install, give the release digest of this binary: --sha256sums SHA256SUMS (from the same release; verify it first with gh attestation verify %s --repo jerryfane/macserve) or --sha256 HEX", setup.ReleaseAsset)
+	if want == "" || wantController == "" {
+		return "", "", "", fmt.Errorf("before install, give the release digests of this binary and of the macserve-controller beside it: --sha256sums SHA256SUMS (from the same release; verify it first with gh attestation verify %s --repo jerryfane/macserve) or --sha256 HEX --controller-sha256 HEX", setup.ReleaseAsset)
 	}
 	digest, err := fileDigest(self)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	if digest != want {
-		return "", "", fmt.Errorf("%s has SHA-256 %s, not the release digest %s; nothing was changed", self, digest, want)
+		return "", "", "", fmt.Errorf("%s has SHA-256 %s, not the release digest %s; nothing was changed", self, digest, want)
 	}
-	return self, digest, nil
+	controller := filepath.Join(filepath.Dir(self), deploy.ControllerBinaryName)
+	controllerDigest, err := fileDigest(controller)
+	if err != nil {
+		return "", "", "", fmt.Errorf("the release's macserve-controller must be beside %s: %w", self, err)
+	}
+	if controllerDigest != wantController {
+		return "", "", "", fmt.Errorf("%s has SHA-256 %s, not the release digest %s; nothing was changed", controller, controllerDigest, wantController)
+	}
+	return self, digest, controllerDigest, nil
+}
+
+// installedBinaries reads root/config/installed-binaries.json (world
+// readable); nil when absent.
+func installedBinaries(root string) (*deploy.InstalledBinaries, error) {
+	data, err := readSmallFile(filepath.Join(root, "config", "installed-binaries.json"), 1<<16)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return deploy.ParseInstalledBinaries(data)
 }
 
 // startRootHelper starts the one root helper, sudo path _setup-root
-// [--upgrade] --sha256 digest, and connects to it.
-func startRootHelper(path, digest string, upgrade bool, stderr io.Writer) (setupSession, error) {
+// [--upgrade] --sha256 digest [--controller-sha256 controller], and
+// connects to it.
+func startRootHelper(path, digest, controller string, upgrade bool, stderr io.Writer) (setupSession, error) {
 	argv := []string{path, "_setup-root", "--sha256", digest}
 	if upgrade {
 		argv = []string{path, "_setup-root", "--upgrade", "--sha256", digest}
+	}
+	if controller != "" {
+		argv = append(argv, "--controller-sha256", controller)
 	}
 	cmd := exec.Command("/usr/bin/sudo", argv...)
 	cmd.Env, cmd.Dir = []string{setup.FixedPath, "LANG=C"}, "/"

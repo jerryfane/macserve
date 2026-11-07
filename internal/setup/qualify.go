@@ -75,8 +75,9 @@ type Qualifier interface {
 	Health(ctx context.Context) ([]string, error)
 	// CarryPreflight is qualification.CarryPreflight: qualify carry's
 	// proof and anchor checks, read-only, before macserve upgrade skips the
-	// job-session guard.
-	CarryPreflight(ctx context.Context, proof []byte, target string) error
+	// job-session guard. target is the release's two binaries' release
+	// digests.
+	CarryPreflight(ctx context.Context, proof []byte, target qualification.CarryBinaries) error
 }
 
 // JobProcess is one process of the job UID. Restricted is nil when

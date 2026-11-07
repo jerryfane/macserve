@@ -10,10 +10,13 @@
 package doctor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/netip"
 	"regexp"
@@ -77,16 +80,20 @@ func (r Report) ExitCode() int {
 
 // Paths of the installed deployment.
 const (
-	Root          = "/Library/macserve"
-	Binary        = Root + "/bin/macserve"
-	EnvFile       = Root + "/config/deploy.env"
-	ProfilesFile  = Root + "/config/profiles.json"
-	HealthFile    = Root + "/health/current.json"
-	SecretsDir    = Root + "/var/controller/secrets"
-	Qualification = Root + "/config/qualification.json"
-	Anchor        = Root + "/config/activation-anchor.json"
-	Console       = "/dev/console"
-	launchDaemons = "/Library/LaunchDaemons/"
+	Root       = "/Library/macserve"
+	Binary     = Root + "/bin/macserve"
+	Controller = Root + "/bin/macserve-controller"
+	// InstalledBinaries maps signed installed digests to release digests
+	// (deploy.InstalledBinariesPath); absent for unsigned installs.
+	InstalledBinaries = Root + "/config/installed-binaries.json"
+	EnvFile           = Root + "/config/deploy.env"
+	ProfilesFile      = Root + "/config/profiles.json"
+	HealthFile        = Root + "/health/current.json"
+	SecretsDir        = Root + "/var/controller/secrets"
+	Qualification     = Root + "/config/qualification.json"
+	Anchor            = Root + "/config/activation-anchor.json"
+	Console           = "/dev/console"
+	launchDaemons     = "/Library/LaunchDaemons/"
 	// MaxBinary bounds the installed binary doctor hashes.
 	MaxBinary = 256 << 20
 	maxConfig = 1 << 20
@@ -128,28 +135,34 @@ type Options struct {
 	SHA256Sums string
 }
 
-// releaseAsset is the SHA256SUMS entry of the installed binary.
-const releaseAsset = "macserve-darwin-arm64"
+// releaseAsset and controllerAsset are the SHA256SUMS entries of the
+// installed binaries.
+const (
+	releaseAsset    = "macserve-darwin-arm64"
+	controllerAsset = "macserve-controller-darwin-arm64"
+)
 
 var sumsLine = regexp.MustCompile(`^([0-9a-f]{64}) [ *]([A-Za-z0-9._-]+)$`)
 
-// sumsDigest returns releaseAsset's digest from SHA256SUMS text.
-func sumsDigest(data []byte) (string, error) {
+// sumsDigest returns asset's digest from SHA256SUMS text. An asset the
+// release does not publish is "" when optional (a release from before
+// macserve-controller), an error otherwise.
+func sumsDigest(data []byte, asset string, optional bool) (string, error) {
 	found := ""
 	for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
 		m := sumsLine.FindStringSubmatch(line)
 		if m == nil {
 			return "", errors.New("SHA256SUMS has a malformed line")
 		}
-		if m[2] == releaseAsset {
+		if m[2] == asset {
 			if found != "" {
-				return "", errors.New("SHA256SUMS lists " + releaseAsset + " twice")
+				return "", errors.New("SHA256SUMS lists " + asset + " twice")
 			}
 			found = m[1]
 		}
 	}
-	if found == "" {
-		return "", errors.New("SHA256SUMS does not list " + releaseAsset)
+	if found == "" && !optional {
+		return "", errors.New("SHA256SUMS does not list " + asset)
 	}
 	return found, nil
 }
@@ -418,64 +431,154 @@ func (s *state) network() {
 	s.set("net.tailnet", Pass, ap.String()+" accepts connections", "")
 }
 
-// recordedBinary is the digest setup recorded for the installed binary:
-// install's, or the last macserve upgrade's.
-func (s *state) recordedBinary() string {
+// recorded is the digest setup recorded for the installed binary input
+// ("macserve" or setup.ControllerInput): the last macserve upgrade's, else
+// the latest step input. A release record from before the controller
+// binary records none.
+func (s *state) recorded(input string) string {
 	if s.ledger == nil {
 		return ""
 	}
 	for i := len(s.ledger.Releases) - 1; i >= 0; i-- {
-		if s.ledger.Releases[i].Status == setup.StatusDone {
-			return s.ledger.Releases[i].SHA256
+		if r := s.ledger.Releases[i]; r.Status == setup.StatusDone {
+			if input == setup.ControllerInput {
+				return r.ControllerSHA256
+			}
+			return r.SHA256
 		}
 	}
 	for i := len(s.ledger.Records) - 1; i >= 0; i-- {
-		if d := s.ledger.Records[i].Inputs["macserve"]; d != "" {
+		if d := s.ledger.Records[i].Inputs[input]; d != "" {
 			return d
 		}
 	}
 	return ""
 }
 
-func (s *state) binaryDigest() (string, error) {
-	data, err := s.p.ReadFile(Binary, MaxBinary)
+func (s *state) binaryDigest(path string) (string, error) {
+	data, err := s.p.ReadFile(path, MaxBinary)
 	if err != nil {
 		return "", err
 	}
 	return sha256Hex(data), nil
 }
 
+// installedBinaries reads installed-binaries.json; nil when absent (the
+// installed bytes are the release's).
+func (s *state) installedBinaries() (*deploy.InstalledBinaries, error) {
+	data, err := s.p.ReadFile(InstalledBinaries, 1<<16)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return deploy.ParseInstalledBinaries(data)
+}
+
+// outcome is one binary's part of release.bytes.
+type outcome struct {
+	status      Status
+	detail, fix string
+}
+
+// severity orders outcomes: the worst one decides release.bytes.
+var severity = map[Status]int{Pass: 0, Warn: 1, Unknown: 2, Fail: 3}
+
+// release compares bin/macserve and bin/macserve-controller with the
+// release digests (given, from SHA256SUMS or recorded by setup). Signed
+// installed bytes map to their release digests through
+// installed-binaries.json.
 func (s *state) release() {
-	digest, err := s.binaryDigest()
+	digest, err := s.binaryDigest(Binary)
 	if err != nil {
 		s.unreadable("release.bytes", Binary, err)
 		return
 	}
+	inv, err := s.installedBinaries()
+	if err != nil {
+		s.set("release.bytes", Fail, InstalledBinaries+" is invalid or unreadable", "Reinstall with macserve setup.")
+		return
+	}
 	want, source := s.o.ReleaseSHA256, "the release digest you gave"
+	wantController, controllerSource, controllerKnown := "", "", false
 	if want == "" && s.o.SHA256Sums != "" {
 		data, err := s.p.ReadFile(s.o.SHA256Sums, 64<<10)
 		if err == nil {
-			want, err = sumsDigest(data)
+			want, err = sumsDigest(data, releaseAsset, false)
+		}
+		if err == nil {
+			wantController, err = sumsDigest(data, controllerAsset, true)
 		}
 		if err != nil {
 			s.set("release.bytes", Fail, "cannot use --sha256sums: "+err.Error(), "Pass the SHA256SUMS of the release you installed.")
 			return
 		}
-		source = "the release's SHA256SUMS"
+		source, controllerSource, controllerKnown = "the release's SHA256SUMS", "the release's SHA256SUMS", true
 	}
 	if want == "" {
-		want, source = s.recordedBinary(), "the digest setup recorded"
+		want, source = s.recorded("macserve"), "the digest setup recorded"
 	}
+	if !controllerKnown && s.ledger != nil {
+		wantController, controllerSource, controllerKnown = s.recorded(setup.ControllerInput), "the digest setup recorded", true
+	}
+	results := []outcome{s.releaseMacserve(inv, digest, want, source)}
+	results = append(results, s.releaseController(inv, wantController, controllerSource, controllerKnown))
+	worst := results[0]
+	details := []string{}
+	for _, r := range results {
+		if severity[r.status] > severity[worst.status] {
+			worst = r
+		}
+		details = append(details, r.detail)
+	}
+	s.set("release.bytes", worst.status, strings.Join(details, "; "), worst.fix)
+}
+
+func (s *state) releaseMacserve(inv *deploy.InstalledBinaries, digest, want, source string) outcome {
+	release, err := inv.ReleaseDigest(deploy.BinaryName, digest)
 	switch {
+	case err != nil:
+		return outcome{Fail, err.Error(), "Installed binary is not the one installed-binaries.json records: reinstall it with macserve setup."}
 	case want == "" && s.ledger == nil && s.p.EUID != 0:
-		s.set("release.bytes", Unknown, "installed binary sha256 "+digest+"; nothing to compare it with", "Run macserve doctor --sha256sums SHA256SUMS with the release's SHA256SUMS, or sudo macserve doctor.")
+		return outcome{Unknown, "installed binary sha256 " + release + "; nothing to compare it with", "Run macserve doctor --sha256sums SHA256SUMS with the release's SHA256SUMS, or sudo macserve doctor."}
 	case want == "":
-		s.set("release.bytes", Unknown, "installed binary sha256 "+digest+"; setup recorded no digest", "Run macserve doctor --sha256sums SHA256SUMS with the release's SHA256SUMS.")
-	case want != digest:
-		s.set("release.bytes", Fail, "installed binary sha256 "+digest+" is not "+source, "Installed binary is not the release you installed: reinstall it with macserve setup.")
-	default:
-		s.set("release.bytes", Pass, "installed binary matches "+source, "")
+		return outcome{Unknown, "installed binary sha256 " + release + "; setup recorded no digest", "Run macserve doctor --sha256sums SHA256SUMS with the release's SHA256SUMS."}
+	case want != release:
+		return outcome{Fail, "installed binary sha256 " + release + " is not " + source, "Installed binary is not the release you installed: reinstall it with macserve setup."}
 	}
+	return outcome{Pass, "installed binary matches " + source, ""}
+}
+
+// releaseController checks bin/macserve-controller. known reports that
+// want is what the release (or setup) installed, "" meaning none: an
+// installation from before the controller binary.
+func (s *state) releaseController(inv *deploy.InstalledBinaries, want, source string, known bool) outcome {
+	digest, err := s.binaryDigest(Controller)
+	switch {
+	case errors.Is(err, fs.ErrNotExist) && known && want == "":
+		return outcome{Pass, "no macserve-controller (installed before it existed; macserve upgrade installs it)", ""}
+	case errors.Is(err, fs.ErrNotExist) && known:
+		return outcome{Fail, Controller + " is missing", "Reinstall with macserve setup."}
+	case errors.Is(err, fs.ErrNotExist):
+		return outcome{Unknown, Controller + " is missing; nothing says whether this installation has one", "Run sudo macserve doctor."}
+	case errors.Is(err, fs.ErrPermission) && s.p.EUID != 0:
+		return outcome{Unknown, Controller + " is readable only by root", fixSudo}
+	case err != nil:
+		return outcome{Fail, Controller + " is invalid or unreadable", "Reinstall with macserve setup."}
+	}
+	release, err := inv.ReleaseDigest(deploy.ControllerBinaryName, digest)
+	switch {
+	case err != nil:
+		return outcome{Fail, err.Error(), "Installed controller is not the one installed-binaries.json records: reinstall it with macserve setup."}
+	case !known:
+		return outcome{Unknown, "installed controller sha256 " + release + "; nothing to compare it with", "Run macserve doctor --sha256sums SHA256SUMS with the release's SHA256SUMS, or sudo macserve doctor."}
+	case want == "":
+		return outcome{Fail, "installed controller sha256 " + release + " but " + source + " has no macserve-controller", "Reinstall with macserve setup."}
+	case want != release:
+		return outcome{Fail, "installed controller sha256 " + release + " is not " + source, "Installed controller is not the release you installed: reinstall it with macserve setup."}
+	}
+	return outcome{Pass, "installed controller matches " + source, ""}
 }
 
 // protected is one path of the installation and how it must look.
@@ -483,12 +586,17 @@ type protected struct {
 	path    string
 	dir     bool
 	private bool // no access for others
+	// binary: an installed binary, root:wheel 0755. optional: absent is
+	// fine (bin/macserve-controller of an installation from before it
+	// existed; release.bytes says whether it must exist).
+	binary, optional bool
 }
 
 var protectedPaths = []protected{
 	{path: Root, dir: true},
 	{path: Root + "/bin", dir: true},
-	{path: Binary},
+	{path: Binary, binary: true},
+	{path: Controller, binary: true, optional: true},
 	{path: Root + "/config", dir: true},
 	{path: EnvFile},
 	{path: ProfilesFile},
@@ -506,16 +614,18 @@ func (s *state) protect() {
 		case err != nil:
 			s.set("fs.protect", Unknown, "cannot inspect "+want.path, fixSudo)
 			return
+		case !info.Exists && want.optional:
+			continue
 		case !info.Exists:
 			s.set("fs.protect", Fail, want.path+" is missing", fixSetup)
 			return
 		case want.dir != info.Mode.IsDir() || !want.dir && !info.Mode.IsRegular():
 			s.set("fs.protect", Fail, want.path+" has the wrong type", "Reinstall with macserve setup.")
 			return
-		case info.Mode.Perm()&0o022 != 0 || want.private && info.Mode.Perm()&0o007 != 0:
+		case info.Mode.Perm()&0o022 != 0 || want.private && info.Mode.Perm()&0o007 != 0 || want.binary && info.Mode.Perm() != 0o755:
 			s.set("fs.protect", Fail, want.path+" has mode "+fmt.Sprintf("%04o", info.Mode.Perm()), "Reinstall with macserve setup; something changed its permissions.")
 			return
-		case !want.private && info.UID != 0 || want.private && s.env != nil && info.UID != s.env.ControllerUID || !want.dir && info.Nlink != 1:
+		case !want.private && info.UID != 0 || want.private && s.env != nil && info.UID != s.env.ControllerUID || !want.dir && info.Nlink != 1 || want.binary && info.GID != 0:
 			s.set("fs.protect", Fail, want.path+" is not owned by root alone", "Reinstall with macserve setup; something changed its owner.")
 			return
 		}
@@ -675,6 +785,10 @@ func (s *state) services() {
 			disabled++
 		}
 	}
+	if detail := s.controllerProgram(); detail != "" {
+		s.set("svc.state", Fail, detail, "Reinstall with macserve setup; the controller service must run "+Controller+".")
+		return
+	}
 	var foreign []string
 	for label := range s.disabled {
 		if strings.HasPrefix(label, "org.macserve.") && !slices.Contains(Labels, label) && label != setup.FDALabel {
@@ -693,6 +807,87 @@ func (s *state) services() {
 	default:
 		s.set("svc.state", Fail, fmt.Sprintf("%d of %d services loaded, %d disabled", loaded, n, disabled), "Continue with macserve setup; it starts or stops all three together.")
 	}
+}
+
+// controllerProgram checks org.macserve.controller's ProgramArguments: it
+// runs bin/macserve-controller --config controller.json, or, on an
+// installation from before the controller binary (no
+// bin/macserve-controller), bin/macserve controller --config
+// controller.json. It returns what is wrong, or "".
+func (s *state) controllerProgram() string {
+	path := launchDaemons + "org.macserve.controller.plist"
+	data, err := s.p.ReadFile(path, maxConfig)
+	if err != nil {
+		return "cannot read " + path
+	}
+	args, err := programArguments(data)
+	if err != nil {
+		return path + ": " + err.Error()
+	}
+	config := Root + "/config/controller.json"
+	want := []string{Controller, "--config", config}
+	if info, err := s.p.Lstat(Controller); err == nil && !info.Exists {
+		want = []string{Binary, "controller", "--config", config}
+	}
+	if !slices.Equal(args, want) {
+		return path + " runs " + strings.Join(args, " ") + ", not " + strings.Join(want, " ")
+	}
+	return ""
+}
+
+// programArguments returns the ProgramArguments strings of an XML
+// launchd plist's top-level dictionary.
+func programArguments(data []byte) ([]string, error) {
+	d := xml.NewDecoder(bytes.NewReader(data))
+	depth, key, inArgs := 0, "", false
+	var args []string
+	found := false
+	for {
+		tok, err := d.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, errors.New("not an XML property list")
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			depth++
+			switch {
+			case depth == 3 && t.Name.Local == "key":
+				var k string
+				if err := d.DecodeElement(&k, &t); err != nil {
+					return nil, errors.New("invalid plist key")
+				}
+				depth--
+				key = k
+			case depth == 3 && t.Name.Local == "array" && key == "ProgramArguments":
+				if found {
+					return nil, errors.New("ProgramArguments is given twice")
+				}
+				inArgs, found = true, true
+			case depth == 4 && inArgs:
+				var v string
+				if t.Name.Local != "string" || d.DecodeElement(&v, &t) != nil {
+					return nil, errors.New("ProgramArguments holds a non-string")
+				}
+				depth--
+				args = append(args, v)
+			}
+		case xml.EndElement:
+			if depth == 3 {
+				inArgs = false
+				if t.Name.Local != "key" {
+					key = ""
+				}
+			}
+			depth--
+		}
+	}
+	if !found || len(args) == 0 {
+		return nil, errors.New("no ProgramArguments")
+	}
+	return args, nil
 }
 
 func (s *state) github() {
