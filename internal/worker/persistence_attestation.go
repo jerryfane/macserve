@@ -380,12 +380,28 @@ func markPersistenceReviewed(options Options) error {
 // VerifyPersistenceAttestation fully measures accepted registration code and
 // atomically publishes its attestation. It never clears quarantine or a revoked
 // attestation: fresh reviewed acceptance followed by explicit reset is required.
+// Any failure revokes.
 func VerifyPersistenceAttestation(ctx context.Context, options Options) error {
 	return verifyPersistenceAttestation(ctx, options, false, collectPersistence)
 }
 
+// ErrPersistenceScanInconclusive marks a periodic re-verification that failed
+// without observing contamination and therefore left the attestation in place.
+var ErrPersistenceScanInconclusive = errors.New("persistence re-verification inconclusive; attestation left in place")
+
+// ReverifyPersistenceAttestation is the maintenance daemon's periodic full
+// scan. Contamination (ErrContamination) revokes at once, exactly like
+// VerifyPersistenceAttestation. Any other failure (the scan ran out of time,
+// a background registration changed mid-scan, inspection was incomplete)
+// revokes only when revokeInconclusive is set; otherwise the attestation is
+// left as it was and the error wraps ErrPersistenceScanInconclusive, so the
+// caller can retry and decide when repeated failures must revoke.
+func ReverifyPersistenceAttestation(ctx context.Context, options Options, revokeInconclusive bool) error {
+	return scanAndPublish(ctx, options, false, collectPersistence, nil, revokeInconclusive)
+}
+
 func verifyPersistenceAttestation(ctx context.Context, options Options, reset bool, collect func(context.Context, Options) (PersistenceManifest, error)) error {
-	return scanAndPublish(ctx, options, reset, collect, nil)
+	return scanAndPublish(ctx, options, reset, collect, nil, true)
 }
 
 // RebindPersistenceBuild is VerifyPersistenceAttestation for a release that
@@ -401,7 +417,7 @@ func RebindPersistenceBuild(ctx context.Context, options Options) error {
 }
 
 func rebindPersistenceBuild(ctx context.Context, options Options, collect func(context.Context, Options) (PersistenceManifest, error)) error {
-	return scanAndPublish(ctx, options, false, collect, buildOnlyRebind)
+	return scanAndPublish(ctx, options, false, collect, buildOnlyRebind, true)
 }
 
 // buildOnlyRebind accepts a present, valid, unrevoked stored attestation that
@@ -450,8 +466,10 @@ func bindingDifferences(stored, live persistenceAttestationBinding) []string {
 // scanAndPublish is the full scan shared by verification and the strict build
 // rebind. accept, when set, decides on the stored record and the live binding
 // before collection: first without the manifest digest, before anything can
-// revoke, then with it. Its refusal never revokes.
-func scanAndPublish(ctx context.Context, options Options, reset bool, collect func(context.Context, Options) (PersistenceManifest, error), accept func(stored persistenceAttestation, present bool, live persistenceAttestationBinding, manifestKnown bool) error) error {
+// revoke, then with it. Its refusal never revokes. A failed scan revokes the
+// inspected revision when it observed contamination, or when
+// revokeInconclusive is set.
+func scanAndPublish(ctx context.Context, options Options, reset bool, collect func(context.Context, Options) (PersistenceManifest, error), accept func(stored persistenceAttestation, present bool, live persistenceAttestationBinding, manifestKnown bool) error, revokeInconclusive bool) error {
 	ctx, cancel := context.WithTimeout(ctx, PersistenceOperationTimeout)
 	defer cancel()
 	// A contending invocation does not inspect or revoke anything. Its bounded
@@ -464,6 +482,10 @@ func scanAndPublish(ctx context.Context, options Options, reset bool, collect fu
 		var checked bool
 		defer func() {
 			if result != nil && checked && !errors.Is(result, errPersistenceAttestationRevoked) && !errors.Is(result, errPersistenceRebindRefused) {
+				if !revokeInconclusive && !errors.Is(result, ErrContamination) {
+					result = fmt.Errorf("%w: %w", ErrPersistenceScanInconclusive, result)
+					return
+				}
 				// Preserve full-scan failure evidence even after its deadline,
 				// without allowing cleanup to block behind a stuck publisher.
 				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(scanCtx), persistenceAttestationLockTimeout)

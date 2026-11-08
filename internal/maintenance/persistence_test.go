@@ -3,6 +3,7 @@ package maintenance
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -16,7 +17,7 @@ func TestPeriodicPersistenceScanDoesNotBlockHealthOrOverlap(t *testing.T) {
 	started := make(chan time.Duration, 1)
 	release := make(chan struct{})
 	defer close(release)
-	monitor := persistenceMonitor{verify: func(ctx context.Context, _ worker.Options) error {
+	monitor := persistenceMonitor{verify: func(ctx context.Context, _ worker.Options, _ bool) error {
 		deadline, ok := ctx.Deadline()
 		if !ok {
 			started <- 0
@@ -57,7 +58,7 @@ func TestPeriodicPersistenceMismatchPausesUntilReview(t *testing.T) {
 	defer cancel()
 	lastVerified := now.Add(-6 * time.Hour)
 	observation.Persistence.LastVerified = lastVerified
-	monitor := persistenceMonitor{verify: func(context.Context, worker.Options) error {
+	monitor := persistenceMonitor{verify: func(context.Context, worker.Options, bool) error {
 		observation.Persistence.Valid = false
 		observation.Persistence.NeedsReview = true
 		observation.Persistence.RevokedAt = now
@@ -88,7 +89,7 @@ func TestMissingAttestationStartsScanWithoutClaimingReadiness(t *testing.T) {
 		t.Fatal("missing attestation admitted")
 	}
 	called := make(chan struct{})
-	monitor := persistenceMonitor{verify: func(context.Context, worker.Options) error { close(called); return nil }}
+	monitor := persistenceMonitor{verify: func(context.Context, worker.Options, bool) error { close(called); return nil }}
 	monitor.schedule(context.Background(), now, worker.Options{}, observation.Persistence, errors.New("missing"))
 	select {
 	case <-called:
@@ -101,7 +102,7 @@ func TestMissingAttestationStartsScanWithoutClaimingReadiness(t *testing.T) {
 func TestFreshAttestationDefersPeriodicScanForSixHours(t *testing.T) {
 	now, _, _, observation := approvedFixture()
 	called := make(chan struct{})
-	monitor := persistenceMonitor{verify: func(context.Context, worker.Options) error { close(called); return nil }}
+	monitor := persistenceMonitor{verify: func(context.Context, worker.Options, bool) error { close(called); return nil }}
 	monitor.schedule(context.Background(), now.Add(6*time.Hour-time.Nanosecond), worker.Options{}, observation.Persistence, nil)
 	if monitor.done != nil {
 		t.Fatal("full scan scheduled before six hours")
@@ -119,7 +120,7 @@ func TestPeriodicPersistenceCancellationFinishesBeforeMonitorExit(t *testing.T) 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	started := make(chan struct{})
-	monitor := persistenceMonitor{verify: func(ctx context.Context, _ worker.Options) error {
+	monitor := persistenceMonitor{verify: func(ctx context.Context, _ worker.Options, _ bool) error {
 		close(started)
 		<-ctx.Done()
 		return ctx.Err()
@@ -139,5 +140,88 @@ func TestPeriodicPersistenceCancellationFinishesBeforeMonitorExit(t *testing.T) 
 	monitor.schedule(ctx, time.Now().Add(24*time.Hour), worker.Options{}, worker.PersistenceAttestationMetadata{}, errors.New("missing"))
 	if monitor.done != nil {
 		t.Fatal("cancelled monitor started another scan")
+	}
+}
+
+// The 2026-11-08 outage: one periodic scan failed without observing anything
+// and revoked the attestation until an owner sitting. Inconclusive scans now
+// leave it in place and are retried; only the scan after the limit revokes.
+func TestInconclusivePeriodicScansRetryBeforeRevoking(t *testing.T) {
+	now, _, _, observation := approvedFixture()
+	observation.Persistence.LastVerified = now.Add(-6 * time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	clock := now
+	var modes []bool
+	monitor := persistenceMonitor{now: func() time.Time { return clock }, verify: func(_ context.Context, _ worker.Options, revokeInconclusive bool) error {
+		modes = append(modes, revokeInconclusive)
+		return fmt.Errorf("%w: registered code inspection incomplete", worker.ErrPersistenceScanInconclusive)
+	}}
+	wait := func() {
+		t.Helper()
+		select {
+		case <-monitor.done:
+		case <-time.After(time.Second):
+			t.Fatal("scan did not complete")
+		}
+	}
+	monitor.schedule(ctx, clock, worker.Options{}, observation.Persistence, nil)
+	wait()
+	for i := 1; i <= persistenceInconclusiveLimit; i++ {
+		// Collect the result; no retry before the retry interval.
+		monitor.schedule(ctx, clock.Add(persistenceRetryInterval-time.Second), worker.Options{}, observation.Persistence, nil)
+		if monitor.done != nil {
+			t.Fatalf("retry %d started before the retry interval", i)
+		}
+		clock = clock.Add(persistenceRetryInterval)
+		monitor.schedule(ctx, clock, worker.Options{}, observation.Persistence, nil)
+		if monitor.done == nil {
+			t.Fatalf("retry %d not started after an inconclusive scan", i)
+		}
+		wait()
+	}
+	want := []bool{false, false, false, true}
+	if len(modes) != len(want) {
+		t.Fatalf("scans %v, want %v", modes, want)
+	}
+	for i := range want {
+		if modes[i] != want[i] {
+			t.Fatalf("scan %d revokeInconclusive=%t; want %v (only the scan after %d inconclusive ones revokes)", i, modes[i], want, persistenceInconclusiveLimit)
+		}
+	}
+}
+
+func TestVerifiedScanResetsInconclusiveCount(t *testing.T) {
+	now, _, _, observation := approvedFixture()
+	observation.Persistence.LastVerified = now.Add(-6 * time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Without the reset, the fifth scan would follow three inconclusive ones.
+	results := []error{
+		worker.ErrPersistenceScanInconclusive, worker.ErrPersistenceScanInconclusive, nil,
+		worker.ErrPersistenceScanInconclusive, worker.ErrPersistenceScanInconclusive, worker.ErrPersistenceScanInconclusive,
+	}
+	var modes []bool
+	clock := now
+	monitor := persistenceMonitor{now: func() time.Time { return clock }, verify: func(_ context.Context, _ worker.Options, revokeInconclusive bool) error {
+		modes = append(modes, revokeInconclusive)
+		err := results[0]
+		results = results[1:]
+		return err
+	}}
+	for range 6 {
+		monitor.schedule(ctx, clock, worker.Options{}, observation.Persistence, nil)
+		if monitor.done == nil {
+			t.Fatalf("scan not started at %s (modes so far %v)", clock, modes)
+		}
+		<-monitor.done
+		// Each scan here leaves the record unverified-old, so the next is due
+		// after the retry interval (inconclusive) or six hours (verified).
+		clock = clock.Add(persistenceScanInterval)
+	}
+	for i, m := range modes {
+		if m {
+			t.Fatalf("scan %d revoked on inconclusive although a verified scan reset the count: %v", i, modes)
+		}
 	}
 }

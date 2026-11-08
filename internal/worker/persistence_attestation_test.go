@@ -119,6 +119,61 @@ func TestPersistenceAttestationMismatchAndUnavailableRevokeDurably(t *testing.T)
 	}
 }
 
+// The periodic re-verification leaves the attestation in place when a scan
+// fails without observing anything, still revokes on contamination, and
+// revokes on any failure once the caller asks it to.
+func TestPeriodicReverifyRevokesOnlyOnContaminationOrWhenAsked(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		contaminated       bool
+		revokeInconclusive bool
+		wantRevoked        bool
+	}{
+		{"inconclusive kept", false, false, false},
+		{"inconclusive after limit revokes", false, true, true},
+		{"contamination revokes", true, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			options, expected := attestationFixture(t)
+			attestFixture(t, options, expected, false)
+			before, err := PersistenceAttestationStatus(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = scanAndPublish(context.Background(), options, false, func(context.Context, Options) (PersistenceManifest, error) {
+				if !tc.contaminated {
+					return PersistenceManifest{}, errors.New("registered code inspection incomplete or protection unavailable")
+				}
+				changed := registrationFixture(t)
+				for id, code := range changed.Code {
+					code.TreeSHA256 = strings.Repeat("c", 64)
+					changed.Code[id] = code
+				}
+				return changed, nil
+			}, nil, tc.revokeInconclusive)
+			if err == nil {
+				t.Fatal("failed scan reported success")
+			}
+			if inconclusive := errors.Is(err, ErrPersistenceScanInconclusive); inconclusive == tc.wantRevoked {
+				t.Fatalf("ErrPersistenceScanInconclusive=%t with revoked=%t: %v", inconclusive, tc.wantRevoked, err)
+			}
+			status, err := PersistenceAttestationStatus(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantRevoked {
+				if status.Valid || !status.NeedsReview || status.RevokedAt.IsZero() {
+					t.Fatalf("not revoked: %+v", status)
+				}
+				return
+			}
+			if status != before {
+				t.Fatalf("inconclusive periodic scan changed the attestation:\n before %+v\n after  %+v", before, status)
+			}
+		})
+	}
+}
+
 func TestPersistenceAttestationPublicationCannotRaceRevocation(t *testing.T) {
 	options, expected := attestationFixture(t)
 	attestFixture(t, options, expected, false)
