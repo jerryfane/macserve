@@ -23,16 +23,51 @@ func ownedLabel(identifier string) string {
 
 // These are structural constraints, not trust in a label. Live protected-file
 // and running-executable checks are mandatory before removing a container.
+// A Developer ID signed macserve is recorded with its 10-character team
+// identifier; an unsigned one with none. Either way the live checks bind the
+// record to the protected executable that is running.
 func ownedServiceMetadata(r BTMRecord, helper string) error {
 	f := r.Fields
 	label := ownedLabel(f["Identifier"])
 	if label == "" || f["Type"] != "legacy daemon (0x10010)" || f["Flags"] != "[ legacy ] (0x1)" ||
 		f["URL"] != "/Library/LaunchDaemons/"+label+".plist" || f["Executable Path"] != helper ||
 		!filepath.IsAbs(helper) || filepath.Clean(helper) != helper ||
-		f["Bundle Identifier"] != "" || f["Team Identifier"] != "" || len(r.Embedded) != 0 {
+		f["Bundle Identifier"] != "" || !ownedTeamIdentifier(f["Team Identifier"]) || len(r.Embedded) != 0 {
 		return errors.New("owned service registration binding mismatch")
 	}
 	return nil
+}
+
+func ownedTeamIdentifier(team string) bool {
+	if team == "" {
+		return true
+	}
+	if len(team) != 10 {
+		return false
+	}
+	for _, c := range team {
+		if (c < 'A' || c > 'Z') && (c < '0' || c > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+// unsignedOwnContainer is the notification container background task
+// management files an unsigned macserve daemon under. After macserve is
+// Developer ID signed, the daemon's record moves to its developer's container,
+// but this old container can keep referencing it until the service is
+// notified again (observed on the Studio, 2026-11-08). Such a stale reference
+// is accepted only for a service that is now signed.
+const unsignedOwnContainer = "Unknown Developer"
+
+func ownContainerParent(container, service BTMRecord) bool {
+	parent := service.Fields["Parent Identifier"]
+	if parent == container.Fields["Identifier"] {
+		return true
+	}
+	return container.Fields["Identifier"] == unsignedOwnContainer && container.Fields["Name"] == "(null)" &&
+		service.Fields["Team Identifier"] != "" && parent != unsignedOwnContainer
 }
 
 // Resolve only exact referenced owned identifiers from UID -2. Unrelated root
@@ -169,7 +204,7 @@ func ownContainer(r BTMRecord, services []BTMRecord) (bool, error) {
 			if service.Fields["Identifier"] != id {
 				continue
 			}
-			if found || service.Fields["Parent Identifier"] != r.Fields["Identifier"] || ownedServiceMetadata(service, service.Fields["Executable Path"]) != nil {
+			if found || !ownContainerParent(r, service) || ownedServiceMetadata(service, service.Fields["Executable Path"]) != nil {
 				return false, errors.New("own-service reference binding mismatch")
 			}
 			found = true

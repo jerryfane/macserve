@@ -144,6 +144,14 @@ are not persisted as approvals. Checks run again on each native census, includin
 snapshot. Thus later registration of the other owned labels does not auto-adopt third-party records or
 invalidate the manifest solely for owned notification metadata. The job-UID header UUID remains bound.
 
+**Developer ID signed macserve (v0.1.39).** Once the admin signs macserve with a Developer ID, BTM records
+the owned daemons with that team's 10-character `Team Identifier` and files them under the developer's
+notification container. An owned record may therefore carry either no team identifier or one well-formed
+team identifier; the live file and executable checks above are unchanged and still bind it. BTM can keep
+the old unsigned `Unknown Developer` container (with `Name: (null)`) referencing a daemon that is now
+filed under its developer (observed on the Studio on 2026-11-08). That stale reference is accepted only
+when the referenced owned record is signed; for an unsigned record the parent must match exactly.
+
 This narrowly recognizes protected infrastructure, not any app name, developer name, team or signature.
 Ad-hoc macserve code is permitted here because the check binds the protected helper to the checking
 executable—not because an ad-hoc signature proves provenance. There is no new digest pin or claimed
