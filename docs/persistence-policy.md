@@ -68,8 +68,12 @@ Root maintenance performs one full scan every six hours in a background task, in
 eight-second health observation. A full scan has a fixed 480-second deadline, does not hold the worker
 admission lock, and never overlaps another full attestation scan, even in another process. Scan-lock
 contention refuses that invocation without changing authority. Missing attestation fails admission closed
-and schedules an initial scan. A full-scan mismatch or collection error durably revokes only the revision
-that scan checked; a stale scan cannot revoke a newer publication or review. Hot-path transient failures
+and schedules an initial scan. A full-scan mismatch durably revokes only the revision that scan checked;
+a stale scan cannot revoke a newer publication or review. Explicit scans also revoke on collection
+failure. The periodic scan revokes on contamination at once; a failure that observed nothing (deadline,
+registration change mid-scan, incomplete inspection, maintenance stop) leaves the attestation in place and
+retries 10 minutes after it ended, and the scan after three consecutive such failures revokes on any
+failure. This adds at most about an hour (three retries) to the trusted-writer window below. Hot-path transient failures
 refuse only that admission. Positive hot mismatches revoke; the reason precedence preserves an existing
 `reset_required` marker over `mismatch`, then `authority_changed`, then `inspection_unavailable`. Revocation preserves the last
 successful verification timestamp. Periodic success cannot silently heal revocation: preserve evidence,
