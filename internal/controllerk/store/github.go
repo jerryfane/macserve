@@ -333,6 +333,31 @@ func (s *Store) GitHubActiveRuns(ctx context.Context, repoID int64) ([]GitHubRun
 	return runs, rows.Err()
 }
 
+// GitHubTrackedRepositories maps each repository ID that still has a current
+// run or a run with an unfinished job to the names its runs were admitted
+// under: the durable set a departure reconciliation must consider, also after
+// a restart.
+func (s *Store) GitHubTrackedRepositories(ctx context.Context) (map[int64][]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT repository_id,repository FROM github_runs
+ WHERE run_key IN (SELECT run_key FROM github_current_runs)
+ OR current_job IN (SELECT id FROM jobs WHERE state NOT IN (`+terminalStates+`))
+ ORDER BY repository_id,repository`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	tracked := make(map[int64][]string)
+	for rows.Next() {
+		var id int64
+		var name string
+		if err = rows.Scan(&id, &name); err != nil {
+			return nil, err
+		}
+		tracked[id] = append(tracked[id], name)
+	}
+	return tracked, rows.Err()
+}
+
 func (s *Store) GitHubRequests(ctx context.Context, jobID string) ([]GitHubRequest, error) {
 	rows, err := s.db.QueryContext(ctx, "SELECT comment_id,request_id,body_sha256 FROM github_requests WHERE job_id=? ORDER BY comment_id", jobID)
 	if err != nil {

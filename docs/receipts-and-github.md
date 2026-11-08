@@ -130,7 +130,9 @@ per owner. `base_branches` lists allowed bases and `default_branch: true` adds e
 branch; at least one is required. `profiles` name org build templates only (no `ios_archive`, no simulator test or
 script template, no explicit profile); for each eligible head the controller reads its root `.macserve.json` at
 the head commit and runs the first listed template that file admits (the same derivation the worker repeats), and
-nothing when the file is missing or admits none. `actions_bot_id`/`actions_app_id` are refused: owner policies
+nothing when the file is missing or admits none. The parsed file is cached per repository ID and head commit;
+the template is chosen against the policy governing the repository at that moment, so a transfer to an owner
+with other templates re-evaluates the head. `actions_bot_id`/`actions_app_id` are refused: owner policies
 are pull mode only and read no `/mac-evidence` comments.
 
 Each poll cycle the keyholder lists the App installation's repositories for every owner-form owner (at most 500 per
@@ -156,7 +158,8 @@ Runs are keyed by numeric repository ID, the policy revision and, for owner poli
 and current repository name. A repository renamed within, or transferred between, owner-policy owners keeps
 building under its new name (its new head runs are new runs; unfinished jobs admitted under the old name are
 cancelled and their checks are no longer updated). A repository transferred to an unlisted owner, uninstalled or
-deleted leaves the listing: its unfinished jobs are cancelled once a cycle completes every listing. Job principals
+deleted leaves the listing: its unfinished jobs are cancelled once a cycle completes every listing. Departures
+are reconciled from the stored runs, so a controller restart in between does not forget them. Job principals
 remain `github:<repository_id>` and receipt approvals `repository:<id>/policy:<revision>/run:<key>`.
 
 Migration from repository policies: add one owner-form policy per owner (pin `owner_id`, list the author IDs and

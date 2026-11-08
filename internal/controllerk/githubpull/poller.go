@@ -63,11 +63,12 @@ type Poller struct {
 	tmpls    map[string]model.Template
 	mu       sync.Mutex
 	// Guarded by mu (held by Poll): the current name of each repository ID
-	// the owner listings cover (replaced by every complete cycle), and the
-	// template each owner-form head selected (key: repository ID, SHA), kept
-	// while the head is still observed.
+	// the owner listings cover (replaced by every complete cycle), and each
+	// owner-form head's parsed .macserve.json (key: repository ID, SHA; nil
+	// when missing or invalid), kept while the head is still observed. The
+	// template is selected from it against the governing policy on every use.
 	discovered map[int64]string
-	selections map[string]string
+	configs    map[string]*model.RepoConfig
 }
 
 func New(options Options) (*Poller, error) {
@@ -80,7 +81,7 @@ func New(options Options) (*Poller, error) {
 	if options.PollInterval == 0 {
 		options.PollInterval = 45 * time.Second
 	}
-	p := &Poller{options: options, policies: make(map[string]githubwire.Policy), owners: make(map[string]githubwire.Policy), pinned: make(map[int64]bool), recipes: make(map[string]model.Profile), tmpls: make(map[string]model.Template), discovered: make(map[int64]string), selections: make(map[string]string)}
+	p := &Poller{options: options, policies: make(map[string]githubwire.Policy), owners: make(map[string]githubwire.Policy), pinned: make(map[int64]bool), recipes: make(map[string]model.Profile), tmpls: make(map[string]model.Template), discovered: make(map[int64]string), configs: make(map[string]*model.RepoConfig)}
 	for _, profile := range options.Profiles.List() {
 		p.recipes[profile.ID] = profile
 	}
@@ -300,21 +301,48 @@ func (p *Poller) pollOwners(ctx context.Context) []error {
 		maps.Copy(p.discovered, seen)
 		return failures
 	}
-	for key := range p.selections {
+	for key := range p.configs {
 		if !observed[key] {
-			delete(p.selections, key)
+			delete(p.configs, key)
 		}
 	}
-	for id, name := range p.discovered {
-		if _, ok := seen[id]; !ok {
-			if err := p.retire(ctx, id); err != nil {
-				failures = append(failures, err)
-				seen[id] = name
-			}
+	// Departures are reconciled from durable runs, not from this process's
+	// memory: a restart between a repository's admission and its departure
+	// must still end its jobs.
+	tracked, err := p.options.Store.GitHubTrackedRepositories(ctx)
+	if err != nil {
+		failures = append(failures, err)
+	}
+	for id, names := range tracked {
+		if _, ok := seen[id]; ok || !p.ownerGoverned(id, names) {
+			continue
+		}
+		if err := p.retire(ctx, id); err != nil {
+			failures = append(failures, err)
 		}
 	}
 	p.discovered = seen
 	return failures
+}
+
+// ownerGoverned reports whether stored runs of repository ID id, admitted
+// under names, belong to an owner-form policy's reconciliation: the ID is not
+// pinned by a repository-form policy and some name is of an owner-form owner
+// and not a repository-form policy's name.
+func (p *Poller) ownerGoverned(id int64, names []string) bool {
+	if p.pinned[id] {
+		return false
+	}
+	for _, name := range names {
+		owner, _, _ := strings.Cut(name, "/")
+		if _, ok := p.owners[owner]; !ok {
+			continue
+		}
+		if _, ok := p.policies[name]; !ok {
+			return true
+		}
+	}
+	return false
 }
 
 // retire ends a departed owner-form repository's current runs: its unfinished
@@ -379,34 +407,38 @@ func (p *Poller) recipe(policy githubwire.Policy, id string) (model.Profile, boo
 // selectProfile is the first owner-form policy template whose snapshot the
 // head's .macserve.json derives a recipe for, exactly as the worker will; ""
 // when the file is missing, invalid or admits none. A head's file is
-// immutable, so the choice is cached while the head is observed.
+// immutable within its repository, so the parsed file is cached while the
+// head is observed; the selection itself always uses the governing policy,
+// which a transfer or rename may change.
 func (p *Poller) selectProfile(ctx context.Context, policy githubwire.Policy, sha string, observed map[string]bool) (string, error) {
 	key := strconv.FormatInt(policy.RepositoryID, 10) + "/" + sha
 	observed[key] = true
-	if id, ok := p.selections[key]; ok {
-		return id, nil
-	}
-	data, found, err := p.options.Client.RegularFile(ctx, policy.Repository, sha, profiles.RepoConfigFile, profiles.MaxRepoConfigBytes)
-	if err != nil {
-		return "", err
-	}
-	selected := ""
-	if found {
-		if config, err := profiles.ParseRepoConfig(data); err == nil {
-			for _, id := range policy.Profiles {
-				snapshot, ok := p.recipe(policy, id)
-				if !ok {
-					continue
-				}
-				if _, err := profiles.Derive(snapshot, config); err == nil {
-					selected = id
-					break
-				}
+	config, cached := p.configs[key]
+	if !cached {
+		data, found, err := p.options.Client.RegularFile(ctx, policy.Repository, sha, profiles.RepoConfigFile, profiles.MaxRepoConfigBytes)
+		if err != nil {
+			return "", err
+		}
+		if found {
+			if parsed, err := profiles.ParseRepoConfig(data); err == nil {
+				config = &parsed
 			}
 		}
+		p.configs[key] = config
 	}
-	p.selections[key] = selected
-	return selected, nil
+	if config == nil {
+		return "", nil
+	}
+	for _, id := range policy.Profiles {
+		snapshot, ok := p.recipe(policy, id)
+		if !ok {
+			continue
+		}
+		if _, err := profiles.Derive(snapshot, *config); err == nil {
+			return id, nil
+		}
+	}
+	return "", nil
 }
 
 func (p *Poller) admission(policy githubwire.Policy, pull githubapi.PullRequest, profileID string) (store.GitHubAdmission, error) {

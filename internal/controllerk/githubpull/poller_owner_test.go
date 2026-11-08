@@ -200,9 +200,21 @@ func (g *orgGitHub) install(name string, id int64, ownerID int64, listedBy strin
 }
 
 type ownerFixture struct {
-	p      *Poller
-	s      *store.Store
-	remote *orgGitHub
+	p       *Poller
+	s       *store.Store
+	remote  *orgGitHub
+	options Options
+}
+
+// restart replaces the poller with a new one over the same store and GitHub,
+// as a controller restart does: no in-memory poll state survives.
+func (f *ownerFixture) restart(t *testing.T) {
+	t.Helper()
+	p, err := New(f.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.p = p
 }
 
 func orgTemplates() []model.Template {
@@ -236,13 +248,14 @@ func newOwnerFixture(t *testing.T, policies ...githubwire.Policy) (*ownerFixture
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	p, err := New(Options{Store: s, Profiles: registry, Client: client, Policies: policies, VerifyReceipt: func(model.Job, int64, json.RawMessage) error {
+	options := Options{Store: s, Profiles: registry, Client: client, Policies: policies, VerifyReceipt: func(model.Job, int64, json.RawMessage) error {
 		return errors.New("no test receipt is cryptographically trusted")
-	}, Now: now})
+	}, Now: now}
+	p, err := New(options)
 	if err != nil {
 		return nil, err
 	}
-	return &ownerFixture{p: p, s: s, remote: remote}, nil
+	return &ownerFixture{p: p, s: s, remote: remote, options: options}, nil
 }
 
 func (f *ownerFixture) pull(repo string, pr githubapi.PullRequest, config string) {
@@ -488,5 +501,89 @@ func TestOwnerPolicyValidation(t *testing.T) {
 	}
 	if _, err := newOwnerFixture(t, ownerPolicy("themartianapp", martianID), ownerPolicy("themartianapp", martianID)); err == nil {
 		t.Error("duplicate owner policy accepted")
+	}
+}
+
+// Departures are reconciled from durable runs: a repository admitted before
+// a controller restart and gone from a complete listing after it still loses
+// its unfinished job and current runs.
+func TestOwnerPolicyDepartureAfterRestart(t *testing.T) {
+	f, err := newOwnerFixture(t, ownerPolicy("themartianapp", martianID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const app = "themartianapp/app"
+	f.remote.install(app, 501, martianID, "themartianapp")
+	f.pull(app, githubapi.PullRequest{Number: 1, HeadSHA: headSHA('1'), HeadRepositoryID: 501, AuthorID: ownerAuthor, BaseRef: "main"}, nativeConfig)
+	f.poll(t)
+	runs := f.active(t, 501)
+	if len(runs) != 1 {
+		t.Fatalf("runs: %+v", runs)
+	}
+	f.restart(t)
+	f.remote.install("outsider/app", 501, 4242, "")
+	f.poll(t)
+	if job := f.job(t, runs[0].JobID); !job.State.Terminal() && !job.CancelRequested {
+		t.Fatalf("job of a repository that left the listing across a restart: state=%s", job.State)
+	}
+	if active := f.active(t, 501); len(active) != 0 {
+		t.Fatalf("active runs after departure: %+v", active)
+	}
+	tracked, err := f.s.GitHubTrackedRepositories(context.Background())
+	if err != nil || len(tracked) != 0 {
+		t.Fatalf("tracked after retirement: %v %v", tracked, err)
+	}
+	// A repository-form policy's pinned repository is never retired by an
+	// owner policy's listing, also after a restart.
+	pinned := githubwire.Policy{RepositoryID: 1447740988, Repository: "themartianapp/tandem", AuthorIDs: []int64{ownerAuthor}, BaseBranches: []string{"main"}, Profiles: []string{nativeBuild}, PolicyRevision: 2}
+	g, err := newOwnerFixture(t, pinned, ownerPolicy("themartianapp", martianID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.remote.install("themartianapp/tandem", 1447740988, martianID, "")
+	g.pull("themartianapp/tandem", githubapi.PullRequest{Number: 1, HeadSHA: headSHA('1'), HeadRepositoryID: 1447740988, AuthorID: ownerAuthor, BaseRef: "main"}, nativeConfig)
+	g.poll(t)
+	pinnedRuns := g.active(t, 1447740988)
+	if len(pinnedRuns) != 1 {
+		t.Fatalf("pinned runs: %+v", pinnedRuns)
+	}
+	g.restart(t)
+	g.poll(t)
+	if job := g.job(t, pinnedRuns[0].JobID); job.State.Terminal() || job.CancelRequested {
+		t.Fatalf("pinned repository job retired by an owner listing: %s", job.State)
+	}
+}
+
+// The template is selected against the policy governing the repository now:
+// a transfer between owners with different template lists re-evaluates a
+// head the old owner's templates did not admit.
+func TestOwnerPolicyTransferReevaluatesTemplateSelection(t *testing.T) {
+	flutterOnly := ownerPolicy("jerryfane", jerryID)
+	flutterOnly.Profiles = []string{flutterBuild}
+	f, err := newOwnerFixture(t, flutterOnly, ownerPolicy("themartianapp", martianID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.remote.install("jerryfane/app", 501, jerryID, "jerryfane")
+	f.pull("jerryfane/app", githubapi.PullRequest{Number: 1, HeadSHA: headSHA('1'), HeadRepositoryID: 501, AuthorID: ownerAuthor, BaseRef: "main"}, nativeConfig)
+	f.poll(t)
+	if runs := f.active(t, 501); len(runs) != 0 {
+		t.Fatalf("native head admitted by a Flutter-only policy: %+v", runs)
+	}
+	f.remote.install("themartianapp/app", 501, martianID, "themartianapp")
+	f.remote.mu.Lock()
+	f.remote.pulls["themartianapp/app"] = f.remote.pulls["jerryfane/app"]
+	f.remote.files["themartianapp/app@"+headSHA('1')] = nativeConfig
+	reads := f.remote.fileGets
+	f.remote.mu.Unlock()
+	f.poll(t)
+	runs := f.active(t, 501)
+	if len(runs) != 1 || runs[0].Profile != nativeBuild || runs[0].Repository != "themartianapp/app" {
+		t.Fatalf("transferred head not re-evaluated: %+v", runs)
+	}
+	f.remote.mu.Lock()
+	defer f.remote.mu.Unlock()
+	if f.remote.fileGets != reads {
+		t.Fatalf("immutable .macserve.json re-read after transfer: %d then %d", reads, f.remote.fileGets)
 	}
 }
