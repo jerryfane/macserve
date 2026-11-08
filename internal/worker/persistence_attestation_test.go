@@ -183,10 +183,13 @@ func TestPeriodicReverifyRevokesOnUnsafeDescendantRecordedAsProblem(t *testing.T
 	for _, tc := range []struct {
 		name        string
 		treeErr     error
+		laterErr    error // a collection step after the code trees fails
 		wantRevoked bool
 	}{
-		{"world-writable descendant", fmt.Errorf("%w: registered tree descendant is writable by an untrusted user", ErrContamination), true},
-		{"tree unreadable", errors.New("registered tree inspection unavailable"), false},
+		{"world-writable descendant", fmt.Errorf("%w: registered tree descendant is writable by an untrusted user", ErrContamination), nil, true},
+		{"world-writable descendant then deadline", fmt.Errorf("%w: registered tree descendant is writable by an untrusted user", ErrContamination), context.DeadlineExceeded, true},
+		{"tree unreadable", errors.New("registered tree inspection unavailable"), nil, false},
+		{"tree unreadable then deadline", errors.New("registered tree inspection unavailable"), context.DeadlineExceeded, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			options, expected := attestationFixture(t)
@@ -208,7 +211,10 @@ func TestPeriodicReverifyRevokesOnUnsafeDescendantRecordedAsProblem(t *testing.T
 					t.Fatal("failed tree reached code-signature inspection")
 					return "", nil
 				}
-				return m, collectRegistrationCode(ctx, &m, registrationWritersFixture(), acl, digest, command)
+				if err := collectRegistrationCode(ctx, &m, registrationWritersFixture(), acl, digest, command); err != nil {
+					return m, err
+				}
+				return m, tc.laterErr
 			}, nil, false)
 			if err == nil {
 				t.Fatal("scan with a failed tree reported success")

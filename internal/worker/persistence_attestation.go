@@ -529,6 +529,11 @@ func scanAndPublish(ctx context.Context, options Options, reset bool, collect fu
 		}
 		current, err := collect(scanCtx, options)
 		if err != nil {
+			// Contamination observed before a later collection step failed is
+			// still positive evidence: keep it so the scan revokes as a mismatch.
+			if current.contamination != nil {
+				return errors.Join(fmt.Errorf("registered code inspection observed contamination: %w", current.contamination), err)
+			}
 			return err
 		}
 		if err := matchPersistence(expected, current); err != nil {
