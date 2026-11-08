@@ -41,8 +41,9 @@ type Client struct {
 	installations         map[string]int64
 	key                   *rsa.PrivateKey
 	// mint supplies installation tokens for a brokered client, which holds
-	// no App key.
+	// no App key; list supplies its owner repository listings.
 	mint         TokenSource
+	list         RepositorySource
 	repositories map[string]int64
 	owners       map[string]bool
 	// verified holds repository IDs learned for owner-approved repositories
@@ -54,6 +55,22 @@ type Client struct {
 	rateMu        sync.Mutex
 	blockedUntil  time.Time
 	blockedStatus int
+	// cacheMu guards the conditional-request caches: repository reads by
+	// lowercase name and installation listings by owner. A 304 reply costs
+	// no rate limit and replays the identical verified representation.
+	cacheMu  sync.Mutex
+	repos    map[string]cachedRepository
+	listings map[string]cachedListing
+}
+
+type cachedRepository struct {
+	etag  string
+	value Repository
+}
+
+type cachedListing struct {
+	etag  string
+	value []Repository
 }
 
 func newClient(o HTTPOptions) (*Client, error) {
@@ -87,7 +104,7 @@ func newClient(o HTTPOptions) (*Client, error) {
 	if now == nil {
 		now = time.Now
 	}
-	return &Client{http: &h, base: u, now: now, tokens: make(map[string]cachedToken)}, nil
+	return &Client{http: &h, base: u, now: now, tokens: make(map[string]cachedToken), repos: make(map[string]cachedRepository), listings: make(map[string]cachedListing)}, nil
 }
 
 func NewToken(token string, o HTTPOptions) (*Client, error) {
@@ -129,7 +146,7 @@ func NewApp(o AppOptions) (*Client, error) {
 
 // NewBrokered returns an App client that holds no App key: every
 // installation token comes from o.Tokens, and must name the approved
-// repository it was requested for.
+// repository it was requested for; owner listings come from o.Listing.
 func NewBrokered(o BrokeredOptions) (*Client, error) {
 	if o.AppID <= 0 || o.Tokens == nil || len(o.Repositories) == 0 && len(o.Owners) == 0 {
 		return nil, errors.New("invalid brokered GitHub App configuration")
@@ -138,7 +155,7 @@ func NewBrokered(o BrokeredOptions) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.appID, c.mint = o.AppID, o.Tokens
+	c.appID, c.mint, c.list = o.AppID, o.Tokens, o.Listing
 	if err := c.setPolicy(o.Repositories, o.Owners); err != nil {
 		return nil, err
 	}
@@ -417,7 +434,7 @@ func (c *Client) InstallationToken(ctx context.Context, repo string) (Installati
 	if cached.value != token {
 		return InstallationToken{}, errors.New("GitHub installation token changed while minting")
 	}
-	return InstallationToken{Token: token, ExpiresAt: cached.expires, RepositoryID: repository.ID}, nil
+	return InstallationToken{Token: token, ExpiresAt: cached.expires, RepositoryID: repository.ID, OwnerID: repository.Owner.ID}, nil
 }
 
 // CommitTree returns the Git tree SHA a commit of repo names, through a

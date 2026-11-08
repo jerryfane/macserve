@@ -43,12 +43,12 @@ func TestReceiptExpectationUsesEffectiveRequiredTests(t *testing.T) {
 		job.Result = raw
 	}
 	complete(&model.RepoRecipe{ConfigSHA256: strings.Repeat("f", 64), Config: config, WorkDir: derived.WorkDir, Prepare: derived.Prepare, Run: derived.Run, Shard: derived.Shard, RequiredTests: derived.RequiredTests})
-	expected, err := receiptExpectation(map[string]int64{"themartianapp/herdrup": 42}, job)
+	expected, err := receiptExpectation(42, job)
 	if err != nil || !slices.Equal(expected.RequiredTests, selectors) || expected.RepositoryID != 42 || expected.Profile != template.ID || expected.ProfileDigest != admission.ProfileDigest || expected.Simulator == nil || *expected.Simulator != template.Simulators[0] {
 		t.Fatalf("template test expectation %+v %v", expected, err)
 	}
 	complete(nil)
-	if _, err := receiptExpectation(nil, job); err == nil {
+	if _, err := receiptExpectation(42, job); err == nil {
 		t.Fatal("template job without a recipe had an expectation")
 	}
 }

@@ -43,7 +43,12 @@ type fakeGitHub struct {
 	head   githubapi.BranchHead
 	trees  map[string]string
 	tokens map[string]githubapi.InstallationToken
+	repos  map[string][]githubapi.Repository
 	calls  int
+}
+
+func (g *fakeGitHub) InstallationRepositories(_ context.Context, owner string) ([]githubapi.Repository, error) {
+	return g.repos[owner], nil
 }
 
 func (g *fakeGitHub) InstallationToken(_ context.Context, r string) (githubapi.InstallationToken, error) {
@@ -335,6 +340,55 @@ func TestTokenMintedOnlyForPolicyRepositories(t *testing.T) {
 	}
 }
 
+// An owner-form pull policy pins its owner's account ID: tokens for that
+// owner's repositories require it (a renamed or re-registered login never
+// mints), other owners are still refused, and only pinned owners are listed,
+// keeping exactly the repositories of the pinned account.
+func TestOwnerPolicyMintsAndListsOnlyPinnedOwnerRepositories(t *testing.T) {
+	f := newFixture(t, scopedRelease)
+	f.engine.options.Policy.OwnerIDs = map[string]int64{"acme": 900}
+	expires := time.Now().Add(time.Hour)
+	f.github.tokens["acme/app2"] = githubapi.InstallationToken{Token: "ghs_owner", ExpiresAt: expires, RepositoryID: 77, OwnerID: 900}
+	f.github.tokens["acme/taken"] = githubapi.InstallationToken{Token: "ghs_taken", ExpiresAt: expires, RepositoryID: 78, OwnerID: 901}
+	f.github.tokens["mallory/app"] = githubapi.InstallationToken{Token: "ghs_outside", ExpiresAt: expires, RepositoryID: 88, OwnerID: 900}
+	f.github.tokens[repo] = githubapi.InstallationToken{Token: "ghs_pinned", ExpiresAt: expires, RepositoryID: repoID, OwnerID: 901}
+	ctx := context.Background()
+	if token, err := f.engine.Token(ctx, "acme/app2"); err != nil || token.Token != "ghs_owner" {
+		t.Fatalf("owner policy repository: %+v %v", token, err)
+	}
+	// The repository-ID pin governs a pinned repository on its own.
+	if token, err := f.engine.Token(ctx, repo); err != nil || token.Token != "ghs_pinned" {
+		t.Fatalf("pinned repository: %+v %v", token, err)
+	}
+	var refusal *RefusalError
+	for _, outside := range []string{"acme/taken", "mallory/app"} {
+		if _, err := f.engine.Token(ctx, outside); !errors.As(err, &refusal) {
+			t.Fatalf("token minted for %s: %v", outside, err)
+		}
+	}
+	owner := func(id int64, login string) githubapi.RepositoryOwner {
+		return githubapi.RepositoryOwner{Login: login, ID: id}
+	}
+	f.github.repos = map[string][]githubapi.Repository{"acme": {
+		{ID: 77, FullName: "acme/app2", Owner: owner(900, "acme")},
+		{ID: 78, FullName: "acme/taken", Owner: owner(901, "acme")},
+		{ID: 79, FullName: "other/app", Owner: owner(900, "other")},
+	}}
+	listed, err := f.engine.Repositories(ctx, "acme")
+	if err != nil || len(listed) != 1 || listed[0].ID != 77 {
+		t.Fatalf("owner listing: %+v %v", listed, err)
+	}
+	for _, unlisted := range []string{"mallory", "other", ""} {
+		if _, err := f.engine.Repositories(ctx, unlisted); !errors.As(err, &refusal) {
+			t.Fatalf("listing for %q: %v", unlisted, err)
+		}
+	}
+	f.github.repos["acme"] = make([]githubapi.Repository, githubapi.MaxInstallationRepositories+1)
+	if _, err := f.engine.Repositories(ctx, "acme"); !errors.As(err, &refusal) {
+		t.Fatalf("unbounded listing accepted: %v", err)
+	}
+}
+
 // The server answers only the controller UID; the client trusts only the
 // keyholder UID; a refusal crosses the socket as a RefusalError.
 func TestRPCPeerChecksAndRefusal(t *testing.T) {
@@ -361,6 +415,14 @@ func TestRPCPeerChecksAndRefusal(t *testing.T) {
 	var refusal *RefusalError
 	if _, err := client.Token(ctx, "mallory/app"); !errors.As(err, &refusal) {
 		t.Fatalf("refusal over RPC: %v", err)
+	}
+	if _, err := client.Repositories(ctx, "acme"); !errors.As(err, &refusal) {
+		t.Fatalf("listing without an owner pin over RPC: %v", err)
+	}
+	f.engine.options.Policy.OwnerIDs = map[string]int64{"acme": 900}
+	f.github.repos = map[string][]githubapi.Repository{"acme": {{ID: 77, FullName: "acme/app2", Owner: githubapi.RepositoryOwner{Login: "acme", ID: 900}, DefaultBranch: "main"}}}
+	if listed, err := client.Repositories(ctx, "acme"); err != nil || len(listed) != 1 || listed[0].ID != 77 || listed[0].Owner.ID != 900 || listed[0].DefaultBranch != "main" {
+		t.Fatalf("listing over RPC: %+v %v", listed, err)
 	}
 	if receipt, err := client.Seal(ctx, f.request(t)); err != nil || string(receipt) != `{"signed":true}` {
 		t.Fatalf("seal over RPC: %s %v", receipt, err)

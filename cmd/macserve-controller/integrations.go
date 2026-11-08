@@ -61,17 +61,17 @@ func newIntegrations(ctx context.Context, config controllerconfig.Config, db *st
 	}
 	service := &integrations{db: db, keyholder: &keyholder.Client{Socket: config.Keyholder.Socket, KeyholderUID: config.Keyholder.UID}}
 	if cfg := config.GitHub; cfg != nil {
-		service.app, err = githubapi.NewBrokered(githubapi.BrokeredOptions{AppID: cfg.AppID, Tokens: service.keyholder.Token, Repositories: config.Receipt.Repositories, Owners: config.Receipt.Owners})
+		service.app, err = githubapi.NewBrokered(githubapi.BrokeredOptions{AppID: cfg.AppID, Tokens: service.keyholder.Token, Listing: service.keyholder.Repositories, Repositories: config.Receipt.Repositories, Owners: config.Receipt.Owners})
 		if err != nil {
 			return nil, err
 		}
 		service.poller, err = githubpull.New(githubpull.Options{Store: db, Profiles: registry, Client: service.app, Policies: cfg.Policies, PollInterval: time.Duration(cfg.PollSeconds) * time.Second,
-			VerifyReceipt: func(job model.Job, raw json.RawMessage) error {
+			VerifyReceipt: func(job model.Job, repositoryID int64, raw json.RawMessage) error {
 				payload, err := receipt.Verify(raw, keys)
 				if err != nil {
 					return err
 				}
-				expected, err := receiptExpectation(config.Receipt.Repositories, job)
+				expected, err := receiptExpectation(repositoryID, job)
 				if err != nil {
 					return err
 				}
@@ -146,11 +146,12 @@ func (s *integrations) pruneReceipts(ctx context.Context) error {
 	})
 }
 
-// receiptExpectation is the policy a completed job's receipt must match. A
-// template test job's admitted snapshot has no required tests: they are its
-// shard's selectors, derived from the repository recipe its completion
-// recorded, exactly as the signer sealed them.
-func receiptExpectation(repositories map[string]int64, job model.Job) (receipt.Expected, error) {
+// receiptExpectation is the policy a completed job's receipt must match: the
+// GitHub run's repository ID and the job's admitted request. A template test
+// job's admitted snapshot has no required tests: they are its shard's
+// selectors, derived from the repository recipe its completion recorded,
+// exactly as the signer sealed them.
+func receiptExpectation(repositoryID int64, job model.Job) (receipt.Expected, error) {
 	var completion controller.Completion
 	if err := json.Unmarshal(job.Result, &completion); err != nil {
 		return receipt.Expected{}, fmt.Errorf("job %s completion: %w", job.ID, err)
@@ -159,5 +160,5 @@ func receiptExpectation(repositories map[string]int64, job model.Job) (receipt.E
 	if err != nil {
 		return receipt.Expected{}, err
 	}
-	return receipt.Expected{RepositoryID: repositories[job.Request.Repo], Repo: job.Request.Repo, SHA: job.Request.SHA, Profile: job.Request.Profile, ProfileDigest: job.ProfileDigest, Kind: job.Request.Kind, Xcode: job.Request.Xcode, Simulator: job.Request.Simulator, RequiredTests: profile.RequiredTests, Release: job.Request.Release}, nil
+	return receipt.Expected{RepositoryID: repositoryID, Repo: job.Request.Repo, SHA: job.Request.SHA, Profile: job.Request.Profile, ProfileDigest: job.ProfileDigest, Kind: job.Request.Kind, Xcode: job.Request.Xcode, Simulator: job.Request.Simulator, RequiredTests: profile.RequiredTests, Release: job.Request.Release}, nil
 }

@@ -122,7 +122,7 @@ func (p *Poller) checkInput(ctx context.Context, run store.GitHubRun) (githubapi
 		}
 		if job.State == model.Succeeded {
 			input.Conclusion = "action_required"
-			if len(packet.Receipt) > 0 && p.options.VerifyReceipt(job, packet.Receipt) == nil {
+			if len(packet.Receipt) > 0 && p.options.VerifyReceipt(job, run.RepositoryID, packet.Receipt) == nil {
 				// The verifier proves the signature/policy; the publisher independently
 				// binds its durable request-to-attempt mapping to those signed identities.
 				var envelope struct {
@@ -169,8 +169,13 @@ func (p *Poller) checkInput(ctx context.Context, run store.GitHubRun) (githubapi
 func (p *Poller) publishOne(ctx context.Context, run store.GitHubRun) (int64, error) {
 	// A retired recipe/policy must never recreate an older same-name check
 	// after the current requirement has been enrolled. Its receipt stays local.
-	policy, ok := p.policies[run.Repository]
-	if !ok || policy.RepositoryID != run.RepositoryID || policy.PolicyRevision != run.PolicyRevision {
+	policy, ok := p.runPolicy(run)
+	if !ok || policy.PolicyRevision != run.PolicyRevision {
+		return run.CheckID, nil
+	}
+	// Nor is an owner-form run published under a name its repository no
+	// longer has (renamed, transferred or departed since the last listing).
+	if policy.OwnerScoped() && p.discovered[run.RepositoryID] != run.Repository {
 		return run.CheckID, nil
 	}
 	current, err := p.admission(policy, githubapi.PullRequest{Number: 1, HeadSHA: run.SHA}, run.Profile)

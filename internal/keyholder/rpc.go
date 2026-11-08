@@ -27,11 +27,12 @@ const (
 
 // Operations.
 const (
-	opToken       = "token"
-	opSeal        = "seal"
-	opManifest    = "manifest"
-	opReceiptJobs = "receipt_jobs"
-	opForget      = "forget"
+	opToken        = "token"
+	opRepositories = "repositories"
+	opSeal         = "seal"
+	opManifest     = "manifest"
+	opReceiptJobs  = "receipt_jobs"
+	opForget       = "forget"
 )
 
 // request is one controller → keyholder call, a single JSON line on a fresh
@@ -39,6 +40,7 @@ const (
 type request struct {
 	Op     string       `json:"op"`
 	Repo   string       `json:"repo,omitempty"`
+	Owner  string       `json:"owner,omitempty"`
 	Seal   *SealRequest `json:"seal,omitempty"`
 	JobID  string       `json:"job_id,omitempty"`
 	Digest string       `json:"digest,omitempty"`
@@ -50,19 +52,21 @@ type request struct {
 // as embedded JSON, which encoding/json would re-encode (HTML-escaping '<',
 // '>' and '&') and so change the authenticated bytes.
 type response struct {
-	OK       bool                         `json:"ok"`
-	Error    string                       `json:"error,omitempty"`
-	Refused  bool                         `json:"refused,omitempty"`
-	NotFound bool                         `json:"not_found,omitempty"`
-	Token    *githubapi.InstallationToken `json:"token,omitempty"`
-	Receipt  []byte                       `json:"receipt,omitempty"`
-	Manifest []byte                       `json:"manifest,omitempty"`
-	JobIDs   []string                     `json:"job_ids,omitempty"`
+	OK           bool                         `json:"ok"`
+	Error        string                       `json:"error,omitempty"`
+	Refused      bool                         `json:"refused,omitempty"`
+	NotFound     bool                         `json:"not_found,omitempty"`
+	Token        *githubapi.InstallationToken `json:"token,omitempty"`
+	Repositories []githubapi.Repository       `json:"repositories,omitempty"`
+	Receipt      []byte                       `json:"receipt,omitempty"`
+	Manifest     []byte                       `json:"manifest,omitempty"`
+	JobIDs       []string                     `json:"job_ids,omitempty"`
 }
 
 // service is the Engine surface the server exposes.
 type service interface {
 	Token(context.Context, string) (githubapi.InstallationToken, error)
+	Repositories(context.Context, string) ([]githubapi.Repository, error)
 	Seal(context.Context, SealRequest) (json.RawMessage, error)
 	Manifest(context.Context, string, string) (json.RawMessage, error)
 	ReceiptJobs(context.Context) ([]string, error)
@@ -176,6 +180,8 @@ func (s *Server) dispatch(ctx context.Context, req request) response {
 		if token, err = s.Engine.Token(ctx, req.Repo); err == nil {
 			resp.Token = &token
 		}
+	case opRepositories:
+		resp.Repositories, err = s.Engine.Repositories(ctx, req.Owner)
 	case opSeal:
 		if req.Seal == nil {
 			err = refusal("seal request missing")
@@ -315,6 +321,16 @@ func (c *Client) Token(ctx context.Context, repo string) (githubapi.Installation
 		return githubapi.InstallationToken{}, errors.New("keyholder token response lacks a token")
 	}
 	return *resp.Token, nil
+}
+
+// Repositories lists an owner-form policy owner's installation repositories;
+// it satisfies githubapi.RepositorySource.
+func (c *Client) Repositories(ctx context.Context, owner string) ([]githubapi.Repository, error) {
+	resp, err := c.call(ctx, request{Op: opRepositories, Owner: owner})
+	if err != nil {
+		return nil, err
+	}
+	return resp.Repositories, nil
 }
 
 // Seal asks the keyholder to verify and sign a job's receipt.

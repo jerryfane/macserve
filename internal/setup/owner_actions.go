@@ -43,7 +43,12 @@ func (h *Helper) github(l *Ledger, loc LedgerLocation) (Response, error) {
 	if c.GitHub == nil {
 		return Response{Detail: "controller.json has no github section yet"}, nil
 	}
+	// Owner-form policies pin no repository; controller.json validation
+	// already requires their owner in receipt.owners.
 	for _, p := range c.GitHub.Policies {
+		if p.OwnerScoped() {
+			continue
+		}
 		if id, ok := e.Repositories[p.Repository]; !ok || id != p.RepositoryID {
 			return Response{}, fmt.Errorf("the github policy for %s is not a repository deploy.env pins", p.Repository)
 		}
