@@ -7,6 +7,10 @@ no `controller` subcommand) requires a root-controlled configuration and
 a dedicated non-login, non-admin controller account distinct from the owner and job account. Configuration fields:
 `root`, `socket`, `job_uid`, `owner_uid`, `profiles_file`, `listen`, `tls_certificate`, `tls_key`,
 `principals`, `health_file`, `receipt`, `keyholder`, and optional `allowed_networks`, `pause_file`, `github`.
+`github.policies` entries are either repository-form (a pinned `repository`/`repository_id`) or owner-form
+(`owner`/`owner_id`, covering every repository the owner's App installation lists); a policy setting both is
+refused. Each owner-form owner must also be in `receipt.owners`. See
+[receipts and GitHub](receipts-and-github.md#owner-policies) for the fields, threat model and migration.
 Profiles and the public TLS certificate are root-controlled. The TLS private key is a controller-private file; the
 receipt and App private keys are the [keyholder](#keyholder)'s, and `receipt.private_key_file` and
 `github.private_key_file` name them only for the keyholder (exactly
@@ -206,7 +210,7 @@ migration) writes `keyholder.json`, root:wheel `0644`, unknown fields rejected:
 | `job_uid`, `job_gid` | the job account, which must never share a keyholder group |
 | `state_dir` | `/Library/macserve/var/keyholder`: `secrets/` (`receipt-key.pem`, `github-app.pem`), `receipts/` (full receipt manifests), `release/` (verified release provenance) |
 | `socket` | `/Library/macserve/var/keyholder-run/keyholder.sock` |
-| `controller_config` | `/Library/macserve/config/controller.json`: the receipt and github sections, service identity and repository policy |
+| `controller_config` | `/Library/macserve/config/controller.json`: the receipt and github sections, service identity and repository policy (including each owner-form pull policy's pinned `owner_id`, which owner listings and token mints require) |
 | `release_scope_file` | `/Library/macserve/config/release-scope.json` |
 | `seal_keys` | `{"macserve-worker-<host_id>": "<base64 Ed25519 public key>"}`: the root worker's build seal keys |
 

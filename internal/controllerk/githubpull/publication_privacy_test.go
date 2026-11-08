@@ -81,7 +81,7 @@ func TestPublicationKeepsSmallPrivateManifestOutOfChecks(t *testing.T) {
 					t.Fatalf("legacy fixture is not genuine signed evidence: %v", err)
 				}
 			}
-			f.p.options.VerifyReceipt = func(j model.Job, raw json.RawMessage) error {
+			f.p.options.VerifyReceipt = func(j model.Job, repositoryID int64, raw json.RawMessage) error {
 				payload, err := receipt.Verify(raw, keys)
 				if err != nil {
 					return err
@@ -91,7 +91,7 @@ func TestPublicationKeepsSmallPrivateManifestOutOfChecks(t *testing.T) {
 				}
 				return receipt.ValidateSuccess(payload, receipt.Expected{RepositoryID: 123, Repo: j.Request.Repo, SHA: j.Request.SHA, Profile: j.Request.Profile, ProfileDigest: j.ProfileDigest, Kind: j.Request.Kind, Xcode: j.Request.Xcode, RequiredTests: j.Profile.RequiredTests})
 			}
-			if err := f.p.options.VerifyReceipt(job, raw); err != nil {
+			if err := f.p.options.VerifyReceipt(job, 123, raw); err != nil {
 				t.Fatal(err)
 			}
 			if err := f.s.Transition(ctx, job.ID, job.LeaseToken, model.Preparing, model.Finalizing, "collected", finished); err != nil {

@@ -88,21 +88,36 @@ func (w checkWire) value() Check {
 	return Check{ID: w.ID, Name: w.Name, HeadSHA: w.HeadSHA, ExternalID: w.ExternalID, Status: w.Status, Conclusion: w.Conclusion, HTMLURL: w.HTMLURL, AppID: w.App.ID, Output: w.Output}
 }
 
+// repository reads repo's identity. The read is conditional on the last
+// verified representation's ETag, so an unchanged repository re-verifies from
+// a 304 that costs no rate limit; every reply is checked identically.
 func (c *Client) repository(ctx context.Context, repo, token string) (Repository, error) {
+	key := strings.ToLower(repo)
+	c.cacheMu.Lock()
+	cached := c.repos[key]
+	c.cacheMu.Unlock()
 	var result Repository
-	_, _, err := c.request(ctx, http.MethodGet, "/repos/"+repo, token, "", nil, &result)
+	header, unchanged, err := c.request(ctx, http.MethodGet, "/repos/"+repo, token, cached.etag, nil, &result)
 	if err != nil {
 		return Repository{}, err
+	}
+	if unchanged {
+		result = cached.value
 	}
 	if result.ID <= 0 || !strings.EqualFold(result.FullName, repo) {
 		return Repository{}, errors.New("GitHub repository identity mismatch")
 	}
 	if c.appID != 0 {
 		id, known := c.RepositoryID(repo)
-		_, pinned := c.repositories[strings.ToLower(repo)]
+		_, pinned := c.repositories[key]
 		if !known || result.ID != id || !pinned && !strings.EqualFold(result.Owner.Login, repoOwner(repo)) {
 			return Repository{}, errors.New("GitHub repository identity mismatch")
 		}
+	}
+	if etag := header.Get("ETag"); !unchanged && etag != "" {
+		c.cacheMu.Lock()
+		c.repos[key] = cachedRepository{etag: etag, value: result}
+		c.cacheMu.Unlock()
 	}
 	return result, nil
 }

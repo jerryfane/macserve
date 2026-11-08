@@ -121,12 +121,19 @@ func liveGitHub(ctx context.Context) (string, error) {
 		installations = map[string]int64{}
 		for _, p := range gh.Policies {
 			owner, _, _ := strings.Cut(p.Repository, "/")
+			if p.OwnerScoped() {
+				owner = p.Owner
+			}
 			installations[owner] = gh.InstallationID
 		}
 	}
+	// Owner-form policies name no repository: their installation's listing
+	// is the repository set.
 	var repos []string
 	for _, p := range gh.Policies {
-		repos = append(repos, p.Repository)
+		if !p.OwnerScoped() {
+			repos = append(repos, p.Repository)
+		}
 	}
 	api, err := onboarding.NewAPI(githubapi.HTTPOptions{})
 	if err != nil {

@@ -38,9 +38,11 @@ func refusal(format string, args ...any) error {
 }
 
 // GitHub is the keyholder's own GitHub App client: the only holder of the
-// App key, used to mint tokens and to check release provenance.
+// App key, used to mint tokens, list owner-policy repositories and check
+// release provenance.
 type GitHub interface {
 	InstallationToken(ctx context.Context, repo string) (githubapi.InstallationToken, error)
+	InstallationRepositories(ctx context.Context, owner string) ([]githubapi.Repository, error)
 	DefaultBranchHead(ctx context.Context, repo string) (githubapi.BranchHead, error)
 	CommitTree(ctx context.Context, repo, sha string) (string, error)
 }
@@ -54,10 +56,14 @@ type ReceiptSigner interface {
 
 // Policy is the root-owned repository policy tokens are minted for: exact
 // repositories pinned to numeric IDs and approved owner logins
-// (controller.json receipt.repositories and receipt.owners).
+// (controller.json receipt.repositories and receipt.owners). OwnerIDs pins
+// the numeric account ID of each owner an owner-form pull policy names
+// (github.policies[].owner_id): only those owners' repositories are listed,
+// and a token for one of their repositories requires the pinned owner ID.
 type Policy struct {
 	Repositories map[string]int64
 	Owners       []string
+	OwnerIDs     map[string]int64
 }
 
 // Allows reports whether repo is a canonical repository the policy names.
@@ -132,7 +138,9 @@ func (e *Engine) Close() error {
 }
 
 // Token mints a short-lived installation token for repo, only when the
-// root-owned policy names it.
+// root-owned policy names it. A repository pinned by ID must have that ID;
+// otherwise a repository of an owner-form policy owner must belong to the
+// pinned owner account ID, so a renamed or re-registered login never mints.
 func (e *Engine) Token(ctx context.Context, repo string) (githubapi.InstallationToken, error) {
 	if !e.options.Policy.Allows(repo) {
 		return githubapi.InstallationToken{}, refusal("repository %q is outside the root-owned token policy", repo)
@@ -144,10 +152,44 @@ func (e *Engine) Token(ctx context.Context, repo string) (githubapi.Installation
 	if err != nil {
 		return githubapi.InstallationToken{}, err
 	}
-	if pinned := e.options.Policy.Repositories[repo]; pinned > 0 && token.RepositoryID != pinned {
-		return githubapi.InstallationToken{}, refusal("repository %s ID %d is not the pinned %d", repo, token.RepositoryID, pinned)
+	owner, _, _ := strings.Cut(repo, "/")
+	if pinned := e.options.Policy.Repositories[repo]; pinned > 0 {
+		if token.RepositoryID != pinned {
+			return githubapi.InstallationToken{}, refusal("repository %s ID %d is not the pinned %d", repo, token.RepositoryID, pinned)
+		}
+	} else if pin := e.options.Policy.OwnerIDs[owner]; pin > 0 && token.OwnerID != pin {
+		return githubapi.InstallationToken{}, refusal("repository %s owner ID %d is not the pinned %d", repo, token.OwnerID, pin)
 	}
 	return token, nil
+}
+
+// Repositories lists the installation repositories of owner, only when an
+// owner-form pull policy pins its account ID: those whose owner is that
+// login and that account ID, at most githubapi.MaxInstallationRepositories.
+// The installation-wide listing token never leaves the keyholder.
+func (e *Engine) Repositories(ctx context.Context, owner string) ([]githubapi.Repository, error) {
+	pin := e.options.Policy.OwnerIDs[owner]
+	if pin <= 0 || !slices.Contains(e.options.Policy.Owners, owner) {
+		return nil, refusal("owner %q has no owner-form pull policy", owner)
+	}
+	if e.options.GitHub == nil {
+		return nil, refusal("no GitHub App is configured")
+	}
+	listed, err := e.options.GitHub.InstallationRepositories(ctx, owner)
+	if err != nil {
+		return nil, err
+	}
+	if len(listed) > githubapi.MaxInstallationRepositories {
+		return nil, refusal("owner %s lists more than %d repositories", owner, githubapi.MaxInstallationRepositories)
+	}
+	repos := make([]githubapi.Repository, 0, len(listed))
+	for _, r := range listed {
+		name := strings.ToLower(r.FullName)
+		if r.Owner.ID == pin && strings.EqualFold(r.Owner.Login, owner) && strings.HasPrefix(name, owner+"/") && repositoryPattern.MatchString(name) {
+			repos = append(repos, r)
+		}
+	}
+	return repos, nil
 }
 
 // SealRequest is the controller's receipt request: the job record, the

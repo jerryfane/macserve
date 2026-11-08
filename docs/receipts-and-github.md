@@ -68,10 +68,11 @@ for source fetch; each token is scoped to one numeric repository ID and kept in 
 API token belongs in Actions. Without App configuration, the private API can fetch public Git repositories;
 numeric receipt repository identities then come from administrator configuration, not a fresh App lookup.
 
-Each policy supplies `repository_id`, `repository`, `author_ids`, `base_branches`, `profiles`,
-`policy_revision`, and optional `actions_bot_id`, `actions_app_id`. Numeric author and repository identity,
-not display names or commit author text, control admission. Repository writers must all be trusted: allowlisting
-a PR author does not authenticate everyone who can push to their branch.
+Each policy names exactly one repository or one owner; a policy that sets both forms (or neither) is refused at
+configuration load and controller start. A repository-form policy supplies `repository_id`, `repository`,
+`author_ids`, `base_branches`, `profiles`, `policy_revision`, and optional `actions_bot_id`, `actions_app_id`.
+Numeric author and repository identity, not display names or commit author text, control admission. Repository
+writers must all be trusted: allowlisting a PR author does not authenticate everyone who can push to their branch.
 
 Polling automatically enrolls each observed eligible open same-repository head; no comment or Linux workflow
 is required. Forks, unlisted authors, disallowed bases and disabled profiles never execute. A current head is
@@ -113,6 +114,59 @@ lookup failures: overlap may revisit them, but there is no guaranteed retry queu
 Existing cursors are not reset after long downtime. Requests older than the initial window are not enrolled.
 GitHub offset pagination is not a snapshot: historical edits/deletions during a prolonged scan can shift offsets;
 the overlap mitigates recent churn but does not guarantee replay under adversarial historical mutation.
+
+### Owner policies
+
+An owner-form policy builds pull requests in every repository of one GitHub account with no per-repository setup:
+
+```json
+{"owner": "themartianapp", "owner_id": <numeric account ID>, "author_ids": [38183696],
+ "default_branch": true, "base_branches": [], "profiles": ["org-ios-sim-build-v1"], "policy_revision": 1}
+```
+
+`owner` is the lowercase account login and `owner_id` its numeric ID (`GET /users/<login>` `id`), pinned when the
+policy is written. The owner must be in `receipt.owners` and in each named template's `owners`; at most one policy
+per owner. `base_branches` lists allowed bases and `default_branch: true` adds each repository's current default
+branch; at least one is required. `profiles` name org build templates only (no `ios_archive`, no simulator test or
+script template, no explicit profile); for each eligible head the controller reads its root `.macserve.json` at
+the head commit and runs the first listed template that file admits (the same derivation the worker repeats), and
+nothing when the file is missing or admits none. The parsed file is cached per repository ID and head commit;
+the template is chosen against the policy governing the repository at that moment, so a transfer to an owner
+with other templates re-evaluates the head. `actions_bot_id`/`actions_app_id` are refused: owner policies
+are pull mode only and read no `/mac-evidence` comments.
+
+Each poll cycle the keyholder lists the App installation's repositories for every owner-form owner (at most 500 per
+owner, paginated; a larger installation is refused whole, never truncated) with an installation-wide token that has
+only metadata read permission and never leaves the keyholder. The poller keeps a listed repository only when its
+owner login is the policy `owner` **and** its owner account ID is `owner_id`; repository reads, pull lists and the
+listing itself are conditional (ETag) where GitHub allows, and a rate-limit reply ends the cycle. A repository a
+repository-form policy pins (by ID or name) is governed by that policy alone. The keyholder mints a token for an
+owner-form owner's repository only when GitHub reports that owner account ID, and still refuses every repository
+outside `receipt.repositories` and `receipt.owners`; release receipts are unchanged and still need an explicit
+release scope entry.
+
+Who can trigger a build: only a pull request opened by a listed `author_ids` account from a branch of the same
+repository (head repository ID equals base repository ID) into an allowed base. Fork pull requests, other authors
+and other bases never execute and, for owner policies, get no run and no check at all (repository-form policies
+keep their `action_required` rejection check). Anyone who can push to an allowed author's head branch can change
+what runs, so every writer of every repository the installation lists must be trusted; limit the installation to
+the repositories that qualify. A login rename or re-registration does not move trust: a repository whose owner
+account ID differs from `owner_id` is never listed, minted for or dispatched, and its unfinished jobs are
+cancelled.
+
+Runs are keyed by numeric repository ID, the policy revision and, for owner policies, the owner login, owner ID
+and current repository name. A repository renamed within, or transferred between, owner-policy owners keeps
+building under its new name (its new head runs are new runs; unfinished jobs admitted under the old name are
+cancelled and their checks are no longer updated). A repository transferred to an unlisted owner, uninstalled or
+deleted leaves the listing: its unfinished jobs are cancelled once a cycle completes every listing. Departures
+are reconciled from the stored runs, so a controller restart in between does not forget them. Job principals
+remain `github:<repository_id>` and receipt approvals `repository:<id>/policy:<revision>/run:<key>`.
+
+Migration from repository policies: add one owner-form policy per owner (pin `owner_id`, list the author IDs and
+templates, set `default_branch` or `base_branches`) and remove the repository-form policies it replaces, together
+with their `receipt.repositories` pins if nothing else needs them. A repository-form policy left in place keeps
+governing its repository exactly as before. Runs admitted under a removed repository policy are no longer
+dispatched or published; the owner policy admits the same heads as new runs (new run keys, new checks).
 
 ## Signer receipts
 

@@ -233,7 +233,7 @@ func newFixtureWith(t *testing.T, registry *profiles.Registry, policyProfiles []
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	options := Options{Store: s, Profiles: registry, Client: client, Policies: []githubwire.Policy{{RepositoryID: 123, Repository: testRepo, AuthorIDs: []int64{42}, BaseBranches: []string{"main"}, Profiles: policyProfiles, PolicyRevision: 1, ActionsBotID: 55, ActionsAppID: 66}}, VerifyReceipt: func(model.Job, json.RawMessage) error {
+	options := Options{Store: s, Profiles: registry, Client: client, Policies: []githubwire.Policy{{RepositoryID: 123, Repository: testRepo, AuthorIDs: []int64{42}, BaseBranches: []string{"main"}, Profiles: policyProfiles, PolicyRevision: 1, ActionsBotID: 55, ActionsAppID: 66}}, VerifyReceipt: func(model.Job, int64, json.RawMessage) error {
 		return errors.New("no test receipt is cryptographically trusted")
 	}, Now: now}
 	p, err := New(options)
@@ -545,7 +545,7 @@ func TestHTTPSignedSuccessPreservesCanonicalReceiptAndAttempt(t *testing.T) {
 		t.Fatal(err)
 	}
 	keys := map[string]ed25519.PublicKey{"test-key": key.Public().(ed25519.PublicKey)}
-	f.p.options.VerifyReceipt = func(j model.Job, raw json.RawMessage) error {
+	f.p.options.VerifyReceipt = func(j model.Job, repositoryID int64, raw json.RawMessage) error {
 		payload, err := receipt.Verify(raw, keys)
 		if err != nil {
 			return err

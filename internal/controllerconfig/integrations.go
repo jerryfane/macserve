@@ -37,6 +37,22 @@ type GitHubConfig struct {
 	PollSeconds    int                 `json:"poll_seconds,omitempty"`
 }
 
+// OwnerIDs maps each owner-form policy's owner login to its pinned numeric
+// account ID: the owners whose repositories the keyholder lists and mints for
+// by owner identity.
+func (g *GitHubConfig) OwnerIDs() map[string]int64 {
+	ids := make(map[string]int64)
+	if g == nil {
+		return ids
+	}
+	for _, p := range g.Policies {
+		if p.OwnerScoped() {
+			ids[p.Owner] = p.OwnerID
+		}
+	}
+	return ids
+}
+
 var repositoryName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*/[a-z0-9_.-]+$`)
 
 func (c *Config) validateIntegrations() error {
@@ -74,7 +90,21 @@ func (c *Config) validateIntegrations() error {
 		if g.PollSeconds < 30 || g.PollSeconds > 60 {
 			return errors.New("GitHub poll interval must be 30–60 seconds")
 		}
+		owners := make(map[string]bool)
 		for _, p := range g.Policies {
+			if err := p.CheckForm(); err != nil {
+				return err
+			}
+			if p.OwnerScoped() {
+				if !githubapi.ValidOwner(p.Owner) || p.OwnerID <= 0 || p.OwnerID > 9007199254740991 || owners[p.Owner] {
+					return errors.New("owner GitHub policies require a unique lowercase owner login and its numeric owner ID")
+				}
+				if !slices.Contains(r.Owners, p.Owner) {
+					return errors.New("owner GitHub policies require a receipt owners entry")
+				}
+				owners[p.Owner] = true
+				continue
+			}
 			if r.Repositories[p.Repository] != p.RepositoryID || p.RepositoryID <= 0 {
 				return errors.New("GitHub policies must match pinned receipt repository IDs")
 			}

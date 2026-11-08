@@ -153,7 +153,7 @@ func newKeyholderEngine(ctx context.Context, config keyholder.Config) (*keyholde
 	}
 	options := keyholder.Options{
 		Signer: signer, SealKeys: sealKeys,
-		Policy: keyholder.Policy{Repositories: cc.Receipt.Repositories, Owners: cc.Receipt.Owners},
+		Policy: keyholder.Policy{Repositories: cc.Receipt.Repositories, Owners: cc.Receipt.Owners, OwnerIDs: cc.GitHub.OwnerIDs()},
 		ReleaseScope: func() (keyholder.ReleaseScope, error) {
 			if err := hostguard.RootConfig(config.ReleaseScopeFile); err != nil {
 				return keyholder.ReleaseScope{}, err

@@ -32,23 +32,30 @@ type AppOptions struct {
 }
 
 // InstallationToken is a short-lived installation token scoped to one
-// repository, its expiry and that repository's verified numeric ID.
+// repository, its expiry and that repository's verified numeric ID and owner ID.
 type InstallationToken struct {
 	Token        string    `json:"token"`
 	ExpiresAt    time.Time `json:"expires_at"`
 	RepositoryID int64     `json:"repository_id"`
+	OwnerID      int64     `json:"owner_id,omitempty"`
 }
 
 // TokenSource mints per-repository installation tokens for a client that
 // holds no App key (the keyholder mints them for the controller).
 type TokenSource func(ctx context.Context, repo string) (InstallationToken, error)
 
-// BrokeredOptions configures an App client whose tokens come from Tokens.
-// AppID still identifies the App's check runs and comments; Repositories and
-// Owners are the same approval policy as AppOptions.
+// RepositorySource lists an owner's installation repositories for a client
+// that holds no App key (the keyholder lists them for the controller).
+type RepositorySource func(ctx context.Context, owner string) ([]Repository, error)
+
+// BrokeredOptions configures an App client whose tokens come from Tokens and
+// whose owner repository listings come from Listing (optional). AppID still
+// identifies the App's check runs and comments; Repositories and Owners are
+// the same approval policy as AppOptions.
 type BrokeredOptions struct {
 	AppID        int64
 	Tokens       TokenSource
+	Listing      RepositorySource
 	Repositories map[string]int64
 	Owners       []string
 	HTTP         HTTPOptions
@@ -72,6 +79,7 @@ type Repository struct {
 
 type RepositoryOwner struct {
 	Login string `json:"login"`
+	ID    int64  `json:"id"`
 }
 
 type PullRequest struct {
