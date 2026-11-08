@@ -44,6 +44,7 @@ type censusTracker struct {
 	now     func() time.Time
 	budget  time.Duration
 	maxAge  time.Duration
+	reserve time.Duration // probe time kept for the checks after the census
 	mu      sync.Mutex
 	running *censusRun
 	latest  *censusResult
@@ -57,7 +58,7 @@ type censusRun struct {
 }
 
 func newCensusTracker(parent context.Context) *censusTracker {
-	return &censusTracker{parent: parent, run: accountBytes, now: time.Now, budget: censusBudget, maxAge: censusMaxAge}
+	return &censusTracker{parent: parent, run: accountBytes, now: time.Now, budget: censusBudget, maxAge: censusMaxAge, reserve: censusProbeReserve}
 }
 
 func censusInconclusive(err error) bool {
@@ -91,7 +92,9 @@ func (t *censusTracker) start(key censusKey, roots []string) *censusRun {
 	return r
 }
 
-// account returns the accounted bytes for one probe.
+// account returns the accounted bytes for one probe. It waits for the running
+// census only until reserve before the probe's deadline, so the probe still has
+// time for its remaining checks when it falls back to the last census.
 func (t *censusTracker) account(ctx context.Context, roots []string, jobHome string, jobUID uint32) (int64, error) {
 	key := censusKey{roots: strings.Join(roots, "\x00"), jobHome: jobHome, jobUID: jobUID}
 	r := t.start(key, roots)
@@ -102,6 +105,12 @@ func (t *censusTracker) account(ctx context.Context, roots []string, jobHome str
 		return -1, latest.err
 	}
 	if r.key == key {
+		wait := ctx
+		if deadline, ok := ctx.Deadline(); ok {
+			var cancel context.CancelFunc
+			wait, cancel = context.WithDeadline(ctx, deadline.Add(-t.reserve))
+			defer cancel()
+		}
 		select {
 		case <-r.done:
 			if r.res.err == nil {
@@ -110,7 +119,7 @@ func (t *censusTracker) account(ctx context.Context, roots []string, jobHome str
 			if !censusInconclusive(r.res.err) {
 				return -1, r.res.err
 			}
-		case <-ctx.Done():
+		case <-wait.Done():
 		}
 	}
 	t.mu.Lock()

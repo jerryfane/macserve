@@ -19,3 +19,8 @@ const censusBudget = 120 * time.Second
 // census's mount and special-file checks in published health; every other
 // fact in health is observed afresh by each probe.
 const censusMaxAge = 150 * time.Second
+
+// censusProbeReserve is the part of a probe's 8 s budget kept for the checks
+// that follow the census (coexistence, protected-record rereads) when a probe
+// stops waiting for a running census and uses the last one.
+const censusProbeReserve = 4 * time.Second

@@ -66,6 +66,7 @@ func newTestTracker(t *testing.T) (*censusTracker, *fakeCensus, *fakeClock) {
 	tr := newCensusTracker(ctx)
 	tr.run = f.run
 	tr.now = clock.Now
+	tr.reserve = 150 * time.Millisecond
 	return tr, f, clock
 }
 
@@ -75,6 +76,16 @@ func probe(tr *censusTracker, wait time.Duration) (int64, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), wait)
 	defer cancel()
 	return tr.account(ctx, censusRoots, "/Users/job", 6202)
+}
+
+// probeLeavesTime is a 200 ms probe that also reports whether its context was
+// still live when the census step returned: the checks after the census
+// (inspect.go) need it.
+func probeLeavesTime(tr *censusTracker) (int64, error, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	got, err := tr.account(ctx, censusRoots, "/Users/job", 6202)
+	return got, err, ctx.Err() == nil
 }
 
 // finish completes the running census and waits until the tracker recorded it.
@@ -124,9 +135,12 @@ func TestSlowCensusDoesNotStarveProbes(t *testing.T) {
 	finish(t, tr, f, censusOutcome{bytes: 4096})
 	// The next census is slow: every probe for the next 2 minutes times out on it.
 	for elapsed := time.Duration(0); elapsed <= 120*time.Second; elapsed += 10 * time.Second {
-		got, err := probe(tr, 10*time.Millisecond)
+		got, err, live := probeLeavesTime(tr)
 		if err != nil || got != 4096 {
 			t.Fatalf("probe at +%s: got %d, %v; want the last census 4096", elapsed, got, err)
+		}
+		if !live {
+			t.Fatalf("probe at +%s: the census step used up the probe's context; the rest of the probe cannot run", elapsed)
 		}
 		clock.advance(10 * time.Second)
 	}

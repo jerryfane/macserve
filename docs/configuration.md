@@ -173,7 +173,8 @@ needs Full Disk Access for `/Library/macserve/bin/macserve`; see the installatio
 The maintenance daemon runs the census in the background with its own 120 s budget instead of inside each 8 s
 probe: under heavy builds a full census outlasted the probe for minutes, health expired, and the controller
 cancelled the running job (`isolation_unavailable`) although nothing was wrong. A probe waits for the running
-census until its own deadline; if it is still running, the probe uses the last completed clean census if it
+census until 4 s before its own deadline (keeping time for its remaining checks); if it is still running, the
+probe uses the last completed clean census if it
 finished at most 150 s ago, otherwise it is inconclusive as before. So the accounted bytes and the census's
 mount and special-file checks in published health can be up to 150 s old; a census that finds something is
 reported by every probe until a newer census completes, and every other health fact is still observed by each
