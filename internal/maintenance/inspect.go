@@ -53,9 +53,12 @@ func Check(ctx context.Context, c Config) (health.Health, error) {
 	if c.path == "" {
 		return health.Health{}, errors.New("check requires protected configuration")
 	}
-	return observe(ctx, c)
+	return observe(ctx, c, nil)
 }
-func observe(ctx context.Context, c Config) (health.Health, error) {
+
+// observe runs one probe. A nil census runs the byte census synchronously
+// within ctx; the daemon passes its tracker (see censusTracker).
+func observe(ctx context.Context, c Config, census *censusTracker) (health.Health, error) {
 	invalid, _ := Evaluate(time.Now(), Qualification{}, BoundaryEvidence{}, Observation{})
 	opts, err := persistenceOptions(c)
 	if err != nil {
@@ -85,7 +88,7 @@ func observe(ctx context.Context, c Config) (health.Health, error) {
 	if err = decode(edata, &e); err != nil {
 		return invalid, err
 	}
-	o, err := Inspect(ctx, c)
+	o, err := inspect(ctx, c, census)
 	if err != nil {
 		return invalid, err
 	}
@@ -102,6 +105,10 @@ func observe(ctx context.Context, c Config) (health.Health, error) {
 // Inspect collects live facts without requiring approval records or publishing
 // health. It cannot qualify the host or manufacture boundary evidence.
 func Inspect(ctx context.Context, c Config) (Observation, error) {
+	return inspect(ctx, c, nil)
+}
+
+func inspect(ctx context.Context, c Config, census *censusTracker) (Observation, error) {
 	invalid := Observation{}
 	if runtime.GOOS != "darwin" || os.Getuid() != 0 || os.Geteuid() != 0 {
 		return invalid, errors.New("maintenance inspection requires macOS root")
@@ -190,7 +197,12 @@ func Inspect(ctx context.Context, c Config) (Observation, error) {
 	if err != nil {
 		return invalid, err
 	}
-	o.AccountedBytes, err = accountBytes(ctx, []string{"/Library/macserve/var", account.HomeDir}, account.HomeDir, wc.JobUID)
+	roots := []string{"/Library/macserve/var", account.HomeDir}
+	if census != nil {
+		o.AccountedBytes, err = census.account(ctx, roots, account.HomeDir, wc.JobUID)
+	} else {
+		o.AccountedBytes, err = accountBytes(ctx, roots, account.HomeDir, wc.JobUID)
+	}
 	if err != nil {
 		return invalid, err
 	}
