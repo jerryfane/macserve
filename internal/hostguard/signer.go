@@ -24,7 +24,8 @@ type SignerIdentity struct {
 }
 
 // universalGroups are memberships every local account has implicitly
-// (everyone, localaccounts); sharing them grants nothing.
+// (everyone, localaccounts); sharing them grants nothing. A group that nests
+// one of them is universal too (nestsUniversalGroup, universal_groups.go).
 var universalGroups = []uint32{12, 61}
 
 // Signer checks, before any key or keychain is opened, that the signer runs
@@ -110,7 +111,13 @@ func daemonGroups(role string, id daemonIdentity, own []int, job []string) error
 			return fmt.Errorf("%s must not belong to wheel, staff or admin", role)
 		}
 		if jobSet[gid] && !slices.Contains(universalGroups, gid) {
-			return fmt.Errorf("%s shares group %d with the job account", role, gid)
+			universal, err := nestsUniversalGroup(gid)
+			if err != nil {
+				return fmt.Errorf("%s shares group %d with the job account: %w", role, gid, err)
+			}
+			if !universal {
+				return fmt.Errorf("%s shares group %d with the job account", role, gid)
+			}
 		}
 		hasRPC = hasRPC || gid == id.RPCGID
 	}
