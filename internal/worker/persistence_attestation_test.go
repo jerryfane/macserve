@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -169,6 +170,64 @@ func TestPeriodicReverifyRevokesOnlyOnContaminationOrWhenAsked(t *testing.T) {
 			}
 			if status != before {
 				t.Fatalf("inconclusive periodic scan changed the attestation:\n before %+v\n after  %+v", before, status)
+			}
+		})
+	}
+}
+
+// Review of #99: an unsafe registered-code descendant reaches the scan as a
+// candidate Problem, not as a returned error. A periodic scan that recorded it
+// must still revoke at once, as a mismatch, while an inspection that merely
+// could not finish stays inconclusive.
+func TestPeriodicReverifyRevokesOnUnsafeDescendantRecordedAsProblem(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		treeErr     error
+		wantRevoked bool
+	}{
+		{"world-writable descendant", fmt.Errorf("%w: registered tree descendant is writable by an untrusted user", ErrContamination), true},
+		{"tree unreadable", errors.New("registered tree inspection unavailable"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			options, expected := attestationFixture(t)
+			attestFixture(t, options, expected, false)
+			before, err := PersistenceAttestationStatus(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = scanAndPublish(context.Background(), options, false, func(ctx context.Context, _ Options) (PersistenceManifest, error) {
+				// The census is exactly the accepted one: only the code tree fails.
+				m := registrationFixture(t)
+				m.Code = map[string]RegisteredCode{}
+				acl := func(context.Context, string, registrationWriters) error { return tc.treeErr }
+				digest := func(context.Context, string, registrationWriters) (string, error) {
+					t.Fatal("failed tree was hashed")
+					return "", nil
+				}
+				command := func(context.Context, ...string) (string, error) {
+					t.Fatal("failed tree reached code-signature inspection")
+					return "", nil
+				}
+				return m, collectRegistrationCode(ctx, &m, registrationWritersFixture(), acl, digest, command)
+			}, nil, false)
+			if err == nil {
+				t.Fatal("scan with a failed tree reported success")
+			}
+			status, statusErr := PersistenceAttestationStatus(options)
+			if statusErr != nil {
+				t.Fatal(statusErr)
+			}
+			if !tc.wantRevoked {
+				if !errors.Is(err, ErrPersistenceScanInconclusive) || status != before {
+					t.Fatalf("unavailable inspection revoked or was not inconclusive: %v %+v", err, status)
+				}
+				return
+			}
+			if !errors.Is(err, ErrContamination) || errors.Is(err, ErrPersistenceScanInconclusive) {
+				t.Fatalf("observed contamination classified as inconclusive: %v", err)
+			}
+			if status.Valid || !status.NeedsReview || status.Reason != "mismatch" {
+				t.Fatalf("unsafe descendant left the attestation in place: %+v", status)
 			}
 		})
 	}

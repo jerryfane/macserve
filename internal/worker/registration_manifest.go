@@ -27,6 +27,10 @@ type PersistenceManifest struct {
 	Census   BTMCensus                 `json:"census"`
 	Code     map[string]RegisteredCode `json:"code"`
 	Problems []string                  `json:"problems,omitempty"`
+	// contamination is the first Problem that was positive evidence
+	// (ErrContamination), kept typed so a scan that recorded it as a Problem
+	// still revokes as a mismatch rather than as an inconclusive inspection.
+	contamination error
 }
 
 func persistenceBytes(m PersistenceManifest) ([]byte, error) {
@@ -195,6 +199,7 @@ func collectRegistrationCode(ctx context.Context, m *PersistenceManifest, writer
 		}
 		if treeErrors[root] != nil {
 			m.Problems = append(m.Problems, id+": protected code tree unavailable: "+treeErrors[root].Error())
+			m.noteContamination(treeErrors[root])
 			continue
 		}
 		code, err := verifyRegisteredCode(ctx, path, r, writers, command)
@@ -205,6 +210,7 @@ func collectRegistrationCode(ctx context.Context, m *PersistenceManifest, writer
 		m.Code[id] = code
 		if err != nil {
 			m.Problems = append(m.Problems, id+": "+err.Error())
+			m.noteContamination(err)
 		}
 	}
 	// Signing commands must not bridge a changed tree or mutable ancestry.
@@ -224,6 +230,12 @@ func collectRegistrationCode(ctx context.Context, m *PersistenceManifest, writer
 	return nil
 }
 
+func (m *PersistenceManifest) noteContamination(err error) {
+	if m.contamination == nil && errors.Is(err, ErrContamination) {
+		m.contamination = err
+	}
+}
+
 func matchPersistence(expected, current PersistenceManifest) error {
 	if err := matchPersistenceCensus(expected, current.OSBuild, current.Census); err != nil {
 		return err
@@ -234,6 +246,9 @@ func matchPersistence(expected, current PersistenceManifest) error {
 		}
 	}
 	if len(current.Problems) != 0 {
+		if current.contamination != nil {
+			return fmt.Errorf("registered code inspection observed contamination: %w", current.contamination)
+		}
 		return errors.New("registered code inspection incomplete or protection unavailable")
 	}
 	accepted, err := persistenceBytes(expected)
