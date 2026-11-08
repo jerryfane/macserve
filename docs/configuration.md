@@ -170,6 +170,14 @@ These are monitored application budgets, not filesystem quotas. Controller test 
 exported by the pinned worker tool; it does not execute repository-provided parsers.
 The census refuses nested mounts except the job user's own CoreDevice `devicefs` (Xcode), and on SIP hosts
 needs Full Disk Access for `/Library/macserve/bin/macserve`; see the installation guide.
+The maintenance daemon runs the census in the background with its own 120 s budget instead of inside each 8 s
+probe: under heavy builds a full census outlasted the probe for minutes, health expired, and the controller
+cancelled the running job (`isolation_unavailable`) although nothing was wrong. A probe waits for the running
+census until its own deadline; if it is still running, the probe uses the last completed clean census if it
+finished at most 150 s ago, otherwise it is inconclusive as before. So the accounted bytes and the census's
+mount and special-file checks in published health can be up to 150 s old; a census that finds something is
+reported by every probe until a newer census completes, and every other health fact is still observed by each
+probe. The free-disk floors above are checked by the controller itself every second and do not depend on it.
 
 Offered/running workers retain the ordinary 30-second heartbeat-loss fence. Cancellation, deadline or finalizing
 starts a fixed cleanup/delivery grace (two minutes each, plus heartbeat tolerance); repeated heartbeats cannot

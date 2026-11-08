@@ -19,6 +19,9 @@ import (
 // failure path extends the lifetime of a successful observation. A probe that
 // only ran out of time is inconclusive, not a finding: the last valid health
 // then stays in place until its own expiry instead of being replaced at once.
+// The one fact a probe may take from an earlier observation is the byte
+// census, which runs in the background and may be up to censusMaxAge old
+// (censusTracker); every other fact is observed by the probe itself.
 func Run(ctx context.Context, c Config) error {
 	if runtime.GOOS != "darwin" || os.Getuid() != 0 || os.Geteuid() != 0 {
 		return errors.New("maintenance requires macOS root")
@@ -61,6 +64,7 @@ func Run(ctx context.Context, c Config) error {
 		stopMonitor()
 		<-monitorDone
 	}()
+	census := newCensusTracker(ctx)
 	for {
 		started := time.Now()
 		current, err := LoadConfig(c.path)
@@ -69,7 +73,7 @@ func Run(ctx context.Context, c Config) error {
 		if err == nil {
 			interval = time.Duration(current.IntervalSeconds) * time.Second
 			probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-			h, err = observe(probeCtx, current)
+			h, err = observe(probeCtx, current, census)
 			cancel()
 			// Inspect bounds itself (8 s) inside the probe, so a deadline error
 			// can come from either context; only the daemon's own shutdown is not
