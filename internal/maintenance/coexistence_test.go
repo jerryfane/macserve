@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jerryfane/macserve/internal/health"
 	"github.com/jerryfane/macserve/internal/pfctl"
 )
 
@@ -226,6 +228,105 @@ func TestCoexistenceServiceFailuresRemainFatal(t *testing.T) {
 		if _, err := observeCoexistenceWithCommands(context.Background(), c, f.command, f.command); err == nil {
 			t.Fatal("unproven running service admitted")
 		}
+	}
+}
+
+// exitStatus returns the error os/exec reports for a native command that
+// exited with code, as coexistenceLaunchctl returns it.
+func exitStatus(t *testing.T, code int) error {
+	t.Helper()
+	err := exec.Command("/bin/sh", "-c", fmt.Sprintf("exit %d", code)).Run()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != code {
+		t.Fatalf("exit %d: %v", code, err)
+	}
+	return err
+}
+
+// Studio, 2026-11-09 12:25:18Z: one probe read the KeepAlive keyring daemon
+// between two runs, published invalid health with 28 s of the last valid
+// health left, and the controller cancelled the running job. launchd's log of
+// a keyring relaunch (2026-11-10) shows what a probe can read in between: the
+// service not running, then spawn scheduled (respawn throttled 10 s after a
+// run shorter than its 10 s minimum runtime), then running under a new PID; a
+// redeploy is not loaded (launchctl exit 113) from bootout to bootstrap.
+func TestCoexistingServiceRelaunchKeepsLastValidHealth(t *testing.T) {
+	capture := keyringLaunchOutput(t)
+	between := func(state string) coexistenceReply {
+		text := strings.Replace(strings.Replace(capture, "\tstate = running\n", "\tstate = "+state+"\n", 1), "\tpid = 2908\n", "", 1)
+		return coexistenceReply{out: pfctl.Output{Stdout: text}}
+	}
+	c := Config{CoexistingServices: []string{"org.gitmoot.keyring"}}
+	observe := func(reply coexistenceReply) (CoexistenceState, error) {
+		f := coexistenceFixture{"print system/org.gitmoot.keyring": reply}
+		return observeCoexistenceWithCommands(context.Background(), c, f.command, f.command)
+	}
+	before, err := observe(coexistenceReply{out: pfctl.Output{Stdout: capture}})
+	if err != nil || before.Services[0].PID != 2908 {
+		t.Fatalf("running keyring: %+v %v", before, err)
+	}
+	last := health.Health{BoundaryValidated: true, CheckedAt: before.RecordedAt, ExpiresAt: before.RecordedAt.Add(healthLifetime)}
+	for name, reply := range map[string]coexistenceReply{
+		"not running":     between("not running"),
+		"spawn scheduled": between("spawn scheduled"),
+		"not loaded": {
+			out: pfctl.Output{Stderr: "Bad request.\nCould not find service \"org.gitmoot.keyring\" in domain for system\n"},
+			err: exitStatus(t, 113),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := observe(reply)
+			if err == nil {
+				t.Fatal("service between two runs observed as running")
+			}
+			if !keepLastValid(err, last, last.CheckedAt.Add(10*time.Second)) {
+				t.Errorf("relaunch replaced still-valid health: %v", err)
+			}
+			if keepLastValid(err, last, last.ExpiresAt) || keepLastValid(err, health.Health{}, last.CheckedAt) {
+				t.Errorf("relaunch kept expired or absent health: %v", err)
+			}
+		})
+	}
+	running := strings.Replace(strings.Replace(capture, "\tpid = 2908\n", "\tpid = 2950\n", 1), "\truns = 60\n", "\truns = 61\n", 1)
+	after, err := observe(coexistenceReply{out: pfctl.Output{Stdout: running}})
+	if err != nil || after.Services[0].PID != 2950 {
+		t.Fatalf("relaunched keyring: %+v %v", after, err)
+	}
+}
+
+// Guard (passes before the relaunch fix by design): only a well-formed
+// snapshot of the requested service in a state other than running, or
+// launchctl's not-loaded status, is inconclusive. Any other service read
+// stays a finding and publishes invalid health at once.
+func TestCoexistenceServiceFindingsReplaceLastValidHealth(t *testing.T) {
+	capture := keyringLaunchOutput(t)
+	down := strings.Replace(strings.Replace(capture, "\tstate = running\n", "\tstate = not running\n", 1), "\tpid = 2908\n", "", 1)
+	now := time.Date(2026, 11, 9, 12, 25, 18, 0, time.UTC)
+	valid := health.Health{BoundaryValidated: true, CheckedAt: now.Add(-12 * time.Second), ExpiresAt: now.Add(28 * time.Second)}
+	stdout := func(text string) coexistenceReply { return coexistenceReply{out: pfctl.Output{Stdout: text}} }
+	c := Config{CoexistingServices: []string{"org.gitmoot.keyring"}}
+	for name, reply := range map[string]coexistenceReply{
+		"running without PID":            stdout(strings.Replace(capture, "\tpid = 2908\n", "", 1)),
+		"two PIDs":                       stdout(strings.Replace(capture, "\tpid = 2908\n", "\tpid = 2908\n\tpid = 2950\n", 1)),
+		"two PIDs between runs":          stdout(strings.Replace(down, "\tdomain = system\n", "\tdomain = system\n\tpid = 2908\n\tpid = 2950\n", 1)),
+		"non-canonical PID":              stdout(strings.Replace(capture, "\tpid = 2908\n", "\tpid = 02908\n", 1)),
+		"non-canonical PID between runs": stdout(strings.Replace(down, "\tdomain = system\n", "\tdomain = system\n\tpid = 0\n", 1)),
+		"two states":                     stdout(strings.Replace(capture, "\tstate = running\n", "\tstate = running\n\tstate = not running\n", 1)),
+		"quoted state":                   stdout(strings.Replace(capture, "\tstate = running\n", "\tstate = \"not running\"\n", 1)),
+		"state with a PID claim":         stdout(strings.Replace(capture, "\tstate = running\n", "\tstate = not running; pid = 2950\n", 1)),
+		"another service between runs":   stdout(strings.Replace(down, "system/org.gitmoot.keyring = {", "system/org.gitmoot.keyring-web = {", 1)),
+		"truncated between runs":         stdout(strings.TrimSuffix(down, "}\n")),
+		"diagnostic between runs":        {out: pfctl.Output{Stdout: down, Stderr: "partial"}},
+		"other launchctl status":         {err: exitStatus(t, 1)},
+		"not-loaded text without status": {err: errors.New("exit status 113")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := coexistenceFixture{"print system/org.gitmoot.keyring": reply}
+			_, err := observeCoexistenceWithCommands(context.Background(), c, f.command, f.command)
+			if err == nil || keepLastValid(err, valid, now) {
+				t.Fatalf("finding kept last valid health: %v", err)
+			}
+		})
 	}
 }
 

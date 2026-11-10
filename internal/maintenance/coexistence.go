@@ -191,6 +191,10 @@ func observeCoexistenceWithCommands(ctx context.Context, c Config, pf, launchctl
 	// unavailability cannot consume their bounded observation window.
 	for _, label := range c.CoexistingServices {
 		text, err := query(launchctl, false, "print", "system/"+label)
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == launchctlNotLoaded {
+			return CoexistenceState{}, fmt.Errorf("coexisting system service %q: not loaded (%v): %w", label, err, errCoexistingServiceRestarting)
+		}
 		if err != nil {
 			return CoexistenceState{}, fmt.Errorf("coexisting system service %q: %w", label, err)
 		}
@@ -232,16 +236,36 @@ func coexistenceMainDigest(filter, translation string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// launchctlNotLoaded is the exit status of `launchctl print` for a service
+// that is not loaded (as in internal/setup).
+const launchctlNotLoaded = 113
+
+// errCoexistingServiceRestarting reports a configured coexisting service that
+// is between two launchd runs: loaded but not running (a KeepAlive relaunch,
+// throttled for 10 s after a run shorter than its minimum runtime) or not
+// loaded at all (a redeploy between its bootout and bootstrap). Steady-state
+// health accepts a peer's new PID, so this is inconclusive, not a finding: the
+// last valid health stays until its own expiry (keepLastValid) and a peer that
+// is still down then publishes invalid health. Malformed or ambiguous output,
+// another target, a diagnostic, and a missing, duplicate or noncanonical PID
+// of a running service remain findings.
+var errCoexistingServiceRestarting = errors.New("service is between two launchd runs")
+
 // The shared parser validates the entire balanced snapshot before root fields
 // can authorize a running service. Bind that authority to the requested target.
+// A well-formed snapshot of that target in another state is a service between
+// two runs.
 func coexistenceServicePID(label, text string) (int, error) {
 	bad := errors.New("service is not verifiably running with one canonical PID")
 	if !coexistenceServiceLabel(label) {
 		return 0, bad
 	}
-	snapshot, err := launchctlprint.Parse(text)
+	snapshot, err := launchctlprint.ParseLoaded(text)
 	if err != nil || snapshot.Target != "system/"+label {
 		return 0, bad
+	}
+	if snapshot.State != "running" {
+		return 0, fmt.Errorf("state = %s: %w", snapshot.State, errCoexistingServiceRestarting)
 	}
 	return snapshot.PID, nil
 }
