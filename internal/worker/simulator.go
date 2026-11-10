@@ -232,6 +232,9 @@ func (e *Engine) cleanup(ctx context.Context, m *manifest) error {
 	if m.DeviceCreatePending || m.DeviceUDID != "" {
 		return fmt.Errorf("%w: unresolved simulator ownership", ErrRecovery)
 	}
+	if err := e.unmountMetalToolchain(ctx, m); err != nil {
+		return err
+	}
 	if err := e.workspacePass(ctx, m.JobID, false, true); err != nil {
 		return err
 	}

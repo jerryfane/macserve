@@ -8,9 +8,12 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/jerryfane/macserve/internal/mounttable"
+	"github.com/jerryfane/macserve/internal/worker"
 	"golang.org/x/sys/unix"
 )
 
@@ -23,78 +26,77 @@ import (
 // Hardlinks and nested roots are counted once. This is an approximate live budget
 // census, not a snapshot: concurrent changes can be missed or observed at different
 // times. Mount crossings, special nodes (except local sockets), and traversal
-// limits invalidate the census, with one exception: the CoreDevice devicefs that
-// Xcode/CoreDeviceService mounts for the job user inside the job home (see
-// coreDeviceMount) is not descended. Local sockets have metadata but no file payload.
+// limits invalidate the census, with the exceptions acceptedMount names: the
+// CoreDevice devicefs that Xcode/CoreDeviceService mounts for the job user
+// inside the job home and Xcode's read-only Metal toolchain image in a job
+// workspace are not descended. Local sockets have metadata but no file payload.
 // Errors name the census root and the quoted root-relative path that failed, so
 // a TCC denial (EPERM without Full Disk Access) or a refusal is diagnosable.
 func accountBytes(ctx context.Context, roots []string, jobHome string, jobUID uint32) (int64, error) {
-	return census{base: "/", statat: unix.Fstatat, mounts: mountTable, jobHome: jobHome, jobUID: jobUID}.account(ctx, roots)
+	return census{base: "/", statat: unix.Fstatat, mounts: mounttable.Read, jobHome: jobHome, workspaces: workspaceRoot, jobUID: jobUID}.account(ctx, roots)
 }
+
+// workspaceRoot is the worker's job workspace root, the only worker.json
+// workspace_root Inspect accepts.
+const workspaceRoot = "/Library/macserve/var/workspaces"
 
 // census is the filesystem boundary of accountBytes. Roots are absolute paths
 // resolved beneath base ("/" in production). The stat boundary permits
 // deterministic coverage of changes before directory open; mounts reports the
-// kernel mount table. jobHome and jobUID name the job-home root and its owner.
+// kernel mount table. jobHome and jobUID name the job-home root and its owner;
+// workspaces is the worker's job workspace root.
 type census struct {
 	base   string
 	statat func(int, string, *unix.Stat_t, int) error
 	// fstat is unix.Fstat of an opened directory when nil.
 	fstat func(int, *unix.Stat_t) error
 	// openat is unix.Openat when nil.
-	openat  func(int, string, int, uint32) (int, error)
-	mounts  func() ([]mountEntry, error)
-	jobHome string
-	jobUID  uint32
-}
-
-// mountEntry is the portable subset of one getfsstat record. fsid is
-// f_fsid.val[0], which equals st_dev of every node on that mount.
-type mountEntry struct {
-	fsid   uint64
-	owner  uint32
-	flags  uint64
-	fstype string
-	on     string
-	from   string
+	openat     func(int, string, int, uint32) (int, error)
+	mounts     func() ([]mounttable.Entry, error)
+	jobHome    string
+	workspaces string
+	jobUID     uint32
 }
 
 const (
 	// Root-relative mount point and backing directory of the CoreDevice devicefs.
 	coreDeviceMountPoint = "Library/Developer/CoreDevice/DeviceFS"
 	coreDeviceData       = "Library/Containers/com.apple.CoreDevice.CoreDeviceService/Data"
-	// <sys/mount.h> MNT_NODEV and MNT_NOSUID; a darwin test pins them to x/sys.
-	mountNoDev  = 0x10
-	mountNoSUID = 0x8
 )
 
-// coreDeviceMount returns the single mount-table record for dev if, and only if,
-// it is the job user's own CoreDevice devicefs at its fixed job-home path, backed
-// by CoreDeviceService's container directory in that same home. The backing bytes
-// are therefore already counted on the home device, and the FSKit server runs as
-// the job user, so it cannot store anything the job could not write directly.
-// Every other nested mount (disk images, other FSKit or network filesystems,
+// acceptedMount returns the single mount-table record for dev, the mounted
+// root found at the absolute path at, if, and only if, it is one of:
+//   - the job user's own CoreDevice devicefs at its fixed job-home path, backed
+//     by CoreDeviceService's container directory in that same home. The backing
+//     bytes are therefore already counted on the home device, and the FSKit
+//     server runs as the job user, so it cannot store anything the job could
+//     not write directly.
+//   - Xcode's Metal toolchain image in a job workspace, mounted read-only,
+//     nodev and nosuid by the job user (worker.MetalToolchainMount): Apple's
+//     asset bytes, stored outside the workspace, that nothing can write. The
+//     worker unmounts it when it removes the workspace.
+//
+// Every other nested mount (other disk images, FSKit or network filesystems,
 // devicefs elsewhere or owned by another user) stays a mount crossing.
-func (c census) coreDeviceMount(dev uint64) (mountEntry, error) {
-	if c.mounts == nil || c.jobHome == "" {
-		return mountEntry{}, errors.New("mutable mount crossing")
+func (c census) acceptedMount(dev uint64, at string) (mounttable.Entry, error) {
+	coreDevice := c.jobHome != "" && at == c.jobHome+"/"+coreDeviceMountPoint
+	metal := c.workspaces != "" && worker.MetalToolchainMountPoint(c.workspaces, at)
+	if c.mounts == nil || !coreDevice && !metal {
+		return mounttable.Entry{}, errors.New("mutable mount crossing")
 	}
 	table, err := c.mounts()
 	if err != nil {
-		return mountEntry{}, fmt.Errorf("mutable mount crossing: %w", err)
+		return mounttable.Entry{}, fmt.Errorf("mutable mount crossing: %w", err)
 	}
-	var match []mountEntry
-	for _, m := range table {
-		if m.fsid == dev {
-			match = append(match, m)
-		}
+	m, ok := mounttable.Unique(table, dev)
+	if !ok {
+		return mounttable.Entry{}, errors.New("mutable mount crossing: no unique mount record")
 	}
-	if len(match) != 1 {
-		return mountEntry{}, errors.New("mutable mount crossing: no unique mount record")
+	if coreDevice && (m.FSType != "devicefs" || m.On != at || m.From != "devices -- file://"+c.jobHome+"/"+coreDeviceData+"/" || m.Owner != c.jobUID || m.Flags&(mounttable.NoDev|mounttable.NoSUID) != mounttable.NoDev|mounttable.NoSUID) {
+		return mounttable.Entry{}, fmt.Errorf("mutable mount crossing: %s mount is not the job CoreDevice devicefs", strconv.Quote(m.FSType))
 	}
-	m := match[0]
-	if m.fstype != "devicefs" || m.on != c.jobHome+"/"+coreDeviceMountPoint || m.from != "devices -- file://"+c.jobHome+"/"+coreDeviceData+"/" || m.owner != c.jobUID || m.flags&(mountNoDev|mountNoSUID) != mountNoDev|mountNoSUID {
-		return mountEntry{}, fmt.Errorf("mutable mount crossing: %s mount is not the job CoreDevice devicefs", strconv.Quote(m.fstype))
+	if metal && (m.On != at || !worker.MetalToolchainMount(m, c.workspaces, c.jobUID)) {
+		return mounttable.Entry{}, fmt.Errorf("mutable mount crossing: %s mount is not the job Xcode Metal toolchain image", strconv.Quote(m.FSType))
 	}
 	return m, nil
 }
@@ -132,9 +134,14 @@ func (c census) account(ctx context.Context, roots []string) (int64, error) {
 	seen := map[inode]bool{}
 	var total int64
 	entries := 0
-	// The one accepted CoreDevice mount; it must be unchanged when the census ends.
-	var skipped *mountEntry
-	jobHome := false
+	// The accepted mounts (acceptedMount), by device, with where each was
+	// found; each must be unchanged when the census ends.
+	type accepted struct {
+		entry     mounttable.Entry
+		root, rel string
+	}
+	var skipped []accepted
+	rootPath := ""
 	var walk func(int, string, string, uint64, int) error
 	walk = func(parent int, name, rel string, device uint64, depth int) error {
 		fail := func(err error) error {
@@ -155,20 +162,29 @@ func (c census) account(ctx context.Context, roots []string) (int64, error) {
 			return fail(err)
 		}
 		if uint64(st.Dev) != device {
-			if !jobHome || rel != coreDeviceMountPoint || skipped != nil || st.Mode&unix.S_IFMT != unix.S_IFDIR {
+			if st.Mode&unix.S_IFMT != unix.S_IFDIR {
 				return fail(errors.New("mutable mount crossing"))
 			}
-			m, err := c.coreDeviceMount(uint64(st.Dev))
+			m, err := c.acceptedMount(uint64(st.Dev), filepath.Join(rootPath, rel))
 			if err != nil {
 				return fail(err)
 			}
 			// Never open or descend the mount. The name must still resolve to the
-			// same mounted root after the decision.
+			// same mounted root after the decision. An accepted mount that is gone
+			// or replaced by then (the worker unmounts the Metal toolchain image
+			// as it removes a workspace; CoreDeviceService remounts its devicefs)
+			// makes the census inconclusive, like a change the final check sees;
+			// whatever is there now is decided by the next census. Any other
+			// stat failure stays a failure.
 			var again unix.Stat_t
-			if err := statat(parent, name, &again, unix.AT_SYMLINK_NOFOLLOW); err != nil || again.Dev != st.Dev || again.Ino != st.Ino || again.Mode&unix.S_IFMT != unix.S_IFDIR {
-				return fail(errors.New("mutable mount changed during census"))
+			if err := statat(parent, name, &again, unix.AT_SYMLINK_NOFOLLOW); err != nil && !errors.Is(err, unix.ENOENT) {
+				return fail(err)
+			} else if err != nil || again.Dev != st.Dev || again.Ino != st.Ino || again.Mode&unix.S_IFMT != unix.S_IFDIR {
+				return fail(errAcceptedMountChanged)
 			}
-			skipped = &m
+			if !slices.ContainsFunc(skipped, func(s accepted) bool { return s.entry.FSID == m.FSID }) {
+				skipped = append(skipped, accepted{m, rootPath, rel})
+			}
 			return nil
 		}
 		key := inode{uint64(st.Dev), uint64(st.Ino)}
@@ -262,7 +278,7 @@ func (c census) account(ctx context.Context, roots []string) (int64, error) {
 			err = errors.New("mutable root is not directory")
 		}
 		if err == nil {
-			jobHome = c.jobHome != "" && root == c.jobHome
+			rootPath = root
 			err = walk(fd, parts[len(parts)-1], ".", uint64(st.Dev), 0)
 		}
 		unix.Close(fd)
@@ -271,33 +287,27 @@ func (c census) account(ctx context.Context, roots []string) (int64, error) {
 		}
 	}
 	if skipped != nil {
-		// The skip is valid only if the same record still describes that mount.
+		// A skip is valid only if the same record still describes that mount.
 		table, err := c.mounts()
-		if err != nil {
-			return -1, fmt.Errorf("mutable census %s: %s: %w", c.jobHome, strconv.Quote(coreDeviceMountPoint), err)
-		}
-		same := 0
-		for _, m := range table {
-			if m.fsid == skipped.fsid {
-				same++
-				if m != *skipped {
-					same++
-				}
+		for _, s := range skipped {
+			if err != nil {
+				return -1, fmt.Errorf("mutable census %s: %s: %w", s.root, strconv.Quote(s.rel), err)
 			}
-		}
-		if same != 1 {
-			return -1, fmt.Errorf("mutable census %s: %s: %w", c.jobHome, strconv.Quote(coreDeviceMountPoint), errCoreDeviceMountChanged)
+			if m, ok := mounttable.Unique(table, s.entry.FSID); !ok || m != s.entry {
+				return -1, fmt.Errorf("mutable census %s: %s: %w", s.root, strconv.Quote(s.rel), errAcceptedMountChanged)
+			}
 		}
 	}
 	return total, ctx.Err()
 }
 
-// errCoreDeviceMountChanged reports that the one accepted CoreDevice devicefs
+// errAcceptedMountChanged reports that an accepted mount (acceptedMount)
 // changed (remounted or unmounted) while the census ran. Xcode's
 // CoreDeviceService does this on its own schedule, notably as a build
-// finishes, so it makes that census inconclusive rather than a finding; a
+// finishes, and the worker unmounts the Metal toolchain image as it removes
+// a workspace, so it makes that census inconclusive rather than a finding; a
 // mount that is actually wrong is refused by the next census.
-var errCoreDeviceMountChanged = errors.New("mutable mount table changed during census")
+var errAcceptedMountChanged = errors.New("mutable mount table changed during census")
 
 // ignoringEINTR retries a system call interrupted by a signal before it did any
 // work, as package os does for its own calls.

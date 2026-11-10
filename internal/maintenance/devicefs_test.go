@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jerryfane/macserve/internal/mounttable"
 	"golang.org/x/sys/unix"
 )
 
@@ -45,7 +46,7 @@ func studioProbe(t *testing.T, name string) []byte {
 }
 
 // darwinStatfsRecord decodes the darwin/arm64 struct statfs layout portably.
-func darwinStatfsRecord(t *testing.T, b []byte) mountEntry {
+func darwinStatfsRecord(t *testing.T, b []byte) mounttable.Entry {
 	t.Helper()
 	if len(b) != 2168 {
 		t.Fatalf("statfs record size %d", len(b))
@@ -57,13 +58,13 @@ func darwinStatfsRecord(t *testing.T, b []byte) mountEntry {
 		return string(b)
 	}
 	le := binary.LittleEndian
-	return mountEntry{
-		fsid:   uint64(int32(le.Uint32(b[48:]))),
-		owner:  le.Uint32(b[56:]),
-		flags:  uint64(le.Uint32(b[64:])),
-		fstype: text(b[72:88]),
-		on:     text(b[88:1112]),
-		from:   text(b[1112:2136]),
+	return mounttable.Entry{
+		FSID:   uint64(int32(le.Uint32(b[48:]))),
+		Owner:  le.Uint32(b[56:]),
+		Flags:  uint64(le.Uint32(b[64:])),
+		FSType: text(b[72:88]),
+		On:     text(b[88:1112]),
+		From:   text(b[1112:2136]),
 	}
 }
 
@@ -94,9 +95,9 @@ func setStat(st *unix.Stat_t, field string, value uint64) {
 
 func TestStudioDevicefsProbeBytes(t *testing.T) {
 	m := darwinStatfsRecord(t, studioProbe(t, "studio-devicefs-statfs.hex"))
-	want := mountEntry{fsid: 805306371, owner: 6202, flags: 0x10301418, fstype: "devicefs",
-		on:   "/Users/macservejob/Library/Developer/CoreDevice/DeviceFS",
-		from: "devices -- file:///Users/macservejob/Library/Containers/com.apple.CoreDevice.CoreDeviceService/Data/"}
+	want := mounttable.Entry{FSID: 805306371, Owner: 6202, Flags: 0x10301418, FSType: "devicefs",
+		On:   "/Users/macservejob/Library/Developer/CoreDevice/DeviceFS",
+		From: "devices -- file:///Users/macservejob/Library/Containers/com.apple.CoreDevice.CoreDeviceService/Data/"}
 	if m != want {
 		t.Fatalf("probe record decoded as %+v", m)
 	}
@@ -136,38 +137,38 @@ func TestMutableAccountingSkipsJobCoreDeviceMount(t *testing.T) {
 	roots := []string{"/Library/macserve/var", "/Users/macservejob"}
 	type scenario struct {
 		mountAt   string // base-relative path that presents the mounted root
-		table     func(call int) ([]mountEntry, error)
+		table     func(call int) ([]mounttable.Entry, error)
 		remounted bool // the name resolves to another root after the decision
 		want      string
 	}
-	same := func(m mountEntry) func(int) ([]mountEntry, error) {
-		return func(int) ([]mountEntry, error) { return []mountEntry{m}, nil }
+	same := func(m mounttable.Entry) func(int) ([]mounttable.Entry, error) {
+		return func(int) ([]mounttable.Entry, error) { return []mounttable.Entry{m}, nil }
 	}
 	jobMount := "Users/macservejob/" + deviceFS
-	changed := func(f func(*mountEntry)) mountEntry {
+	changed := func(f func(*mounttable.Entry)) mounttable.Entry {
 		m := record
 		f(&m)
 		return m
 	}
 	for name, tc := range map[string]scenario{
 		"studio devicefs":           {mountAt: jobMount, table: same(record)},
-		"disk image at mount point": {mountAt: jobMount, table: same(changed(func(m *mountEntry) { m.fstype = "apfs" })), want: "mutable mount crossing"},
-		"devicefs at another path":  {mountAt: "Users/macservejob/Library/Caches", table: same(changed(func(m *mountEntry) { m.on = "/Users/macservejob/Library/Caches" })), want: "mutable mount crossing"},
+		"disk image at mount point": {mountAt: jobMount, table: same(changed(func(m *mounttable.Entry) { m.FSType = "apfs" })), want: "mutable mount crossing"},
+		"devicefs at another path":  {mountAt: "Users/macservejob/Library/Caches", table: same(changed(func(m *mounttable.Entry) { m.On = "/Users/macservejob/Library/Caches" })), want: "mutable mount crossing"},
 		"devicefs in service root":  {mountAt: "Library/macserve/var/" + deviceFS, table: same(record), want: "mutable mount crossing"},
-		"another user's devicefs":   {mountAt: jobMount, table: same(changed(func(m *mountEntry) { m.owner = 501 })), want: "mutable mount crossing"},
-		"source outside job home":   {mountAt: jobMount, table: same(changed(func(m *mountEntry) { m.from = "devices -- file:///private/tmp/data/" })), want: "mutable mount crossing"},
-		"setuid devicefs":           {mountAt: jobMount, table: same(changed(func(m *mountEntry) { m.flags &^= statfsNoSUID })), want: "mutable mount crossing"},
-		"device nodes allowed":      {mountAt: jobMount, table: same(changed(func(m *mountEntry) { m.flags &^= statfsNoDev })), want: "mutable mount crossing"},
-		"ambiguous mount record":    {mountAt: jobMount, table: func(int) ([]mountEntry, error) { return []mountEntry{record, record}, nil }, want: "mutable mount crossing"},
-		"no mount record":           {mountAt: jobMount, table: func(int) ([]mountEntry, error) { return nil, nil }, want: "mutable mount crossing"},
-		"mount table unavailable":   {mountAt: jobMount, table: func(int) ([]mountEntry, error) { return nil, unix.EIO }, want: "mutable mount crossing"},
-		"remounted after decision":  {mountAt: jobMount, table: same(record), remounted: true, want: "mutable mount changed during census"},
-		"unmounted during census":   {mountAt: jobMount, table: func(call int) ([]mountEntry, error) { return []mountEntry{record}[:2-call], nil }, want: "mutable mount table changed during census"},
-		"replaced during census": {mountAt: jobMount, table: func(call int) ([]mountEntry, error) {
+		"another user's devicefs":   {mountAt: jobMount, table: same(changed(func(m *mounttable.Entry) { m.Owner = 501 })), want: "mutable mount crossing"},
+		"source outside job home":   {mountAt: jobMount, table: same(changed(func(m *mounttable.Entry) { m.From = "devices -- file:///private/tmp/data/" })), want: "mutable mount crossing"},
+		"setuid devicefs":           {mountAt: jobMount, table: same(changed(func(m *mounttable.Entry) { m.Flags &^= statfsNoSUID })), want: "mutable mount crossing"},
+		"device nodes allowed":      {mountAt: jobMount, table: same(changed(func(m *mounttable.Entry) { m.Flags &^= statfsNoDev })), want: "mutable mount crossing"},
+		"ambiguous mount record":    {mountAt: jobMount, table: func(int) ([]mounttable.Entry, error) { return []mounttable.Entry{record, record}, nil }, want: "mutable mount crossing"},
+		"no mount record":           {mountAt: jobMount, table: func(int) ([]mounttable.Entry, error) { return nil, nil }, want: "mutable mount crossing"},
+		"mount table unavailable":   {mountAt: jobMount, table: func(int) ([]mounttable.Entry, error) { return nil, unix.EIO }, want: "mutable mount crossing"},
+		"remounted after decision":  {mountAt: jobMount, table: same(record), remounted: true, want: "mutable mount table changed during census"},
+		"unmounted during census":   {mountAt: jobMount, table: func(call int) ([]mounttable.Entry, error) { return []mounttable.Entry{record}[:2-call], nil }, want: "mutable mount table changed during census"},
+		"replaced during census": {mountAt: jobMount, table: func(call int) ([]mounttable.Entry, error) {
 			if call == 1 {
-				return []mountEntry{record}, nil
+				return []mounttable.Entry{record}, nil
 			}
-			return []mountEntry{changed(func(m *mountEntry) { m.from = "devices -- file:///private/tmp/data/" })}, nil
+			return []mounttable.Entry{changed(func(m *mounttable.Entry) { m.From = "devices -- file:///private/tmp/data/" })}, nil
 		}, want: "mutable mount table changed during census"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -202,7 +203,7 @@ func TestMutableAccountingSkipsJobCoreDeviceMount(t *testing.T) {
 				}
 				presented++
 				// Present the real probed devicefs root in place of the directory.
-				setStat(st, "Dev", record.fsid)
+				setStat(st, "Dev", record.FSID)
 				setStat(st, "Ino", probeRoot.ino)
 				setStat(st, "Mode", probeRoot.mode)
 				setStat(st, "Nlink", probeRoot.nlink)
@@ -216,7 +217,7 @@ func TestMutableAccountingSkipsJobCoreDeviceMount(t *testing.T) {
 				return nil
 			}
 			calls := 0
-			c := census{base: base, statat: statat, jobHome: "/Users/macservejob", jobUID: 6202, mounts: func() ([]mountEntry, error) {
+			c := census{base: base, statat: statat, jobHome: "/Users/macservejob", jobUID: 6202, mounts: func() ([]mounttable.Entry, error) {
 				calls++
 				return tc.table(calls)
 			}}
@@ -238,8 +239,8 @@ func TestMutableAccountingSkipsJobCoreDeviceMount(t *testing.T) {
 			// (the daemon keeps last valid health until it expires); every
 			// other refusal must stay a finding.
 			raced := tc.want == "mutable mount table changed during census"
-			if errors.Is(err, errCoreDeviceMountChanged) != raced {
-				t.Fatalf("errors.Is(err, errCoreDeviceMountChanged)=%v, want %v: %v", !raced, raced, err)
+			if errors.Is(err, errAcceptedMountChanged) != raced {
+				t.Fatalf("errors.Is(err, errAcceptedMountChanged)=%v, want %v: %v", !raced, raced, err)
 			}
 		})
 	}

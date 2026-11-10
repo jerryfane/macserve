@@ -52,10 +52,10 @@ func TestWorkspaceBudgetChargesSparseFilesAllocatedBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	if err := workspaceBudget(root, 30<<30); err != nil {
+	if err := workspaceBudget(root, 30<<30, nil); err != nil {
 		t.Fatalf("sparse compilation cache exceeded the 30 GiB budget: %v", err)
 	}
-	if err := workspaceBudget(root, allocated-1); err == nil {
+	if err := workspaceBudget(root, allocated-1, nil); err == nil {
 		t.Fatal("allocated bytes of the sparse files were not charged")
 	}
 }
@@ -96,7 +96,7 @@ func TestWorkspaceWalksRefuseMountPoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	if err := workspaceBudgetWith(root, 1<<40, statat); !errors.Is(err, errWorkspaceMount) || !strings.Contains(err.Error(), `"checkout/ios/mounted"`) {
+	if err := workspaceBudgetWith(root, 1<<40, statat, nil); !errors.Is(err, errWorkspaceMount) || !strings.Contains(err.Error(), `"checkout/ios/mounted"`) {
 		t.Fatalf("budget walk = %v, want mount refusal", err)
 	}
 	digests, err := lockfilesWith(context.Background(), root, uint32(os.Geteuid()), false, statat)

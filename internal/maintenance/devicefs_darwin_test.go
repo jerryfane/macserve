@@ -10,20 +10,18 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/jerryfane/macserve/internal/mounttable"
 	"golang.org/x/sys/unix"
 )
 
 func TestMountEntryFromStudioStatfs(t *testing.T) {
-	if mountNoDev != unix.MNT_NODEV || mountNoSUID != unix.MNT_NOSUID {
-		t.Fatal("mount flag constants differ from <sys/mount.h>")
-	}
 	raw := studioProbe(t, "studio-devicefs-statfs.hex")
 	var s unix.Statfs_t
 	if len(raw) != int(unsafe.Sizeof(s)) {
 		t.Skipf("probe bytes are darwin/arm64 struct statfs; this platform's is %d bytes", unsafe.Sizeof(s))
 	}
 	copy(unsafe.Slice((*byte)(unsafe.Pointer(&s)), unsafe.Sizeof(s)), raw)
-	if got, want := mountEntryFromStatfs(&s), darwinStatfsRecord(t, raw); got != want {
+	if got, want := mounttable.FromStatfs(&s), darwinStatfsRecord(t, raw); got != want {
 		t.Fatalf("production decoder read %+v, want %+v", got, want)
 	}
 }

@@ -39,13 +39,13 @@ func TestMaintenanceInvariantsKeepLastValid(t *testing.T) {
 	inconclusive := []error{
 		context.DeadlineExceeded,
 		fmt.Errorf("census: %w", context.DeadlineExceeded),
-		fmt.Errorf("census: %w", errCoreDeviceMountChanged),
+		fmt.Errorf("census: %w", errAcceptedMountChanged),
 	}
 	findings := []error{
 		nil,
 		context.Canceled,
 		errors.New("context deadline exceeded"),
-		errors.New(errCoreDeviceMountChanged.Error()),
+		errors.New(errAcceptedMountChanged.Error()),
 		errors.New("GUI baseline process changed"),
 		fmt.Errorf("persistence: %w", errors.New("inspection_unavailable")),
 	}

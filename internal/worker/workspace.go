@@ -18,11 +18,17 @@ import (
 // create one. The budget and lockfile walks never descend it: the nested
 // filesystem's bytes are not on the workspace device and a job could hide or
 // forge them there. walkWorkspace (evidence and cleanup) refuses it as
-// contamination.
+// contamination. The one exception is Xcode's Metal toolchain image
+// (MetalToolchainMount), which the budget walk and the evidence pass skip and
+// cleanup unmounts first.
 var errWorkspaceMount = errors.New("mount point in workspace")
 
 // statAt is unix.Fstatat; tests replace it to present another device.
 type statAt func(dirfd int, name string, stat *unix.Stat_t, flags int) error
+
+// lstatAt is the statAt of every workspace walk; tests replace it to present
+// a mount at a name.
+var lstatAt statAt = unix.Fstatat
 
 // fstatFD is unix.Fstat of an opened descriptor; tests replace it to present
 // a mount between a name's stat and its open, or at a job's workspace root.
@@ -31,10 +37,12 @@ var fstatFD = unix.Fstat
 // walkSameDevice visits every entry beneath dir with its lstat facts, the
 // open parent directory and its slash-separated path below rel. It works on
 // directory descriptors: no symlink is followed, and no entry or opened
-// directory on a device other than device is visited or descended. A running
-// job deletes and renames files, so an entry that vanishes between listing
-// and stat or open is skipped; maxArchiveEntries bounds the walk.
-func walkSameDevice(ctx context.Context, dir *os.File, rel string, device uint64, statat statAt, visit func(parent *os.File, name, rel string, stat *unix.Stat_t) error) error {
+// directory on a device other than device is visited or descended; such a
+// mount refuses the walk unless tolerate (nil tolerates nothing) accepts it,
+// and then it is skipped. A running job deletes and renames files, so an
+// entry that vanishes between listing and stat or open is skipped;
+// maxArchiveEntries bounds the walk.
+func walkSameDevice(ctx context.Context, dir *os.File, rel string, device uint64, statat statAt, tolerate nestedMountCheck, visit func(parent *os.File, name, rel string, stat *unix.Stat_t) error) error {
 	mount := func(rel string) error { return fmt.Errorf("%w: %s", errWorkspaceMount, strconv.Quote(rel)) }
 	var top unix.Stat_t
 	if err := unix.Fstat(int(dir.Fd()), &top); err != nil {
@@ -67,6 +75,9 @@ func walkSameDevice(ctx context.Context, dir *os.File, rel string, device uint64
 					return err
 				}
 				if uint64(stat.Dev) != device {
+					if tolerate != nil && stat.Mode&unix.S_IFMT == unix.S_IFDIR && tolerate(rel, uint64(stat.Dev)) {
+						continue
+					}
 					return mount(rel)
 				}
 				if err := visit(dir, name, rel, &stat); err != nil {
@@ -88,6 +99,10 @@ func walkSameDevice(ctx context.Context, dir *os.File, rel string, device uint64
 				var opened unix.Stat_t
 				err = fstatFD(fd, &opened)
 				if err == nil && uint64(opened.Dev) != device {
+					if tolerate != nil && tolerate(rel, uint64(opened.Dev)) {
+						child.Close()
+						continue
+					}
 					err = mount(rel)
 				}
 				if err == nil {
@@ -124,16 +139,18 @@ func chargedBytes(stat *unix.Stat_t) (int64, error) {
 }
 
 // walkWorkspace opens every component relative to an already open directory,
-// never follows a symlink and never crosses a mount. It is used only before
-// launching jobs or after proven UID quiescence, not as a concurrent chmod tool.
-func walkWorkspace(ctx context.Context, directory *os.File, owner uint32, prepare bool, gid uint32, repair bool) error {
+// never follows a symlink and never crosses a mount: a mounted directory is
+// foreign unless tolerate (nil tolerates nothing) accepts it, and then it is
+// skipped. It is used only before launching jobs or after proven UID
+// quiescence, not as a concurrent chmod tool.
+func walkWorkspace(ctx context.Context, directory *os.File, owner uint32, prepare bool, gid uint32, repair bool, tolerate nestedMountCheck) error {
 	var base unix.Stat_t
 	if err := unix.Fstat(int(directory.Fd()), &base); err != nil {
 		return err
 	}
 	count := 0
-	var visit func(*os.File) error
-	visit = func(dir *os.File) error {
+	var visit func(*os.File, string) error
+	visit = func(dir *os.File, prefix string) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -171,7 +188,7 @@ func walkWorkspace(ctx context.Context, directory *os.File, owner uint32, prepar
 					return errors.New("workspace entry limit exceeded")
 				}
 				var entry unix.Stat_t
-				if err := unix.Fstatat(int(dir.Fd()), name, &entry, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+				if err := lstatAt(int(dir.Fd()), name, &entry, unix.AT_SYMLINK_NOFOLLOW); err != nil {
 					return err
 				}
 				kind := entry.Mode & unix.S_IFMT
@@ -188,6 +205,10 @@ func walkWorkspace(ctx context.Context, directory *os.File, owner uint32, prepar
 						return errors.New("symlink in prepared workspace")
 					}
 					continue // unlinking later removes only the link, never its target
+				}
+				rel := path.Join(prefix, name)
+				if entry.Dev != base.Dev && kind == unix.S_IFDIR && tolerate != nil && tolerate(rel, uint64(entry.Dev)) {
+					continue
 				}
 				if entry.Dev != base.Dev || (entry.Uid != owner && entry.Uid != uint32(os.Geteuid())) {
 					return fmt.Errorf("%w: foreign workspace entry", ErrContamination)
@@ -214,7 +235,7 @@ func walkWorkspace(ctx context.Context, directory *os.File, owner uint32, prepar
 				}
 				file := os.NewFile(uintptr(fd), name)
 				if kind == unix.S_IFDIR {
-					err = visit(file)
+					err = visit(file, rel)
 				} else if prepare {
 					err = file.Chown(int(owner), int(gid))
 				}
@@ -228,9 +249,13 @@ func walkWorkspace(ctx context.Context, directory *os.File, owner uint32, prepar
 			}
 		}
 	}
-	return visit(directory)
+	return visit(directory, ".")
 }
 
+// workspacePass walks jobID's workspace (walkWorkspace). Only the evidence
+// pass, neither prepare nor repair, tolerates Xcode's Metal toolchain image
+// (metalToolchainCheck): prepare runs before any job command, and cleanup's
+// repair pass follows unmountMetalToolchain.
 func (e *Engine) workspacePass(ctx context.Context, jobID string, prepare, repair bool) error {
 	file, err := e.workspaces.OpenFile(jobID, os.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
 	if os.IsNotExist(err) {
@@ -257,6 +282,10 @@ func (e *Engine) workspacePass(ctx context.Context, jobID string, prepare, repai
 	if parentStat.Dev != jobStat.Dev {
 		return fmt.Errorf("%w: %w: %s", ErrContamination, errWorkspaceMount, strconv.Quote(jobID))
 	}
+	var tolerate nestedMountCheck
+	if !prepare && !repair {
+		tolerate = e.metalToolchainCheck(jobID)
+	}
 	owner, gid := e.options.JobUID, e.options.JobGID
 	if _, native := e.options.Runner.(*nativeRunner); !native {
 		// Injected runners never change machine identity. Their fixtures are owned
@@ -264,5 +293,5 @@ func (e *Engine) workspacePass(ctx context.Context, jobID string, prepare, repai
 		owner, gid = uint32(os.Geteuid()), uint32(os.Getegid())
 		prepare = false
 	}
-	return walkWorkspace(ctx, file, owner, prepare, gid, repair)
+	return walkWorkspace(ctx, file, owner, prepare, gid, repair, tolerate)
 }

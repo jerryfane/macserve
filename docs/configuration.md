@@ -181,7 +181,8 @@ rows and 14 GiB for artifacts, with seven-day expiry/oldest-terminal eviction. M
 expired downloads, log pages and newly opened log streams return `410`.
 These are monitored application budgets, not filesystem quotas. Controller test parsing uses sealed JSON
 exported by the pinned worker tool; it does not execute repository-provided parsers.
-The census refuses nested mounts except the job user's own CoreDevice `devicefs` (Xcode), and on SIP hosts
+The census refuses nested mounts except the job user's own CoreDevice `devicefs` (Xcode) and Xcode's read-only
+Metal toolchain image in a job workspace (unmounted by workspace cleanup), and on SIP hosts
 needs Full Disk Access for `/Library/macserve/bin/macserve`; see the installation guide.
 The maintenance daemon runs the census in the background with its own 120 s budget instead of inside each 8 s
 probe: under heavy builds a full census outlasted the probe for minutes, health expired, and the controller

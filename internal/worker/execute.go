@@ -362,7 +362,7 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 			case <-monitorCtx.Done():
 				return
 			case <-ticker.C:
-				if err := workspaceBudget(x.root, e.options.MaxWorkspaceBytes); err != nil {
+				if err := x.budget(e.options.MaxWorkspaceBytes); err != nil {
 					diskFailure <- err
 					cancel()
 					return
@@ -378,7 +378,7 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 			returned = errors.Join(returned, err)
 		default:
 		}
-		returned = errors.Join(returned, workspaceBudget(x.root, e.options.MaxWorkspaceBytes))
+		returned = errors.Join(returned, x.budget(e.options.MaxWorkspaceBytes))
 	}()
 	err = x.prepare(prepareCtx)
 	prepareCancel()
@@ -452,7 +452,7 @@ func (x *execution) prepare(ctx context.Context) error {
 		if size > x.engine.options.MaxWorkspaceBytes {
 			return errors.New("generated file exceeds workspace budget")
 		}
-		if err := workspaceBudget(x.root, x.engine.options.MaxWorkspaceBytes-size); err != nil {
+		if err := x.budget(x.engine.options.MaxWorkspaceBytes - size); err != nil {
 			return err
 		}
 		if err := x.root.MkdirAll(path.Dir(name), 0700); err != nil {
@@ -486,14 +486,14 @@ func (x *execution) prepare(ctx context.Context) error {
 		if err := x.recipe(ctx, command); err != nil {
 			return err
 		}
-		if err := workspaceBudget(x.root, x.engine.options.MaxWorkspaceBytes); err != nil {
+		if err := x.budget(x.engine.options.MaxWorkspaceBytes); err != nil {
 			return err
 		}
 		if err := x.flutterStep(ctx, command, true); err != nil {
 			return err
 		}
 	}
-	return workspaceBudget(x.root, x.engine.options.MaxWorkspaceBytes)
+	return x.budget(x.engine.options.MaxWorkspaceBytes)
 }
 
 func (x *execution) invoke(ctx context.Context, command Command, stdout, stderr io.Writer) (ProcessResult, error) {
@@ -654,14 +654,22 @@ func noSymlinkPath(root *os.Root, name string) error {
 
 // workspaceBudget charges every regular file and symlink in the workspace
 // once per inode (see chargedBytes) against limit; directories are not
-// charged. Special files and mount points refuse (walkSameDevice). Exported
+// charged. Special files and mount points refuse (walkSameDevice), except a
+// mount tolerate accepts, which is neither descended nor charged. Exported
 // artifacts keep their own logical-size bound: evidence.Collect copies them
 // densely.
-func workspaceBudget(root *os.Root, limit int64) error {
-	return workspaceBudgetWith(root, limit, unix.Fstatat)
+func workspaceBudget(root *os.Root, limit int64, tolerate nestedMountCheck) error {
+	return workspaceBudgetWith(root, limit, lstatAt, tolerate)
 }
 
-func workspaceBudgetWith(root *os.Root, limit int64, statat statAt) error {
+// budget is workspaceBudget of x's workspace, which tolerates Xcode's Metal
+// toolchain image (metalToolchainCheck): its bytes are Apple's read-only
+// asset, stored outside the workspace.
+func (x *execution) budget(limit int64) error {
+	return workspaceBudget(x.root, limit, x.engine.metalToolchainCheck(x.job.ID))
+}
+
+func workspaceBudgetWith(root *os.Root, limit int64, statat statAt, tolerate nestedMountCheck) error {
 	dir, err := root.Open(".")
 	if err != nil {
 		return err
@@ -674,7 +682,7 @@ func workspaceBudgetWith(root *os.Root, limit int64, statat statAt) error {
 	type inode struct{ dev, ino uint64 }
 	seen := make(map[inode]bool)
 	var total int64
-	return walkSameDevice(context.Background(), dir, ".", uint64(top.Dev), statat, func(_ *os.File, _, _ string, stat *unix.Stat_t) error {
+	return walkSameDevice(context.Background(), dir, ".", uint64(top.Dev), statat, tolerate, func(_ *os.File, _, _ string, stat *unix.Stat_t) error {
 		kind := stat.Mode & unix.S_IFMT
 		if kind == unix.S_IFDIR {
 			return nil
@@ -702,7 +710,7 @@ func workspaceBudgetWith(root *os.Root, limit int64, statat statAt) error {
 // lockfiles digests the dependency lockfiles under checkout; a Flutter job
 // also tracks pubspec.lock.
 func lockfiles(ctx context.Context, root *os.Root, owner uint32, flutter bool) (map[string]string, error) {
-	return lockfilesWith(ctx, root, owner, flutter, unix.Fstatat)
+	return lockfilesWith(ctx, root, owner, flutter, lstatAt)
 }
 
 // lockfilesWith digests the dependency lockfiles under checkout. It runs
@@ -726,7 +734,7 @@ func lockfilesWith(ctx context.Context, root *os.Root, owner uint32, flutter boo
 	}
 	defer checkout.Close()
 	digests := make(map[string]string)
-	err = walkSameDevice(ctx, checkout, "checkout", device, statat, func(parent *os.File, name, rel string, stat *unix.Stat_t) error {
+	err = walkSameDevice(ctx, checkout, "checkout", device, statat, nil, func(parent *os.File, name, rel string, stat *unix.Stat_t) error {
 		if stat.Mode&unix.S_IFMT == unix.S_IFDIR {
 			return nil
 		}
