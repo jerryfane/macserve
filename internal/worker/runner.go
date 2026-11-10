@@ -68,6 +68,15 @@ type nativeRunner struct {
 	console func() error
 	// diagnostics receives tolerated memory sampling failures; nil discards.
 	diagnostics io.Writer
+	// Lane attribution (lanes.go): the tracker, its sampler, the workspace
+	// root that holds every job's workspace and the reader of an
+	// instance's executable and launchd_sim arguments.
+	lanes          *laneTracker
+	lanesOnce      sync.Once
+	samplerMu      sync.Mutex
+	samplerRunning bool
+	workspaceRoot  string
+	describe       func(int, bool) (processDescription, error)
 }
 
 // newProcessRunner is the process/pipes implementation. Production construction
@@ -180,6 +189,12 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 		}
 	}
 	baselineKiB := baseline.kib
+	// A command of a job in lane mode is charged its own lane's processes
+	// (laneTracker); the job-UID baseline then charges nothing.
+	var tracker *laneTracker
+	if command.JobID != "" && r.lanes != nil && r.lanes.has(command.JobID) {
+		tracker = r.lanes
+	}
 	if stdout == nil {
 		stdout = io.Discard
 	}
@@ -216,6 +231,12 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 	pid := cmd.Process.Pid
 	uid := r.uid
 	defer cmd.Process.Release()
+	if tracker != nil {
+		// The root keeps this PID through launchctl asuser, _job-exec and
+		// the tool's exec. It is forgotten once reaped: the PID may be reused.
+		tracker.addRoot(command.JobID, pid)
+		defer tracker.removeRoot(command.JobID, pid)
+	}
 
 	pipes := make(chan pipeResult, 2)
 	var outputMu sync.Mutex
@@ -264,6 +285,20 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 		}
 	}
 	observe := func(samples []processSample) error {
+		if tracker != nil {
+			tracker.update(samples)
+			mine, total, err := tracker.footprint(samples, command.JobID)
+			if err != nil {
+				return err
+			}
+			charged := kibToMiB(mine)
+			result.PeakMemoryMiB = max(result.PeakMemoryMiB, charged)
+			result.HostPeakMemoryMiB = max(result.HostPeakMemoryMiB, kibToMiB(total))
+			if command.MemoryLimitMiB > 0 && charged > int64(command.MemoryLimitMiB) {
+				return fmt.Errorf("%w: sampled %d MiB in the job's own processes, budget %d MiB (monitored, not a hard cap)", ErrMemoryLimit, charged, command.MemoryLimitMiB)
+			}
+			return nil
+		}
 		totalKiB, err := footprintKiB(samples, uid)
 		if err != nil {
 			return err

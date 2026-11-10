@@ -1,0 +1,31 @@
+{
+ "source": "live capture 2026-11-10T08:45Z of the parallel trial's simulator_script job booting three lane devices (6 samples), sanitized as attr-validate; each lane device is attributed to its own job here, the script's tree to the first",
+ "uid": 6202,
+ "broker": 78808,
+ "job_start": 1794300263,
+ "jobs": [
+  {
+   "id": "j_lane1",
+   "roots": [
+    59337
+   ],
+   "udids": [
+    "D0C8B03C-385D-44C3-94B5-E04D57D0543D"
+   ]
+  },
+  {
+   "id": "j_lane2",
+   "roots": [],
+   "udids": [
+    "6E72EF0B-D80D-4C97-92A3-8737E3BB3201"
+   ]
+  },
+  {
+   "id": "j_lane3",
+   "roots": [],
+   "udids": [
+    "0F9FB0E9-63BF-4672-814B-999933C2A5E8"
+   ]
+  }
+ ]
+}
