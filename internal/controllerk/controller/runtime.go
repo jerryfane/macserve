@@ -27,6 +27,9 @@ type execution struct {
 	cancellingSince time.Time
 	finalizingSince time.Time
 	cancel          context.CancelFunc
+	// fencing marks a lease never delivered that is being ended: it is
+	// never offered, even while c.mu is released for its source removal.
+	fencing bool
 }
 
 // execution returns the active execution of job id, or nil. Callers hold c.mu.
