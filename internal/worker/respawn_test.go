@@ -357,16 +357,20 @@ func TestQuiesceAcceptsVerifiedRelaunchOnAuditedPIDNumber(t *testing.T) {
 	}
 }
 
-// Any other new holder of an audited PID number is still a changed baseline,
-// refused before anything is signalled.
-func TestUnverifiedHolderOfAuditedPIDNumberStillRefuses(t *testing.T) {
+// macserve#108: any other new holder of an audited PID number is not the
+// audited process (PID numbers are recycled once the counter wraps). It is
+// residual like an unverified relaunch on any other number: terminated by
+// quiesce, and while the audited process stays unresolved a survivor fails
+// cleanup without contamination, as for any exited audited process (#27 F2).
+func TestUnverifiedHolderOfAuditedPIDNumberIsResidual(t *testing.T) {
 	s, agents, rows := samePIDWorld("/Users/job/Library/LaunchAgents/com.apple.corespeechd.plist", "LaunchAgent")
-	h := host(s, agents, rows)
-	if err := quiesceOnce(s); err == nil || errors.Is(err, ErrContamination) || len(h.signalled) != 0 {
-		t.Fatalf("quiesce = %v, signalled %v", err, h.signalled)
+	c, err := s.census(context.Background(), rows)
+	if err != nil || !c.unresolved || !slices.ContainsFunc(c.residual, func(p processSample) bool { return p.pid == 100 && p.start == "20:0" }) {
+		t.Fatalf("census = %+v, %v; want the holder residual and the audited process unresolved", c, err)
 	}
-	if _, err := s.residual(context.Background(), rows); err == nil {
-		t.Fatal("unverified holder of an audited PID number accepted")
+	h := host(s, agents, rows)
+	if err := quiesceOnce(s); err == nil || errors.Is(err, ErrContamination) || !slices.Contains(h.signalled, 100) {
+		t.Fatalf("quiesce = %v, signalled %v", err, h.signalled)
 	}
 }
 
