@@ -125,8 +125,14 @@ func TestScopeDistinguishesResidualProcessesFromInspectionFailure(t *testing.T) 
 			if err := s.quiesce(ctx); err == nil || errors.Is(err, ErrContamination) != (mode == "residual") {
 				t.Fatalf("incorrect cleanup classification: %v", err)
 			}
-			if (mode == "baseline-reused" || mode == "baseline-zombie" || mode == "baseline-foreign" || mode == "sample-error") && calls != 0 {
+			if (mode == "baseline-zombie" || mode == "baseline-foreign" || mode == "sample-error") && calls != 0 {
 				t.Fatal("signalled before validating protected baseline")
+			}
+			// macserve#108: a job process on a recycled audited PID number is not
+			// the audited process; it is the job's and is terminated, and the
+			// unresolved audited process keeps the failure free of contamination.
+			if mode == "baseline-reused" && calls == 0 {
+				t.Fatal("job process on a recycled audited PID number was not terminated")
 			}
 		})
 	}

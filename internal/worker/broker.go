@@ -146,19 +146,25 @@ type processCensus struct {
 }
 
 // census classifies job-UID processes against the audited baseline. An audited
-// PID now held by another UID or a zombie is refused. An audited PID that is
+// process is one instance, its PID and kernel start time. That instance now
+// under another UID or a zombie is refused. An audited instance that is
 // simply absent is not: launchd-managed Apple helpers exit on their own, and a
 // job can only end its own UID's processes, which hides or retains nothing. A
 // new process stands in for an absent one only as launchd's verified relaunch
 // of a recorded system service (see respawned); that includes a relaunch that
-// lands on the exited audited PID number. Any other holder of an audited PID
-// number is refused as a changed baseline. Outside worker-reset, a process
-// launchd's record proves to be an Apple-defined or developer-tool launch (see
-// appleLaunch, developerToolLaunch) is not residual, also on a reused audited
-// PID number. While worker-reset runs
-// (s.adopt), the recorded unselected instances are residual although audited,
-// and a new system LaunchAgent that launchd started may be adopted (see
-// adoption).
+// lands on the exited audited PID number. Outside worker-reset, any other
+// process on an exited audited instance's PID number is not that instance:
+// the kernel hands PID numbers out again once its PID counter wraps, which
+// a build host under job load does several times a day (macserve#108). It is
+// classified by its own UID like a process on any other number, and a job-UID
+// one is residual unless it is a verified relaunch or a tolerated launch.
+// Outside worker-reset, a process launchd's record proves to be an
+// Apple-defined or developer-tool launch (see appleLaunch,
+// developerToolLaunch) is not residual. While worker-reset runs (s.adopt),
+// the recorded unselected instances are residual although audited, a new
+// system LaunchAgent that launchd started may be adopted (see adoption), and
+// any other holder of a selected PID number is refused as a changed
+// baseline.
 func (s *processScope) census(ctx context.Context, samples []processSample) (processCensus, error) {
 	if err := s.launchdUnchanged(ctx); err != nil {
 		return processCensus{}, err
@@ -171,7 +177,7 @@ func (s *processScope) census(ctx context.Context, samples []processSample) (pro
 	var reused []int
 	present := make(map[int]bool, len(s.baseline.Processes))
 	for _, p := range samples {
-		if start, ok := absent[p.pid]; ok {
+		if start, ok := absent[p.pid]; ok && (p.start == start || s.adopt != nil) {
 			if p.uid != s.uid || p.zombie || p.start == "" {
 				return processCensus{}, errBaselineChanged
 			}
