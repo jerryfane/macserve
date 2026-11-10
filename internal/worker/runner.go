@@ -68,6 +68,8 @@ type nativeRunner struct {
 	console func() error
 	// diagnostics receives tolerated memory sampling failures; nil discards.
 	diagnostics io.Writer
+	// kill signals the unprotected cleanup's process group or direct child.
+	kill func(int, syscall.Signal) error
 	// Lane attribution (lanes.go): the tracker, its sampler, the workspace
 	// root that holds every job's workspace and the reader of an
 	// instance's executable and launchd_sim arguments.
@@ -92,6 +94,7 @@ func newProcessRunner() *nativeRunner {
 		termGrace:      500 * time.Millisecond,
 		killGrace:      time.Second,
 		drainTimeout:   250 * time.Millisecond,
+		kill:           syscall.Kill,
 	}
 	r.sample = func(ctx context.Context) ([]processSample, error) { return memoryProcesses(ctx, r.uid) }
 	return r
@@ -501,14 +504,14 @@ func (r *nativeRunner) cleanupGroup(group, uid int, reap func(), reaped, waitFai
 			// A still-unreaped direct child cannot have had its PID reused.
 			// Never fall back to signalling an unverified process group.
 			if !foreignGroup && !reaped() && !waitFailed() {
-				if err := syscall.Kill(group, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
+				if err := r.kill(group, sig); !signalSettled(err) {
 					failures = errors.Join(failures, cleanupFailure("cleanup: signal direct child", err))
 				}
 			}
 			return
 		}
 		if live {
-			if err := syscall.Kill(-group, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
+			if err := r.kill(-group, sig); !signalSettled(err) {
 				failures = errors.Join(failures, cleanupFailure("cleanup: signal process group", err))
 			}
 		}
@@ -619,6 +622,17 @@ func (r *nativeRunner) cleanupProtectedGroup(group, uid int, reap func(), reaped
 		return errors.Join(ErrCleanup, cleanupFailure("protected cleanup", errors.New("direct child not reaped within the cleanup window"), ctx.Err()))
 	}
 	return nil
+}
+
+// signalSettled reports whether a cleanup signal's result leaves the
+// verdict to the confirmation listing. ESRCH: nothing left to signal. EPERM:
+// Darwin's killpg refuses a group whose member is exiting (CI macOS
+// 2026-11-10: "signal process group: operation not permitted" while the
+// leader died of the same SIGTERM). ownedGroup already refused a foreign-UID
+// member, and a member that survives is still found live by the listing and
+// fails cleanup, so neither error can pass a live process.
+func signalSettled(err error) bool {
+	return err == nil || errors.Is(err, syscall.ESRCH) || errors.Is(err, syscall.EPERM)
 }
 
 func ownedGroup(samples []processSample, group, uid int) (bool, error) {

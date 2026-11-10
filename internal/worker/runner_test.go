@@ -685,3 +685,36 @@ func TestLaneCommandSkipsAccountBaseline(t *testing.T) {
 		}
 	}
 }
+
+// Darwin's killpg can return EPERM for a group whose member is exiting, after
+// it delivered the signal (CI macOS, 2026-11-10). Cleanup is decided by the
+// confirmation listing and reap, not by that return; a member that survives
+// still fails cleanup.
+func TestNativeRunnerCleanupToleratesExitingGroupEPERM(t *testing.T) {
+	for _, delivered := range []bool{true, false} {
+		runner, command := helperRunner(t, "hang")
+		runner.termGrace, runner.killGrace = 200*time.Millisecond, 200*time.Millisecond
+		var target atomic.Int64
+		runner.kill = func(pid int, sig syscall.Signal) error {
+			target.Store(int64(pid))
+			if delivered {
+				if err := syscall.Kill(pid, sig); err != nil {
+					return err
+				}
+			}
+			return syscall.EPERM
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		result, err := runner.Run(ctx, command, io.Discard, io.Discard)
+		cancel()
+		if delivered && (errors.Is(err, ErrCleanup) || !result.CleanupOK) {
+			t.Fatalf("delivered signal's EPERM left cleanup unconfirmed: %+v, %v", result, err)
+		}
+		if !delivered {
+			syscall.Kill(int(target.Load()), syscall.SIGKILL)
+			if result.CleanupOK || !errors.Is(err, ErrCleanup) {
+				t.Fatalf("surviving member passed cleanup: %+v, %v", result, err)
+			}
+		}
+	}
+}
