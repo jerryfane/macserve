@@ -3,6 +3,7 @@ package maintenance
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -148,8 +149,10 @@ func TestSlowCensusDoesNotStarveProbes(t *testing.T) {
 		t.Fatalf("census started %d times; a running census must not be restarted", f.starts())
 	}
 	clock.advance(censusMaxAge)
-	if _, err := probe(tr, 10*time.Millisecond); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("probe after censusMaxAge: %v, want inconclusive", err)
+	// #108: a bare "context deadline exceeded" could not be placed against its
+	// stage; the inconclusive census names itself.
+	if _, err := probe(tr, 10*time.Millisecond); !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "mutable census") {
+		t.Fatalf("probe after censusMaxAge: %v, want inconclusive naming the census", err)
 	}
 	finish(t, tr, f, censusOutcome{bytes: 8192})
 	go func() { f.release <- censusOutcome{bytes: 9000} }()
