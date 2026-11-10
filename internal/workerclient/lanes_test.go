@@ -29,6 +29,10 @@ type laneController struct {
 	epochs   []string
 	lanes    []int
 	complete map[string]worker.Result
+	// conflicts is how many registrations of an epoch after the first are
+	// refused with 409, as while the controller still holds a lease of the
+	// earlier epoch.
+	conflicts int
 }
 
 func (f *laneController) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -42,6 +46,11 @@ func (f *laneController) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.events = append(f.events, "register")
 		f.epochs = append(f.epochs, reg.Epoch)
 		f.lanes = append(f.lanes, reg.Lanes)
+		if reg.Epoch != f.epochs[0] && f.conflicts > 0 {
+			f.conflicts--
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	case path == "/next":
 		var next protocol.NextRequest
@@ -181,9 +190,11 @@ func TestClientRunsLeasesConcurrently(t *testing.T) {
 
 // A lane whose cleanup is unverified drains the client: no lease is asked
 // for while its sibling runs, and a new epoch registers only after the
-// sibling ends and Recover runs at idle.
+// sibling ends and Recover runs at idle. A registration the controller
+// refuses with 409 (it still holds a lease of the earlier epoch) is retried:
+// the quiescent worker does not exit.
 func TestClientDrainsAfterUnverifiedLaneCleanup(t *testing.T) {
-	controller := &laneController{t: t, queue: []string{"j_bad", "j_good", "j_later"}, complete: map[string]worker.Result{}}
+	controller := &laneController{t: t, queue: []string{"j_bad", "j_good", "j_later"}, complete: map[string]worker.Result{}, conflicts: 2}
 	cfg, _ := unixController(t, controller)
 	cfg.MaxConcurrentJobs = 2
 	engine := newLaneExecutor("j_bad", "j_good", "j_later")
@@ -229,8 +240,8 @@ func TestClientDrainsAfterUnverifiedLaneCleanup(t *testing.T) {
 	if engine.recovers <= recovers {
 		t.Fatal("no idle Recover before resuming")
 	}
-	if len(controller.epochs) < 2 || controller.epochs[0] == controller.epochs[len(controller.epochs)-1] {
-		t.Fatalf("epoch not rotated after the drain: %v", controller.epochs)
+	if len(controller.epochs) < 4 || controller.epochs[0] == controller.epochs[len(controller.epochs)-1] || controller.conflicts != 0 {
+		t.Fatalf("epoch not rotated after the drain and refused registrations: %v", controller.epochs)
 	}
 	if controller.complete["j_bad"].State != model.Failed || controller.complete["j_good"].State != model.Succeeded {
 		t.Fatalf("completions %+v", controller.complete)

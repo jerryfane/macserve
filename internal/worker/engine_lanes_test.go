@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"path/filepath"
 	"slices"
@@ -81,10 +82,14 @@ func (f *laneFake) QuiesceJob(ctx context.Context, job string) error {
 	f.event("quiesce " + job)
 	return ctx.Err()
 }
-func (f *laneFake) Residue(context.Context) (int, error) {
+func (f *laneFake) Residue(context.Context) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.residue, nil
+	residue := make([]string, f.residue)
+	for i := range residue {
+		residue[i] = fmt.Sprintf("pid=%d exe=\"/usr/bin/leftover\"", 900+i)
+	}
+	return residue, nil
 }
 func (f *laneFake) LaneAdmission(ctx context.Context) error {
 	f.event("lane-admission")
@@ -230,6 +235,29 @@ func TestLaneResidueDrainsUntilIdleQuiesce(t *testing.T) {
 	if err := engine.Recover(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// The drain LaneReady starts beside a running job names the unattributed
+// processes (PID and command), so the host log shows what drained it.
+func TestLaneReadyDrainNamesUnattributedProcesses(t *testing.T) {
+	runner := newLaneFake()
+	engine := laneEngine(t, runner, 2)
+	source, data := sourceFixture(t)
+	gate := runner.gate("job-a")
+	a := runLane(engine, fixtureLaneJob(t, "job-a", model.Build), source, data)
+	<-runner.started
+	runner.mu.Lock()
+	runner.residue = 2
+	runner.mu.Unlock()
+	err := engine.LaneReady(context.Background())
+	if !errors.Is(err, ErrDrain) || !strings.Contains(err.Error(), `2 unattributed job-account process(es): pid=900 exe="/usr/bin/leftover"; pid=901 exe="/usr/bin/leftover"`) {
+		t.Fatalf("drain does not name the processes: %v", err)
+	}
+	runner.mu.Lock()
+	runner.residue = 0
+	runner.mu.Unlock()
+	close(gate)
+	<-a
 }
 
 // When the last two jobs both end beside each other, nothing ran the full

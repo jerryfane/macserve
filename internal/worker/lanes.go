@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -392,9 +393,10 @@ type laneRunner interface {
 	// baseline, tolerated, unattributed or another job's process. A survivor
 	// is contamination.
 	QuiesceJob(ctx context.Context, jobID string) error
-	// Residue counts job-UID processes no job's lineage claims and the census
-	// neither audits nor tolerates (unattributed), without signalling any.
-	Residue(ctx context.Context) (int, error)
+	// Residue describes each job-UID process no job's lineage claims and the
+	// census neither audits nor tolerates (unattributed), without signalling
+	// any: one entry each, none when there is no residue.
+	Residue(ctx context.Context) ([]string, error)
 	// LaneAdmission is Admission while other jobs run: their labelled
 	// processes are not residual, and an unattributed process refuses with
 	// ErrDrain instead of contamination.
@@ -547,14 +549,14 @@ func (r *nativeRunner) laneCensus(ctx context.Context, samples []processSample) 
 	return r.scope.census(ctx, rest)
 }
 
-func (r *nativeRunner) Residue(ctx context.Context) (int, error) {
+func (r *nativeRunner) Residue(ctx context.Context) ([]string, error) {
 	if r.scope == nil {
-		return 0, errors.New("protected job process scope is required")
+		return nil, errors.New("protected job process scope is required")
 	}
 	if err := r.loadBaseline(); err != nil {
-		return 0, err
+		return nil, err
 	}
-	count := func() (map[processInstance]bool, bool, error) {
+	count := func() (map[processInstance]processSample, bool, error) {
 		samples, err := r.scope.sample(ctx)
 		if err != nil {
 			return nil, false, err
@@ -563,21 +565,49 @@ func (r *nativeRunner) Residue(ctx context.Context) (int, error) {
 		if err != nil {
 			return nil, false, err
 		}
-		found := make(map[processInstance]bool, len(c.residual))
+		found := make(map[processInstance]processSample, len(c.residual))
 		for _, p := range c.residual {
-			found[processInstance{p.pid, p.start}] = true
+			found[processInstance{p.pid, p.start}] = p
 		}
 		return found, c.unresolved, nil
 	}
-	return settledResidue(ctx, count)
+	residue, unresolved, err := settledResidue(ctx, count)
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]string, 0, len(residue)+1)
+	for _, p := range residue {
+		entries = append(entries, r.residueEntry(p))
+	}
+	if unresolved {
+		entries = append(entries, "unresolved census: an audited process is gone without a verified relaunch")
+	}
+	return entries, nil
 }
 
-// settledResidue counts residual instances listed by count both now and
-// residueSettle later; an unresolved second census counts as one.
-func settledResidue(ctx context.Context, count func() (map[processInstance]bool, bool, error)) (int, error) {
+// residueEntry names an unattributed process for the root-only worker log:
+// its PID, kernel parent, start, executable and arguments, each bounded.
+func (r *nativeRunner) residueEntry(p processSample) string {
+	entry := fmt.Sprintf("pid=%d ppid=%d start=%s", p.pid, p.parent, p.start)
+	if r.describe == nil {
+		return entry + " command=unavailable"
+	}
+	d, err := r.describe(p.pid, true)
+	if err != nil {
+		return entry + " command=unavailable"
+	}
+	return entry + fmt.Sprintf(" exe=%q args=%q", clip(d.executable, contaminationPathBytes), clip(strings.ReplaceAll(d.args, "\x00", " "), residueArgsBytes))
+}
+
+const residueArgsBytes = 400
+
+// settledResidue returns the residual instances listed by count both now
+// and residueSettle later, sorted by PID. unresolved reports a second census
+// that was unresolved with no such instance: it counts as one.
+func settledResidue(ctx context.Context, count func() (map[processInstance]processSample, bool, error)) ([]processSample, bool, error) {
 	first, unresolved, err := count()
 	if err != nil || len(first) == 0 && !unresolved {
-		return 0, err
+		return nil, false, err
 	}
 	// Short-lived build helpers (SwiftPM's double-forked git, live
 	// 2026-11-10) can be listed in one snapshot: only an instance still
@@ -586,25 +616,23 @@ func settledResidue(ctx context.Context, count func() (map[processInstance]bool,
 	select {
 	case <-ctx.Done():
 		timer.Stop()
-		return 0, ctx.Err()
+		return nil, false, ctx.Err()
 	case <-timer.C:
 	}
 	second, unresolved, err := count()
 	if err != nil {
-		return 0, err
+		return nil, false, err
 	}
-	n := 0
-	for key := range second {
-		if first[key] {
-			n++
+	var persisting []processSample
+	for key, p := range second {
+		if _, ok := first[key]; ok {
+			persisting = append(persisting, p)
 		}
 	}
-	if n == 0 && unresolved {
-		// An audited process is gone without a verified relaunch: nothing
-		// here may judge that while jobs run.
-		n = 1
-	}
-	return n, nil
+	slices.SortFunc(persisting, func(a, b processSample) int { return a.pid - b.pid })
+	// An audited process gone without a verified relaunch: nothing here may
+	// judge that while jobs run.
+	return persisting, len(persisting) == 0 && unresolved, nil
 }
 
 // residueSettle is how long an unattributed process must persist to count
