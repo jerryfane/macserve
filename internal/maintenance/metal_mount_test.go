@@ -139,3 +139,58 @@ func TestMutableAccountingMetalToolchainUnmountedDuringCensus(t *testing.T) {
 		t.Fatalf("census = %v, want inconclusive naming the image", err)
 	}
 }
+
+// Review #118: the worker can unmount the image (and remove the workspace)
+// between acceptedMount accepting it and the census re-stating its name. That
+// makes the census inconclusive, never a finding that invalidates health and
+// cancels running jobs. A re-stat that fails otherwise stays a failure.
+func TestMutableAccountingMetalToolchainGoneAfterAcceptance(t *testing.T) {
+	const rel = "workspaces/job/home/Library/Developer/DVTDownloads/MetalToolchain/mounts/389a215aea89fda945178f9fb8bcdc6aa0e20570"
+	for name, tc := range map[string]struct {
+		again        func(st *unix.Stat_t) error // the second stat of the mount point
+		inconclusive bool
+	}{
+		"unmounted":           {again: func(*unix.Stat_t) error { return nil }, inconclusive: true},
+		"workspace removed":   {again: func(*unix.Stat_t) error { return unix.ENOENT }, inconclusive: true},
+		"re-stat not allowed": {again: func(*unix.Stat_t) error { return unix.EACCES }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			base := censusFixtureDir(t)
+			mountPoint := filepath.Join(base, "Library/macserve/var", rel)
+			if err := os.MkdirAll(mountPoint, 0700); err != nil {
+				t.Fatal(err)
+			}
+			var mounted unix.Stat_t
+			if err := unix.Lstat(mountPoint, &mounted); err != nil {
+				t.Fatal(err)
+			}
+			record := mounttable.Entry{FSID: 77, Owner: 6202, Flags: mounttable.ReadOnly | mounttable.NoSUID | mounttable.NoDev, FSType: "apfs", On: "/Library/macserve/var/" + rel, From: "/dev/disk12s1"}
+			stats := 0
+			statat := func(fd int, name string, st *unix.Stat_t, flags int) error {
+				if err := unix.Fstatat(fd, name, st, flags); err != nil {
+					return err
+				}
+				if st.Dev != mounted.Dev || st.Ino != mounted.Ino {
+					return nil
+				}
+				if stats++; stats == 1 {
+					setStat(st, "Dev", record.FSID)
+					return nil
+				}
+				// The worker unmounted it after the decision: the name is the
+				// workspace directory again, or gone.
+				return tc.again(st)
+			}
+			c := census{base: base, statat: statat, workspaces: workspaceRoot, jobUID: 6202, mounts: func() ([]mounttable.Entry, error) {
+				return []mounttable.Entry{record}, nil
+			}}
+			n, err := c.account(context.Background(), []string{"/Library/macserve/var"})
+			if n != -1 || err == nil || stats != 2 || errors.Is(err, errAcceptedMountChanged) != tc.inconclusive || !strings.Contains(err.Error(), strconv.Quote(rel)) {
+				t.Fatalf("census = %d %v (stats %d), want inconclusive=%v naming the image", n, err, stats, tc.inconclusive)
+			}
+			if !tc.inconclusive && !errors.Is(err, unix.EACCES) {
+				t.Fatalf("census = %v, want the re-stat failure", err)
+			}
+		})
+	}
+}

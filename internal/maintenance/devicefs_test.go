@@ -162,7 +162,7 @@ func TestMutableAccountingSkipsJobCoreDeviceMount(t *testing.T) {
 		"ambiguous mount record":    {mountAt: jobMount, table: func(int) ([]mounttable.Entry, error) { return []mounttable.Entry{record, record}, nil }, want: "mutable mount crossing"},
 		"no mount record":           {mountAt: jobMount, table: func(int) ([]mounttable.Entry, error) { return nil, nil }, want: "mutable mount crossing"},
 		"mount table unavailable":   {mountAt: jobMount, table: func(int) ([]mounttable.Entry, error) { return nil, unix.EIO }, want: "mutable mount crossing"},
-		"remounted after decision":  {mountAt: jobMount, table: same(record), remounted: true, want: "mutable mount changed during census"},
+		"remounted after decision":  {mountAt: jobMount, table: same(record), remounted: true, want: "mutable mount table changed during census"},
 		"unmounted during census":   {mountAt: jobMount, table: func(call int) ([]mounttable.Entry, error) { return []mounttable.Entry{record}[:2-call], nil }, want: "mutable mount table changed during census"},
 		"replaced during census": {mountAt: jobMount, table: func(call int) ([]mounttable.Entry, error) {
 			if call == 1 {

@@ -170,10 +170,17 @@ func (c census) account(ctx context.Context, roots []string) (int64, error) {
 				return fail(err)
 			}
 			// Never open or descend the mount. The name must still resolve to the
-			// same mounted root after the decision.
+			// same mounted root after the decision. An accepted mount that is gone
+			// or replaced by then (the worker unmounts the Metal toolchain image
+			// as it removes a workspace; CoreDeviceService remounts its devicefs)
+			// makes the census inconclusive, like a change the final check sees;
+			// whatever is there now is decided by the next census. Any other
+			// stat failure stays a failure.
 			var again unix.Stat_t
-			if err := statat(parent, name, &again, unix.AT_SYMLINK_NOFOLLOW); err != nil || again.Dev != st.Dev || again.Ino != st.Ino || again.Mode&unix.S_IFMT != unix.S_IFDIR {
-				return fail(errors.New("mutable mount changed during census"))
+			if err := statat(parent, name, &again, unix.AT_SYMLINK_NOFOLLOW); err != nil && !errors.Is(err, unix.ENOENT) {
+				return fail(err)
+			} else if err != nil || again.Dev != st.Dev || again.Ino != st.Ino || again.Mode&unix.S_IFMT != unix.S_IFDIR {
+				return fail(errAcceptedMountChanged)
 			}
 			if !slices.ContainsFunc(skipped, func(s accepted) bool { return s.entry.FSID == m.FSID }) {
 				skipped = append(skipped, accepted{m, rootPath, rel})
