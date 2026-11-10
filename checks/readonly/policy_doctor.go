@@ -42,6 +42,10 @@ var Doctor = Policy{
 		module + "/internal/hostguard.ConsoleAdmissible",
 		// The service disk budget for a lane count: arithmetic, no I/O.
 		module + "/internal/health.ServiceBudget",
+		// The lanes.json rule: decodes bytes doctor's probe read and calls
+		// back only doctor's own probe-backed check and reader; it logs
+		// nothing and touches no file itself.
+		module + "/internal/health.LaneOverride",
 		module + "/internal/setup.SystemBoot",
 		// The recorded controller digest: a walk of the decoded ledger's
 		// install input, releases and controller rebinds, no I/O.

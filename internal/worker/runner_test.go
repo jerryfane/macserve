@@ -657,3 +657,31 @@ func TestProtectedCleanupGroupLiveAfterWindowIsContamination(t *testing.T) {
 		t.Fatalf("cleanup failure does not name its command and phase: %q / %q", err, diagnostics.String())
 	}
 }
+
+// A command of a job in lane mode is charged its own lane's processes, so it
+// never samples the account-wide baseline: a failing baseline sample cannot
+// refuse it. A command outside lane mode still needs that baseline.
+func TestLaneCommandSkipsAccountBaseline(t *testing.T) {
+	for _, lane := range []bool{true, false} {
+		runner, command := helperRunner(t, "success")
+		var calls atomic.Int32
+		runner.sample = func(context.Context) ([]processSample, error) {
+			if calls.Add(1) == 1 {
+				return nil, errors.New("account sample unavailable")
+			}
+			return nil, nil
+		}
+		command.JobID = "job-a"
+		if lane {
+			runner.lanes = trackerFor(syscall.Getpid(), os.Geteuid(), map[int]processDescription{})
+			runner.lanes.begin("job-a", time.Now())
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, err := runner.Run(ctx, command, io.Discard, io.Discard)
+		cancel()
+		refused := err != nil && strings.Contains(err.Error(), "sample worker memory baseline")
+		if lane == refused {
+			t.Fatalf("lane=%v: baseline refusal %v (err %v)", lane, refused, err)
+		}
+	}
+}

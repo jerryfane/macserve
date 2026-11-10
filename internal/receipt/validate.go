@@ -163,19 +163,15 @@ func validLanes(p Payload) bool {
 	if c == nil || c.Lane < 1 || c.Lane > c.MaxLanes || c.MaxLanes > model.MaxConcurrentJobs || c.UnattributedResidue < 0 {
 		return false
 	}
-	alone := len(c.OverlappedJobs) == 0
+	alone := c.OverlapCount == 0
+	if c.OverlapCount < 0 || len(c.OverlappedJobs) != min(c.OverlapCount, PublishedOverlaps) || !validDigest(c.OverlapsSHA256) || !validOverlaps(p.JobID, c.OverlappedJobs) {
+		return false
+	}
 	switch {
 	case c.Attribution != worker.AttributionLineage && c.Attribution != worker.AttributionAccount,
 		c.Attribution == worker.AttributionAccount && !alone,
 		c.MaxLanes == 1 && !alone:
 		return false
-	}
-	seen := make(map[string]bool, len(c.OverlappedJobs))
-	for _, o := range c.OverlappedJobs {
-		if !validJobID(o.JobID) || o.JobID == p.JobID || seen[o.JobID] || o.Seconds < 0 {
-			return false
-		}
-		seen[o.JobID] = true
 	}
 	if c.IdleVerdict != worker.IdleClean && c.IdleVerdict != worker.IdleNotRequired && c.IdleVerdict != worker.IdleDeferred {
 		return false
@@ -185,12 +181,25 @@ func validLanes(p Payload) bool {
 	return host == 0 || host > 0 && host >= p.Resources.PeakMemoryMiB
 }
 
+// validOverlaps reports whether overlaps name distinct valid jobs other than
+// jobID with nonnegative overlap.
+func validOverlaps(jobID string, overlaps []Overlap) bool {
+	seen := make(map[string]bool, len(overlaps))
+	for _, o := range overlaps {
+		if !validJobID(o.JobID) || o.JobID == jobID || seen[o.JobID] || o.Seconds < 0 {
+			return false
+		}
+		seen[o.JobID] = true
+	}
+	return true
+}
+
 // sameLanes compares lane records; an empty overlap list equals a null one.
 func sameLanes(a, b *Concurrency) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	return a.Lane == b.Lane && a.MaxLanes == b.MaxLanes && slices.Equal(a.OverlappedJobs, b.OverlappedJobs) && a.Attribution == b.Attribution && a.UnattributedResidue == b.UnattributedResidue && a.IdleVerdict == b.IdleVerdict
+	return a.Lane == b.Lane && a.MaxLanes == b.MaxLanes && a.OverlapCount == b.OverlapCount && slices.Equal(a.OverlappedJobs, b.OverlappedJobs) && a.OverlapsSHA256 == b.OverlapsSHA256 && a.Attribution == b.Attribution && a.UnattributedResidue == b.UnattributedResidue && a.IdleVerdict == b.IdleVerdict
 }
 
 // requiredExecuted applies the parser's required-test rule (evidence.RequiredMatch,
@@ -257,6 +266,8 @@ func validateDetails(p Payload, require func(bool, string)) {
 		require(r.Concurrency == nil && r.HostPeakMemoryMiB == 0, "execution manifest")
 	} else {
 		require(sameLanes(lanes(r), p.Concurrency) && r.HostPeakMemoryMiB == p.Resources.HostPeakMemoryMiB, "execution manifest")
+		// The complete list, of which the payload publishes a bounded part.
+		require(r.Concurrency == nil || validOverlaps(p.JobID, fullOverlaps(r.Concurrency)), "lane record")
 	}
 	require(len(r.Commands) == p.CommandCount && len(r.Artifacts) == p.ArtifactCount, "manifest counts")
 	for _, item := range []struct {

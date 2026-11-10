@@ -178,6 +178,8 @@ func TestLanesRunTwoJobsWithPerJobCleanup(t *testing.T) {
 	if c.IdleVerdict != IdleClean || len(c.OverlappedJobs) != 1 || c.OverlappedJobs[0].JobID != "job-a" {
 		t.Fatalf("second job concurrency: %+v", c)
 	}
+	requireVerifiedTreeUntilAck(t, engine, "job-a", source.Tree)
+	requireVerifiedTreeUntilAck(t, engine, "job-b", source.Tree)
 	if err := engine.LaneReady(context.Background()); err != nil {
 		t.Fatalf("idle engine not ready: %v", err)
 	}
@@ -301,6 +303,22 @@ func TestOneLaneKeepsSingleJobCleanup(t *testing.T) {
 	}
 	if c := out.result.Concurrency; c.Attribution != AttributionAccount || c.IdleVerdict != IdleClean || c.MaxLanes != 1 || c.Lane != 1 || len(c.OverlappedJobs) != 0 {
 		t.Fatalf("one lane concurrency: %+v", c)
+	}
+	requireVerifiedTreeUntilAck(t, engine, "job-a", source.Tree)
+}
+
+// requireVerifiedTreeUntilAck checks the extracted tree the client seals
+// after Execute returns is kept until the completion's export is removed.
+func requireVerifiedTreeUntilAck(t *testing.T, engine *Engine, job, tree string) {
+	t.Helper()
+	if got := engine.VerifiedTree(job); got != tree {
+		t.Fatalf("VerifiedTree(%s) after Execute = %q, want %q", job, got, tree)
+	}
+	if err := engine.RemoveExport(job); err != nil {
+		t.Fatal(err)
+	}
+	if got := engine.VerifiedTree(job); got != "" {
+		t.Fatalf("VerifiedTree(%s) after RemoveExport = %q", job, got)
 	}
 }
 

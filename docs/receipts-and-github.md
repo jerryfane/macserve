@@ -254,7 +254,9 @@ recipes, account boundaries and GUI qualification still require the approved dep
 ## Concurrency record (receipt schema 2)
 
 Receipts sealed by this release are payload schema 2 and carry `concurrency`: `lane`, `max_lanes`,
-`overlapped_jobs` (`job_id`, `overlap_seconds` for every job that ran in the broker while this one did),
+`overlap_count` (every job that ran in the broker while this one did), `overlapped_jobs` (`job_id`,
+`overlap_seconds` of the 8 longest of them), `overlaps_sha256` (sha256 of the JSON array of the complete list, which
+the full manifest's worker result carries, so the compact receipt stays within its publication limit),
 `attribution` (`account/v1`: every non-baseline job-UID process was the job's, the single-job rule;
 `lineage+device/v1`: the lane attribution of docs/architecture.md), `unattributed_residue` and `idle_verdict`
 (`clean`: the job ended with the full job-account check; `not_required`: siblings ran, its own processes and

@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -77,7 +78,7 @@ func TestLaneReceiptValidates(t *testing.T) {
 	if p.Schema != 2 || p.Resources.HostPeakMemoryMiB != 6144 || p.Resources.PeakMemoryMiB != 2048 {
 		t.Fatalf("lane receipt identity: schema %d resources %+v", p.Schema, p.Resources)
 	}
-	want := `{"attribution":"lineage+device/v1","idle_verdict":"not_required","lane":2,"max_lanes":2,"overlapped_jobs":[{"job_id":"job-0","overlap_seconds":7}],"unattributed_residue":0}`
+	want := `{"attribution":"lineage+device/v1","idle_verdict":"not_required","lane":2,"max_lanes":2,"overlap_count":1,"overlapped_jobs":[{"job_id":"job-0","overlap_seconds":7}],"overlaps_sha256":"` + overlapsDigest([]Overlap{{JobID: "job-0", Seconds: 7}}) + `","unattributed_residue":0}`
 	if got := string(signedField(t, raw, "concurrency")); got != want {
 		t.Fatalf("signed lane record %s, want %s", got, want)
 	}
@@ -127,7 +128,7 @@ func TestPreLaneResultRecordsOneLane(t *testing.T) {
 				result.State, result.Reason = model.Failed, "cleanup failed"
 			}
 			_, raw, p := sealFixture(t, options, job, result)
-			want := `{"attribution":"account/v1","idle_verdict":"` + verdict + `","lane":1,"max_lanes":1,"overlapped_jobs":[],"unattributed_residue":0}`
+			want := `{"attribution":"account/v1","idle_verdict":"` + verdict + `","lane":1,"max_lanes":1,"overlap_count":0,"overlapped_jobs":[],"overlaps_sha256":"` + overlapsDigest(nil) + `","unattributed_residue":0}`
 			if got := string(signedField(t, raw, "concurrency")); p.Schema != 2 || got != want {
 				t.Fatalf("schema %d lane record %s, want %s", p.Schema, got, want)
 			}
@@ -309,5 +310,41 @@ func TestSchemaOneManifestReplaysUnchanged(t *testing.T) {
 	manifest, err := restarted.Manifest(context.Background(), job.ID, verified.Manifest.SHA256)
 	if err != nil || !bytes.Equal(manifest, old) {
 		t.Fatalf("legacy manifest changed: %v", err)
+	}
+}
+
+// A long job beside a replenished queue overlaps many jobs: its compact
+// receipt publishes a bounded part (the longest overlaps, the count and a
+// digest) and stays publishable, while the full manifest's complete list is
+// bound by that digest.
+func TestManyOverlapsStayPublishable(t *testing.T) {
+	options, job, result, expected := laneFixture(t)
+	const n = 400
+	result.Concurrency.OverlappedJobs = nil
+	for i := range n {
+		result.Concurrency.OverlappedJobs = append(result.Concurrency.OverlappedJobs, worker.Overlap{JobID: fmt.Sprintf("j_%048d", i), Seconds: int64(i)})
+	}
+	signer, raw, p := sealFixture(t, options, job, result)
+	if len(raw) > MaxReceiptBytes {
+		t.Fatalf("compact receipt %d bytes", len(raw))
+	}
+	if _, err := PublicDigest(raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateSuccess(p, expected); err != nil {
+		t.Fatal(err)
+	}
+	c := p.Concurrency
+	if c.OverlapCount != n || len(c.OverlappedJobs) != PublishedOverlaps || c.OverlappedJobs[0].Seconds != n-1 || c.OverlappedJobs[PublishedOverlaps-1].Seconds != n-PublishedOverlaps {
+		t.Fatalf("published overlaps: count %d, %v", c.OverlapCount, c.OverlappedJobs)
+	}
+	full := fullManifest(t, signer, p)
+	if err := ValidateSuccess(full, expected); err != nil {
+		t.Fatalf("full manifest: %v", err)
+	}
+	// An unpublished entry of the complete list is still bound.
+	full.Details.Result.Concurrency.OverlappedJobs[0].Seconds++
+	if err := ValidateSuccess(full, expected); err == nil || !strings.Contains(err.Error(), "execution manifest") {
+		t.Fatalf("unpublished overlap changed undetected: %v", err)
 	}
 }

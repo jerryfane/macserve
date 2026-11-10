@@ -164,37 +164,40 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 	if command.MemoryLimitMiB < 0 {
 		return result, errors.New("worker command memory budget must not be negative")
 	}
-	// The job UID's GUI session is always logged in, and its footprint
-	// (including compressed and swapped memory) is outside the job's control.
-	// A command is charged only for footprint above the job UID's footprint
-	// sampled immediately before its job's first command; without that
-	// baseline it must not start.
-	baseline := command.MemoryBaseline
-	if baseline == nil {
-		baseline = &MemoryBaseline{}
-	}
-	if !baseline.sampled {
-		baselineCtx, cancelBaseline := context.WithTimeout(ctx, r.sampleTimeout)
-		samples, err := r.sample(baselineCtx)
-		cancelBaseline()
-		if err != nil {
-			return result, fmt.Errorf("%s: sample worker memory baseline: %w", label, err)
-		}
-		kib, err := footprintKiB(samples, r.uid)
-		if err != nil {
-			return result, fmt.Errorf("%s: sample worker memory baseline: %w", label, err)
-		}
-		*baseline = MemoryBaseline{sampled: true, kib: kib}
-		if command.MemoryBaseline != nil && r.diagnostics != nil {
-			fmt.Fprintf(r.diagnostics, "macserve worker: job memory baseline: job-UID footprint %d MiB\n", kibToMiB(kib))
-		}
-	}
-	baselineKiB := baseline.kib
 	// A command of a job in lane mode is charged its own lane's processes
-	// (laneTracker); the job-UID baseline then charges nothing.
+	// (laneTracker) and samples no job-UID baseline.
 	var tracker *laneTracker
 	if command.JobID != "" && r.lanes != nil && r.lanes.has(command.JobID) {
 		tracker = r.lanes
+	}
+	// Otherwise the job UID's GUI session is always logged in, and its
+	// footprint (including compressed and swapped memory) is outside the
+	// job's control. A command is charged only for footprint above the job
+	// UID's footprint sampled immediately before its job's first command;
+	// without that baseline it must not start.
+	var baselineKiB int64
+	if tracker == nil {
+		baseline := command.MemoryBaseline
+		if baseline == nil {
+			baseline = &MemoryBaseline{}
+		}
+		if !baseline.sampled {
+			baselineCtx, cancelBaseline := context.WithTimeout(ctx, r.sampleTimeout)
+			samples, err := r.sample(baselineCtx)
+			cancelBaseline()
+			if err != nil {
+				return result, fmt.Errorf("%s: sample worker memory baseline: %w", label, err)
+			}
+			kib, err := footprintKiB(samples, r.uid)
+			if err != nil {
+				return result, fmt.Errorf("%s: sample worker memory baseline: %w", label, err)
+			}
+			*baseline = MemoryBaseline{sampled: true, kib: kib}
+			if command.MemoryBaseline != nil && r.diagnostics != nil {
+				fmt.Fprintf(r.diagnostics, "macserve worker: job memory baseline: job-UID footprint %d MiB\n", kibToMiB(kib))
+			}
+		}
+		baselineKiB = baseline.kib
 	}
 	if stdout == nil {
 		stdout = io.Discard

@@ -856,18 +856,20 @@ func (s *state) lanes() int {
 	if json.Unmarshal(data, &config) != nil || config.MaxConcurrentJobs < 1 || config.MaxConcurrentJobs > model.MaxConcurrentJobs {
 		return 1
 	}
-	lanes := config.MaxConcurrentJobs
-	// The lowering-only override (health.LanesOverrideFile); a malformed
-	// one runs one lane.
-	if data, err := s.p.ReadFile(Root+"/config/lanes.json", maxConfig); err == nil {
-		var override struct {
-			MaxConcurrentJobs int `json:"max_concurrent_jobs"`
+	// The lowering-only override, by the runtime rule (health.LaneOverride):
+	// a present file that is not a root-owned regular file writable only by
+	// root, unreadable or malformed means one lane.
+	path := Root + "/config/lanes.json"
+	info, err := s.p.Lstat(path)
+	lanes, _ := health.LaneOverride(config.MaxConcurrentJobs, err != nil || info.Exists, func() error {
+		if err != nil {
+			return err
 		}
-		if json.Unmarshal(data, &override) != nil || override.MaxConcurrentJobs < 1 || override.MaxConcurrentJobs > model.MaxConcurrentJobs {
-			return 1
+		if !info.Mode.IsRegular() || info.UID != 0 || info.Mode.Perm()&0o022 != 0 || info.Nlink != 1 {
+			return errors.New("lanes override must be a root-owned regular file writable only by root")
 		}
-		lanes = min(lanes, override.MaxConcurrentJobs)
-	}
+		return nil
+	}, func() ([]byte, error) { return s.p.ReadFile(path, maxConfig) })
 	return lanes
 }
 

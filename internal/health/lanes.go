@@ -1,11 +1,9 @@
 package health
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
 
@@ -22,48 +20,46 @@ const LanesOverrideFile = "/Library/macserve/config/lanes.json"
 
 // EffectiveLanes is configured (already >= 1) lowered by the override file.
 func EffectiveLanes(configured int) int {
-	lanes, note := laneOverride(LanesOverrideFile, configured, hostguard.RootConfig, os.ReadFile)
+	_, err := os.Lstat(LanesOverrideFile)
+	lanes, note := LaneOverride(configured, !errors.Is(err, os.ErrNotExist), func() error { return hostguard.RootConfig(LanesOverrideFile) }, func() ([]byte, error) { return os.ReadFile(LanesOverrideFile) })
 	if note != "" {
 		log.Printf("macserve lanes: %s", note)
 	}
 	return lanes
 }
 
-// laneOverride is EffectiveLanes for path. An absent file leaves configured;
-// a value above configured is ignored (an override never raises); a file that
+// LaneOverride is the override rule, given whether the file is present,
+// its protection check and its reader, so that doctor applies the runtime
+// rule through its own read-only probe. An absent file leaves configured; a
+// value above configured is ignored (an override never raises); a file that
 // is unsafe, unreadable or malformed fails closed to one lane.
-func laneOverride(path string, configured int, check func(string) error, read func(string) ([]byte, error)) (int, string) {
+func LaneOverride(configured int, present bool, check func() error, read func() ([]byte, error)) (int, string) {
 	configured = max(configured, 1)
-	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+	if !present {
 		return configured, ""
 	}
 	fail := func(err error) (int, string) {
-		return 1, fmt.Sprintf("%s refused (%v); running one lane", path, err)
+		return 1, fmt.Sprintf("%s refused (%v); running one lane", LanesOverrideFile, err)
 	}
-	if err := check(path); err != nil {
+	if err := check(); err != nil {
 		return fail(err)
 	}
-	data, err := read(path)
+	data, err := read()
 	if err != nil {
 		return fail(err)
 	}
-	var override struct {
-		MaxConcurrentJobs *int `json:"max_concurrent_jobs"`
-	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&override); err != nil {
+	// Exactly one member; json.Unmarshal refuses trailing data.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
 		return fail(err)
 	}
-	if err := decoder.Decode(new(any)); err != io.EOF {
-		return fail(errors.New("trailing data"))
+	raw, ok := fields["max_concurrent_jobs"]
+	var n int
+	if !ok || len(fields) != 1 || json.Unmarshal(raw, &n) != nil || n < 1 || n > model.MaxConcurrentJobs {
+		return fail(errors.New(`must be exactly {"max_concurrent_jobs": 1..3}`))
 	}
-	if override.MaxConcurrentJobs == nil || *override.MaxConcurrentJobs < 1 || *override.MaxConcurrentJobs > model.MaxConcurrentJobs {
-		return fail(errors.New("max_concurrent_jobs must be 1..3"))
-	}
-	n := *override.MaxConcurrentJobs
 	if n > configured {
-		return configured, fmt.Sprintf("%s max_concurrent_jobs %d above the configured %d ignored", path, n, configured)
+		return configured, fmt.Sprintf("%s max_concurrent_jobs %d above the configured %d ignored", LanesOverrideFile, n, configured)
 	}
-	return n, fmt.Sprintf("%s lowers max_concurrent_jobs to %d (configured %d)", path, n, configured)
+	return n, fmt.Sprintf("%s lowers max_concurrent_jobs to %d (configured %d)", LanesOverrideFile, n, configured)
 }

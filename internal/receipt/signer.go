@@ -2,6 +2,7 @@ package receipt
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -13,6 +14,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/jerryfane/macserve/internal/evidence"
@@ -98,13 +101,40 @@ func lanes(r worker.Result) *Concurrency {
 		if r.CleanupOK {
 			verdict = worker.IdleClean
 		}
-		return &Concurrency{Lane: 1, MaxLanes: 1, OverlappedJobs: []Overlap{}, Attribution: worker.AttributionAccount, IdleVerdict: verdict}
+		return &Concurrency{Lane: 1, MaxLanes: 1, OverlappedJobs: []Overlap{}, OverlapsSHA256: overlapsDigest(nil), Attribution: worker.AttributionAccount, IdleVerdict: verdict}
 	}
-	overlaps := make([]Overlap, 0, len(c.OverlappedJobs))
+	all := fullOverlaps(c)
+	published := slices.Clone(all)
+	// The longest overlaps are published; ties by job ID.
+	slices.SortStableFunc(published, func(a, b Overlap) int {
+		if a.Seconds != b.Seconds {
+			return cmp.Compare(b.Seconds, a.Seconds)
+		}
+		return strings.Compare(a.JobID, b.JobID)
+	})
+	published = published[:min(len(published), PublishedOverlaps)]
+	return &Concurrency{Lane: c.Lane, MaxLanes: c.MaxLanes, OverlapCount: len(all), OverlappedJobs: published, OverlapsSHA256: overlapsDigest(all), Attribution: c.Attribution, UnattributedResidue: c.UnattributedResidue, IdleVerdict: c.IdleVerdict}
+}
+
+// fullOverlaps is the worker's complete overlap list, in its order.
+func fullOverlaps(c *worker.Concurrency) []Overlap {
+	all := make([]Overlap, 0, len(c.OverlappedJobs))
 	for _, o := range c.OverlappedJobs {
-		overlaps = append(overlaps, Overlap(o))
+		all = append(all, Overlap(o))
 	}
-	return &Concurrency{Lane: c.Lane, MaxLanes: c.MaxLanes, OverlappedJobs: overlaps, Attribution: c.Attribution, UnattributedResidue: c.UnattributedResidue, IdleVerdict: c.IdleVerdict}
+	return all
+}
+
+// overlapsDigest is the sha256 of the JSON array of overlaps.
+func overlapsDigest(overlaps []Overlap) string {
+	if overlaps == nil {
+		overlaps = []Overlap{}
+	}
+	data, err := json.Marshal(overlaps)
+	if err != nil {
+		panic(err)
+	}
+	return hashBytes(data)
 }
 
 func (s *Signer) Seal(ctx context.Context, job model.Job, result worker.Result) (json.RawMessage, error) {

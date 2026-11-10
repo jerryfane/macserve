@@ -128,19 +128,28 @@ type ResourcePolicy struct {
 }
 
 // Concurrency (schema 2) is the job's lane record from the worker that ran
-// it: its 1-based lane of the worker's MaxLanes, every job that executed in
-// the worker while it did with the overlap in whole seconds, the rule that
-// attributed job-account processes to it (worker.Attribution*), how many
-// unattributed processes it observed, and the idle verdict its cleanup ended
-// with (worker.Idle*).
+// it: its 1-based lane of the worker's MaxLanes; the jobs that executed in
+// the worker while it did, bounded for publication (OverlapCount of them,
+// the PublishedOverlaps longest in OverlappedJobs, and OverlapsSHA256 over
+// the worker's complete list, which the full manifest's result carries); the
+// rule that attributed job-account processes to it (worker.Attribution*); how
+// many unattributed processes it observed; and the idle verdict its cleanup
+// ended with (worker.Idle*).
 type Concurrency struct {
 	Lane                int       `json:"lane"`
 	MaxLanes            int       `json:"max_lanes"`
+	OverlapCount        int       `json:"overlap_count"`
 	OverlappedJobs      []Overlap `json:"overlapped_jobs"`
+	OverlapsSHA256      string    `json:"overlaps_sha256"`
 	Attribution         string    `json:"attribution"`
 	UnattributedResidue int       `json:"unattributed_residue"`
 	IdleVerdict         string    `json:"idle_verdict"`
 }
+
+// PublishedOverlaps bounds Concurrency.OverlappedJobs, so a long job beside a
+// replenished queue still fits the compact receipt's publication limit.
+const PublishedOverlaps = 8
+
 type Overlap struct {
 	JobID   string `json:"job_id"`
 	Seconds int64  `json:"overlap_seconds"`

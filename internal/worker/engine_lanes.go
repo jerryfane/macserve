@@ -163,7 +163,8 @@ func (e *Engine) leave(jobID string) {
 	if e.accountHeld == jobID {
 		e.accountHeld = ""
 	}
-	delete(e.verified, jobID)
+	// e.verified[jobID] outlives the job: the client seals VerifiedTree after
+	// Execute returns, and RemoveExport forgets it once delivery is acked.
 	e.changedLocked()
 }
 
