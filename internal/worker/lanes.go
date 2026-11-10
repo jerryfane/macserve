@@ -74,6 +74,10 @@ type laneJob struct {
 const laneLabelConflict = "\x00conflict"
 
 func newLaneTracker(broker, uid int, workspaceRoot string, describe func(int, bool) (processDescription, error)) *laneTracker {
+	// The kernel reports executables by real path (/var is /private/var).
+	if real, err := filepath.EvalSymlinks(workspaceRoot); err == nil && workspaceRoot != "" {
+		workspaceRoot = real
+	}
 	return &laneTracker{broker: broker, uid: uid, workspaceRoot: workspaceRoot, describe: describe, jobs: map[string]*laneJob{}, labels: map[processInstance]string{}, described: map[processInstance]processDescription{}, conflicts: map[processInstance]bool{}}
 }
 
