@@ -77,7 +77,17 @@ type Domain struct {
 // the structural checks. Other fields may contain dictionaries, arrays, quoted
 // keys, and => entries. Quotes are line-local; controls, malformed nesting and
 // trailing output fail.
-func Parse(text string) (Snapshot, error) {
+func Parse(text string) (Snapshot, error) { return parse(text, false) }
+
+// ParseLoaded accepts what Parse accepts and also a service that launchd has
+// loaded but is not running right now: the same complete structure whose one
+// unquoted root state is plain ASCII words other than running (launchd prints
+// `not running` or `spawn scheduled` between two runs of a KeepAlive service)
+// and which has at most one canonical root pid. Such a snapshot is no evidence
+// of a running process: callers check State before they use PID.
+func ParseLoaded(text string) (Snapshot, error) { return parse(text, true) }
+
+func parse(text string, loaded bool) (Snapshot, error) {
 	var result Snapshot
 	stateSeen, pidSeen, pathSeen, typeSeen, programSeen, originalSeen, bundleSeen := false, false, false, false, false, false, false
 	// envUsable is cleared by any root environment entry that is not a plain
@@ -86,7 +96,7 @@ func Parse(text string) (Snapshot, error) {
 	root := func(key, value string, arrow bool) (string, error) {
 		switch key {
 		case "state":
-			if stateSeen || arrow || value != "running" {
+			if stateSeen || arrow || value != "running" && !(loaded && stateWords(value)) {
 				return "", errInvalid
 			}
 			result.State, stateSeen = value, true
@@ -164,7 +174,7 @@ func Parse(text string) (Snapshot, error) {
 		return nil
 	}
 	target, err := walk(text, root, item)
-	if err != nil || !stateSeen || !pidSeen {
+	if err != nil || !stateSeen || result.State == "running" && !pidSeen {
 		return Snapshot{}, errInvalid
 	}
 	result.Target = target
@@ -448,6 +458,19 @@ func decimal(value string, zero bool) bool {
 		}
 	}
 	return true
+}
+
+// stateWords reports whether a root state is ASCII letters in words separated
+// by single spaces, with no quote, bracket or edge whitespace.
+func stateWords(value string) bool {
+	for i := range len(value) {
+		c := value[i]
+		letter := 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z'
+		if !letter && (c != ' ' || i == 0 || i == len(value)-1 || value[i-1] == ' ') {
+			return false
+		}
+	}
+	return value != ""
 }
 
 // entry finds only unquoted assignment separators. Nested dictionary bodies

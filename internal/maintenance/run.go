@@ -118,11 +118,13 @@ func Run(ctx context.Context, c Config) error {
 // health has not yet expired. Inconclusive means it ran out of time (under
 // launchd ProcessType=Background a census of a job home that a build is
 // writing into measured up to 8 s, 1-2 s typical) or the accepted CoreDevice
-// devicefs changed mid-census (Xcode does this as a build finishes). Every
+// devicefs changed mid-census (Xcode does this as a build finishes), or a
+// configured coexisting service was between two launchd runs (a KeepAlive
+// relaunch or its own redeploy). Every
 // other error, and any inconclusive probe once the last valid health has
 // expired, publishes invalid health.
 func keepLastValid(err error, last health.Health, now time.Time) bool {
-	inconclusive := errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errCoreDeviceMountChanged)
+	inconclusive := errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errCoreDeviceMountChanged) || errors.Is(err, errCoexistingServiceRestarting)
 	return inconclusive && last.BoundaryValidated && last.ExpiresAt.After(now)
 }
 
