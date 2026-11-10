@@ -49,6 +49,14 @@ type laneTracker struct {
 	// conflicts are instances two jobs' seeds claimed; they are never any
 	// job's and are judged as unattributed.
 	conflicts map[processInstance]bool
+	// lineage reads an instance's kernel unique ID and its parent's at fork
+	// (darwin p_puniqueid); nil follows the PPID alone. unique caches it per
+	// instance; uniqueLabel maps every unique ID ever labelled, while any job
+	// runs, to its label, so a process whose parent exited and was never
+	// reparented in a sample keeps its job.
+	lineage     func(pid int, start string) (uint64, uint64, error)
+	unique      map[processInstance][2]uint64
+	uniqueLabel map[uint64]string
 }
 
 type processInstance struct {
@@ -76,7 +84,7 @@ func newLaneTracker(broker, uid int, workspaceRoot string, describe func(int, bo
 	if real, err := filepath.EvalSymlinks(workspaceRoot); err == nil && workspaceRoot != "" {
 		workspaceRoot = real
 	}
-	return &laneTracker{broker: broker, uid: uid, workspaceRoot: workspaceRoot, describe: describe, jobs: map[string]*laneJob{}, labels: map[processInstance]string{}, conflicts: map[processInstance]bool{}}
+	return &laneTracker{broker: broker, uid: uid, workspaceRoot: workspaceRoot, describe: describe, jobs: map[string]*laneJob{}, labels: map[processInstance]string{}, conflicts: map[processInstance]bool{}, unique: map[processInstance][2]uint64{}, uniqueLabel: map[uint64]string{}}
 }
 
 func (t *laneTracker) begin(jobID string, started time.Time) {
@@ -91,6 +99,9 @@ func (t *laneTracker) end(jobID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	delete(t.jobs, jobID)
+	if len(t.jobs) == 0 {
+		clear(t.uniqueLabel)
+	}
 }
 
 func (t *laneTracker) addRoot(jobID string, pid int) {
@@ -184,11 +195,46 @@ func (t *laneTracker) update(samples []processSample) {
 			delete(t.conflicts, i)
 		}
 	}
+	for i := range t.unique {
+		if !live[i] {
+			delete(t.unique, i)
+		}
+	}
+	// A labelled instance's unique ID is recorded before it can exit
+	// unsampled again; a new instance's lineage is read once.
+	earliest, any := time.Time{}, false
+	for _, j := range t.jobs {
+		if !any || j.started.Before(earliest) {
+			earliest, any = j.started, true
+		}
+	}
+	if t.lineage != nil && any {
+		for _, p := range samples {
+			key := processInstance{p.pid, p.start}
+			if p.uid != t.uid || p.zombie || p.pid <= 1 {
+				continue
+			}
+			if _, ok := t.unique[key]; ok {
+				continue
+			}
+			if started, ok := startTime(p.start); !ok || started.Before(earliest.Add(-time.Second)) {
+				if _, labelled := t.labels[key]; !labelled {
+					continue
+				}
+			}
+			if u, parent, err := t.lineage(p.pid, p.start); err == nil {
+				t.unique[key] = [2]uint64{u, parent}
+			}
+		}
+	}
 	visiting := map[int]bool{}
 	var resolve func(p processSample) string
 	resolve = func(p processSample) string {
 		key := processInstance{p.pid, p.start}
 		if label, ok := t.labels[key]; ok {
+			if ids, known := t.unique[key]; known {
+				t.uniqueLabel[ids[0]] = label
+			}
 			return label
 		}
 		if t.conflicts[key] || p.uid != t.uid || p.start == "" || p.pid <= 1 || visiting[p.pid] {
@@ -209,8 +255,17 @@ func (t *laneTracker) update(samples []processSample) {
 		case seed == "":
 			label = inherited
 		}
+		ids, known := t.unique[key]
+		if label == "" && known {
+			// The parent at fork, by kernel unique ID, even when it has
+			// exited and this process was reparented.
+			label = t.uniqueLabel[ids[1]]
+		}
 		if label != "" {
 			t.labels[key] = label
+			if known {
+				t.uniqueLabel[ids[0]] = label
+			}
 		}
 		return label
 	}
@@ -350,6 +405,7 @@ func (r *nativeRunner) laneTracker() *laneTracker {
 	r.lanesOnce.Do(func() {
 		if r.lanes == nil {
 			r.lanes = newLaneTracker(syscall.Getpid(), r.uid, r.workspaceRoot, r.describe)
+			r.lanes.lineage = r.lineage
 		}
 	})
 	return r.lanes

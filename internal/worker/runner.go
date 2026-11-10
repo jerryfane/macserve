@@ -77,6 +77,7 @@ type nativeRunner struct {
 	samplerRunning bool
 	workspaceRoot  string
 	describe       func(int, bool) (processDescription, error)
+	lineage        func(int, string) (uint64, uint64, error)
 }
 
 // newProcessRunner is the process/pipes implementation. Production construction

@@ -304,7 +304,11 @@ change launchd/persistence state. That fits only the phase-1 model of trusted re
 by lineage, sampled every 100 ms while a job runs: every command root the broker starts for a job, every
 `launchd_sim` whose arguments name a device directory of a simulator the job created, and every process whose
 executable lies under the job's workspace or device directory seed the job's label; a child first seen with a
-labelled parent inherits it, and labels stay with the instance when it is reparented to launchd. Two seeds claiming
+labelled parent inherits it, and labels stay with the instance when it is reparented to launchd. On macOS the broker
+also reads each new instance's kernel unique ID and its parent's unique ID at fork (`proc_pidinfo`
+`PROC_PIDUNIQIDENTIFIERINFO`, `p_puniqueid`), which survives reparenting: a process whose parent exited before it was
+sampled (a fast double fork, as SwiftPM's `git` does) inherits the label of that parent's unique ID if it was ever
+labelled. Two seeds claiming
 one instance make it nobody's. Validated on live Studio captures (`internal/worker/testdata/lanes`): a tandem unit-test
 job and three booting simulators split with no unattributed process. Instances no lineage claims are judged by the
 existing census (audited baseline, verified relaunches, tolerated Apple/developer-tool launches such as

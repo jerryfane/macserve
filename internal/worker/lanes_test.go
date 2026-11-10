@@ -380,3 +380,37 @@ func TestLaneWorkspaceExecutableSeeds(t *testing.T) {
 		t.Fatalf("prefix-sharing workspace labelled %q", label)
 	}
 }
+
+// A process whose parent exited before any sample, and which was reparented
+// to launchd, keeps its job through the kernel's parent unique ID at fork,
+// also after the labelled ancestor itself exited; an unrelated reparented
+// process does not.
+func TestLaneLabelFollowsKernelParentAcrossExit(t *testing.T) {
+	const broker, uid = 100, 600
+	now := time.Now().Unix()
+	ids := map[int][2]uint64{200: {1000, 1}, 201: {1001, 1000}, 202: {1002, 1001}, 300: {2000, 1}, 301: {2001, 9999}}
+	tracker := trackerFor(broker, uid, map[int]processDescription{})
+	tracker.lineage = func(pid int, _ string) (uint64, uint64, error) {
+		v, ok := ids[pid]
+		if !ok {
+			return 0, 0, syscall.ESRCH
+		}
+		return v[0], v[1], nil
+	}
+	tracker.begin("a", time.Unix(now-10, 0))
+	tracker.addRoot("a", 200)
+	tracker.update([]processSample{laneSample(200, broker, uid, now), laneSample(201, 200, uid, now)})
+	// 200 and 201 exit; 202 (forked by 201, never seen with it) is reparented.
+	tracker.removeRoot("a", 200)
+	tracker.update([]processSample{laneSample(202, 1, uid, now+1), laneSample(301, 1, uid, now+1)})
+	if got := tracker.labels[processInstance{202, strconv.FormatInt(now+1, 10) + ":0"}]; got != "a" {
+		t.Fatalf("orphan of an exited labelled parent labelled %q, want a", got)
+	}
+	if label, ok := tracker.labels[processInstance{301, strconv.FormatInt(now+1, 10) + ":0"}]; ok {
+		t.Fatalf("unrelated reparented process labelled %q", label)
+	}
+	tracker.end("a")
+	if len(tracker.uniqueLabel) != 0 {
+		t.Fatal("unique-ID labels kept after every job ended")
+	}
+}
