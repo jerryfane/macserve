@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -100,11 +101,17 @@ func TestRealHostLanesSplitTreesAndQuiesceOneJob(t *testing.T) {
 			continue
 		}
 		byArg[d.args] = label
+		_ = d
 		if d.args == "/bin/sleep\x00301" && p.parent != 1 {
 			t.Logf("sleep 301 parent %d (not yet reparented)", p.parent)
 		}
 	}
 	tracker.mu.Unlock()
+	for _, p := range samples {
+		if d, err := describeProcess(p.pid, true); err == nil && strings.Contains(d.args, "sleepcopy") {
+			t.Logf("copy pid=%d ppid=%d uid=%d start=%s exe=%q root=%q", p.pid, p.parent, p.uid, p.start, d.executable, tracker.workspaceRoot)
+		}
+	}
 	for args, want := range map[string]string{
 		"/bin/sleep\x00300": "job-a", "/bin/sleep\x00301": "job-a", "/bin/sleep\x00302": "job-a",
 		"/bin/sleep\x00310": "job-b", "/bin/sleep\x00311": "job-b", "/bin/sleep\x00312": "job-b",
