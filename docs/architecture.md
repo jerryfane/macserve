@@ -291,3 +291,38 @@ category, not a schema-4 record category: the maintenance record's categories an
 signer the `unix_socket_boundary` category passes only if every `signer_denial` row passes too (qualify carry
 requires the same). The owner report never carries `signer_denial` rows, and a challenge without a signer refuses
 them. An installed `org.macserve.signer.plist` is bound into the activation anchor.
+
+## Concurrent jobs in one job account
+
+With `max_concurrent_jobs` above 1 the broker runs up to that many jobs at once in the one job account (owner
+decision: no second account). Paths are already per job (workspace, HOME, TMPDIR, caches, DerivedData, evidence,
+export, manifest, simulator). Isolation between concurrent jobs is cooperative, not enforced: a job can still signal
+or write a sibling's processes and files, act on a sibling's simulator through the shared CoreSimulator service, and
+change launchd/persistence state. That fits only the phase-1 model of trusted repositories.
+
+**Attribution** (`internal/worker/lanes.go`). The broker labels job-UID process instances (PID and kernel start time)
+by lineage, sampled every 100 ms while a job runs: every command root the broker starts for a job, every
+`launchd_sim` whose arguments name a device directory of a simulator the job created, and every process whose
+executable lies under the job's workspace or device directory seed the job's label; a child first seen with a
+labelled parent inherits it, and labels stay with the instance when it is reparented to launchd. Two seeds claiming
+one instance make it nobody's. Validated on live Studio captures (`internal/worker/testdata/lanes`): a tandem unit-test
+job and three booting simulators split with no unattributed process. Instances no lineage claims are judged by the
+existing census (audited baseline, verified relaunches, tolerated Apple/developer-tool launches such as
+CoreSimulatorService, SimLaunchHost, testmanagerd, CoreDevice); what remains is *unattributed*. The memory budget then
+charges the summed `phys_footprint` of the job's own labelled processes (no job-UID baseline);
+`host_peak_memory_mib` records the whole job UID.
+
+**Cleanup.** A job that starts while no other job runs is admitted by the full admission and preflight quiesce. A job
+started beside others is admitted by a lane admission: other jobs' labelled processes are not residual, and an
+unattributed process refuses the start and *drains* the broker. A job whose finalization begins while no other job
+runs ends with the unchanged full quiesce and admission (idle verdict `clean`); no other job starts until it ends. A
+job finishing beside others deletes only its own simulator and quiesces only its labelled processes (SIGTERM, SIGKILL,
+survivor = contamination and quarantine, as before), never a shared service or a sibling's process; any unattributed
+process left makes its `cleanup_ok` false (idle verdict `deferred`, the job fails) and drains the broker. While
+draining, the broker claims nothing, lets running jobs finish, and the next idle `Recover` runs the full quiesce and
+admission: contamination quarantines exactly as with one job, a clean account resumes intake under a new epoch.
+Simulator creation is serialized across lanes, and a sibling's recorded device is never an unrecorded device after an
+interrupted create. A broker restart with several manifests recovers all of them at idle (full quiesce, then each
+job's simulator and workspace). Each completion is saved as `pending-<job>.json` until acknowledged (a pre-lane
+`pending.json` is still delivered).
+

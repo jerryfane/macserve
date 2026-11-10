@@ -163,7 +163,7 @@ Every stderr line of the controller, worker and maintenance daemons
 (`/Library/macserve/var/controller/log/controller.err.log`, `/Library/macserve/var/broker/log/worker.err.log` and
 `maintenance.err.log`) starts with its RFC 3339 UTC time in milliseconds, e.g. `2026-11-07T03:16:26.412Z`, so a
 cancellation can be placed against its cause. The controller logs `controller readiness: ready=… cancel_active=…
-blockers=… active_job=…` at its first readiness evaluation and whenever the outcome changes, and
+blockers=… active_job=<id>[,<id>…]` at its first readiness evaluation and whenever the outcome changes, and
 `controller job cancellation requested: job=… source=… blockers=… detail=…` for each cancellation it requests
 itself (deadline, readiness, gate error, log limit, shutdown), naming the cause recorded as the job's
 `cancel_reason`. Maintenance logs `published invalid health checked_at=… last_valid_until=… blockers=…
@@ -173,8 +173,10 @@ probe could not keep one. A valid record is logged as `published health … bloc
 example `host_memory_pressure`, `service_disk_budget_exceeded`) differ from the previous record's. Toolchain
 qualification is the controller's own comparison and appears only in its lines.
 
-Disk admission reserves 30 GiB while preserving 120 GiB free; below 100 GiB active work is cancelled.
-The total accounted mutable-data budget is 80 GiB. The retained evidence pool reserves 1 GiB for store log
+Disk admission reserves 30 GiB per job while preserving 120 GiB free: a job is claimed beside N running ones only
+with at least 120 + 30·(N+1) GiB free and at most budget − 30·(N+1) GiB accounted. Below 100 GiB free active work is
+cancelled. The total accounted mutable-data budget is 50 + 30·`max_concurrent_jobs` GiB (80 GiB with one lane, 110
+with two, 140 with three); maintenance, `doctor` and the controller read `max_concurrent_jobs` from `controller.json`. The retained evidence pool reserves 1 GiB for store log
 rows and 14 GiB for artifacts, with seven-day expiry/oldest-terminal eviction. Metadata persists for 90 days;
 expired downloads, log pages and newly opened log streams return `410`.
 These are monitored application budgets, not filesystem quotas. Controller test parsing uses sealed JSON
@@ -310,3 +312,22 @@ Controller `signer` section (printed by `deploy-install` from `signer-init`'s `{
 `{"signer":{"socket":"/Library/macserve/var/signer-run/signer.sock","uid":<signer UID>,"rpc_gid":<_macserve_signrpc GID>,"inbox":"/Library/macserve/var/signer-inbox","key_id":"<signer key_id>","public_key":"<base64>"}}`.
 The controller checks the socket peer is `uid` on every connection and pins the signer receipt key. Without the
 section, `POST /v1/jobs/{id}/sign` reports signing unavailable.
+
+## Concurrent jobs (`max_concurrent_jobs`)
+
+`controller.json` and `worker.json` each take `max_concurrent_jobs` (1–3; omitted means 1). The controller leases at
+most the smaller of its own value and the `lanes` the worker registers; with 1 the service runs one job at a time
+exactly as before. Each claimed job gets a `lane` (1-based, shown in the job view; a unique index forbids two active
+jobs in one lane, store schema version 7). The fair per-repository order still chooses the next job. `simulator_script`
+and `ios_archive` run alone: such a job at the head of the queue waits for every running job to finish, and nothing
+starts beside it. A second or third lane is claimed only when the disk reservation above holds for one more job.
+`GET /v1/capabilities` reports `max_concurrent_jobs`; `GET /v1/admin/state` reports `active_jobs`.
+
+Readiness cancellation distinguishes host facts from capacity: a trust blocker (`isolation_unavailable`,
+`toolchain_validation_unavailable`, `owner_pause_unavailable`, `disk_accounting_unavailable`) or a gate error cancels
+every active job; when only capacity blockers cancel (`disk_emergency`, `service_disk_budget_exceeded`) the controller
+cancels the newest active job and re-evaluates after 30 s. A client, deadline or log-limit cancel touches its own job.
+A completion with `cleanup_ok=false`, or a lost heartbeat, fences the worker epoch: running siblings finish on their
+own leases, a prepared lease not yet delivered is interrupted, and nothing is claimed until the worker registers a new
+epoch after its idle check.
+
