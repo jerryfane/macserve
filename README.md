@@ -80,7 +80,8 @@ flowchart LR
 
 1. A job arrives either through the private API or because the GitHub App poller saw an eligible open PR head.
 2. The controller fetches the exact commit, verifies its tree and exports the full source; jobs wait in a durable
-   SQLite queue that admits one active execution at a time.
+   SQLite queue that admits one active execution at a time, taking turns between repositories so one repository's
+   burst does not hold back another's job.
 3. The root worker broker claims the job over a Unix socket and runs the fixed recipe inside the dedicated job
    account's existing GUI session, with the pinned Xcode and, where the job needs one, its own simulator.
 4. Test evidence is parsed independently, artifacts are stored immutably, and the controller signs a receipt.

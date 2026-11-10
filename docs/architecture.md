@@ -38,7 +38,9 @@ PF enforcement may be a separately reviewed future opt-in; it is not implemented
   admission, pinned Xcode/runtime matching, timeout limits and SHA-256 recipe digests. Relative paths cannot
   contain `..`; command placeholders are limited to `CHECKOUT`, `WORKSPACE`, `DERIVED_DATA`, `RESULT_BUNDLE`,
   `SIMULATOR_ID`, `JOB_ID` and `DEVELOPER_DIR`, each written `${NAME}`. Test profiles require explicit test scope.
-- `internal/controllerk/store`: SQLite WAL queue with principal-scoped idempotency, FIFO admission, database-enforced single
+- `internal/controllerk/store`: SQLite WAL queue with principal-scoped idempotency, fair claim order across
+  repositories (the repository waiting longest since its last claim goes next, FIFO within each repository;
+  [configuration](configuration.md)), database-enforced single
   active execution, lease-checked transitions and active-execution log writes, persistent pause/drain,
   cancellation and retention. Terminal logs and results cannot be amended by a late worker.
   Interrupted execution or uncertain cleanup quarantines dispatch. Clearing quarantine requires a caller-proven

@@ -207,6 +207,17 @@ func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, principal, key string
 	return job, false, nil
 }
 
+// fairNext selects the sequence of the next queued job: the oldest queued job
+// of the repository that has waited longest since its last claim. A
+// repository's last claim is the newest started_at among its retained jobs
+// (only Claim sets started_at); a repository with none goes first, and ties
+// fall back to submission order. A burst from one repository therefore
+// delays another repository's job by at most one claim per other waiting
+// repository, and each repository stays FIFO. The order relies on the claim
+// clock not stepping backwards; a backwards step only reorders repositories
+// until the clock passes the earlier claims again.
+const fairNext = `SELECT head.sequence FROM (SELECT repo,MIN(sequence) AS sequence FROM jobs WHERE state='queued' GROUP BY repo) AS head ORDER BY (SELECT MAX(started_at) FROM jobs WHERE jobs.repo=head.repo) NULLS FIRST,head.sequence LIMIT 1`
+
 // Claim holds a database write reservation from eligibility checks through lease
 // assignment. The database additionally prohibits a second active row, even if
 // a future caller bypasses the normal dispatch path.
@@ -249,7 +260,7 @@ func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time) (m
 	if acknowledged != "" && acknowledged != workerEpoch {
 		return model.Job{}, ErrLease
 	}
-	job, err := scanJob(tx.QueryRowContext(ctx, "SELECT "+jobColumns+" FROM jobs WHERE state='queued' ORDER BY sequence LIMIT 1"))
+	job, err := scanJob(tx.QueryRowContext(ctx, "SELECT "+jobColumns+" FROM jobs WHERE sequence=("+fairNext+")"))
 	if errors.Is(err, ErrNotFound) {
 		if err := tx.Commit(); err != nil {
 			return model.Job{}, err
