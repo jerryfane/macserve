@@ -40,6 +40,8 @@ var Doctor = Policy{
 		module + "/internal/deploy.ParseInstalledBinaries",
 		"(*" + module + "/internal/deploy.InstalledBinaries).ReleaseDigest",
 		module + "/internal/hostguard.ConsoleAdmissible",
+		// The service disk budget for a lane count: arithmetic, no I/O.
+		module + "/internal/health.ServiceBudget",
 		module + "/internal/setup.SystemBoot",
 		// The recorded controller digest: a walk of the decoded ledger's
 		// install input, releases and controller rebinds, no I/O.
