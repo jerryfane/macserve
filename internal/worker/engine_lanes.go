@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"slices"
 	"strings"
 	"time"
@@ -250,9 +251,11 @@ func (e *Engine) LaneReady(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if residue != 0 {
-		e.setDrain(fmt.Sprintf("%d unattributed job-account process(es) while jobs run", residue))
-		return fmt.Errorf("%w: unattributed job-account process(es)", ErrDrain)
+	if len(residue) != 0 {
+		e.setDrain(fmt.Sprintf("%d unattributed job-account process(es) while jobs run", len(residue)))
+		// The caller logs this error on the host only; the processes make the
+		// drain diagnosable there.
+		return fmt.Errorf("%w: %d unattributed job-account process(es): %s", ErrDrain, len(residue), residueList(residue))
 	}
 	e.mu.Lock()
 	e.readyAt = e.options.Now()
@@ -313,16 +316,26 @@ func (e *Engine) siblingManifests(jobID string, names []string) bool {
 // laneResidue counts unattributed job-account processes after a job's lane
 // quiesce beside running jobs. Any, or a failed count, leaves the job's
 // cleanup unverified until the idle quiesce (errLaneResidue).
-func (e *Engine) laneResidue(ctx context.Context, result *Result) error {
-	n, err := e.laneRunner().Residue(ctx)
+func (e *Engine) laneResidue(ctx context.Context, jobID string, result *Result) error {
+	residue, err := e.laneRunner().Residue(ctx)
 	if err != nil {
 		return errors.Join(ErrCleanup, err)
 	}
-	result.Concurrency.UnattributedResidue = n
-	if n != 0 {
+	result.Concurrency.UnattributedResidue = len(residue)
+	if len(residue) != 0 {
+		log.Printf("worker job %s lane cleanup deferred to the idle quiesce: %d unattributed job-account process(es): %s", jobID, len(residue), residueList(residue))
 		return errLaneResidue
 	}
 	return nil
+}
+
+// residueList joins at most contaminationEntries residue entries.
+func residueList(residue []string) string {
+	list := strings.Join(residue[:min(len(residue), contaminationEntries)], "; ")
+	if more := len(residue) - contaminationEntries; more > 0 {
+		list += fmt.Sprintf("; +%d more", more)
+	}
+	return list
 }
 
 // finishLane records jobID's lane verdict before it leaves: its overlaps,

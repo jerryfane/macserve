@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -420,25 +421,33 @@ func TestLaneLabelFollowsKernelParentAcrossExit(t *testing.T) {
 func TestResidueCountsOnlyPersistingProcesses(t *testing.T) {
 	residueSettle = time.Millisecond
 	t.Cleanup(func() { residueSettle = time.Second })
-	a, b, c := processInstance{10, "1:0"}, processInstance{11, "1:0"}, processInstance{12, "2:0"}
+	a, b, c := processSample{pid: 10, start: "1:0"}, processSample{pid: 11, start: "1:0"}, processSample{pid: 12, start: "2:0"}
+	snapshot := func(samples ...processSample) map[processInstance]processSample {
+		out := map[processInstance]processSample{}
+		for _, p := range samples {
+			out[processInstance{p.pid, p.start}] = p
+		}
+		return out
+	}
 	for name, tc := range map[string]struct {
-		snapshots  []map[processInstance]bool
-		unresolved bool
-		want       int
+		snapshots      []map[processInstance]processSample
+		unresolved     bool
+		want           []processSample
+		wantUnresolved bool
 	}{
-		"transient":  {[]map[processInstance]bool{{a: true, b: true}, {c: true}}, false, 0},
-		"persisting": {[]map[processInstance]bool{{a: true, b: true}, {b: true, c: true}}, false, 1},
-		"none":       {[]map[processInstance]bool{{}, {a: true}}, false, 0},
-		"unresolved": {[]map[processInstance]bool{{}, {}}, true, 1},
+		"transient":  {[]map[processInstance]processSample{snapshot(a, b), snapshot(c)}, false, nil, false},
+		"persisting": {[]map[processInstance]processSample{snapshot(a, b), snapshot(b, c)}, false, []processSample{b}, false},
+		"none":       {[]map[processInstance]processSample{snapshot(), snapshot(a)}, false, nil, false},
+		"unresolved": {[]map[processInstance]processSample{snapshot(), snapshot()}, true, nil, true},
 	} {
 		calls := 0
-		n, err := settledResidue(context.Background(), func() (map[processInstance]bool, bool, error) {
+		got, unresolved, err := settledResidue(context.Background(), func() (map[processInstance]processSample, bool, error) {
 			snapshot := tc.snapshots[calls]
 			calls++
 			return snapshot, tc.unresolved, nil
 		})
-		if err != nil || n != tc.want {
-			t.Errorf("%s: residue %d %v, want %d", name, n, err, tc.want)
+		if err != nil || !slices.Equal(got, tc.want) || unresolved != tc.wantUnresolved {
+			t.Errorf("%s: residue %v unresolved=%t %v, want %v unresolved=%t", name, got, unresolved, err, tc.want, tc.wantUnresolved)
 		}
 	}
 }
