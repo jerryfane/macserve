@@ -554,22 +554,62 @@ func (r *nativeRunner) Residue(ctx context.Context) (int, error) {
 	if err := r.loadBaseline(); err != nil {
 		return 0, err
 	}
-	samples, err := r.scope.sample(ctx)
+	count := func() (map[processInstance]bool, bool, error) {
+		samples, err := r.scope.sample(ctx)
+		if err != nil {
+			return nil, false, err
+		}
+		c, err := r.laneCensus(ctx, samples)
+		if err != nil {
+			return nil, false, err
+		}
+		found := make(map[processInstance]bool, len(c.residual))
+		for _, p := range c.residual {
+			found[processInstance{p.pid, p.start}] = true
+		}
+		return found, c.unresolved, nil
+	}
+	return settledResidue(ctx, count)
+}
+
+// settledResidue counts residual instances listed by count both now and
+// residueSettle later; an unresolved second census counts as one.
+func settledResidue(ctx context.Context, count func() (map[processInstance]bool, bool, error)) (int, error) {
+	first, unresolved, err := count()
+	if err != nil || len(first) == 0 && !unresolved {
+		return 0, err
+	}
+	// Short-lived build helpers (SwiftPM's double-forked git, live
+	// 2026-11-10) can be listed in one snapshot: only an instance still
+	// running residueSettle later is residue.
+	timer := time.NewTimer(residueSettle)
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+		return 0, ctx.Err()
+	case <-timer.C:
+	}
+	second, unresolved, err := count()
 	if err != nil {
 		return 0, err
 	}
-	c, err := r.laneCensus(ctx, samples)
-	if err != nil {
-		return 0, err
+	n := 0
+	for key := range second {
+		if first[key] {
+			n++
+		}
 	}
-	n := len(c.residual)
-	if n == 0 && c.unresolved {
+	if n == 0 && unresolved {
 		// An audited process is gone without a verified relaunch: nothing
 		// here may judge that while jobs run.
 		n = 1
 	}
 	return n, nil
 }
+
+// residueSettle is how long an unattributed process must persist to count
+// as residue while jobs run.
+var residueSettle = time.Second
 
 func (r *nativeRunner) LaneAdmission(parent context.Context) error {
 	ctx, cancel := context.WithTimeout(parent, persistenceAdmissionTimeout)

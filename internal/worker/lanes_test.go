@@ -414,3 +414,31 @@ func TestLaneLabelFollowsKernelParentAcrossExit(t *testing.T) {
 		t.Fatal("unique-ID labels kept after every job ended")
 	}
 }
+
+// A short-lived unattributed process seen in one snapshot is not residue;
+// one still running residueSettle later is, and an unresolved census counts.
+func TestResidueCountsOnlyPersistingProcesses(t *testing.T) {
+	residueSettle = time.Millisecond
+	t.Cleanup(func() { residueSettle = time.Second })
+	a, b, c := processInstance{10, "1:0"}, processInstance{11, "1:0"}, processInstance{12, "2:0"}
+	for name, tc := range map[string]struct {
+		snapshots  []map[processInstance]bool
+		unresolved bool
+		want       int
+	}{
+		"transient":  {[]map[processInstance]bool{{a: true, b: true}, {c: true}}, false, 0},
+		"persisting": {[]map[processInstance]bool{{a: true, b: true}, {b: true, c: true}}, false, 1},
+		"none":       {[]map[processInstance]bool{{}, {a: true}}, false, 0},
+		"unresolved": {[]map[processInstance]bool{{}, {}}, true, 1},
+	} {
+		calls := 0
+		n, err := settledResidue(context.Background(), func() (map[processInstance]bool, bool, error) {
+			snapshot := tc.snapshots[calls]
+			calls++
+			return snapshot, tc.unresolved, nil
+		})
+		if err != nil || n != tc.want {
+			t.Errorf("%s: residue %d %v, want %d", name, n, err, tc.want)
+		}
+	}
+}
