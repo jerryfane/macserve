@@ -245,7 +245,7 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 					quietErr = inspector.Admission(finalCtx)
 				}
 			} else {
-				residueErr = e.laneResidue(finalCtx, &result)
+				residueErr = e.laneResidue(finalCtx, job.ID, &result)
 			}
 		}
 		var cleanupErr error

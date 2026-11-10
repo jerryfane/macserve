@@ -332,6 +332,10 @@ cancels the newest active job and re-evaluates after 30 s. A client, deadline or
 A completion with `cleanup_ok=false`, or a lost heartbeat, fences the worker epoch: running siblings finish on their
 own leases, a prepared lease not yet delivered is interrupted, and nothing is claimed until the worker registers a new
 epoch after its idle check.
+The worker drains the same way when an unattributed job-account process appears beside running jobs; its log line
+(`worker draining until idle: ...`) names each such process by PID, kernel parent, start, executable and arguments. A
+registration the controller refuses with 409 because it still holds a lease of the earlier epoch is retried each poll;
+the worker does not exit.
 
 ### Lowering concurrency without a sitting: `lanes.json`
 

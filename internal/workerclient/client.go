@@ -316,8 +316,14 @@ func (c *Client) Run(ctx context.Context) (returned error) {
 				if errors.Is(err, ErrPeerIdentity) {
 					return err
 				}
+				// 409: the controller still holds a lease of an earlier
+				// epoch (a lease it delivered keeps its heartbeat and
+				// cleanup windows). It ends that lease itself, so the
+				// quiescent worker retries rather than exiting.
 				var status *HTTPError
-				if errors.As(err, &status) && status.Status >= 400 && status.Status < 500 && status.Status != 429 {
+				if errors.As(err, &status) && status.Status == http.StatusConflict {
+					log.Printf("worker registration refused while the controller ends an earlier epoch's lease; retrying after poll: %v", err)
+				} else if errors.As(err, &status) && status.Status >= 400 && status.Status < 500 && status.Status != 429 {
 					return err
 				}
 				if err := pause(); err != nil {
