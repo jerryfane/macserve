@@ -46,8 +46,6 @@ type laneTracker struct {
 	describe func(pid int, wantArgs bool) (processDescription, error)
 	jobs     map[string]*laneJob
 	labels   map[processInstance]string
-	// described caches descriptions of instances started during a job.
-	described map[processInstance]processDescription
 	// conflicts are instances two jobs' seeds claimed; they are never any
 	// job's and are judged as unattributed.
 	conflicts map[processInstance]bool
@@ -78,7 +76,7 @@ func newLaneTracker(broker, uid int, workspaceRoot string, describe func(int, bo
 	if real, err := filepath.EvalSymlinks(workspaceRoot); err == nil && workspaceRoot != "" {
 		workspaceRoot = real
 	}
-	return &laneTracker{broker: broker, uid: uid, workspaceRoot: workspaceRoot, describe: describe, jobs: map[string]*laneJob{}, labels: map[processInstance]string{}, described: map[processInstance]processDescription{}, conflicts: map[processInstance]bool{}}
+	return &laneTracker{broker: broker, uid: uid, workspaceRoot: workspaceRoot, describe: describe, jobs: map[string]*laneJob{}, labels: map[processInstance]string{}, conflicts: map[processInstance]bool{}}
 }
 
 func (t *laneTracker) begin(jobID string, started time.Time) {
@@ -181,11 +179,6 @@ func (t *laneTracker) update(samples []processSample) {
 			delete(t.labels, i)
 		}
 	}
-	for i := range t.described {
-		if !live[i] {
-			delete(t.described, i)
-		}
-	}
 	for i := range t.conflicts {
 		if !live[i] {
 			delete(t.conflicts, i)
@@ -256,20 +249,16 @@ func (t *laneTracker) seed(p processSample) string {
 	if !recent || t.describe == nil {
 		return found
 	}
-	key := processInstance{p.pid, p.start}
-	d, ok := t.described[key]
-	if !ok {
-		var err error
-		d, err = t.describe(p.pid, false)
-		if err != nil {
-			return found
+	// Never cached: an exec keeps the instance (PID and start) but changes
+	// its executable, so an unlabelled instance is described every update.
+	d, err := t.describe(p.pid, false)
+	if err != nil {
+		return found
+	}
+	if filepath.Base(d.executable) == "launchd_sim" {
+		if full, err := t.describe(p.pid, true); err == nil {
+			d = full
 		}
-		if filepath.Base(d.executable) == "launchd_sim" {
-			if full, err := t.describe(p.pid, true); err == nil {
-				d = full
-			}
-		}
-		t.described[key] = d
 	}
 	for id, j := range t.jobs {
 		if startOK && started.Before(j.started.Add(-time.Second)) {
