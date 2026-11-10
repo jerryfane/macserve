@@ -68,11 +68,19 @@ func (c *Controller) fenceUndelivered(ctx context.Context, epoch string) error {
 	} else if fenced {
 		return store.ErrLease
 	}
-	// The older epoch gets no further lease, and prepare ends its
+	// The fence is durable before c.mu is released: the older epoch can
+	// neither register again (restoring c.epoch) nor be offered these
+	// leases while their sources are removed, and prepare ends its
 	// preparations as fenced.
+	for _, a := range stale {
+		if err := c.options.Store.FenceEpoch(ctx, a.job.WorkerEpoch); err != nil {
+			return err
+		}
+	}
 	c.epoch = ""
 	preparing := false
 	for _, a := range stale {
+		a.fencing = true
 		a.cancel()
 		if !a.ready {
 			preparing = true
@@ -100,13 +108,16 @@ func (c *Controller) fenceUndelivered(ctx context.Context, epoch string) error {
 }
 
 // endUndelivered ends a's prepared lease never delivered: it removes the
-// source, then records why the lease was not delivered. Callers hold c.mu,
-// which is released around the removal.
+// source, then records why the lease was not delivered. a is never offered
+// from now on. Callers hold c.mu, which is released around the removal.
 func (c *Controller) endUndelivered(ctx context.Context, a *execution, job model.Job, now time.Time) {
+	a.fencing = true
 	c.mu.Unlock()
 	cleanupErr := c.removeSource(job.ID)
 	c.mu.Lock()
-	if !c.holds(a) {
+	// A lease delivered before the fence is live work: checkExecution's
+	// heartbeat and cleanup windows end it, not a preparation failure.
+	if !c.holds(a) || a.offered {
 		return
 	}
 	state, reason := model.Cancelled, "cancelled before lease delivery"
@@ -171,8 +182,9 @@ func (c *Controller) next(ctx context.Context, epoch string, running []string) (
 			continue
 		}
 		// A preparing lease may be retried when its HTTP response was lost. Running
-		// and finalizing leases are never handed out a second time.
-		if offer != nil || !a.ready || job.State != model.Preparing || job.CancelRequested || a.offered && slices.Contains(running, job.ID) {
+		// and finalizing leases are never handed out a second time, nor is a
+		// lease being fenced or claimed by another epoch.
+		if offer != nil || !a.ready || a.fencing || job.WorkerEpoch != epoch || job.State != model.Preparing || job.CancelRequested || a.offered && slices.Contains(running, job.ID) {
 			continue
 		}
 		offer, lease = a, &protocol.Lease{Job: job, Token: job.LeaseToken, Source: a.source.Source}

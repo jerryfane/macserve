@@ -32,6 +32,8 @@ type fakeSource struct {
 	directory string
 	release   <-chan struct{}
 	started   chan struct{}
+	// removing, when set, runs at the start of Remove.
+	removing func(id string)
 }
 
 func (f *fakeSource) Prepare(ctx context.Context, job model.Job) (source.Descriptor, error) {
@@ -54,6 +56,9 @@ func (f *fakeSource) Prepare(ctx context.Context, job model.Job) (source.Descrip
 	return source.Descriptor{Path: filename, Source: worker.Source{Commit: job.Request.SHA, Tree: strings.Repeat("b", 40), SHA256: hex.EncodeToString(digest[:]), SizeBytes: int64(len(data))}}, nil
 }
 func (f *fakeSource) Remove(id string) error {
+	if f.removing != nil {
+		f.removing(id)
+	}
 	err := os.Remove(filepath.Join(f.directory, id+".tar"))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil

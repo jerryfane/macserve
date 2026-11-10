@@ -364,6 +364,33 @@ func TestNewEpochCancelsPreparingLease(t *testing.T) {
 	f.register(t, "epoch-b", 2)
 }
 
+// The fence is irreversible while the controller removes the fenced lease's
+// source without its lock: the older epoch can neither register again nor
+// receive the lease being ended.
+func TestFencedEpochCannotReturnDuringSourceRemoval(t *testing.T) {
+	f := newLanes(t, 2)
+	stale := f.enqueue(t, "one", model.Build)
+	f.register(t, "epoch-a", 2)
+	f.claim(t, "epoch-a")
+	var registerErr, nextErr error
+	var delivered *protocol.Lease
+	f.source.removing = func(id string) {
+		if id != stale.ID || delivered != nil || registerErr != nil {
+			return
+		}
+		registerErr = f.controller.register(context.Background(), protocol.Registration{Epoch: "epoch-a", Quiescent: true, Lanes: 2})
+		delivered, nextErr = f.controller.next(context.Background(), "epoch-a", nil)
+	}
+	f.register(t, "epoch-b", 2)
+	f.source.removing = nil
+	if !errors.Is(registerErr, store.ErrLease) || delivered != nil || !errors.Is(nextErr, store.ErrLease) {
+		t.Fatalf("fenced epoch during source removal: register %v, lease %v %v", registerErr, delivered, nextErr)
+	}
+	if job := f.job(t, stale.ID); job.State != model.Interrupted || job.Reason != fencedBeforeDelivery {
+		t.Fatalf("undelivered lease: %s %q", job.State, job.Reason)
+	}
+}
+
 // A prepared lease never delivered ends at its deadline although its epoch
 // is current and no worker asks for it.
 func TestUndeliveredLeaseEndsAtDeadline(t *testing.T) {
