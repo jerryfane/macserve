@@ -183,12 +183,18 @@ The census refuses nested mounts except the job user's own CoreDevice `devicefs`
 needs Full Disk Access for `/Library/macserve/bin/macserve`; see the installation guide.
 The maintenance daemon runs the census in the background with its own 120 s budget instead of inside each 8 s
 probe: under heavy builds a full census outlasted the probe for minutes, health expired, and the controller
-cancelled the running job (`isolation_unavailable`) although nothing was wrong. A probe waits for the running
-census until 4 s before its own deadline (keeping time for its remaining checks); if it is still running, the
-probe uses the last completed clean census if it
-finished at most 150 s ago, otherwise it is inconclusive as before. So the accounted bytes and the census's
-mount and special-file checks in published health can be up to 150 s old; a census that finds something is
-reported by every probe until a newer census completes, and every other health fact is still observed by each
+cancelled the running job (`isolation_unavailable`) although nothing was wrong. The GUI-baseline process check
+runs the same way with a 30 s budget ([#108](https://github.com/jerryfane/macserve/issues/108)): it verifies the
+launchd records of the job GUI session's processes with some 250-280 `launchctl` runs, which took 2-3 s on the
+Studio, but 6.5 s to more than 7.5 s of the 8 s probe in every probe for over 40 s while simulators booted. A
+probe waits for each running observation until 4 s before its own deadline (keeping time for its remaining
+checks); if it is still running, the probe uses the last completed clean one if it finished at most 150 s
+(census) or 45 s (GUI baseline) ago, otherwise it is inconclusive as before and its error names the observation
+(`mutable census: …`, `GUI baseline: …`). So the accounted bytes and the census's mount and special-file checks
+in published health can be up to 150 s old, and the boot identity, audited-process and launchd-environment
+checks and the exited audited processes up to 45 s (from a process table read at most 75 s earlier). An
+observation that finds something is reported by every probe until a newer one completes, an observation of
+other baseline or persistence records is never reused, and every other health fact is still observed by each
 probe. The free-disk floors above are checked by the controller itself every second and do not depend on it.
 
 Offered/running workers retain the ordinary 30-second heartbeat-loss fence. Cancellation, deadline or finalizing
