@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/jerryfane/macserve/internal/hostguard"
+	"github.com/jerryfane/macserve/internal/model"
 	"github.com/jerryfane/macserve/internal/worker"
 )
 
@@ -38,7 +39,14 @@ type Config struct {
 	// seals with; SealKeyID names it in the keyholder's pins.
 	SealKeyFile string `json:"seal_key_file,omitempty"`
 	SealKeyID   string `json:"seal_key_id,omitempty"`
+	// MaxConcurrentJobs is how many jobs the broker executes at once in the
+	// one job account (1..model.MaxConcurrentJobs; omitted means 1, the
+	// single-job broker).
+	MaxConcurrentJobs int `json:"max_concurrent_jobs,omitempty"`
 }
+
+// Lanes is MaxConcurrentJobs, 1 when omitted.
+func (c Config) Lanes() int { return max(c.MaxConcurrentJobs, 1) }
 
 // LeaseAuthority reports whether the configuration names the registry,
 // qualification record and seal key the lease path requires. Older
@@ -60,7 +68,7 @@ func (c Config) LeaseAuthority() error {
 // options; the broker, worker-reset, persistence review and qualification tool
 // evidence all use this one mapping.
 func (c Config) EngineOptions() worker.Options {
-	return worker.Options{Root: c.Root, ExportRoot: c.ExportRoot, WorkspaceRoot: c.WorkspaceRoot, JobUID: c.JobUID, JobGID: c.JobGID, OwnerUID: c.OwnerUID, ControllerUID: c.ControllerUID, HelperPath: c.HelperPath, BaselinePath: c.BaselinePath, PersistencePath: c.PersistencePath}
+	return worker.Options{Root: c.Root, ExportRoot: c.ExportRoot, WorkspaceRoot: c.WorkspaceRoot, JobUID: c.JobUID, JobGID: c.JobGID, OwnerUID: c.OwnerUID, ControllerUID: c.ControllerUID, HelperPath: c.HelperPath, BaselinePath: c.BaselinePath, PersistencePath: c.PersistencePath, Lanes: c.Lanes()}
 }
 
 func LoadConfig(path string) (Config, error) {
@@ -135,6 +143,9 @@ func normalize(cfg Config) (Config, error) {
 	}
 	if cfg.PollSeconds < 1 || cfg.PollSeconds > 30 || cfg.HeartbeatSeconds < 1 || cfg.HeartbeatSeconds > 5 || cfg.RequestTimeoutSeconds < 1 || cfg.RequestTimeoutSeconds > 10 {
 		return cfg, errors.New("worker polling or heartbeat bounds exceeded")
+	}
+	if cfg.MaxConcurrentJobs < 0 || cfg.MaxConcurrentJobs > model.MaxConcurrentJobs {
+		return cfg, fmt.Errorf("max_concurrent_jobs must be 1..%d", model.MaxConcurrentJobs)
 	}
 	return cfg, nil
 }

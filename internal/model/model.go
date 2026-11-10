@@ -43,6 +43,19 @@ func (k Kind) UsesSimulator() bool {
 	return k.Tests() || k == SimulatorScript
 }
 
+// Exclusive reports whether a job of kind k runs only while no other job
+// is active, and keeps every other job from starting while it runs: a
+// simulator_script job runs arbitrary repository shell in the shared job
+// account, and an ios_archive job's evidence requires the job account
+// stopped.
+func (k Kind) Exclusive() bool {
+	return k == SimulatorScript || k == IOSArchive
+}
+
+// MaxConcurrentJobs bounds the max_concurrent_jobs setting of the worker
+// and the controller; 1 is the single-job service.
+const MaxConcurrentJobs = 3
+
 // MaxTimeoutSeconds is the largest job timeout a recipe of kind k may allow.
 func (k Kind) MaxTimeoutSeconds() int {
 	switch k {
@@ -377,6 +390,9 @@ type Job struct {
 	CancelRequested bool            `json:"cancel_requested"`
 	Result          json.RawMessage `json:"result,omitempty"`
 	CleanupOK       bool            `json:"cleanup_ok"`
+	// Lane is the 1-based concurrency lane the controller assigned when it
+	// claimed the job; 0 for a job never claimed, or claimed before lanes.
+	Lane int `json:"lane,omitempty"`
 	// ReleaseProvenance is an ios_archive job's admission-time
 	// default-branch binding; other jobs have none.
 	ReleaseProvenance *ReleaseProvenance `json:"release_provenance,omitempty"`

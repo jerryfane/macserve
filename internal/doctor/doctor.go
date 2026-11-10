@@ -731,15 +731,16 @@ func (s *state) healthChecks() {
 	if h.AdmissionInconclusive != "" {
 		blockers = append(blockers, "worker_admission_inconclusive")
 	}
+	budget := health.ServiceBudget(s.lanes())
 	switch {
-	case h.AccountedBytes < 0 || h.AccountedBytes > health.ServiceBudgetBytes:
+	case h.AccountedBytes < 0 || h.AccountedBytes > budget:
 		blockers = append(blockers, "service_disk_budget_exceeded")
-		s.set("disk", Fail, fmt.Sprintf("macserve accounts %d GiB of its %d GiB budget", h.AccountedBytes>>30, health.ServiceBudgetBytes>>30), "Remove old jobs' evidence or wait for retention cleanup.")
-	case h.AccountedBytes > health.ServiceBudgetBytes-health.JobReservationBytes:
+		s.set("disk", Fail, fmt.Sprintf("macserve accounts %d GiB of its %d GiB budget", h.AccountedBytes>>30, budget>>30), "Remove old jobs' evidence or wait for retention cleanup.")
+	case h.AccountedBytes > budget-health.JobReservationBytes:
 		blockers = append(blockers, "service_disk_reservation_unavailable")
-		s.set("disk", Warn, fmt.Sprintf("macserve accounts %d GiB of its %d GiB budget; no room for one more job", h.AccountedBytes>>30, health.ServiceBudgetBytes>>30), "Wait for retention cleanup before the next build.")
+		s.set("disk", Warn, fmt.Sprintf("macserve accounts %d GiB of its %d GiB budget; no room for one more job", h.AccountedBytes>>30, budget>>30), "Wait for retention cleanup before the next build.")
 	default:
-		s.set("disk", Pass, fmt.Sprintf("macserve accounts %d GiB of its %d GiB budget", h.AccountedBytes>>30, health.ServiceBudgetBytes>>30), "")
+		s.set("disk", Pass, fmt.Sprintf("macserve accounts %d GiB of its %d GiB budget", h.AccountedBytes>>30, budget>>30), "")
 	}
 	if h.MemoryPressure {
 		blockers = append(blockers, "host_memory_pressure")
@@ -839,6 +840,23 @@ func (s *state) services() {
 	default:
 		s.set("svc.state", Fail, fmt.Sprintf("%d of %d services loaded, %d disabled", loaded, n, disabled), "Continue with macserve setup; it starts or stops them all together.")
 	}
+}
+
+// lanes is the controller's max_concurrent_jobs, which sizes its service
+// disk budget (health.ServiceBudget); 1 when controller.json is unreadable
+// or omits it.
+func (s *state) lanes() int {
+	data, err := s.p.ReadFile(Root+"/config/controller.json", maxConfig)
+	if err != nil {
+		return 1
+	}
+	var config struct {
+		MaxConcurrentJobs int `json:"max_concurrent_jobs"`
+	}
+	if json.Unmarshal(data, &config) != nil || config.MaxConcurrentJobs < 1 || config.MaxConcurrentJobs > model.MaxConcurrentJobs {
+		return 1
+	}
+	return config.MaxConcurrentJobs
 }
 
 // controllerProgram checks org.macserve.controller's ProgramArguments: it

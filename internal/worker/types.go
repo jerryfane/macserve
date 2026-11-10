@@ -71,6 +71,10 @@ type Options struct {
 	CleanupTimeout    time.Duration
 	MaxWorkspaceBytes int64
 	MaxArtifactBytes  int64
+	// Lanes is how many jobs Execute runs at once (max_concurrent_jobs,
+	// 1..model.MaxConcurrentJobs; 0 means 1). With 1 every job owns the
+	// whole job account, as before lanes existed.
+	Lanes int
 	// PlistJSON converts property list bytes to JSON for an ios_archive
 	// job's root-side signing manifest (bundle Info.plist and requested
 	// entitlements). New defaults it to /usr/bin/plutil run by the worker

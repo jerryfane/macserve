@@ -16,9 +16,19 @@ const (
 	ArtifactHeader = "X-Macserve-Artifact"
 )
 
+// Registration announces a worker epoch. Lanes is how many jobs the worker
+// runs at once (its max_concurrent_jobs); 0 means 1, the pre-lane worker.
 type Registration struct {
 	Epoch     string `json:"epoch"`
 	Quiescent bool   `json:"quiescent"`
+	Lanes     int    `json:"lanes,omitempty"`
+}
+
+// NextRequest is the body of POST /next. Running lists the job IDs the
+// worker is executing in any phase; the controller never offers one of
+// them again, so a free lane asks only for a job no lane holds.
+type NextRequest struct {
+	Running []string `json:"running,omitempty"`
 }
 
 type Lease struct {

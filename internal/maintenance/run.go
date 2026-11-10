@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/jerryfane/macserve/internal/controllerconfig"
 	"github.com/jerryfane/macserve/internal/health"
 	"github.com/jerryfane/macserve/internal/hostguard"
 	"github.com/jerryfane/macserve/internal/worker"
@@ -73,6 +74,11 @@ func Run(ctx context.Context, c Config) error {
 		var h health.Health
 		if err == nil {
 			interval = time.Duration(current.IntervalSeconds) * time.Second
+			// The log names the blockers the controller derives, whose disk
+			// budget depends on its max_concurrent_jobs.
+			if cc, ccErr := controllerconfig.LoadConfig(current.ControllerConfig); ccErr == nil {
+				report.lanes = cc.Lanes()
+			}
 			probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 			h, err = observe(probeCtx, current, bg)
 			cancel()

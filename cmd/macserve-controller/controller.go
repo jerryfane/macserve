@@ -68,7 +68,7 @@ func serveController(parent context.Context, config controllerconfig.Config) err
 	if err != nil {
 		return err
 	}
-	guard, err := health.NewGuard(health.GuardOptions{Root: config.Root, HealthFile: config.HealthFile, PauseFile: config.PauseFile, JobUID: config.JobUID, OwnerUID: config.OwnerUID, Profiles: qualified})
+	guard, err := health.NewGuard(health.GuardOptions{Root: config.Root, HealthFile: config.HealthFile, PauseFile: config.PauseFile, JobUID: config.JobUID, OwnerUID: config.OwnerUID, Profiles: qualified, Lanes: config.Lanes()})
 	if err != nil {
 		return err
 	}

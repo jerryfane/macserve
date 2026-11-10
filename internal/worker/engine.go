@@ -30,6 +30,10 @@ var (
 	ErrBusy     = errors.New("worker is busy")
 	ErrClosed   = errors.New("worker is closed")
 	ErrRecovery = errors.New("worker requires recovery")
+	// ErrDrain refuses a new job while other jobs run: an unattributed
+	// job-account process or an unverified job cleanup must first be judged
+	// by the full job-account quiesce, which runs only when no job runs.
+	ErrDrain = errors.New("worker draining: job-account cleanup must be verified when no job runs")
 	identifier  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 	sha40       = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	sha64       = regexp.MustCompile(`^[0-9a-f]{64}$`)
