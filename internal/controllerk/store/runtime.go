@@ -70,6 +70,14 @@ func (s *Store) RegisterWorker(ctx context.Context, epoch string) error {
 	return tx.Commit()
 }
 
+// EpochFenced reports whether epoch was replaced or fenced: RegisterWorker
+// refuses it (ErrLease).
+func (s *Store) EpochFenced(ctx context.Context, epoch string) (bool, error) {
+	var fenced bool
+	err := s.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM invalid_epochs WHERE epoch=?)", epoch).Scan(&fenced)
+	return fenced, err
+}
+
 // Fail atomically ends uncertain or controller-side preparation work. Uncertain
 // cleanup fences its epoch before releasing the job's lane.
 func (s *Store) Fail(ctx context.Context, id, lease string, state model.State, cleanupOK bool, reason string, now time.Time) error {

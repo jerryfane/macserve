@@ -331,7 +331,11 @@ every active job; when only capacity blockers cancel (`disk_emergency`, `service
 cancels the newest active job and re-evaluates after 30 s. A client, deadline or log-limit cancel touches its own job.
 A completion with `cleanup_ok=false`, or a lost heartbeat, fences the worker epoch: running siblings finish on their
 own leases, a prepared lease not yet delivered is interrupted, and nothing is claimed until the worker registers a new
-epoch after its idle check.
+epoch after its idle check. A worker that registers a new epoch (after a drain or a restart) likewise fences the earlier
+one: a lease of the earlier epoch never delivered is interrupted (`worker epoch fenced before lease delivery`) and its
+source removed, and the registration is accepted; one still preparing is cancelled and the registration answers 503
+until it has ended. A lease the earlier epoch received keeps its heartbeat and cleanup windows, and the registration
+answers 409 until they end it.
 
 ### Lowering concurrency without a sitting: `lanes.json`
 

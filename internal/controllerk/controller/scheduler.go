@@ -24,11 +24,8 @@ func (c *Controller) register(ctx context.Context, registration protocol.Registr
 	if c.closed {
 		return ErrNotReady
 	}
-	// One worker epoch serves every lane; it cannot change under a live job.
-	for _, a := range c.active {
-		if a.job.WorkerEpoch != registration.Epoch {
-			return store.ErrTransition
-		}
+	if err := c.fenceUndelivered(ctx, registration.Epoch); err != nil {
+		return err
 	}
 	if err := c.options.Store.RegisterWorker(ctx, registration.Epoch); err != nil {
 		return err
@@ -38,6 +35,92 @@ func (c *Controller) register(ctx context.Context, registration protocol.Registr
 	c.workerIdle = len(c.active) == 0
 	c.lastSeen = c.options.Now()
 	return nil
+}
+
+// fenceUndelivered ends, before a new worker epoch registers, every lease of
+// an older epoch never delivered. One worker epoch serves every lane and
+// cannot change under a live job, but a new epoch is a worker that recovered
+// quiescence holding no lease: the older epoch's worker is gone (restarted,
+// or drained). Its leases never delivered would otherwise hold their lanes,
+// and refuse this registration, until their deadline. A delivered lease is
+// work the worker may still clean up: it keeps its heartbeat and cleanup
+// windows, and the registration is refused (ErrTransition) until they end it.
+// A lease still preparing is cancelled and refuses with ErrNotReady until
+// prepare ends it. Callers hold c.mu, which is released around source removal.
+func (c *Controller) fenceUndelivered(ctx context.Context, epoch string) error {
+	var stale []*execution
+	for _, a := range c.active {
+		if a.job.WorkerEpoch == epoch {
+			continue
+		}
+		if a.offered {
+			return store.ErrTransition
+		}
+		stale = append(stale, a)
+	}
+	if len(stale) == 0 {
+		return nil
+	}
+	// A replaced epoch never registers again; it must not end the leases
+	// of the epoch that replaced it.
+	if fenced, err := c.options.Store.EpochFenced(ctx, epoch); err != nil {
+		return err
+	} else if fenced {
+		return store.ErrLease
+	}
+	// The older epoch gets no further lease, and prepare ends its
+	// preparations as fenced.
+	c.epoch = ""
+	preparing := false
+	for _, a := range stale {
+		a.cancel()
+		if !a.ready {
+			preparing = true
+			continue
+		}
+		job, err := c.options.Store.Get(ctx, a.job.ID)
+		if err != nil {
+			return err
+		}
+		c.endUndelivered(ctx, a, job, c.options.Now())
+		if c.closed {
+			return ErrNotReady
+		}
+	}
+	if preparing {
+		return ErrNotReady
+	}
+	// c.mu was released: refuse unless every older lease has ended.
+	for _, a := range c.active {
+		if a.job.WorkerEpoch != epoch {
+			return store.ErrTransition
+		}
+	}
+	return nil
+}
+
+// endUndelivered ends a's prepared lease never delivered: it removes the
+// source, then records why the lease was not delivered. Callers hold c.mu,
+// which is released around the removal.
+func (c *Controller) endUndelivered(ctx context.Context, a *execution, job model.Job, now time.Time) {
+	c.mu.Unlock()
+	cleanupErr := c.removeSource(job.ID)
+	c.mu.Lock()
+	if !c.holds(a) {
+		return
+	}
+	state, reason := model.Cancelled, "cancelled before lease delivery"
+	if job.Deadline != nil && !now.Before(*job.Deadline) {
+		state = model.TimedOut
+	} else if !job.CancelRequested {
+		state, reason = model.Interrupted, fencedBeforeDelivery
+	}
+	if c.options.Store.FailPreparation(ctx, job.ID, job.LeaseToken, state, cleanupErr == nil, reason, now) == nil {
+		c.release(a)
+		if cleanupErr != nil {
+			c.epoch = ""
+		}
+	}
 }
 
 // next hands out at most one lease per call. running lists the jobs the worker
@@ -215,9 +298,10 @@ func (c *Controller) monitor() {
 }
 
 // fencedBeforeDelivery ends a lease never delivered because its worker epoch
-// was fenced (a sibling lane's cleanup failed or its heartbeat was lost): the
-// draining worker can no longer ask for it, and it would hold its lane and
-// keep the worker's next epoch from registering until its deadline.
+// was fenced (a sibling lane's cleanup failed, its heartbeat was lost, or the
+// worker registered a new epoch): the draining or restarted worker can no
+// longer ask for it, and it would hold its lane and keep the worker's next
+// epoch from registering until its deadline.
 const fencedBeforeDelivery = "worker epoch fenced before lease delivery"
 
 func (c *Controller) checkActive(ctx context.Context) {
@@ -288,23 +372,7 @@ func (c *Controller) checkExecution(ctx context.Context, a *execution, now time.
 			c.mu.Unlock()
 			return
 		}
-		c.mu.Unlock()
-		cleanupErr := c.removeSource(job.ID)
-		c.mu.Lock()
-		if c.holds(a) {
-			state, reason := model.Cancelled, "cancelled before lease delivery"
-			if deadline {
-				state = model.TimedOut
-			} else if !job.CancelRequested {
-				state, reason = model.Interrupted, fencedBeforeDelivery
-			}
-			if c.options.Store.FailPreparation(ctx, job.ID, job.LeaseToken, state, cleanupErr == nil, reason, now) == nil {
-				c.release(a)
-				if cleanupErr != nil {
-					c.epoch = ""
-				}
-			}
-		}
+		c.endUndelivered(ctx, a, job, now)
 		c.mu.Unlock()
 		return
 	}
