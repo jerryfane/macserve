@@ -37,7 +37,7 @@ func TestWorkspaceCleanupClearsOnlyConfinedUserFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer dir.Close()
-	if err := walkWorkspace(context.Background(), dir, uint32(os.Geteuid()), false, uint32(os.Getegid()), true); err != nil {
+	if err := walkWorkspace(context.Background(), dir, uint32(os.Geteuid()), false, uint32(os.Getegid()), true, nil); err != nil {
 		t.Fatal(err)
 	}
 	var repaired, untouched unix.Stat_t
@@ -76,7 +76,7 @@ func TestWorkspaceImmutableHardlinkDoesNotModifyExternalInode(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer dir.Close()
-	if err := walkWorkspace(context.Background(), dir, uint32(os.Geteuid()), false, uint32(os.Getegid()), true); err == nil {
+	if err := walkWorkspace(context.Background(), dir, uint32(os.Geteuid()), false, uint32(os.Getegid()), true, nil); err == nil {
 		t.Fatal("modified immutable external hardlink instead of refusing cleanup")
 	}
 	var stat unix.Stat_t

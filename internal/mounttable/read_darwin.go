@@ -1,4 +1,4 @@
-package maintenance
+package mounttable
 
 import (
 	"errors"
@@ -6,9 +6,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// mountTable reads cached mount records (MNT_NOWAIT): it never asks a
+// Read returns the cached mount records (MNT_NOWAIT): it never asks a
 // filesystem, including a user-space FSKit server, for fresh statistics.
-func mountTable() ([]mountEntry, error) {
+func Read() ([]Entry, error) {
 	for range 4 {
 		n, err := unix.Getfsstat(nil, unix.MNT_NOWAIT)
 		if err != nil {
@@ -22,22 +22,23 @@ func mountTable() ([]mountEntry, error) {
 		if n == len(buf) {
 			continue // The table may have grown past the buffer.
 		}
-		mounts := make([]mountEntry, n)
+		mounts := make([]Entry, n)
 		for i := range mounts {
-			mounts[i] = mountEntryFromStatfs(&buf[i])
+			mounts[i] = FromStatfs(&buf[i])
 		}
 		return mounts, nil
 	}
 	return nil, errors.New("mount table changed while reading")
 }
 
-func mountEntryFromStatfs(s *unix.Statfs_t) mountEntry {
-	return mountEntry{
-		fsid:   uint64(s.Fsid.Val[0]),
-		owner:  s.Owner,
-		flags:  uint64(s.Flags),
-		fstype: unix.ByteSliceToString(s.Fstypename[:]),
-		on:     unix.ByteSliceToString(s.Mntonname[:]),
-		from:   unix.ByteSliceToString(s.Mntfromname[:]),
+// FromStatfs is the Entry of one struct statfs.
+func FromStatfs(s *unix.Statfs_t) Entry {
+	return Entry{
+		FSID:   uint64(s.Fsid.Val[0]),
+		Owner:  s.Owner,
+		Flags:  uint64(s.Flags),
+		FSType: unix.ByteSliceToString(s.Fstypename[:]),
+		On:     unix.ByteSliceToString(s.Mntonname[:]),
+		From:   unix.ByteSliceToString(s.Mntfromname[:]),
 	}
 }

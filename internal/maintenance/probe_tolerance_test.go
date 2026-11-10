@@ -36,8 +36,8 @@ func TestKeepLastValidOnlyForTimeoutsWithinLifetime(t *testing.T) {
 		{"permission failure", errors.New(`mutable census /Library/macserve/var: "controller/Library/Mail": operation not permitted`), valid, now, false},
 		// Studio, 2026-11-02, as a real build finished: the accepted
 		// CoreDevice devicefs changed during the census.
-		{"CoreDevice mount changed within lifetime", fmt.Errorf("mutable census /Users/macservejob: %q: %w", coreDeviceMountPoint, errCoreDeviceMountChanged), valid, now, true},
-		{"CoreDevice mount changed after expiry", fmt.Errorf("mutable census /Users/macservejob: %q: %w", coreDeviceMountPoint, errCoreDeviceMountChanged), valid, valid.ExpiresAt, false},
+		{"CoreDevice mount changed within lifetime", fmt.Errorf("mutable census /Users/macservejob: %q: %w", coreDeviceMountPoint, errAcceptedMountChanged), valid, now, true},
+		{"CoreDevice mount changed after expiry", fmt.Errorf("mutable census /Users/macservejob: %q: %w", coreDeviceMountPoint, errAcceptedMountChanged), valid, valid.ExpiresAt, false},
 		{"same text, not the race", errors.New(`mutable census /Users/macservejob: "Library/Developer/CoreDevice/DeviceFS": mutable mount table changed during census`), valid, now, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

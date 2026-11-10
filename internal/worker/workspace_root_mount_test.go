@@ -90,7 +90,7 @@ func TestWorkspaceWalksRefuseMountAfterOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	if err := workspaceBudget(root, 1<<40); !errors.Is(err, errWorkspaceMount) {
+	if err := workspaceBudget(root, 1<<40, nil); !errors.Is(err, errWorkspaceMount) {
 		t.Fatalf("budget walk = %v, want post-open mount refusal", err)
 	}
 	if digests, err := lockfiles(context.Background(), root, uint32(os.Geteuid()), false); !errors.Is(err, errWorkspaceMount) {
@@ -114,10 +114,10 @@ func TestWorkspaceBudgetChargesHardlinkedInodeOnce(t *testing.T) {
 	}
 	defer root.Close()
 	charged := allocatedBytes(t, root, "payload")
-	if err := workspaceBudget(root, charged); err != nil {
+	if err := workspaceBudget(root, charged, nil); err != nil {
 		t.Fatalf("hard link charged twice: %v", err)
 	}
-	if err := workspaceBudget(root, charged-1); err == nil {
+	if err := workspaceBudget(root, charged-1, nil); err == nil {
 		t.Fatal("hardlinked inode not charged")
 	}
 }

@@ -131,7 +131,7 @@ func Run(ctx context.Context, c Config) error {
 // other error, and any inconclusive probe once the last valid health has
 // expired, publishes invalid health.
 func keepLastValid(err error, last health.Health, now time.Time) bool {
-	inconclusive := errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errCoreDeviceMountChanged) || errors.Is(err, errCoexistingServiceRestarting)
+	inconclusive := errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errAcceptedMountChanged) || errors.Is(err, errCoexistingServiceRestarting)
 	return inconclusive && last.BoundaryValidated && last.ExpiresAt.After(now)
 }
 

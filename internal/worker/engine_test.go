@@ -654,10 +654,10 @@ func TestWorkspaceBudgetAndBadArchivePreventSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	charged := allocatedBytes(t, root, "oversize")
-	if err := workspaceBudget(root, charged-1); err == nil {
+	if err := workspaceBudget(root, charged-1, nil); err == nil {
 		t.Fatal("workspace oversize not detected")
 	}
-	if err := workspaceBudget(root, charged); err != nil {
+	if err := workspaceBudget(root, charged, nil); err != nil {
 		t.Fatal(err)
 	}
 }

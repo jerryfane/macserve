@@ -137,7 +137,7 @@ func inspect(ctx context.Context, c Config, bg *background) (Observation, error)
 	if err != nil {
 		return invalid, err
 	}
-	if cc.Root != "/Library/macserve/var/controller" || wc.Root != "/Library/macserve/var/broker" || wc.ExportRoot != "/Library/macserve/var/exports" || wc.WorkspaceRoot != "/Library/macserve/var/workspaces" || cc.HealthFile != "/Library/macserve/health/current.json" || cc.JobUID != wc.JobUID || cc.OwnerUID != wc.OwnerUID || cc.Socket != wc.Socket {
+	if cc.Root != "/Library/macserve/var/controller" || wc.Root != "/Library/macserve/var/broker" || wc.ExportRoot != "/Library/macserve/var/exports" || wc.WorkspaceRoot != workspaceRoot || cc.HealthFile != "/Library/macserve/health/current.json" || cc.JobUID != wc.JobUID || cc.OwnerUID != wc.OwnerUID || cc.Socket != wc.Socket {
 		return invalid, errors.New("unsupported maintenance deployment topology")
 	}
 	if err := hostguard.BrokerIdentity(wc.JobUID, wc.JobGID, wc.ControllerUID, wc.OwnerUID); err != nil {

@@ -36,7 +36,7 @@ func newCensusTracker(parent context.Context) *censusTracker {
 }
 
 func censusInconclusive(err error) bool {
-	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, errCoreDeviceMountChanged)
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, errAcceptedMountChanged)
 }
 
 // account returns the accounted bytes for one probe.

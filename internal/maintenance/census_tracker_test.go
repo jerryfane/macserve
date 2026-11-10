@@ -190,7 +190,7 @@ func TestInconclusiveCensusIsNeverReused(t *testing.T) {
 	if _, err := probe(tr, 10*time.Millisecond); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal(err)
 	}
-	finish(t, tr, f, censusOutcome{bytes: 5, err: errCoreDeviceMountChanged})
+	finish(t, tr, f, censusOutcome{bytes: 5, err: errAcceptedMountChanged})
 	if _, err := probe(tr, 10*time.Millisecond); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("got %v; an inconclusive census is neither a finding nor evidence", err)
 	}
