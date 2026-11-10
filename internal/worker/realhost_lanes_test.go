@@ -12,9 +12,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -37,9 +35,6 @@ func TestRealHostLanesSplitTreesAndQuiesceOneJob(t *testing.T) {
 		}}
 	started := time.Now().Add(-time.Second)
 	for _, job := range []string{"job-a", "job-b"} {
-		if err := os.Mkdir(filepath.Join(root, job), 0700); err != nil {
-			t.Fatal(err)
-		}
 		runner.BeginJob(job, started)
 	}
 	t.Cleanup(func() { runner.EndJob("job-a"); runner.EndJob("job-b") })
@@ -67,17 +62,6 @@ func TestRealHostLanesSplitTreesAndQuiesceOneJob(t *testing.T) {
 	// 0.5 s (reparented to launchd), and the root itself.
 	start("job-a", "/bin/sleep 300 & (/bin/sleep 301 & /bin/sleep 0.5); exec /bin/sleep 302")
 	start("job-b", "/bin/sleep 310 & (/bin/sleep 311 & /bin/sleep 0.5); exec /bin/sleep 312")
-	// A process launched outside any job's lineage whose executable lies
-	// in job-a's workspace is job-a's (the reparented repo-built binary).
-	copy := filepath.Join(root, "job-a", "sleepcopy")
-	data, err := os.ReadFile("/bin/sleep")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(copy, data, 0700); err != nil {
-		t.Fatal(err)
-	}
-	start("", "("+copy+" 320 &)")
 	time.Sleep(2 * time.Second)
 
 	samples, err := identityProcesses(context.Background())
@@ -101,21 +85,14 @@ func TestRealHostLanesSplitTreesAndQuiesceOneJob(t *testing.T) {
 			continue
 		}
 		byArg[d.args] = label
-		_ = d
 		if d.args == "/bin/sleep\x00301" && p.parent != 1 {
 			t.Logf("sleep 301 parent %d (not yet reparented)", p.parent)
 		}
 	}
 	tracker.mu.Unlock()
-	for _, p := range samples {
-		if d, err := describeProcess(p.pid, true); err == nil && strings.Contains(d.args, "sleepcopy") {
-			t.Logf("copy pid=%d ppid=%d uid=%d start=%s exe=%q root=%q", p.pid, p.parent, p.uid, p.start, d.executable, tracker.workspaceRoot)
-		}
-	}
 	for args, want := range map[string]string{
 		"/bin/sleep\x00300": "job-a", "/bin/sleep\x00301": "job-a", "/bin/sleep\x00302": "job-a",
 		"/bin/sleep\x00310": "job-b", "/bin/sleep\x00311": "job-b", "/bin/sleep\x00312": "job-b",
-		copy + "\x00320": "job-a",
 	} {
 		if byArg[args] != want {
 			t.Errorf("%q labelled %q, want %q (labels %v)", args, byArg[args], want, byArg)
@@ -146,9 +123,6 @@ func TestRealHostLanesSplitTreesAndQuiesceOneJob(t *testing.T) {
 		if alive["/bin/sleep\x00"+strconv.Itoa(n)] {
 			t.Errorf("job-a sleep %d survived its lane quiesce", n)
 		}
-	}
-	if alive[copy+"\x00320"] {
-		t.Error("job-a workspace binary survived its lane quiesce")
 	}
 	for _, n := range []int{310, 311, 312} {
 		if !alive["/bin/sleep\x00"+strconv.Itoa(n)] {

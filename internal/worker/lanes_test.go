@@ -360,3 +360,23 @@ func must[T any](v T, err error) T {
 	}
 	return v
 }
+
+// A process outside any job's lineage (reparented before it was first seen)
+// whose executable lies in a job's workspace is that job's; a path in a
+// sibling's workspace with the same prefix is not.
+func TestLaneWorkspaceExecutableSeeds(t *testing.T) {
+	const broker, uid = 100, 600
+	now := time.Now().Unix()
+	tracker := trackerFor(broker, uid, map[int]processDescription{
+		500: {executable: "/ws/job-a/derived-data/Build/App"},
+		501: {executable: "/ws/job-ab/derived-data/Build/App"},
+	})
+	tracker.begin("job-a", time.Unix(now-10, 0))
+	tracker.update([]processSample{laneSample(500, 1, uid, now), laneSample(501, 1, uid, now)})
+	if got := tracker.labels[processInstance{500, strconv.FormatInt(now, 10) + ":0"}]; got != "job-a" {
+		t.Fatalf("workspace binary label %q", got)
+	}
+	if label, ok := tracker.labels[processInstance{501, strconv.FormatInt(now, 10) + ":0"}]; ok {
+		t.Fatalf("prefix-sharing workspace labelled %q", label)
+	}
+}
