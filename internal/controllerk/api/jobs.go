@@ -103,6 +103,10 @@ func jobView(job model.Job) map[string]any {
 	if job.State == model.Failed || job.State == model.TimedOut || job.State == model.Interrupted || job.State == model.Expired {
 		view["failure_category"] = job.State
 	}
+	// The concurrency lane a claim assigned; none before a claim or lanes.
+	if job.Lane > 0 {
+		view["lane"] = job.Lane
+	}
 	// Why cancellation was requested; the receipt never carries it.
 	if job.CancelReason != nil {
 		view["cancel_reason"] = job.CancelReason
@@ -248,7 +252,7 @@ func (h *handler) capabilities(w http.ResponseWriter, r *http.Request, p control
 	if status.Service.Quarantined {
 		blocked = append(blocked, "quarantined")
 	}
-	body := map[string]any{"api_version": "v1", "service_version": h.ServiceVersion, "repositories": p.Repositories, "profiles": items, "worker_ready": status.WorkerReady, "gui_ready": status.WorkerReady && status.Gate.Ready, "quiescent": status.Quiescent, "blocked_by": blocked, "paused": status.Service.Paused}
+	body := map[string]any{"api_version": "v1", "service_version": h.ServiceVersion, "repositories": p.Repositories, "profiles": items, "worker_ready": status.WorkerReady, "gui_ready": status.WorkerReady && status.Gate.Ready, "quiescent": status.Quiescent, "blocked_by": blocked, "paused": status.Service.Paused, "max_concurrent_jobs": status.MaxConcurrentJobs}
 	if templates != nil {
 		body["templates"] = templates
 	}

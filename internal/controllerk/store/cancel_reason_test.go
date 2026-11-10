@@ -115,14 +115,14 @@ func TestCancelReasonMigrationKeepsVersion5Jobs(t *testing.T) {
 	if _, err := s.Cancel(ctx, cancelledOld.ID, "old cancel", model.CancelReason{Source: model.CancelClient}, testNow); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.ExecContext(ctx, "ALTER TABLE jobs DROP COLUMN cancel_reason; PRAGMA user_version=5;"); err != nil {
+	if _, err := s.db.ExecContext(ctx, undoLaneSchema+"ALTER TABLE jobs DROP COLUMN cancel_reason; PRAGMA user_version=5;"); err != nil {
 		t.Fatal(err)
 	}
 	requireError(t, s.Close(), nil)
 	s = openStore(t, path, Options{})
 	var version int
 	requireError(t, s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version), nil)
-	if version != 6 {
+	if version != SchemaVersion {
 		t.Fatalf("user_version = %d", version)
 	}
 	if got := getJob(t, s, open.ID); got.CancelReason != nil || !reflect.DeepEqual(got, open) {

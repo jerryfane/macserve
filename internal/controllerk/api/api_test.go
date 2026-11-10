@@ -230,7 +230,7 @@ func TestLogsPagingTerminalAndStreamResume(t *testing.T) {
 	f := setup(t)
 	job := f.submit(t, "logs")
 	ctx := context.Background()
-	job, err := f.db.Claim(ctx, "api-test", testTime)
+	job, err := f.db.Claim(ctx, "api-test", testTime, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,7 +322,7 @@ func TestResultsRangesReceiptAndControl(t *testing.T) {
 			t.Fatalf("early %s: %d", suffix, w.Code)
 		}
 	}
-	claimed, err := f.db.Claim(ctx, "epoch", testTime)
+	claimed, err := f.db.Claim(ctx, "epoch", testTime, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -404,7 +404,7 @@ func TestExpiredLogPagesAndStreamsReturnGoneWithoutLosingJob(t *testing.T) {
 	f := setup(t)
 	f.submit(t, "expired-logs")
 	ctx := context.Background()
-	job, err := f.db.Claim(ctx, "api-test", testTime)
+	job, err := f.db.Claim(ctx, "api-test", testTime, 1)
 	if err != nil {
 		t.Fatal(err)
 	}

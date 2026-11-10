@@ -96,7 +96,7 @@ func serveController(parent context.Context, config controllerconfig.Config) err
 		return err
 	}
 	defer exporter.Close()
-	controllerOptions := controller.Options{Root: config.Root, Socket: config.Socket, BrokerUID: 0, Store: db, Source: exporter, Gate: guard.Check, BeforeDispatch: integrations.beforeDispatch, Seal: integrations.seal, PruneReceipts: integrations.pruneReceipts}
+	controllerOptions := controller.Options{Root: config.Root, Socket: config.Socket, Lanes: config.Lanes(), BrokerUID: 0, Store: db, Source: exporter, Gate: guard.Check, BeforeDispatch: integrations.beforeDispatch, Seal: integrations.seal, PruneReceipts: integrations.pruneReceipts}
 	signerKey, err := signerOptions(config, &controllerOptions)
 	if err != nil {
 		return err

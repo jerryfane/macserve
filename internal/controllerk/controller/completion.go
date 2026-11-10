@@ -59,14 +59,15 @@ func (c *Controller) complete(ctx context.Context, job model.Job, result worker.
 		return nil
 	}
 	c.mu.Lock()
-	if c.active == nil || c.active.job.ID != job.ID || !c.active.offered {
+	a := c.execution(job.ID)
+	if a == nil || !a.offered {
 		c.mu.Unlock()
 		return store.ErrLease
 	}
-	if c.active.finalizingSince.IsZero() {
-		c.active.finalizingSince = c.options.Now()
+	if a.finalizingSince.IsZero() {
+		a.finalizingSince = c.options.Now()
 	}
-	source := c.active.source.Source
+	source := a.source.Source
 	c.mu.Unlock()
 	normalized, err := c.verifyResult(ctx, job, result, source)
 	if err != nil {
@@ -112,10 +113,12 @@ func (c *Controller) complete(ctx context.Context, job model.Job, result worker.
 		}
 		c.mu.Lock()
 		err = c.options.Store.Finish(ctx, job.ID, job.LeaseToken, normalized.State, encoded.Bytes(), normalized.CleanupOK, normalized.Reason, c.options.Now())
-		if err == nil && c.active != nil && c.active.job.ID == job.ID {
-			c.active.cancel()
-			c.active = nil
+		if a := c.execution(job.ID); err == nil && a != nil {
+			a.cancel()
+			c.release(a)
 			c.workerIdle = false
+			// Failed cleanup fences new claims for this epoch; sibling lanes
+			// finish on their own leases while the worker drains.
 			if !normalized.CleanupOK {
 				c.epoch = ""
 			}
@@ -182,6 +185,10 @@ func (c *Controller) verifyResult(ctx context.Context, job model.Job, result wor
 	}
 	if result.StartedAt.IsZero() || result.FinishedAt.IsZero() || result.FinishedAt.Before(result.StartedAt) || result.StartedAt.Before(*job.StartedAt) || result.FinishedAt.After(c.options.Now().Add(time.Minute)) {
 		reject("invalid execution timestamps")
+	}
+	// The worker's lane record names the lane this controller assigned.
+	if l := result.Concurrency; l != nil && job.Lane > 0 && l.Lane != job.Lane {
+		reject("lane record mismatch")
 	}
 	manifest, err := c.uploaded(job.ID)
 	if err != nil {

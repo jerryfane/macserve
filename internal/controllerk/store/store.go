@@ -1,4 +1,5 @@
-// Package store owns the durable, single-worker SQLite queue.
+// Package store owns the durable, single-worker SQLite queue, whose jobs run
+// in up to model.MaxConcurrentJobs lanes of that worker.
 package store
 
 import (
@@ -148,7 +149,7 @@ func (s *Store) Close() error { return s.db.Close() }
 
 // SchemaVersion is the SQLite user_version this build migrates to and the
 // newest it opens.
-const SchemaVersion = 6
+const SchemaVersion = 7
 
 func (s *Store) initialize(ctx context.Context) error {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -190,6 +191,11 @@ func (s *Store) initialize(ctx context.Context) error {
 	}
 	if version < 6 {
 		if _, err := tx.ExecContext(ctx, cancelReasonSchema); err != nil {
+			return err
+		}
+	}
+	if version < 7 {
+		if _, err := tx.ExecContext(ctx, laneSchema); err != nil {
 			return err
 		}
 	}
@@ -252,7 +258,7 @@ CREATE TABLE logs (
 PRAGMA user_version=1;
 `
 
-const jobColumns = `id,principal,request,profile,profile_digest,request_digest,state,reason,created_at,updated_at,started_at,finished_at,deadline,worker_epoch,lease_token,cancel_requested,result,cleanup_ok,release_provenance,cancel_reason`
+const jobColumns = `id,principal,request,profile,profile_digest,request_digest,state,reason,created_at,updated_at,started_at,finished_at,deadline,worker_epoch,lease_token,cancel_requested,result,cleanup_ok,release_provenance,cancel_reason,IFNULL(lane,0)`
 
 type scanner interface{ Scan(...any) error }
 
@@ -265,7 +271,7 @@ func scanJobSequence(row scanner, sequence *int64) (model.Job, error) {
 	var request, profile, result, provenance, cancelReason []byte
 	var created, updated int64
 	var started, finished, deadline sql.NullInt64
-	dest := []any{sequence, &job.ID, &job.Principal, &request, &profile, &job.ProfileDigest, &job.RequestDigest, &job.State, &job.Reason, &created, &updated, &started, &finished, &deadline, &job.WorkerEpoch, &job.LeaseToken, &job.CancelRequested, &result, &job.CleanupOK, &provenance, &cancelReason}
+	dest := []any{sequence, &job.ID, &job.Principal, &request, &profile, &job.ProfileDigest, &job.RequestDigest, &job.State, &job.Reason, &created, &updated, &started, &finished, &deadline, &job.WorkerEpoch, &job.LeaseToken, &job.CancelRequested, &result, &job.CleanupOK, &provenance, &cancelReason, &job.Lane}
 	if sequence == nil {
 		dest = dest[1:]
 	}

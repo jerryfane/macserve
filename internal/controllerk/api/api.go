@@ -203,7 +203,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err)
 			return
 		}
-		writeJSON(w, 200, map[string]any{"generation": state.Generation, "active_job": status.ActiveJob, "service": state})
+		writeJSON(w, 200, map[string]any{"generation": state.Generation, "active_jobs": status.ActiveJobs, "service": state})
 	case path == "/v1/admin/pause" && r.Method == http.MethodDelete:
 		state, err := h.Store.Resume(r.Context())
 		if err != nil {

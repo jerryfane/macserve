@@ -40,7 +40,7 @@ func TestSourceDebtSurvivesPruningReopenAndWorkerAcknowledgment(t *testing.T) {
 		t.Fatalf("pruning lost source cleanup ID: %v %v", pending, err)
 	}
 	queued := enqueueJob(t, s, "owner", "waiting", testNow.Add(2*time.Hour))
-	_, err = s.Claim(ctx, "epoch-b", testNow.Add(2*time.Hour))
+	_, err = s.Claim(ctx, "epoch-b", testNow.Add(2*time.Hour), 1)
 	requireError(t, err, ErrNoJob)
 	requireError(t, s.ConfirmSourceCleanup(ctx, job.ID), nil)
 	claimed := claimJob(t, s, "epoch-b", testNow.Add(2*time.Hour))
@@ -82,7 +82,7 @@ func TestSourceDebtMigrationRecoversPreviouslyUncertainExports(t *testing.T) {
 	// Emulate the pre-ledger database, including worker registration having
 	// already cleared its overloaded quarantine bit.
 	requireError(t, s.RegisterWorker(ctx, "epoch-b"), nil)
-	_, err := s.db.ExecContext(ctx, "DROP TABLE signings; DROP TABLE source_cleanup; ALTER TABLE jobs DROP COLUMN release_provenance; ALTER TABLE jobs DROP COLUMN cancel_reason; PRAGMA user_version=2;")
+	_, err := s.db.ExecContext(ctx, undoLaneSchema+"DROP TABLE signings; DROP TABLE source_cleanup; ALTER TABLE jobs DROP COLUMN release_provenance; ALTER TABLE jobs DROP COLUMN cancel_reason; PRAGMA user_version=2;")
 	requireError(t, err, nil)
 	requireError(t, s.Close(), nil)
 	s = openStore(t, path, Options{})

@@ -287,7 +287,7 @@ func (f *fixture) add(comments ...githubapi.Comment) {
 func (f *fixture) finish(t *testing.T, state model.State, result json.RawMessage) {
 	t.Helper()
 	ctx := context.Background()
-	job, err := f.s.Claim(ctx, "worker-epoch", f.options.Now())
+	job, err := f.s.Claim(ctx, "worker-epoch", f.options.Now(), 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -473,7 +473,7 @@ func TestHTTPForkAndUnlistedAuthorNeverEnqueue(t *testing.T) {
 			if run.JobID != "" || check.Conclusion != "action_required" || packet.JobID != "" || len(packet.Requests) != 0 {
 				t.Fatalf("ineligible head admitted or cleared gate: %+v %+v %+v", run, check, packet)
 			}
-			if _, err := f.s.Claim(context.Background(), "epoch", f.options.Now()); !errors.Is(err, store.ErrNoJob) {
+			if _, err := f.s.Claim(context.Background(), "epoch", f.options.Now(), 1); !errors.Is(err, store.ErrNoJob) {
 				t.Fatalf("ineligible code became claimable: %v", err)
 			}
 		})
@@ -521,7 +521,7 @@ func TestHTTPSignedSuccessPreservesCanonicalReceiptAndAttempt(t *testing.T) {
 	f := newFixture(t)
 	f.poll(t)
 	ctx := context.Background()
-	job, err := f.s.Claim(ctx, "worker-epoch", f.options.Now())
+	job, err := f.s.Claim(ctx, "worker-epoch", f.options.Now(), 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -696,7 +696,7 @@ func TestHTTPDispatchTransientRetryAndOneShotPolling(t *testing.T) {
 		t.Fatalf("transient active revalidation cancelled eligible work: %+v %v", stillQueued, err)
 	}
 	f.finish(t, model.Failed, json.RawMessage(`{}`))
-	if _, err = f.s.Claim(ctx, "worker-epoch", f.options.Now()); !errors.Is(err, store.ErrNoJob) {
+	if _, err = f.s.Claim(ctx, "worker-epoch", f.options.Now(), 1); !errors.Is(err, store.ErrNoJob) {
 		t.Fatalf("transient retry duplicated execution: %v", err)
 	}
 }

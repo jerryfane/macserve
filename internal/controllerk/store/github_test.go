@@ -36,7 +36,7 @@ func TestGitHubAdmissionRollbackNeverExposesUnlinkedJob(t *testing.T) {
 		t.Fatal("injected provenance failure admitted work")
 	}
 	other := openStore(t, path, Options{})
-	if _, err := other.Claim(ctx, "epoch", testNow); !errors.Is(err, ErrNoJob) {
+	if _, err := other.Claim(ctx, "epoch", testNow, 1); !errors.Is(err, ErrNoJob) {
 		t.Fatalf("partial admission became claimable: %v", err)
 	}
 	var count int
@@ -50,7 +50,7 @@ func TestGitHubAdmissionRollbackNeverExposesUnlinkedJob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	job, err := other.Claim(ctx, "epoch", testNow)
+	job, err := other.Claim(ctx, "epoch", testNow, 1)
 	if err != nil {
 		t.Fatal(err)
 	}

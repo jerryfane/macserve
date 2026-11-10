@@ -32,6 +32,7 @@ func (e *emptyLogExecutor) Recover(context.Context) error               { return
 func (e *emptyLogExecutor) ArtifactPath(string, string) (string, error) { return e.file, nil }
 func (e *emptyLogExecutor) RemoveExport(string) error                   { close(e.acknowledged); return nil }
 func (e *emptyLogExecutor) VerifiedTree(string) string                  { return "" }
+func (e *emptyLogExecutor) LaneReady(context.Context) error             { return nil }
 func (e *emptyLogExecutor) Execute(ctx context.Context, job model.Job, source worker.Source, input io.Reader, sink worker.Sink) (worker.Result, error) {
 	if err := sink.Stage(model.Running); err != nil {
 		return worker.Result{}, err

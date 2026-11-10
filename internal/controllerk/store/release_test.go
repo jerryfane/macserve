@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -123,13 +124,13 @@ func TestReleaseMigrationKeepsVersion3Jobs(t *testing.T) {
 	ctx := context.Background()
 	s, path := newStore(t, Options{})
 	old := enqueueJob(t, s, "principal", "old", testNow)
-	_, err := s.db.ExecContext(ctx, "DROP TABLE signings; ALTER TABLE jobs DROP COLUMN release_provenance; ALTER TABLE jobs DROP COLUMN cancel_reason; PRAGMA user_version=3;")
+	_, err := s.db.ExecContext(ctx, undoLaneSchema+"DROP TABLE signings; ALTER TABLE jobs DROP COLUMN release_provenance; ALTER TABLE jobs DROP COLUMN cancel_reason; PRAGMA user_version=3;")
 	requireError(t, err, nil)
 	requireError(t, s.Close(), nil)
 	s = openStore(t, path, Options{})
 	var version int
 	requireError(t, s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version), nil)
-	if version != 6 {
+	if version != SchemaVersion {
 		t.Fatalf("user_version = %d", version)
 	}
 	if got := getJob(t, s, old.ID); got.ReleaseProvenance != nil || !reflect.DeepEqual(got, old) {
@@ -139,11 +140,12 @@ func TestReleaseMigrationKeepsVersion3Jobs(t *testing.T) {
 	if err != nil || job.ReleaseProvenance == nil || job.ReleaseProvenance.RepositoryID != 12345 {
 		t.Fatalf("archive after migration: %+v %v", job, err)
 	}
-	if _, err := s.db.ExecContext(ctx, "PRAGMA user_version=7"); err != nil {
+	future := SchemaVersion + 1
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version=%d", future)); err != nil {
 		t.Fatal(err)
 	}
 	requireError(t, s.Close(), nil)
-	if _, err := Open(path, Options{}); err == nil || !strings.Contains(err.Error(), "unsupported store schema version 7") {
+	if _, err := Open(path, Options{}); err == nil || !strings.Contains(err.Error(), fmt.Sprintf("unsupported store schema version %d", future)) {
 		t.Fatalf("future schema opened: %v", err)
 	}
 }

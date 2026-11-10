@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/jerryfane/macserve/internal/controllerk/store"
@@ -95,12 +96,17 @@ func (c *Controller) handler() http.Handler {
 		respond(w, r, nil, err)
 	})
 	mux.HandleFunc("POST "+protocol.Prefix+"/next", func(w http.ResponseWriter, r *http.Request) {
-		var empty struct{}
-		if err := decodeJSON(r.Body, 4096, &empty); err != nil {
+		// A worker before lanes sends an empty object.
+		var request protocol.NextRequest
+		err := decodeJSON(r.Body, 4096, &request)
+		if err == nil && (len(request.Running) > model.MaxConcurrentJobs || slices.ContainsFunc(request.Running, func(id string) bool { return !safeID(id) })) {
+			err = store.ErrInvalid
+		}
+		if err != nil {
 			respond(w, r, nil, err)
 			return
 		}
-		lease, err := c.next(r.Context(), r.Header.Get(protocol.EpochHeader))
+		lease, err := c.next(r.Context(), r.Header.Get(protocol.EpochHeader), request.Running)
 		if lease == nil {
 			respond(w, r, nil, err)
 		} else {
@@ -162,11 +168,12 @@ func (c *Controller) heartbeat(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return protocol.Heartbeat{}, err
 		}
-		if c.active == nil || c.active.job.ID != job.ID || !c.active.offered || job.Deadline == nil {
+		a := c.execution(job.ID)
+		if a == nil || !a.offered || job.Deadline == nil {
 			return protocol.Heartbeat{}, store.ErrLease
 		}
-		c.active.heartbeat = c.options.Now()
-		c.lastSeen = c.active.heartbeat
+		a.heartbeat = c.options.Now()
+		c.lastSeen = a.heartbeat
 		return protocol.Heartbeat{Cancel: c.closed || job.CancelRequested || !c.options.Now().Before(*job.Deadline), Deadline: *job.Deadline}, nil
 	}()
 	respond(w, r, value, err)
@@ -189,11 +196,12 @@ func (c *Controller) stage(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		if c.active == nil || c.active.job.ID != job.ID || !c.active.offered {
+		a := c.execution(job.ID)
+		if a == nil || !a.offered {
 			return store.ErrLease
 		}
-		if value.State == model.Finalizing && c.active.finalizingSince.IsZero() {
-			c.active.finalizingSince = c.options.Now()
+		if value.State == model.Finalizing && a.finalizingSince.IsZero() {
+			a.finalizingSince = c.options.Now()
 		}
 		if job.State == value.State {
 			return nil
@@ -219,7 +227,7 @@ func (c *Controller) logs(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		if c.active == nil || c.active.job.ID != job.ID || !c.active.offered {
+		if a := c.execution(job.ID); a == nil || !a.offered {
 			return store.ErrLease
 		}
 		if value.Stream != "stdout" && value.Stream != "stderr" {
@@ -237,12 +245,16 @@ func (c *Controller) logs(w http.ResponseWriter, r *http.Request) {
 func (c *Controller) serveSource(w http.ResponseWriter, r *http.Request) {
 	c.mu.Lock()
 	job, err := c.requestJob(r, false)
-	if err == nil && (c.active == nil || c.active.job.ID != job.ID || !c.active.ready || !c.active.offered || job.CancelRequested) {
+	var a *execution
+	if err == nil {
+		a = c.execution(job.ID)
+	}
+	if err == nil && (a == nil || !a.ready || !a.offered || job.CancelRequested) {
 		err = store.ErrLease
 	}
 	var name string
 	if err == nil {
-		name = c.active.source.Path
+		name = a.source.Path
 	}
 	c.mu.Unlock()
 	if err != nil {

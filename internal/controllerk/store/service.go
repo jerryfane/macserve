@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"time"
 
 	"github.com/jerryfane/macserve/internal/model"
@@ -21,7 +20,7 @@ func (s *Store) ServiceState(ctx context.Context) (model.ServiceState, error) {
 	return scanService(s.db.QueryRowContext(ctx, "SELECT "+serviceColumns+" FROM service_state WHERE singleton=1"))
 }
 
-// Pause stops dispatch; mode cancel_active also cancels the active job, its
+// Pause stops dispatch; mode cancel_active also cancels every active job, each
 // cancel reason naming principal, the administrator who paused.
 func (s *Store) Pause(ctx context.Context, reason, mode, principal string, now time.Time) (model.ServiceState, error) {
 	cause := model.CancelReason{Source: model.CancelAdminPause, Principal: principal, Detail: reason}
@@ -38,13 +37,14 @@ func (s *Store) Pause(ctx context.Context, reason, mode, principal string, now t
 		return model.ServiceState{}, err
 	}
 	if mode == "cancel_active" {
-		job, err := scanJob(tx.QueryRowContext(ctx, "SELECT "+jobColumns+" FROM jobs WHERE state IN ("+activeStates+")"))
-		if err == nil {
+		running, err := activeJobs(ctx, tx)
+		if err != nil {
+			return model.ServiceState{}, err
+		}
+		for _, job := range running {
 			if err := cancelTx(ctx, tx, job, reason, cause, now); err != nil {
 				return model.ServiceState{}, err
 			}
-		} else if !errors.Is(err, ErrNotFound) {
-			return model.ServiceState{}, err
 		}
 	}
 	state, err := scanService(tx.QueryRowContext(ctx, "SELECT "+serviceColumns+" FROM service_state WHERE singleton=1"))
@@ -86,9 +86,10 @@ func quarantine(ctx context.Context, tx *sql.Tx, epoch, reason string) error {
 	return err
 }
 
-// Recover interrupts rather than resumes an old execution. Its epoch remains
-// invalid even after metadata retention expires or a later epoch is acknowledged.
-// Call only at controller startup after excluding another live controller.
+// Recover interrupts rather than resumes every old execution. Their epochs
+// remain invalid even after metadata retention expires or a later epoch is
+// acknowledged. Call only at controller startup after excluding another live
+// controller.
 func (s *Store) Recover(ctx context.Context, now time.Time) error {
 	if !validTime(now) {
 		return ErrInvalid
@@ -98,19 +99,21 @@ func (s *Store) Recover(ctx context.Context, now time.Time) error {
 		return err
 	}
 	defer tx.Rollback()
-	job, err := scanJob(tx.QueryRowContext(ctx, "SELECT "+jobColumns+" FROM jobs WHERE state IN ("+activeStates+")"))
-	if errors.Is(err, ErrNotFound) {
+	running, err := activeJobs(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if len(running) == 0 {
 		return nil
 	}
-	if err != nil {
-		return err
-	}
-	if err := quarantine(ctx, tx, job.WorkerEpoch, "interrupted worker requires quiescence verification"); err != nil {
-		return err
-	}
-	_, err = tx.ExecContext(ctx, "UPDATE jobs SET state='interrupted',reason='controller recovery',cleanup_ok=0,updated_at=?,finished_at=? WHERE id=?", now.UnixNano(), now.UnixNano(), job.ID)
-	if err != nil {
-		return err
+	for _, job := range running {
+		if err := quarantine(ctx, tx, job.WorkerEpoch, "interrupted worker requires quiescence verification"); err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, "UPDATE jobs SET state='interrupted',reason='controller recovery',cleanup_ok=0,updated_at=?,finished_at=? WHERE id=?", now.UnixNano(), now.UnixNano(), job.ID)
+		if err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
