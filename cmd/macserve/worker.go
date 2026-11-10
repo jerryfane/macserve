@@ -17,6 +17,7 @@ import (
 	"syscall"
 
 	"github.com/jerryfane/macserve/internal/daemonlog"
+	"github.com/jerryfane/macserve/internal/health"
 	"github.com/jerryfane/macserve/internal/hostguard"
 	"github.com/jerryfane/macserve/internal/worker"
 	"github.com/jerryfane/macserve/internal/workerclient"
@@ -65,6 +66,7 @@ func runWorker(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "macserve worker: %v\n", err)
 		return 1
 	}
+	config.MaxConcurrentJobs = health.EffectiveLanes(config.Lanes())
 	engine, err := worker.New(config.EngineOptions())
 	if err != nil {
 		fmt.Fprintf(stderr, "macserve worker: %v\n", err)

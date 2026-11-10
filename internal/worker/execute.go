@@ -113,17 +113,24 @@ func (b *boundedBuffer) ReadFrom(r io.Reader) (int64, error) {
 
 func (e *Engine) Execute(parent context.Context, job model.Job, source Source, archive io.Reader, sink Sink) (result Result, returned error) {
 	result = Result{State: model.Failed, Source: source, StartedAt: e.options.Now()}
-	if !e.mu.TryLock() {
-		return result, ErrBusy
+	solo, err := e.enter(parent, job)
+	if err != nil {
+		return result, err
 	}
-	defer e.mu.Unlock()
-	if e.closed {
-		return result, ErrClosed
+	defer e.leave(job.ID)
+	e.startRecording(job.ID, &result)
+	defer e.stopRecording(job.ID)
+	e.setVerified(job.ID, "")
+	result.Concurrency = &Concurrency{Lane: max(job.Lane, 1), MaxLanes: e.lanes(), OverlappedJobs: []Overlap{}, Attribution: AttributionAccount, IdleVerdict: IdleDeferred}
+	if e.laneMode() {
+		// Every job is attributed from its start: a sibling may start
+		// beside it at any time.
+		result.Concurrency.Attribution = AttributionLineage
+		lanes := e.laneRunner()
+		lanes.BeginJob(job.ID, result.StartedAt)
+		defer lanes.EndJob(job.ID)
 	}
-	e.recording = &result
-	defer func() { e.recording = nil }()
-	e.verified.job, e.verified.tree = job.ID, ""
-	job, err := validateJob(job, source)
+	job, err = validateJob(job, source)
 	if err != nil {
 		return result, err
 	}
@@ -141,10 +148,15 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 	if err != nil {
 		return result, err
 	}
-	if len(names) > 0 {
+	if !e.siblingManifests(job.ID, names) {
 		return result, ErrRecovery
 	}
-	if err := e.admission(parent); err != nil {
+	if solo {
+		err = e.admission(parent)
+	} else {
+		err = e.laneAdmission(parent)
+	}
+	if err != nil {
 		return result, err
 	}
 	if _, err := e.exports.Lstat(job.ID); !os.IsNotExist(err) {
@@ -180,9 +192,13 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 		if sink != nil {
 			returned = errors.Join(returned, sink.Stage(model.Finalizing))
 		}
+		// With one lane, or when no other job runs now, this job holds the
+		// whole account until it leaves and ends like a single job;
+		// otherwise it stops only its own simulator and processes.
+		alone := e.holdAccountIfAlone(job.ID)
 		// Stop simulators and all escaped/orphan job-UID writers before running
 		// the pinned extractor. A second UID barrier follows that subprocess.
-		quietErr := e.stopWriters(finalCtx, &x.manifest)
+		quietErr := e.stopWriters(finalCtx, &x.manifest, job.ID)
 		returned = errors.Join(returned, quietErr)
 		var evidenceErr error
 		if quietErr == nil && x.root != nil {
@@ -221,18 +237,24 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 		if x.evidenceRoot != nil {
 			returned = errors.Join(returned, x.evidenceRoot.Close())
 		}
-		quietErr = errors.Join(quietErr, e.options.Runner.Quiesce(finalCtx))
+		quietErr = errors.Join(quietErr, e.accountQuiesce(finalCtx, job.ID))
+		var residueErr error
 		if quietErr == nil {
-			if inspector, ok := e.options.Runner.(interface{ Admission(context.Context) error }); ok {
-				quietErr = inspector.Admission(finalCtx)
+			if alone {
+				if inspector, ok := e.options.Runner.(interface{ Admission(context.Context) error }); ok {
+					quietErr = inspector.Admission(finalCtx)
+				}
+			} else {
+				residueErr = e.laneResidue(finalCtx, &result)
 			}
 		}
 		var cleanupErr error
 		if quietErr == nil {
 			cleanupErr = e.cleanup(finalCtx, &x.manifest)
 		}
-		returned = e.quarantine(errors.Join(returned, quietErr, cleanupErr))
-		result.CleanupOK = quietErr == nil && cleanupErr == nil && !errors.Is(returned, ErrContamination)
+		returned = e.quarantine(errors.Join(returned, quietErr, cleanupErr, residueErr))
+		result.CleanupOK = quietErr == nil && cleanupErr == nil && residueErr == nil && !errors.Is(returned, ErrContamination)
+		e.finishLane(job.ID, alone, &result)
 		switch {
 		case parent.Err() == context.Canceled || job.CancelRequested:
 			result.State = model.Cancelled
@@ -248,11 +270,16 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 		}
 		result.FinishedAt = e.options.Now()
 	}()
-	preflightCtx, preflightCancel := context.WithTimeout(context.Background(), e.options.CleanupTimeout)
-	preflightErr := e.options.Runner.Quiesce(preflightCtx)
-	preflightCancel()
-	if preflightErr != nil {
-		return result, e.quarantine(preflightErr)
+	if solo {
+		// Beside other jobs, admission already refused any process no job
+		// accounts for; there is nothing of this job's to stop yet.
+		preflightCtx, preflightCancel := context.WithTimeout(context.Background(), e.options.CleanupTimeout)
+		preflightErr := e.options.Runner.Quiesce(preflightCtx)
+		preflightCancel()
+		if preflightErr != nil {
+			return result, e.quarantine(preflightErr)
+		}
+		e.releaseAccount(job.ID)
 	}
 	if job.CancelRequested {
 		return result, context.Canceled
@@ -303,7 +330,7 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 	}
 	err = extractSource(prepareCtx, checkout, archive, source, e.options.MaxWorkspaceBytes)
 	if err == nil {
-		e.verified.tree = source.Tree
+		e.setVerified(job.ID, source.Tree)
 	}
 	if err == nil && x.job.Profile.Template != nil {
 		// Template jobs: the recipe is derived from the repository's
@@ -491,7 +518,7 @@ func (x *execution) command(executable string, args []string) Command {
 	if pin := flutterPin(x.job.Profile); pin != nil {
 		env = flutterEnvironment(env, x.workspace, *pin)
 	}
-	return Command{Executable: executable, Args: args, Dir: x.workspace, Env: env, MemoryLimitMiB: x.job.Profile.MemoryLimitMiB, MemoryBaseline: &x.memoryBaseline}
+	return Command{Executable: executable, Args: args, Dir: x.workspace, Env: env, MemoryLimitMiB: x.job.Profile.MemoryLimitMiB, JobID: x.job.ID, MemoryBaseline: &x.memoryBaseline}
 }
 
 func (x *execution) capture(ctx context.Context, executable string, args ...string) ([]byte, error) {
@@ -783,8 +810,8 @@ func (x *execution) testEvidence(ctx context.Context) error {
 	}
 	raw, commandErr := x.capture(ctx, tool, "get", "test-results", "tests", "--schema-version", "0.4.0", "--path", filepath.Join(x.workspace, "results.xcresult"), "--compact")
 	// Extraction can load hostile bundle contents; its descendants are subject
-	// to the same full-UID barrier before parsing or sealing anything.
-	if err := x.engine.stopWriters(ctx, &x.manifest); err != nil {
+	// to the same barrier before parsing or sealing anything.
+	if err := x.engine.stopWriters(ctx, &x.manifest, x.job.ID); err != nil {
 		return errors.Join(commandErr, err)
 	}
 	if commandErr != nil {
@@ -816,7 +843,7 @@ func (x *execution) writeEvidence(name string, data []byte) error {
 // workspace, under archiveCtx, and collect returns the time that took so the
 // caller does not charge it to ctx's cleanup budget.
 func (x *execution) collect(ctx, archiveCtx context.Context) (time.Duration, error) {
-	if err := x.engine.options.Runner.Quiesce(ctx); err != nil {
+	if err := x.engine.accountQuiesce(ctx, x.job.ID); err != nil {
 		return 0, x.engine.quarantine(err)
 	}
 	if err := x.engine.workspacePass(ctx, x.job.ID, false, false); err != nil {

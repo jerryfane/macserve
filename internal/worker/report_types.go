@@ -80,6 +80,49 @@ type Result struct {
 	LogsTruncated bool                `json:"logs_truncated"`
 	Commands      []ExecutedCommand   `json:"commands"`
 	PeakMemoryMiB int64               `json:"peak_memory_mib"`
+	// HostPeakMemoryMiB is the peak footprint of every non-baseline job-UID
+	// process while the job ran, siblings included; PeakMemoryMiB is the
+	// job's own charge (its lane's processes when lanes run concurrently).
+	HostPeakMemoryMiB int64        `json:"host_peak_memory_mib,omitempty"`
+	Concurrency       *Concurrency `json:"concurrency,omitempty"`
+}
+
+// Attribution names how the broker decided which job-UID processes were the
+// job's. AttributionAccount is the single-job rule: every non-baseline
+// job-UID process. AttributionLineage labels command-root descendants and
+// the job's simulator subtrees (see laneTracker).
+const (
+	AttributionAccount = "account/v1"
+	AttributionLineage = "lineage+device/v1"
+)
+
+// Idle verdicts: IdleClean means the job's cleanup ended with the full
+// job-account quiesce and admission (no other job was live); IdleNotRequired
+// means siblings were live, the job's own processes and simulator were
+// removed and no unattributed process remained; IdleDeferred means an
+// unattributed process remained, so the job's cleanup is unverified until
+// the worker is idle.
+const (
+	IdleClean       = "clean"
+	IdleNotRequired = "not_required"
+	IdleDeferred    = "deferred"
+)
+
+// Concurrency is the job's lane record. OverlappedJobs lists every job that
+// executed in the worker while this one did, with the overlap in whole
+// seconds.
+type Concurrency struct {
+	Lane                int       `json:"lane"`
+	MaxLanes            int       `json:"max_lanes"`
+	OverlappedJobs      []Overlap `json:"overlapped_jobs"`
+	Attribution         string    `json:"attribution"`
+	UnattributedResidue int       `json:"unattributed_residue"`
+	IdleVerdict         string    `json:"idle_verdict"`
+}
+
+type Overlap struct {
+	JobID   string `json:"job_id"`
+	Seconds int64  `json:"overlap_seconds"`
 }
 
 type ExecutedCommand struct {

@@ -32,12 +32,59 @@ type Options struct {
 	MaxBytes int64
 }
 
+// Exporter prepares and removes job sources. Operations on different jobs
+// run concurrently (a sibling's Prepare, which fetches for minutes, never
+// delays a completed job's Remove); operations on one job are serialized.
+// Close waits for every operation in flight.
 type Exporter struct {
 	options Options
 	root    *os.Root
 	lock    *os.File
-	mu      sync.Mutex
-	closed  bool
+	// mu is held shared by every job operation and exclusively by Close;
+	// closed is guarded by it.
+	mu     sync.RWMutex
+	closed bool
+	jobs   jobLocks
+}
+
+// jobLocks is one mutex per job ID, held only while an operation runs.
+type jobLocks struct {
+	mu   sync.Mutex
+	held map[string]chan struct{}
+}
+
+func (l *jobLocks) lock(jobID string) (unlock func()) {
+	for {
+		l.mu.Lock()
+		wait, busy := l.held[jobID]
+		if !busy {
+			if l.held == nil {
+				l.held = map[string]chan struct{}{}
+			}
+			done := make(chan struct{})
+			l.held[jobID] = done
+			l.mu.Unlock()
+			return func() {
+				l.mu.Lock()
+				delete(l.held, jobID)
+				l.mu.Unlock()
+				close(done)
+			}
+		}
+		l.mu.Unlock()
+		<-wait
+	}
+}
+
+// begin admits one operation on jobID, or reports the exporter closed.
+func (e *Exporter) begin(jobID string) (end func(), err error) {
+	e.mu.RLock()
+	if e.closed {
+		e.mu.RUnlock()
+		return nil, os.ErrClosed
+	}
+	unlock := e.jobs.lock(jobID)
+	return func() { unlock(); e.mu.RUnlock() }, nil
 }
 
 var (
@@ -166,11 +213,11 @@ func (e *Exporter) record(jobID string) (resultErr error) {
 // Remove never traverses an arbitrary caller-supplied path. Durable ownership
 // records survive restart; an unrecorded or replaced subtree is left untouched.
 func (e *Exporter) Remove(jobID string) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.closed {
-		return os.ErrClosed
+	end, err := e.begin(jobID)
+	if err != nil {
+		return err
 	}
+	defer end()
 	return e.remove(jobID)
 }
 
@@ -237,11 +284,11 @@ func validJob(job model.Job) bool {
 }
 
 func (e *Exporter) Prepare(ctx context.Context, job model.Job) (descriptor Descriptor, resultErr error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if e.closed {
-		return Descriptor{}, os.ErrClosed
+	end, err := e.begin(job.ID)
+	if err != nil {
+		return Descriptor{}, err
 	}
+	defer end()
 	if !validJob(job) {
 		return Descriptor{}, errors.New("invalid admitted source identity")
 	}

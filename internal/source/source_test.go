@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jerryfane/macserve/internal/model"
 )
@@ -388,5 +389,50 @@ func TestPrepareRollsBackCredentialFailureWithoutLeakingSecrets(t *testing.T) {
 	}
 	if _, err := e.root.Lstat("jobs/" + job.ID); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("cancelled preparation created a subtree")
+	}
+}
+
+// With concurrent jobs, one job's Prepare (credentials, fetch and export can
+// take minutes) must not delay another job's Remove, which completion runs
+// within the worker's RPC timeout; operations on the same job still wait.
+func TestRemoveDoesNotWaitForSiblingPrepare(t *testing.T) {
+	e := fixtureExporter(t)
+	entered, release := make(chan struct{}), make(chan struct{})
+	e.options.Token = func(context.Context, string) (string, error) {
+		close(entered)
+		<-release
+		return "", errors.New("credential refused")
+	}
+	job := model.Job{ID: "j_busy", Request: model.Request{Repo: "example-org/example-app", SHA: strings.Repeat("a", 40)}, Profile: model.Profile{Repo: "example-org/example-app"}}
+	prepared := make(chan error, 1)
+	go func() {
+		_, err := e.Prepare(context.Background(), job)
+		prepared <- err
+	}()
+	<-entered
+	removed := make(chan error, 1)
+	go func() { removed <- e.Remove("j_sibling") }()
+	select {
+	case err := <-removed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("Remove of a sibling job waited for an unrelated Prepare")
+	}
+	same := make(chan error, 1)
+	go func() { same <- e.Remove(job.ID) }()
+	select {
+	case <-same:
+		t.Fatal("Remove ran beside its own job's Prepare")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if err := <-prepared; err == nil {
+		t.Fatal("refused credential accepted")
+	}
+	if err := <-same; err != nil {
+		t.Fatal(err)
 	}
 }

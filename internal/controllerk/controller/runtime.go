@@ -8,10 +8,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
-	"github.com/jerryfane/macserve/internal/controllerk/store"
 	"github.com/jerryfane/macserve/internal/model"
 	"github.com/jerryfane/macserve/internal/peercred"
 	"github.com/jerryfane/macserve/internal/source"
@@ -29,21 +29,51 @@ type execution struct {
 	cancel          context.CancelFunc
 }
 
+// execution returns the active execution of job id, or nil. Callers hold c.mu.
+func (c *Controller) execution(id string) *execution {
+	for _, a := range c.active {
+		if a.job.ID == id {
+			return a
+		}
+	}
+	return nil
+}
+
+// holds reports whether a is still active. Callers hold c.mu.
+func (c *Controller) holds(a *execution) bool {
+	return slices.Contains(c.active, a)
+}
+
+// release removes a from the active set. Callers hold c.mu.
+func (c *Controller) release(a *execution) {
+	c.active = slices.DeleteFunc(c.active, func(b *execution) bool { return b == a })
+}
+
+// lanes is how many jobs may run at once: the controller's configured lanes,
+// capped by the registered worker's. Callers hold c.mu.
+func (c *Controller) lanes() int {
+	return max(min(c.options.Lanes, c.workerLanes), 1)
+}
+
 type Controller struct {
-	options        Options
-	mu             sync.Mutex
-	evidenceMu     sync.Mutex
-	poolBytes      int64 // protected by evidenceMu
-	poolKnown      bool
-	root           *os.Root
-	lock           *os.File
-	ctx            context.Context
-	cancel         context.CancelFunc
-	prep           sync.WaitGroup
-	background     sync.WaitGroup
-	active         *execution
-	epoch          string
-	workerIdle     bool
+	options    Options
+	mu         sync.Mutex
+	evidenceMu sync.Mutex
+	poolBytes  int64 // protected by evidenceMu
+	poolKnown  bool
+	root       *os.Root
+	lock       *os.File
+	ctx        context.Context
+	cancel     context.CancelFunc
+	prep       sync.WaitGroup
+	background sync.WaitGroup
+	// active holds every claimed execution, one per lane, oldest claim first.
+	active      []*execution
+	epoch       string
+	workerLanes int // lanes of the registered worker, at least 1
+	workerIdle  bool
+	// capacityCancel is when a capacity-only gate last cancelled a job.
+	capacityCancel time.Time
 	lastSeen       time.Time
 	maintaining    bool
 	closed         bool
@@ -61,6 +91,12 @@ type Controller struct {
 func New(options Options) (*Controller, error) {
 	if options.Root == "" || options.Socket == "" || options.Store == nil || options.Source == nil || options.Gate == nil || options.HeartbeatTimeout < 0 || options.CleanupTimeout < 0 || options.DeliveryTimeout < 0 || options.SourceTimeout < 0 {
 		return nil, errors.New("controller requires private root, socket, authenticated broker peer UID, store, source and readiness gate")
+	}
+	if options.Lanes < 0 || options.Lanes > model.MaxConcurrentJobs {
+		return nil, fmt.Errorf("controller lanes must be 1..%d", model.MaxConcurrentJobs)
+	}
+	if options.Lanes == 0 {
+		options.Lanes = 1
 	}
 	if options.Now == nil {
 		options.Now = time.Now
@@ -140,12 +176,12 @@ func New(options Options) (*Controller, error) {
 	if !artifactInfo.IsDir() || artifactInfo.Mode().Perm()&0077 != 0 {
 		return fail(errors.New("unsafe artifact root"))
 	}
-	previous, previousErr := options.Store.Active(context.Background())
-	if previousErr != nil && !errors.Is(previousErr, store.ErrNotFound) {
-		return fail(previousErr)
+	previous, err := options.Store.ActiveJobs(context.Background())
+	if err != nil {
+		return fail(err)
 	}
-	if previousErr == nil {
-		if err := options.Store.RequireSourceCleanup(context.Background(), previous.ID); err != nil {
+	for _, job := range previous {
+		if err := options.Store.RequireSourceCleanup(context.Background(), job.ID); err != nil {
 			return fail(err)
 		}
 	}
@@ -241,8 +277,8 @@ func (c *Controller) Run(ctx context.Context) error {
 	// Stop admission immediately, while existing heartbeat requests see cancel.
 	c.mu.Lock()
 	c.closed = true
-	if c.active != nil {
-		job, cancelErr := c.options.Store.Get(context.Background(), c.active.job.ID)
+	for _, a := range c.active {
+		job, cancelErr := c.options.Store.Get(context.Background(), a.job.ID)
 		if cancelErr == nil {
 			_, cancelErr = c.cancelJob(context.Background(), job, "controller shutdown", model.CancelReason{Source: model.CancelShutdown}, c.options.Now())
 		}
@@ -266,8 +302,8 @@ func (c *Controller) Close() error {
 		c.closed = true
 		c.cancel()
 		server := c.server
-		if c.active != nil {
-			c.active.cancel()
+		for _, a := range c.active {
+			a.cancel()
 		}
 		c.mu.Unlock()
 		if server != nil {
@@ -277,10 +313,10 @@ func (c *Controller) Close() error {
 		c.background.Wait()
 		c.evidenceMu.Lock()
 		c.mu.Lock()
-		if c.active != nil {
-			a := c.active
-			c.active = nil
-			c.mu.Unlock()
+		executions := c.active
+		c.active = nil
+		c.mu.Unlock()
+		for _, a := range executions {
 			cleanupErr := c.removeSource(a.job.ID)
 			fail := c.options.Store.FailPreparation
 			cleanupOK := cleanupErr == nil
@@ -289,8 +325,6 @@ func (c *Controller) Close() error {
 				cleanupOK = false
 			}
 			c.closeErr = errors.Join(c.closeErr, cleanupErr, fail(context.Background(), a.job.ID, a.job.LeaseToken, model.Interrupted, cleanupOK, "controller shutdown", c.options.Now()))
-		} else {
-			c.mu.Unlock()
 		}
 		c.evidenceMu.Unlock()
 		c.closeErr = errors.Join(c.closeErr, c.root.Close(), c.lock.Close())
@@ -310,9 +344,9 @@ func (c *Controller) Status(ctx context.Context) (Status, error) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	status := Status{Service: service, Gate: gate, WorkerReady: c.epoch != "" && !c.closed && !service.Quarantined && c.options.Now().Sub(c.lastSeen) <= c.options.HeartbeatTimeout, Quiescent: c.epoch != "" && c.workerIdle && !c.maintaining && c.active == nil && !service.Quarantined}
-	if c.active != nil {
-		status.ActiveJob = c.active.job.ID
+	status := Status{Service: service, Gate: gate, MaxConcurrentJobs: c.options.Lanes, WorkerReady: c.epoch != "" && !c.closed && !service.Quarantined && c.options.Now().Sub(c.lastSeen) <= c.options.HeartbeatTimeout, Quiescent: c.epoch != "" && c.workerIdle && !c.maintaining && len(c.active) == 0 && !service.Quarantined}
+	for _, a := range c.active {
+		status.ActiveJobs = append(status.ActiveJobs, a.job.ID)
 	}
 	return status, nil
 }

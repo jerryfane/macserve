@@ -30,6 +30,10 @@ var (
 	ErrBusy     = errors.New("worker is busy")
 	ErrClosed   = errors.New("worker is closed")
 	ErrRecovery = errors.New("worker requires recovery")
+	// ErrDrain refuses a new job while other jobs run: an unattributed
+	// job-account process or an unverified job cleanup must first be judged
+	// by the full job-account quiesce, which runs only when no job runs.
+	ErrDrain    = errors.New("worker draining: job-account cleanup must be verified when no job runs")
 	identifier  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 	sha40       = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	sha64       = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -37,6 +41,7 @@ var (
 )
 
 type Engine struct {
+	// mu guards the fields below it; it is never held across a job command.
 	mu         sync.Mutex
 	options    Options
 	root       *os.Root
@@ -44,10 +49,25 @@ type Engine struct {
 	workspaces *os.Root
 	lock       *os.File
 	closed     bool
-	recording  *Result // guarded by mu; includes finalization and device cleanup
-	// verified is the last job whose source extraction verified its Git
-	// tree, and that tree; guarded by mu.
-	verified struct{ job, tree string }
+	// recording maps a running job to its result, which records its
+	// commands, including finalization and device cleanup.
+	recording map[string]*Result
+	// verified maps a job whose source extraction verified its Git tree to
+	// that tree, until its export is removed.
+	verified map[string]string
+	// Lane state (see engine_lanes.go).
+	running     map[string]*laneEntry
+	spans       []laneSpan
+	accountHeld string
+	changed     chan struct{}
+	recovering  bool
+	drain       string
+	idlePending bool
+	readyAt     time.Time
+	// deviceMu serializes simulator creation and the verification of an
+	// interrupted creation across lanes, so at most one creation is ever
+	// unrecorded.
+	deviceMu sync.Mutex
 }
 
 // VerifiedTree returns the Git tree the engine computed from jobID's
@@ -57,10 +77,40 @@ type Engine struct {
 func (e *Engine) VerifiedTree(jobID string) string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.verified.job != jobID {
-		return ""
+	return e.verified[jobID]
+}
+
+func (e *Engine) setVerified(jobID, tree string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if tree == "" {
+		delete(e.verified, jobID)
+	} else {
+		e.verified[jobID] = tree
 	}
-	return e.verified.tree
+}
+
+func (e *Engine) startRecording(jobID string, result *Result) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.recording[jobID] = result
+}
+
+func (e *Engine) stopRecording(jobID string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	delete(e.recording, jobID)
+}
+
+// recorder is the result recording jobID's commands, or nil. A job's
+// commands all run on its own execution goroutine, which alone writes it.
+func (e *Engine) recorder(jobID string) *Result {
+	if jobID == "" {
+		return nil
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.recording[jobID]
 }
 
 type manifest struct {
@@ -100,7 +150,7 @@ func New(options Options) (*Engine, error) {
 	if options.Root == "" || options.ExportRoot == "" || options.WorkspaceRoot == "" {
 		return nil, errors.New("control, export and workspace roots are required")
 	}
-	if options.CleanupTimeout < 0 || options.CleanupTimeout > 2*time.Minute || options.MaxWorkspaceBytes < 0 || options.MaxArtifactBytes < 0 {
+	if options.CleanupTimeout < 0 || options.CleanupTimeout > 2*time.Minute || options.MaxWorkspaceBytes < 0 || options.MaxArtifactBytes < 0 || options.Lanes < 0 || options.Lanes > model.MaxConcurrentJobs {
 		return nil, errors.New("invalid worker limits")
 	}
 	if options.CleanupTimeout == 0 {
@@ -128,6 +178,9 @@ func New(options Options) (*Engine, error) {
 	}
 	if options.JobUser, err = jobAccountName(options.JobUser, options.JobUID, native); err != nil {
 		return nil, err
+	}
+	if _, ok := options.Runner.(laneRunner); options.Lanes > 1 && !ok {
+		return nil, errors.New("concurrent jobs require a runner with lane attribution")
 	}
 	for _, target := range []*string{&options.Root, &options.ExportRoot, &options.WorkspaceRoot} {
 		*target, err = filepath.Abs(*target)
@@ -192,7 +245,7 @@ func New(options Options) (*Engine, error) {
 		exports.Close()
 		return fail(err)
 	}
-	return &Engine{options: options, root: root, exports: exports, workspaces: workspaces, lock: lock}, nil
+	return &Engine{options: options, root: root, exports: exports, workspaces: workspaces, lock: lock, recording: map[string]*Result{}, verified: map[string]string{}, running: map[string]*laneEntry{}, changed: make(chan struct{})}, nil
 }
 
 var accountName = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,254}$`)
@@ -229,12 +282,13 @@ func within(parent, child string) bool {
 }
 
 func (e *Engine) Close() error {
-	if !e.mu.TryLock() {
-		return ErrBusy
-	}
+	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.closed {
 		return nil
+	}
+	if len(e.running) != 0 || e.recovering {
+		return ErrBusy
 	}
 	e.closed = true
 	return errors.Join(e.workspaces.Close(), e.exports.Close(), e.root.Close(), e.lock.Close())
@@ -248,8 +302,15 @@ func (e *Engine) saveManifest(m manifest) error {
 	return durableFile(e.root, "manifests/"+m.JobID+".json", data)
 }
 
+// durableMu serializes durable writes between the broker's concurrent jobs
+// (two lanes may record the same quarantine or inconclusive record); the
+// broker lock serializes broker processes.
+var durableMu sync.Mutex
+
 func durableFile(root *os.Root, name string, data []byte) error {
-	// The broker lock serializes writers. A crashed write is never authoritative.
+	durableMu.Lock()
+	defer durableMu.Unlock()
+	// A crashed write is never authoritative.
 	if err := root.Remove(name + ".new"); err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -308,22 +369,51 @@ func (e *Engine) registryNames() ([]string, error) {
 	return dir.Readdirnames(-1)
 }
 
-// Recover retries recorded resources, then verifies admission before a new claim.
+// Recover retries recorded resources, then verifies admission before a new
+// claim. It runs only while no job runs. After a job ended beside others,
+// or while draining, it first quiesces the whole job account, as a job's
+// final cleanup does with one lane: a survivor is contamination. Passing
+// admission ends a drain.
 func (e *Engine) Recover(ctx context.Context) error {
-	if !e.mu.TryLock() {
-		return ErrBusy
-	}
-	defer e.mu.Unlock()
+	e.mu.Lock()
 	if e.closed {
+		e.mu.Unlock()
 		return ErrClosed
 	}
+	if len(e.running) != 0 || e.recovering {
+		e.mu.Unlock()
+		return ErrBusy
+	}
+	e.recovering = true
+	idle := e.idlePending || e.drain != ""
+	e.mu.Unlock()
+	defer func() {
+		e.mu.Lock()
+		e.recovering = false
+		e.changedLocked()
+		e.mu.Unlock()
+	}()
 	if err := e.checkQuarantine(); err != nil {
 		return err
+	}
+	if idle {
+		quietCtx, cancel := context.WithTimeout(ctx, e.options.CleanupTimeout)
+		err := e.options.Runner.Quiesce(quietCtx)
+		cancel()
+		if err != nil {
+			return e.quarantine(err)
+		}
 	}
 	if err := e.recoverOwned(ctx, false); err != nil {
 		return err
 	}
-	return e.admission(ctx)
+	if err := e.admission(ctx); err != nil {
+		return err
+	}
+	e.mu.Lock()
+	e.drain, e.idlePending = "", false
+	e.mu.Unlock()
+	return nil
 }
 
 func (e *Engine) recoverOwned(ctx context.Context, reset bool) error {
@@ -364,7 +454,7 @@ func (e *Engine) recoverOwned(ctx context.Context, reset bool) error {
 				continue
 			}
 		}
-		if err := e.stopWriters(ctx, &m); err != nil {
+		if err := e.stopWriters(ctx, &m, ""); err != nil {
 			failures = append(failures, e.quarantine(err))
 			continue
 		}
@@ -458,5 +548,6 @@ func (e *Engine) RemoveExport(jobID string) error {
 	if !identifier.MatchString(jobID) {
 		return errors.New("invalid export job identity")
 	}
+	delete(e.verified, jobID)
 	return e.exports.RemoveAll(jobID)
 }

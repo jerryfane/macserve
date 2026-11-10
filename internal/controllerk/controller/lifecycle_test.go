@@ -196,7 +196,7 @@ func TestSourceTransferHasIndependentBoundedWriteBudget(t *testing.T) {
 			c.requestTimeout = 20 * time.Millisecond
 			lease := f.lease(t, model.Build)
 			data := bytes.Repeat([]byte("source transfer bytes\n"), 1<<19)
-			if err := os.WriteFile(c.active.source.Path, data, 0600); err != nil {
+			if err := os.WriteFile(c.active[0].source.Path, data, 0600); err != nil {
 				t.Fatal(err)
 			}
 			c.options.SourceTimeout = 3 * time.Second
@@ -290,7 +290,7 @@ func TestSourceCleanupDebtSurvivesRegistrationAndRestart(t *testing.T) {
 		t.Fatalf("registration cleared source debt: %+v %v", service, err)
 	}
 	f.enqueue(t, "waiting", model.Build)
-	if _, err := f.db.Claim(context.Background(), "epoch-b", f.now); !errors.Is(err, store.ErrNoJob) {
+	if _, err := f.db.Claim(context.Background(), "epoch-b", f.now, 1); !errors.Is(err, store.ErrNoJob) {
 		t.Fatalf("source debt allowed direct claim: %v", err)
 	}
 	if err := c.Close(); err != nil {
@@ -335,11 +335,11 @@ func TestPreparationCleanupFailureRetiresEpochWithoutWorkerDebt(t *testing.T) {
 	if err := c.register(context.Background(), protocol.Registration{Epoch: "epoch-a", Quiescent: true}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.next(context.Background(), "epoch-a"); err != nil {
+	if _, err := c.next(context.Background(), "epoch-a", nil); err != nil {
 		t.Fatal(err)
 	}
 	c.prep.Wait()
-	if _, err := c.next(context.Background(), "epoch-a"); !errors.Is(err, store.ErrLease) {
+	if _, err := c.next(context.Background(), "epoch-a", nil); !errors.Is(err, store.ErrLease) {
 		t.Fatalf("uncertain preparation epoch kept polling: %v", err)
 	}
 	if err := c.register(context.Background(), protocol.Registration{Epoch: "epoch-a", Quiescent: true}); !errors.Is(err, store.ErrLease) {

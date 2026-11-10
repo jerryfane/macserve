@@ -29,7 +29,7 @@ func TestRejectedForkPublicationFailureDoesNotRetryForever(t *testing.T) {
 	if _, err := f.s.NextGitHubPublication(context.Background(), f.options.Now()); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("rejected fork retained retry work: %v", err)
 	}
-	if _, err := f.s.Claim(context.Background(), "worker", f.options.Now()); !errors.Is(err, store.ErrNoJob) {
+	if _, err := f.s.Claim(context.Background(), "worker", f.options.Now(), 1); !errors.Is(err, store.ErrNoJob) {
 		t.Fatalf("missing rejection check admitted fork: %v", err)
 	}
 }

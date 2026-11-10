@@ -139,7 +139,7 @@ func (q *SystemQualifier) Health(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	guard, err := health.NewGuard(health.GuardOptions{Root: c.Root, HealthFile: c.HealthFile, PauseFile: c.PauseFile, JobUID: c.JobUID, OwnerUID: c.OwnerUID, Profiles: registry.Digests()})
+	guard, err := health.NewGuard(health.GuardOptions{Root: c.Root, HealthFile: c.HealthFile, PauseFile: c.PauseFile, JobUID: c.JobUID, OwnerUID: c.OwnerUID, Profiles: registry.Digests(), Lanes: health.EffectiveLanes(c.Lanes())})
 	if err != nil {
 		return nil, err
 	}

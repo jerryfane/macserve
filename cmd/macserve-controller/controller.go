@@ -68,7 +68,8 @@ func serveController(parent context.Context, config controllerconfig.Config) err
 	if err != nil {
 		return err
 	}
-	guard, err := health.NewGuard(health.GuardOptions{Root: config.Root, HealthFile: config.HealthFile, PauseFile: config.PauseFile, JobUID: config.JobUID, OwnerUID: config.OwnerUID, Profiles: qualified})
+	lanes := health.EffectiveLanes(config.Lanes())
+	guard, err := health.NewGuard(health.GuardOptions{Root: config.Root, HealthFile: config.HealthFile, PauseFile: config.PauseFile, JobUID: config.JobUID, OwnerUID: config.OwnerUID, Profiles: qualified, Lanes: lanes})
 	if err != nil {
 		return err
 	}
@@ -96,7 +97,7 @@ func serveController(parent context.Context, config controllerconfig.Config) err
 		return err
 	}
 	defer exporter.Close()
-	controllerOptions := controller.Options{Root: config.Root, Socket: config.Socket, BrokerUID: 0, Store: db, Source: exporter, Gate: guard.Check, BeforeDispatch: integrations.beforeDispatch, Seal: integrations.seal, PruneReceipts: integrations.pruneReceipts}
+	controllerOptions := controller.Options{Root: config.Root, Socket: config.Socket, Lanes: lanes, BrokerUID: 0, Store: db, Source: exporter, Gate: guard.Check, BeforeDispatch: integrations.beforeDispatch, Seal: integrations.seal, PruneReceipts: integrations.pruneReceipts}
 	signerKey, err := signerOptions(config, &controllerOptions)
 	if err != nil {
 		return err

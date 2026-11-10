@@ -250,3 +250,17 @@ Native signatures attest recorded observations for trusted code, not host integr
 screenshots/source and full manifests stay behind authenticated downloads; a compact GitHub receipt does not
 give an uncredentialed Linux job arbitrary artifact access. Real App authorization, branch protection, target
 recipes, account boundaries and GUI qualification still require the approved deployment acceptance window.
+
+## Concurrency record (receipt schema 2)
+
+Receipts sealed by this release are payload schema 2 and carry `concurrency`: `lane`, `max_lanes`,
+`overlap_count` (every job that ran in the broker while this one did), `overlapped_jobs` (`job_id`,
+`overlap_seconds` of the 8 longest of them), `overlaps_sha256` (sha256 of the JSON array of the complete list, which
+the full manifest's worker result carries, so the compact receipt stays within its publication limit),
+`attribution` (`account/v1`: every non-baseline job-UID process was the job's, the single-job rule;
+`lineage+device/v1`: the lane attribution of docs/architecture.md), `unattributed_residue` and `idle_verdict`
+(`clean`: the job ended with the full job-account check; `not_required`: siblings ran, its own processes and
+simulator were removed and nothing unattributed remained; `deferred`: cleanup unverified). `resources` gains
+`host_peak_memory_mib` when sampled. A success receipt requires `cleanup_ok` and an idle verdict of `clean` or
+`not_required`. Schema-1 receipts stay valid and carry neither field.
+

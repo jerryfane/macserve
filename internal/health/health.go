@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/jerryfane/macserve/internal/hostguard"
+	"github.com/jerryfane/macserve/internal/model"
 	"golang.org/x/sys/unix"
 )
 
@@ -26,14 +27,44 @@ type GateState struct {
 	Blockers     []string `json:"blockers"`
 	FreeBytes    int64    `json:"free_bytes"`
 	UsedBytes    int64    `json:"used_bytes"`
+	// CapacityOnly is set with CancelActive when every cancelling blocker
+	// is a capacity fact (disk_emergency, service_disk_budget_exceeded):
+	// cancelling the newest active job may restore the gate. Trust facts
+	// (isolation, toolchain, pause, accounting) cancel every active job.
+	CapacityOnly bool `json:"-"`
 }
 
 const (
-	ServiceBudgetBytes  int64 = 80 << 30
+	// serviceBaseBytes is the service disk budget beyond the per-lane job
+	// reservations (see ServiceBudget).
+	serviceBaseBytes    int64 = 50 << 30
 	JobReservationBytes int64 = 30 << 30
 	AdmissionFloorBytes int64 = 120 << 30
 	CancelFloorBytes    int64 = 100 << 30
 )
+
+// ServiceBudget is the disk macserve may account with lanes concurrent jobs
+// (max_concurrent_jobs; values below 1 mean 1): one JobReservationBytes per
+// lane above a fixed base. One lane is the single-job budget of 80 GiB.
+func ServiceBudget(lanes int) int64 {
+	return serviceBaseBytes + int64(max(lanes, 1))*JobReservationBytes
+}
+
+// capacityBlockers cancel the newest active job first (see GateState).
+var capacityBlockers = map[string]bool{"disk_emergency": true, "service_disk_budget_exceeded": true}
+
+// AdmitsAnother reports whether the disk facts of a ready gate leave room
+// for one more job beside active running ones under a lanes budget: the
+// free-space floor and the service budget each keep one JobReservationBytes
+// for every active job and the new one. A ready gate already reserved one,
+// so with no active job this is the gate itself.
+func AdmitsAnother(g GateState, active, lanes int) bool {
+	if !g.Ready || g.CancelActive {
+		return false
+	}
+	need := int64(active+1) * JobReservationBytes
+	return g.FreeBytes >= AdmissionFloorBytes+need && g.UsedBytes >= 0 && g.UsedBytes <= ServiceBudget(lanes)-need
+}
 
 // Health is written atomically by the root-managed maintenance helper. Boundary
 // qualification is bound to non-network protections, not interface inventory.
@@ -61,7 +92,9 @@ type GuardOptions struct {
 	Root, HealthFile, PauseFile string
 	JobUID, OwnerUID            uint32
 	Profiles                    map[string]string
-	Now                         func() time.Time
+	// Lanes is max_concurrent_jobs (0 means 1); it sizes ServiceBudget.
+	Lanes int
+	Now   func() time.Time
 }
 type Guard struct {
 	options    GuardOptions
@@ -76,6 +109,9 @@ func NewGuard(o GuardOptions) (*Guard, error) {
 	}
 	if o.PauseFile != "" && !cleanAbsolute(o.PauseFile) {
 		return nil, errors.New("invalid pause marker")
+	}
+	if o.Lanes < 0 || o.Lanes > model.MaxConcurrentJobs {
+		return nil, errors.New("invalid readiness guard lanes")
 	}
 	if o.Now == nil {
 		o.Now = time.Now
@@ -110,9 +146,11 @@ func (g *Guard) Check(ctx context.Context) (GateState, error) {
 	if err := ctx.Err(); err != nil {
 		return state, err
 	}
+	trust := false
 	fail := func(reason string, cancel bool) {
 		state.Blockers = append(state.Blockers, reason)
 		state.CancelActive = state.CancelActive || cancel
+		trust = trust || cancel && !capacityBlockers[reason]
 	}
 	free, err := g.freeBytes(g.options.Root)
 	if err != nil {
@@ -130,7 +168,7 @@ func (g *Guard) Check(ctx context.Context) (GateState, error) {
 		fail("isolation_unavailable", true)
 	} else {
 		state.UsedBytes = health.AccountedBytes
-		for _, b := range HealthBlockers(health, g.options.Now(), g.options.JobUID, g.options.Profiles) {
+		for _, b := range HealthBlockers(health, g.options.Now(), g.options.JobUID, g.options.Profiles, g.options.Lanes) {
 			fail(b.Name, b.Cancel)
 		}
 	}
@@ -143,6 +181,7 @@ func (g *Guard) Check(ctx context.Context) (GateState, error) {
 		}
 	}
 	state.Ready = len(state.Blockers) == 0
+	state.CapacityOnly = state.CancelActive && !trust
 	return state, nil
 }
 
@@ -155,9 +194,10 @@ type Blocker struct {
 
 // HealthBlockers is the part of the readiness gate decided by a published
 // health record, evaluated at now by a controller expecting jobUID and the
-// qualified digests in profiles; nil profiles skip toolchain qualification.
-// The maintenance daemon logs these for each health record it publishes.
-func HealthBlockers(health Health, now time.Time, jobUID uint32, profiles map[string]string) []Blocker {
+// qualified digests in profiles and lanes concurrent jobs (see
+// ServiceBudget); nil profiles skip toolchain qualification. The maintenance
+// daemon logs these for each health record it publishes.
+func HealthBlockers(health Health, now time.Time, jobUID uint32, profiles map[string]string, lanes int) []Blocker {
 	var blockers []Blocker
 	fail := func(name string, cancel bool) { blockers = append(blockers, Blocker{name, cancel}) }
 	if health.Schema != 3 || health.JobUID != jobUID || !health.BoundaryValidated || !digestString(health.BoundaryReceiptSHA256) || health.CheckedAt.After(now.Add(5*time.Second)) || now.Sub(health.CheckedAt) > 45*time.Second || !health.ExpiresAt.After(now) || health.ExpiresAt.Sub(health.CheckedAt) > 45*time.Second || !health.ExpiresAt.After(health.CheckedAt) {
@@ -169,9 +209,9 @@ func HealthBlockers(health Health, now time.Time, jobUID uint32, profiles map[st
 	if health.AdmissionInconclusive != "" {
 		fail("worker_admission_inconclusive", false)
 	}
-	if health.AccountedBytes < 0 || health.AccountedBytes > ServiceBudgetBytes {
+	if budget := ServiceBudget(lanes); health.AccountedBytes < 0 || health.AccountedBytes > budget {
 		fail("service_disk_budget_exceeded", true)
-	} else if health.AccountedBytes > ServiceBudgetBytes-JobReservationBytes {
+	} else if health.AccountedBytes > budget-JobReservationBytes {
 		fail("service_disk_reservation_unavailable", false)
 	}
 	if health.MemoryPressure {

@@ -15,6 +15,11 @@ type Command struct {
 	Dir            string
 	Env            []string
 	MemoryLimitMiB int
+	// JobID names the job the command runs for: its result records the
+	// command and, with concurrent jobs, its processes are the job's lane
+	// (see laneTracker), which alone its memory budget charges. Empty for
+	// commands outside any job.
+	JobID string
 	// MemoryBaseline, shared by every command of one job, holds the job-UID
 	// footprint sampled immediately before the job's first command; each
 	// command is charged for footprint above it. Nil samples a baseline
@@ -35,7 +40,11 @@ type ProcessResult struct {
 	// PeakMemoryMiB is the charged peak: the highest sampled footprint of the
 	// job UID's live processes above the command's MemoryBaseline.
 	PeakMemoryMiB int64
-	CleanupOK     bool
+	// HostPeakMemoryMiB is set only for a command of a job running in lane
+	// mode, whose PeakMemoryMiB charges its own lane's processes: the peak
+	// sampled footprint of every job-UID process.
+	HostPeakMemoryMiB int64
+	CleanupOK         bool
 }
 
 // Runner abstracts process execution only; production uses the native runner.
@@ -71,6 +80,10 @@ type Options struct {
 	CleanupTimeout    time.Duration
 	MaxWorkspaceBytes int64
 	MaxArtifactBytes  int64
+	// Lanes is how many jobs Execute runs at once (max_concurrent_jobs,
+	// 1..model.MaxConcurrentJobs; 0 means 1). With 1 every job owns the
+	// whole job account, as before lanes existed.
+	Lanes int
 	// PlistJSON converts property list bytes to JSON for an ios_archive
 	// job's root-side signing manifest (bundle Info.plist and requested
 	// entitlements). New defaults it to /usr/bin/plutil run by the worker

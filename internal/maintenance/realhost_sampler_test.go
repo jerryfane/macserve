@@ -34,10 +34,10 @@ func TestRealHostHealthSampler(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	admission := health.ServiceBudgetBytes - health.JobReservationBytes
+	admission := health.ServiceBudget(1) - health.JobReservationBytes
 	gate := func(n int64) string {
 		switch {
-		case n < 0 || n > health.ServiceBudgetBytes:
+		case n < 0 || n > health.ServiceBudget(1):
 			return "service_disk_budget_exceeded (cancels active job)"
 		case n > admission:
 			return "service_disk_reservation_unavailable (blocks admission)"
@@ -57,7 +57,7 @@ func TestRealHostHealthSampler(t *testing.T) {
 			elapsed := time.Since(begun)
 			logical, legacy, entries, walkErr := legacyCensus(root)
 			pressure, pressureErr := memoryPressure()
-			rec := map[string]any{"t": time.Now().UTC(), "root": root, "accounted_bytes": accounted, "account_ms": elapsed.Milliseconds(), "legacy_v0115_bytes": legacy, "logical_bytes": logical, "entries": entries, "memory_pressure": pressure, "gate": gate(accounted), "gate_v0115": gate(legacy), "admission_headroom_bytes": admission - accounted, "cancel_headroom_bytes": health.ServiceBudgetBytes - accounted, "admission_headroom_v0115_bytes": admission - legacy}
+			rec := map[string]any{"t": time.Now().UTC(), "root": root, "accounted_bytes": accounted, "account_ms": elapsed.Milliseconds(), "legacy_v0115_bytes": legacy, "logical_bytes": logical, "entries": entries, "memory_pressure": pressure, "gate": gate(accounted), "gate_v0115": gate(legacy), "admission_headroom_bytes": admission - accounted, "cancel_headroom_bytes": health.ServiceBudget(1) - accounted, "admission_headroom_v0115_bytes": admission - legacy}
 			if accountErr != nil {
 				rec["account_error"] = accountErr.Error()
 			}

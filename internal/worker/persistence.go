@@ -91,6 +91,12 @@ func (r *nativeRunner) Admission(parent context.Context) error {
 // maxUnsettledSnapshots times, then refused without quarantine
 // (errAdmissionUnsettled). Admission needs two consecutive clean snapshots.
 func (s *processScope) observeQuiet(ctx context.Context) error {
+	return s.observeQuietWith(ctx, s.census)
+}
+
+// observeQuietWith is observeQuiet classifying each snapshot by census;
+// lane admission passes one that leaves out running jobs' processes.
+func (s *processScope) observeQuietWith(ctx context.Context, census func(context.Context, []processSample) (processCensus, error)) error {
 	var waitUntil time.Time
 	unsettled := 0
 	for clean := 0; ; {
@@ -101,7 +107,7 @@ func (s *processScope) observeQuiet(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		c, err := s.census(ctx, samples)
+		c, err := census(ctx, samples)
 		if err != nil {
 			return err
 		}
@@ -193,6 +199,25 @@ func (e *Engine) admission(ctx context.Context) error {
 		}
 	}
 	return e.clearInconclusive()
+}
+
+// laneAdmission admits a job beside running ones (see LaneAdmission): an
+// unattributed process drains the engine instead of quarantining it.
+func (e *Engine) laneAdmission(ctx context.Context) error {
+	if err := e.checkQuarantine(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := e.laneRunner().LaneAdmission(ctx); err != nil {
+		if errors.Is(err, ErrDrain) {
+			e.setDrain(PublicReason(err))
+			return err
+		}
+		return e.quarantine(err)
+	}
+	return nil
 }
 
 func (e *Engine) checkQuarantine() error {

@@ -40,6 +40,52 @@ func readinessCause(gate health.GateState, err error) model.CancelReason {
 	return model.CancelReason{Source: model.CancelHostReadiness, Blockers: gate.Blockers, Detail: fmt.Sprintf("free_bytes=%d used_bytes=%d", gate.FreeBytes, gate.UsedBytes)}
 }
 
+// capacityCancelInterval is how long a capacity-only cancellation spares the
+// remaining jobs while the cancelled job releases its disk.
+const capacityCancelInterval = 30 * time.Second
+
+// cancelForGate cancels for a gate that requires cancellation, or that could
+// not be evaluated (gateErr). Trust blockers and gate errors are host facts:
+// every active job is cancelled with the readiness cause. A capacity-only gate
+// cancels just the newest active job not already cancelled and, while another
+// job remains active, at most one per capacityCancelInterval, so the gate is
+// re-evaluated after the cancelled job frees its disk. With one active job this
+// is the single-job cancellation. Callers hold c.mu.
+func (c *Controller) cancelForGate(ctx context.Context, gate health.GateState, gateErr error, now time.Time) error {
+	const reason = "host readiness requires cancellation"
+	cause := readinessCause(gate, gateErr)
+	if gateErr != nil || !gate.CapacityOnly {
+		for _, a := range c.active {
+			job, err := c.options.Store.Get(ctx, a.job.ID)
+			if err != nil {
+				return err
+			}
+			if _, err := c.cancelJob(ctx, job, reason, cause, now); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if len(c.active) > 1 && !c.capacityCancel.IsZero() && now.Sub(c.capacityCancel) < capacityCancelInterval {
+		return nil
+	}
+	for i := len(c.active) - 1; i >= 0; i-- {
+		job, err := c.options.Store.Get(ctx, c.active[i].job.ID)
+		if err != nil {
+			return err
+		}
+		if job.CancelRequested || job.State.Terminal() {
+			continue
+		}
+		if _, err := c.cancelJob(ctx, job, reason, cause, now); err != nil {
+			return err
+		}
+		c.capacityCancel = now
+		return nil
+	}
+	return nil
+}
+
 // gateOutcome is the part of a readiness evaluation whose changes are logged.
 type gateOutcome struct {
 	seen, ready, cancelActive bool
@@ -48,7 +94,7 @@ type gateOutcome struct {
 }
 
 // noteGate logs the first readiness evaluation and every change of its
-// outcome, with the active job, so a cancellation can be placed against the
+// outcome, with every active job, so a cancellation can be placed against the
 // blockers that preceded it. Callers hold c.mu.
 func (c *Controller) noteGate(gate health.GateState, err error) {
 	var text string
@@ -61,8 +107,12 @@ func (c *Controller) noteGate(gate health.GateState, err error) {
 	}
 	*last = gateOutcome{seen: true, ready: gate.Ready, cancelActive: gate.CancelActive, blockers: slices.Clone(gate.Blockers), err: text}
 	active := "none"
-	if c.active != nil {
-		active = c.active.job.ID
+	if len(c.active) > 0 {
+		ids := make([]string, len(c.active))
+		for i, a := range c.active {
+			ids[i] = a.job.ID
+		}
+		active = strings.Join(ids, ",")
 	}
 	if err != nil {
 		log.Printf("controller readiness: ready=false gate_error=%q active_job=%s", text, active)

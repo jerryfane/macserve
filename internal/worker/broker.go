@@ -482,6 +482,9 @@ func nativeRunnerFor(options Options) *nativeRunner {
 		return nil
 	}
 	runner.signalProcess = runner.scope.signal
+	runner.workspaceRoot = options.WorkspaceRoot
+	runner.describe = describeProcess
+	runner.lineage = processLineage
 	return runner
 }
 

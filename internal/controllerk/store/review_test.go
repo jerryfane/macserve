@@ -172,7 +172,7 @@ func TestAcknowledgedEpochIsTheOnlyEpochThatCanClaimAfterRecovery(t *testing.T) 
 		t.Fatal(err)
 	}
 	s = openStore(t, path, Options{})
-	_, err := s.Claim(ctx, "unverified-epoch", testNow)
+	_, err := s.Claim(ctx, "unverified-epoch", testNow, 1)
 	requireError(t, err, ErrLease)
 	if got := getJob(t, s, next.ID); got.State != model.Queued {
 		t.Fatal("unverified epoch claimed a job")

@@ -14,7 +14,7 @@ func TestRegistrationBindsClaimsAndFencesEarlierEpochs(t *testing.T) {
 		t.Fatal(err)
 	}
 	enqueueJob(t, s, "principal", "registered", testNow)
-	_, err := s.Claim(ctx, "unregistered", testNow)
+	_, err := s.Claim(ctx, "unregistered", testNow, 1)
 	requireError(t, err, ErrLease)
 	job := claimJob(t, s, "registered", testNow)
 	if err := s.RegisterWorker(ctx, "registered"); err != nil {
@@ -31,7 +31,7 @@ func TestRegistrationBindsClaimsAndFencesEarlierEpochs(t *testing.T) {
 	s = openStore(t, path, Options{})
 	requireError(t, s.RegisterWorker(ctx, "registered"), ErrLease)
 	enqueueJob(t, s, "principal", "replacement", testNow)
-	_, err = s.Claim(ctx, "unregistered", testNow)
+	_, err = s.Claim(ctx, "unregistered", testNow, 1)
 	requireError(t, err, ErrLease)
 	claimJob(t, s, "replacement", testNow)
 }

@@ -731,15 +731,16 @@ func (s *state) healthChecks() {
 	if h.AdmissionInconclusive != "" {
 		blockers = append(blockers, "worker_admission_inconclusive")
 	}
+	budget := health.ServiceBudget(s.lanes())
 	switch {
-	case h.AccountedBytes < 0 || h.AccountedBytes > health.ServiceBudgetBytes:
+	case h.AccountedBytes < 0 || h.AccountedBytes > budget:
 		blockers = append(blockers, "service_disk_budget_exceeded")
-		s.set("disk", Fail, fmt.Sprintf("macserve accounts %d GiB of its %d GiB budget", h.AccountedBytes>>30, health.ServiceBudgetBytes>>30), "Remove old jobs' evidence or wait for retention cleanup.")
-	case h.AccountedBytes > health.ServiceBudgetBytes-health.JobReservationBytes:
+		s.set("disk", Fail, fmt.Sprintf("macserve accounts %d GiB of its %d GiB budget", h.AccountedBytes>>30, budget>>30), "Remove old jobs' evidence or wait for retention cleanup.")
+	case h.AccountedBytes > budget-health.JobReservationBytes:
 		blockers = append(blockers, "service_disk_reservation_unavailable")
-		s.set("disk", Warn, fmt.Sprintf("macserve accounts %d GiB of its %d GiB budget; no room for one more job", h.AccountedBytes>>30, health.ServiceBudgetBytes>>30), "Wait for retention cleanup before the next build.")
+		s.set("disk", Warn, fmt.Sprintf("macserve accounts %d GiB of its %d GiB budget; no room for one more job", h.AccountedBytes>>30, budget>>30), "Wait for retention cleanup before the next build.")
 	default:
-		s.set("disk", Pass, fmt.Sprintf("macserve accounts %d GiB of its %d GiB budget", h.AccountedBytes>>30, health.ServiceBudgetBytes>>30), "")
+		s.set("disk", Pass, fmt.Sprintf("macserve accounts %d GiB of its %d GiB budget", h.AccountedBytes>>30, budget>>30), "")
 	}
 	if h.MemoryPressure {
 		blockers = append(blockers, "host_memory_pressure")
@@ -838,6 +839,57 @@ func (s *state) services() {
 		s.set("svc.state", Warn, "the services are installed and disabled", "Continue with macserve setup to start them.")
 	default:
 		s.set("svc.state", Fail, fmt.Sprintf("%d of %d services loaded, %d disabled", loaded, n, disabled), "Continue with macserve setup; it starts or stops them all together.")
+	}
+}
+
+// lanes is the controller's max_concurrent_jobs, which sizes its service
+// disk budget (health.ServiceBudget); 1 when controller.json is unreadable
+// or omits it.
+func (s *state) lanes() int {
+	data, err := s.p.ReadFile(Root+"/config/controller.json", maxConfig)
+	if err != nil {
+		return 1
+	}
+	var config struct {
+		MaxConcurrentJobs int `json:"max_concurrent_jobs"`
+	}
+	if json.Unmarshal(data, &config) != nil || config.MaxConcurrentJobs < 1 || config.MaxConcurrentJobs > model.MaxConcurrentJobs {
+		return 1
+	}
+	// The lowering-only override, by the runtime rule (health.LaneOverride):
+	// a present file that is not a root-owned regular file writable only by
+	// root, unreadable or malformed means one lane.
+	path := Root + "/config/lanes.json"
+	info, err := s.p.Lstat(path)
+	lanes, _ := health.LaneOverride(config.MaxConcurrentJobs, err != nil || info.Exists, func() error { return s.rootConfig(path) }, func() ([]byte, error) { return s.p.ReadFile(path, maxConfig) })
+	return lanes
+}
+
+// rootConfig is hostguard.RootConfig through doctor's probe: path (clean and
+// absolute) is a regular file and each of its ancestors a directory, every
+// one root-owned, no symlink, and not group- or world-writable.
+func (s *state) rootConfig(path string) error {
+	parent := func(p string) string {
+		if i := strings.LastIndexByte(p, '/'); i > 0 {
+			return p[:i]
+		}
+		return "/"
+	}
+	for current := path; ; current = parent(current) {
+		info, err := s.p.Lstat(current)
+		if err != nil {
+			return err
+		}
+		validType := info.Mode.IsDir()
+		if current == path {
+			validType = info.Mode.IsRegular()
+		}
+		if !info.Exists || !validType || info.UID != 0 || info.Mode.Perm()&0o022 != 0 {
+			return errors.New("configuration and its parent directories must be root-owned, non-symlink and not group/world writable")
+		}
+		if current == "/" {
+			return nil
+		}
 	}
 }
 

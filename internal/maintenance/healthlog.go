@@ -18,10 +18,13 @@ const timeLayout = "2006-01-02T15:04:05.000Z07:00"
 // from the previously published record's.
 type healthReport struct {
 	blockers string
+	// lanes is the controller's max_concurrent_jobs, which sizes the
+	// service disk budget the controller applies (health.ServiceBudget).
+	lanes int
 }
 
 func (r *healthReport) invalid(h, lastValid health.Health, cause string) {
-	blockers, cancel := healthBlockers(h)
+	blockers, cancel := healthBlockers(h, r.lanes)
 	r.blockers = blockers
 	until := "none"
 	if lastValid.BoundaryValidated {
@@ -31,7 +34,7 @@ func (r *healthReport) invalid(h, lastValid health.Health, cause string) {
 }
 
 func (r *healthReport) valid(h health.Health) {
-	blockers, cancel := healthBlockers(h)
+	blockers, cancel := healthBlockers(h, r.lanes)
 	if blockers == r.blockers {
 		return
 	}
@@ -42,8 +45,8 @@ func (r *healthReport) valid(h health.Health) {
 // healthBlockers lists the blockers a controller reports for h when it reads
 // it fresh. Toolchain qualification is the controller's own comparison against
 // its profiles and is not listed.
-func healthBlockers(h health.Health) (string, bool) {
-	found := health.HealthBlockers(h, h.CheckedAt, h.JobUID, nil)
+func healthBlockers(h health.Health, lanes int) (string, bool) {
+	found := health.HealthBlockers(h, h.CheckedAt, h.JobUID, nil, lanes)
 	if len(found) == 0 {
 		return "none", false
 	}

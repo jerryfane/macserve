@@ -12,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/jerryfane/macserve/internal/model"
 )
 
 // Config is root-controlled policy. It contains token digests, never bearer tokens.
@@ -36,7 +38,14 @@ type Config struct {
 	// controller never opens those key files; it refuses to start without
 	// this section.
 	Keyholder *KeyholderConfig `json:"keyholder,omitempty"`
+	// MaxConcurrentJobs is how many jobs the controller leases at once
+	// (1..model.MaxConcurrentJobs; omitted means 1). The worker's own
+	// max_concurrent_jobs bounds it further.
+	MaxConcurrentJobs int `json:"max_concurrent_jobs,omitempty"`
 }
+
+// Lanes is MaxConcurrentJobs, 1 when omitted.
+func (c Config) Lanes() int { return max(c.MaxConcurrentJobs, 1) }
 
 func LoadConfig(path string) (Config, error) {
 	var c Config
@@ -79,6 +88,9 @@ func (c *Config) validate() error {
 	}
 	if c.PauseFile != "" && !cleanAbsolute(c.PauseFile) {
 		return errors.New("invalid owner pause path")
+	}
+	if c.MaxConcurrentJobs < 0 || c.MaxConcurrentJobs > model.MaxConcurrentJobs {
+		return fmt.Errorf("max_concurrent_jobs must be 1..%d", model.MaxConcurrentJobs)
 	}
 	address, err := netip.ParseAddrPort(c.Listen)
 	if err != nil || address.Port() == 0 {

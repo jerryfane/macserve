@@ -307,9 +307,9 @@ func TestSignedUnknownFieldsAndCaseAliasesRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, modified := range [][]byte{
-		bytes.Replace(raw, []byte(`"schema":1`), []byte(`"SCHEMA":1`), 1),
-		bytes.Replace(raw, []byte(`"schema":1`), []byte(`"schema":1,"unrecognized":true`), 1),
-		bytes.Replace(raw, []byte(`"schema":1`), []byte(`"schema":1,"SCHEMA":1`), 1),
+		bytes.Replace(raw, []byte(`"schema":2`), []byte(`"SCHEMA":2`), 1),
+		bytes.Replace(raw, []byte(`"schema":2`), []byte(`"schema":2,"unrecognized":true`), 1),
+		bytes.Replace(raw, []byte(`"schema":2`), []byte(`"schema":2,"SCHEMA":2`), 1),
 	} {
 		payload, err := canonical(modified)
 		if err != nil {

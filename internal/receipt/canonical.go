@@ -174,6 +174,18 @@ func Digest(raw []byte) (string, error) {
 	return hashBytes(c), nil
 }
 
+// schemaShape reports whether p's lane fields fit its schema: schema 2 has
+// the lane record; schema 1 has neither it nor a host peak footprint.
+func schemaShape(p Payload) bool {
+	switch p.Schema {
+	case payloadSchema:
+		return p.Concurrency != nil
+	case legacyPayloadSchema:
+		return p.Concurrency == nil && p.Resources.HostPeakMemoryMiB == 0
+	}
+	return false
+}
+
 // PublicDigest accepts only canonical compact envelopes suitable for publication.
 // It does not authenticate the signer; callers must still verify success evidence.
 // Legacy full receipts must be rerun, never rewritten after evidence is committed.
@@ -190,7 +202,7 @@ func PublicDigest(raw []byte) (string, error) {
 	if strictDecode(raw, &envelope) != nil || strictDecode(envelope.Payload, &p) != nil {
 		return "", ErrInvalid
 	}
-	if p.Schema != 1 || p.Details != nil || p.Manifest == nil || !validJobID(p.JobID) ||
+	if !schemaShape(p) || p.Details != nil || p.Manifest == nil || !validJobID(p.JobID) ||
 		!validDigest(p.Manifest.SHA256) || p.Manifest.SizeBytes <= 0 || p.Manifest.SizeBytes > maxManifestBytes ||
 		p.Manifest.URL != manifestURL(p.JobID, p.Manifest.SHA256) {
 		return "", ErrInvalid
@@ -227,7 +239,7 @@ func Verify(raw []byte, keys map[string]ed25519.PublicKey) (Payload, error) {
 	if err := strictDecode(payload, &p); err != nil {
 		return Payload{}, err
 	}
-	if p.Schema != 1 || !validJobID(p.JobID) || p.AttemptID == "" || p.AttemptID != p.Approval.AttemptID || !validDigest(p.InputDigest) {
+	if !schemaShape(p) || !validJobID(p.JobID) || p.AttemptID == "" || p.AttemptID != p.Approval.AttemptID || !validDigest(p.InputDigest) {
 		return Payload{}, ErrInvalid
 	}
 	if (p.Details == nil) == (p.Manifest == nil) {

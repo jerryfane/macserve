@@ -219,10 +219,14 @@ func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, principal, key string
 const fairNext = `SELECT head.sequence FROM (SELECT repo,MIN(sequence) AS sequence FROM jobs WHERE state='queued' GROUP BY repo) AS head ORDER BY (SELECT MAX(started_at) FROM jobs WHERE jobs.repo=head.repo) NULLS FIRST,head.sequence LIMIT 1`
 
 // Claim holds a database write reservation from eligibility checks through lease
-// assignment. The database additionally prohibits a second active row, even if
-// a future caller bypasses the normal dispatch path.
-func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time) (model.Job, error) {
-	if !validOpaque(workerEpoch, 256) || !validTime(now) {
+// assignment. It claims only while fewer than lanes jobs are active and none of
+// them is an exclusive kind, and assigns the lowest free lane. The fair head is
+// chosen over every queued job: an exclusive head waits until no job is active,
+// and nothing behind it is claimed meanwhile. The database additionally
+// prohibits two active rows on one lane, even if a future caller bypasses the
+// normal dispatch path.
+func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time, lanes int) (model.Job, error) {
+	if !validOpaque(workerEpoch, 256) || !validTime(now) || lanes < 1 || lanes > model.MaxConcurrentJobs {
 		return model.Job{}, ErrInvalid
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -237,10 +241,15 @@ func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time) (m
 		return model.Job{}, err
 	}
 	var blocked bool
-	if err := tx.QueryRowContext(ctx, "SELECT paused OR quarantined OR "+sourceCleanupPending+" OR EXISTS(SELECT 1 FROM jobs WHERE state IN ("+activeStates+")) FROM service_state WHERE singleton=1").Scan(&blocked); err != nil {
+	if err := tx.QueryRowContext(ctx, "SELECT paused OR quarantined OR "+sourceCleanupPending+" FROM service_state WHERE singleton=1").Scan(&blocked); err != nil {
 		return model.Job{}, err
 	}
-	if blocked {
+	running, err := activeJobs(ctx, tx)
+	if err != nil {
+		return model.Job{}, err
+	}
+	lane := freeLane(running, lanes)
+	if blocked || len(running) >= lanes || lane == 0 || slices.ContainsFunc(running, func(job model.Job) bool { return job.Request.Kind.Exclusive() }) {
 		if err := tx.Commit(); err != nil {
 			return model.Job{}, err
 		}
@@ -270,6 +279,12 @@ func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time) (m
 	if err != nil {
 		return model.Job{}, err
 	}
+	if job.Request.Kind.Exclusive() && len(running) > 0 || !memoryAdmits(running, job) {
+		if err := tx.Commit(); err != nil {
+			return model.Job{}, err
+		}
+		return model.Job{}, ErrNoJob
+	}
 	deadline := now.Add(time.Duration(job.Request.TimeoutSeconds) * time.Second)
 	if !validTime(deadline) {
 		return model.Job{}, ErrInvalid
@@ -278,7 +293,7 @@ func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time) (m
 	if err != nil {
 		return model.Job{}, err
 	}
-	_, err = tx.ExecContext(ctx, "UPDATE jobs SET state='preparing',worker_epoch=?,lease_token=?,started_at=?,deadline=?,updated_at=? WHERE id=?", workerEpoch, lease, now.UnixNano(), deadline.UnixNano(), now.UnixNano(), job.ID)
+	_, err = tx.ExecContext(ctx, "UPDATE jobs SET state='preparing',worker_epoch=?,lease_token=?,started_at=?,deadline=?,updated_at=?,lane=? WHERE id=?", workerEpoch, lease, now.UnixNano(), deadline.UnixNano(), now.UnixNano(), lane, job.ID)
 	if err != nil {
 		if contention(err) || uniqueViolation(err) {
 			return model.Job{}, ErrNoJob
@@ -383,7 +398,8 @@ func (s *Store) Cancel(ctx context.Context, id, reason string, cause model.Cance
 
 // Finish stores the complete result envelope (including caller-supplied exit
 // metadata) together with the terminal state. Cleanup uncertainty quarantines
-// dispatch in the same transaction that releases the active singleton.
+// dispatch in the same transaction that releases the job's lane; sibling
+// lanes keep their leases until they finish.
 func (s *Store) Finish(ctx context.Context, id, lease string, state model.State, result json.RawMessage, cleanupOK bool, reason string, now time.Time) error {
 	if !model.Finalizing.CanTransition(state) || state == model.Succeeded && !cleanupOK {
 		return ErrTransition
@@ -451,4 +467,21 @@ func (s *Store) Prune(ctx context.Context, now time.Time) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// ConcurrentMemoryCapMiB bounds the summed memory budgets (memory_limit_mib)
+// of concurrently active jobs (PARALLEL-DESIGN.md §7.3): a job beside others
+// is claimed only while the sum, with its own, stays within it. A job alone
+// is never refused by it, so one lane behaves as before.
+const ConcurrentMemoryCapMiB = 128 << 10
+
+func memoryAdmits(running []model.Job, next model.Job) bool {
+	if len(running) == 0 {
+		return true
+	}
+	total := int64(next.Profile.MemoryLimitMiB)
+	for _, job := range running {
+		total += int64(job.Profile.MemoryLimitMiB)
+	}
+	return total <= ConcurrentMemoryCapMiB
 }

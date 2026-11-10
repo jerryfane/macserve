@@ -1,0 +1,17 @@
+{
+ "source": "live capture 2026-11-10T06:23:59Z of one tandem unit_test job (PARALLEL-DESIGN.md \u00a72), sanitized: arguments dropped except launchd_sim's device path",
+ "uid": 6202,
+ "broker": 17535,
+ "job_start": 1794291241,
+ "jobs": [
+  {
+   "id": "j_unit",
+   "roots": [
+    93632
+   ],
+   "udids": [
+    "69CE8552-4584-4C40-AD00-A501D281B0EF"
+   ]
+  }
+ ]
+}

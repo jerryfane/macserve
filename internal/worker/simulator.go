@@ -75,7 +75,7 @@ func (x *execution) simulator(ctx context.Context) error {
 		// boot through the teardown path (shutdown and delete the recorded
 		// UDID, prove it absent, quiesce the job UID) and create a fresh one.
 		// Tests are never retried.
-		if stopErr := x.engine.stopWriters(ctx, &x.manifest); stopErr != nil {
+		if stopErr := x.engine.stopWriters(ctx, &x.manifest, x.job.ID); stopErr != nil {
 			return errors.Join(err, stopErr)
 		}
 		x.result.Observation.DeviceUDID = ""
@@ -93,6 +93,11 @@ const simulatorBootAttempts = 2
 // inventory is recorded before creation: an interrupted create must never
 // infer ownership from a device name or delete an unrecorded UDID.
 func (x *execution) createDevice(ctx context.Context, pin *model.Simulator) (string, error) {
+	// One creation at a time across lanes: a sibling's device is then
+	// either in this snapshot or recorded in its own manifest before this
+	// creation starts (see verifyDeviceCreation).
+	x.engine.deviceMu.Lock()
+	defer x.engine.deviceMu.Unlock()
 	before, err := x.engine.deviceInventory(ctx, &x.manifest)
 	if err != nil {
 		return "", err
@@ -111,6 +116,10 @@ func (x *execution) createDevice(ctx context.Context, pin *model.Simulator) (str
 	x.manifest.DeviceCreatePending = false
 	x.manifest.DevicesBefore = nil
 	x.result.Observation.DeviceUDID = id
+	if lanes := x.engine.laneRunner(); lanes != nil && x.engine.laneMode() {
+		// Before boot: the device's launchd_sim is the job's from its start.
+		lanes.AttachDevice(x.job.ID, id)
+	}
 	if saveErr := x.engine.saveManifest(x.manifest); saveErr != nil {
 		return "", errors.Join(err, saveErr)
 	}
@@ -143,7 +152,10 @@ func environment(workspace, developer, account string) []string {
 	return []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "USER=" + account, "LOGNAME=" + account, "DEVELOPER_DIR=" + developer, "HOME=" + filepath.Join(workspace, "home"), "TMPDIR=" + filepath.Join(workspace, "tmp"), "TMP=" + filepath.Join(workspace, "tmp"), "TEMP=" + filepath.Join(workspace, "tmp"), "CFFIXED_USER_HOME=" + filepath.Join(workspace, "home"), "XDG_CACHE_HOME=" + filepath.Join(workspace, "caches"), "CLANG_MODULE_CACHE_PATH=" + filepath.Join(workspace, "caches", "clang"), "SWIFT_MODULECACHE_PATH=" + filepath.Join(workspace, "caches", "swift"), "LANG=en_US.UTF-8", "LC_ALL=en_US.UTF-8"}
 }
 
-func (e *Engine) stopWriters(ctx context.Context, m *manifest) error {
+// stopWriters stops m's simulator and then the job processes jobID's
+// cleanup may stop (accountQuiesce); jobID "" is recovery, which stops every
+// job process.
+func (e *Engine) stopWriters(ctx context.Context, m *manifest, jobID string) error {
 	ctx, cancel := context.WithTimeout(ctx, e.options.CleanupTimeout)
 	defer cancel()
 	var simulatorErr error
@@ -156,7 +168,7 @@ func (e *Engine) stopWriters(ctx context.Context, m *manifest) error {
 		}
 		simulatorErr = e.stopDevice(ctx, m)
 	}
-	quietErr := e.options.Runner.Quiesce(ctx)
+	quietErr := e.accountQuiesce(ctx, jobID)
 	if quietErr != nil {
 		return errors.Join(ErrRecovery, simulatorErr, quietErr)
 	}
@@ -168,7 +180,7 @@ func (e *Engine) stopDevice(ctx context.Context, m *manifest) error {
 		if !udidPattern.MatchString(m.DeviceUDID) {
 			return ErrRecovery
 		}
-		command := Command{Executable: "/usr/bin/xcrun", Dir: "/", Env: environment(filepath.Join(e.options.WorkspaceRoot, m.JobID), m.DeveloperDir, e.options.JobUser)}
+		command := Command{Executable: "/usr/bin/xcrun", Dir: "/", Env: environment(filepath.Join(e.options.WorkspaceRoot, m.JobID), m.DeveloperDir, e.options.JobUser), JobID: m.JobID}
 		var failures []error
 		for _, action := range []string{"shutdown", "delete"} {
 			command.Args = []string{"simctl", action, m.DeviceUDID}
@@ -246,7 +258,7 @@ func (e *Engine) deviceInventory(ctx context.Context, m *manifest) ([]string, er
 	defer cancel()
 	output := &boundedBuffer{max: 16 << 20}
 	stderr := &boundedBuffer{max: 1 << 20}
-	result, err := e.run(ctx, Command{Executable: "/usr/bin/xcrun", Args: []string{"simctl", "list", "devices", "--json"}, Dir: "/", Env: environment(filepath.Join(e.options.WorkspaceRoot, m.JobID), m.DeveloperDir, e.options.JobUser)}, output, stderr)
+	result, err := e.run(ctx, Command{Executable: "/usr/bin/xcrun", Args: []string{"simctl", "list", "devices", "--json"}, Dir: "/", Env: environment(filepath.Join(e.options.WorkspaceRoot, m.JobID), m.DeveloperDir, e.options.JobUser), JobID: m.JobID}, output, stderr)
 	if err != nil || result.ExitCode != 0 || result.Signal != "" || !result.CleanupOK || output.err != nil || stderr.err != nil {
 		return nil, errors.Join(err, output.err, stderr.err, errors.New("cannot verify recorded simulator inventory"))
 	}
@@ -287,11 +299,22 @@ func (e *Engine) reconcileDevice(ctx context.Context, m *manifest) error {
 	return e.saveManifest(*m)
 }
 
+// verifyDeviceCreation resolves an interrupted creation: every device now
+// listed must be in the pre-create snapshot or recorded by another job's
+// manifest (a sibling's own device, created after this one's creation
+// ended); anything else is an unrecorded device. It runs under deviceMu, so
+// no sibling creation is in flight.
 func (e *Engine) verifyDeviceCreation(ctx context.Context, m *manifest) error {
 	if !m.DeviceCreatePending {
 		return nil
 	}
+	e.deviceMu.Lock()
+	defer e.deviceMu.Unlock()
 	ids, err := e.deviceInventory(ctx, m)
+	if err != nil {
+		return err
+	}
+	recorded, err := e.recordedDevices(m.JobID)
 	if err != nil {
 		return err
 	}
@@ -303,7 +326,7 @@ func (e *Engine) verifyDeviceCreation(ctx context.Context, m *manifest) error {
 		before[id] = true
 	}
 	for _, id := range ids {
-		if !before[id] {
+		if !before[id] && !recorded[strings.ToUpper(id)] {
 			return fmt.Errorf("%w: unrecorded simulator after interrupted creation: %s; worker-reset required", ErrContamination, id)
 		}
 	}
@@ -348,8 +371,12 @@ func (e *Engine) resetDeviceCreation(ctx context.Context, m *manifest) error {
 		}
 		before[id] = true
 	}
+	recorded, err := e.recordedDevices(m.JobID)
+	if err != nil {
+		return err
+	}
 	for _, id := range second {
-		if before[id] {
+		if before[id] || recorded[strings.ToUpper(id)] {
 			continue
 		}
 		m.DeviceUDID = id
@@ -361,4 +388,30 @@ func (e *Engine) resetDeviceCreation(ctx context.Context, m *manifest) error {
 		}
 	}
 	return e.verifyDeviceCreation(ctx, m)
+}
+
+// recordedDevices is the set of device UDIDs (upper case) other jobs'
+// manifests record as theirs.
+func (e *Engine) recordedDevices(except string) (map[string]bool, error) {
+	names, err := e.registryNames()
+	if err != nil {
+		return nil, err
+	}
+	recorded := map[string]bool{}
+	for _, name := range names {
+		if name == except+".json" || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		var other manifest
+		if err := readJSON(e.root, "manifests/"+name, &other); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
+		}
+		if other.DeviceUDID != "" {
+			recorded[strings.ToUpper(other.DeviceUDID)] = true
+		}
+	}
+	return recorded, nil
 }

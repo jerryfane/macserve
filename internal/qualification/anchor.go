@@ -43,8 +43,9 @@ const (
 )
 
 // mutableConfig are config files that approval or the owner change in normal
-// operation; they are never configuration identity.
-var mutableConfig = []string{"owner.pause", "qualification.json", "boundary-evidence.json", "activation-anchor.json"}
+// operation; they are never configuration identity. lanes.json only lowers
+// concurrency (health.LanesOverrideFile).
+var mutableConfig = []string{"owner.pause", "qualification.json", "boundary-evidence.json", "activation-anchor.json", "lanes.json"}
 
 var daemonPlists = []string{"/Library/LaunchDaemons/org.macserve.controller.plist", "/Library/LaunchDaemons/org.macserve.keyholder.plist", "/Library/LaunchDaemons/org.macserve.maintenance.plist", "/Library/LaunchDaemons/org.macserve.worker.plist"}
 

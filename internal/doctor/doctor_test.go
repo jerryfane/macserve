@@ -481,3 +481,55 @@ func TestAllowedCommand(t *testing.T) {
 		}
 	}
 }
+
+// Doctor sizes the disk budget by the lanes the services actually run, by the
+// runtime rule for lanes.json: an unsafe, unreadable or malformed override
+// runs one lane (80 GiB budget, so 60 GiB accounted leaves no room), a safe
+// one lowers, an absent one leaves controller.json's two lanes (110 GiB).
+func TestDoctorLanesOverrideFollowsRuntimeRule(t *testing.T) {
+	const override = Root + "/config/lanes.json"
+	safe := plan.FileInfo{Exists: true, Mode: 0o644, Nlink: 1}
+	dir := plan.FileInfo{Exists: true, Mode: fs.ModeDir | 0o755, Nlink: 3}
+	for name, tc := range map[string]struct {
+		info      plan.FileInfo
+		body      string
+		readErr   error
+		ancestors map[string]plan.FileInfo
+		want      Status
+	}{
+		// Runtime RootConfig also refuses an unsafe ancestor directory.
+		"group-writable ancestor": {safe, `{"max_concurrent_jobs":2}`, nil, map[string]plan.FileInfo{"/Library": {Exists: true, Mode: fs.ModeDir | 0o775, Nlink: 3}}, Warn},
+		"user-owned ancestor":     {safe, `{"max_concurrent_jobs":2}`, nil, map[string]plan.FileInfo{Root + "/config": {Exists: true, Mode: fs.ModeDir | 0o755, UID: 501, Nlink: 3}}, Warn},
+		"symlinked ancestor":      {safe, `{"max_concurrent_jobs":2}`, nil, map[string]plan.FileInfo{Root: {Exists: true, Mode: fs.ModeSymlink | 0o755, Nlink: 1}}, Warn},
+		"missing ancestor":        {safe, `{"max_concurrent_jobs":2}`, nil, map[string]plan.FileInfo{"/": {}}, Warn},
+		"absent":                  {plan.FileInfo{}, "", nil, nil, Pass},
+		"safe two":                {safe, `{"max_concurrent_jobs":2}`, nil, nil, Pass},
+		"safe one":                {safe, `{"max_concurrent_jobs":1}`, nil, nil, Warn},
+		"group writable":          {plan.FileInfo{Exists: true, Mode: 0o664, Nlink: 1}, `{"max_concurrent_jobs":2}`, nil, nil, Warn},
+		"not root owned":          {plan.FileInfo{Exists: true, Mode: 0o644, UID: 501, Nlink: 1}, `{"max_concurrent_jobs":2}`, nil, nil, Warn},
+		"symlink":                 {plan.FileInfo{Exists: true, Mode: fs.ModeSymlink | 0o644, Nlink: 1}, `{"max_concurrent_jobs":2}`, nil, nil, Warn},
+		"unknown field":           {safe, `{"max_concurrent_jobs":2,"lanes":3}`, nil, nil, Warn},
+		"unreadable":              {safe, "", fs.ErrPermission, nil, Warn},
+		"above configured":        {safe, `{"max_concurrent_jobs":3}`, nil, nil, Pass},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := healthy(t)
+			h.files[Root+"/config/controller.json"] = []byte(`{"max_concurrent_jobs":2}`)
+			h.setHealth(t, func(x *health.Health) { x.AccountedBytes = 60 << 30 })
+			h.stats[override] = tc.info
+			h.stats["/"], h.stats["/Library"] = dir, dir
+			for path, info := range tc.ancestors {
+				h.stats[path] = info
+			}
+			if tc.info.Exists && tc.readErr == nil {
+				h.files[override] = []byte(tc.body)
+			}
+			if tc.readErr != nil {
+				h.fileErr[override] = tc.readErr
+			}
+			if c := checks(Run(context.Background(), h.probe(), Options{}))["disk"]; c.Status != tc.want {
+				t.Fatalf("disk %s (%s), want %s", c.Status, c.Detail, tc.want)
+			}
+		})
+	}
+}

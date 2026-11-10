@@ -129,12 +129,12 @@ func (f *runtimeFixture) dispatch(t *testing.T) protocol.Lease {
 	if err := f.controller.register(context.Background(), protocol.Registration{Epoch: "epoch-a", Quiescent: true}); err != nil {
 		t.Fatal(err)
 	}
-	lease, err := f.controller.next(context.Background(), "epoch-a")
+	lease, err := f.controller.next(context.Background(), "epoch-a", nil)
 	if err != nil || lease != nil {
 		t.Fatalf("preparation admission: %v %v", lease, err)
 	}
 	f.controller.prep.Wait()
-	lease, err = f.controller.next(context.Background(), "epoch-a")
+	lease, err = f.controller.next(context.Background(), "epoch-a", nil)
 	if err != nil || lease == nil {
 		t.Fatalf("prepared lease: %v %v", lease, err)
 	}
@@ -354,7 +354,7 @@ func TestArtifactIntegrityAliasesExpiryAndQuiescentAcknowledgment(t *testing.T) 
 	if _, err := f.db.Pause(context.Background(), "benchmark", "drain", "admin", f.now); err != nil {
 		t.Fatal(err)
 	}
-	if lease, err := f.controller.next(context.Background(), "epoch-a"); lease != nil || err != nil {
+	if lease, err := f.controller.next(context.Background(), "epoch-a", nil); lease != nil || err != nil {
 		t.Fatalf("paused acknowledgment: %v %v", lease, err)
 	}
 	status, err = f.controller.Status(context.Background())
@@ -484,7 +484,7 @@ func TestPreparationOutlivesPollAndDoesNotStartHeartbeatClock(t *testing.T) {
 		t.Fatal(err)
 	}
 	poll, cancel := context.WithCancel(context.Background())
-	if lease, err := f.controller.next(poll, "epoch-a"); lease != nil || err != nil {
+	if lease, err := f.controller.next(poll, "epoch-a", nil); lease != nil || err != nil {
 		t.Fatalf("claim: %v %v", lease, err)
 	}
 	<-f.source.started
@@ -497,7 +497,7 @@ func TestPreparationOutlivesPollAndDoesNotStartHeartbeatClock(t *testing.T) {
 	}
 	close(release)
 	f.controller.prep.Wait()
-	lease, err := f.controller.next(context.Background(), "epoch-a")
+	lease, err := f.controller.next(context.Background(), "epoch-a", nil)
 	if err != nil || lease == nil || lease.Job.ID != job.ID {
 		t.Fatalf("export did not survive polling: %v %v", lease, err)
 	}
@@ -511,7 +511,7 @@ func TestPreparationCancellationReleasesOnlyAfterExporterStops(t *testing.T) {
 	if err := f.controller.register(context.Background(), protocol.Registration{Epoch: "epoch-a", Quiescent: true}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.controller.next(context.Background(), "epoch-a"); err != nil {
+	if _, err := f.controller.next(context.Background(), "epoch-a", nil); err != nil {
 		t.Fatal(err)
 	}
 	<-f.source.started
@@ -537,7 +537,7 @@ func TestIdleReadinessExpiresWithoutLosingKnownQuiescence(t *testing.T) {
 	if err != nil || status.WorkerReady || !status.Quiescent {
 		t.Fatalf("idle readiness did not expire: %+v %v", status, err)
 	}
-	if _, err := f.controller.next(context.Background(), "epoch-a"); err != nil {
+	if _, err := f.controller.next(context.Background(), "epoch-a", nil); err != nil {
 		t.Fatal(err)
 	}
 	status, err = f.controller.Status(context.Background())
@@ -592,11 +592,11 @@ func TestArtifactPoolEvictsOldestTerminalBytesNotActiveOrMetadata(t *testing.T) 
 	}
 	f.offset.Store(int64(time.Second))
 	f.enqueue(t, "second", model.Build)
-	if _, err := f.controller.next(context.Background(), "epoch-a"); err != nil {
+	if _, err := f.controller.next(context.Background(), "epoch-a", nil); err != nil {
 		t.Fatal(err)
 	}
 	f.controller.prep.Wait()
-	second, err := f.controller.next(context.Background(), "epoch-a")
+	second, err := f.controller.next(context.Background(), "epoch-a", nil)
 	if err != nil || second == nil {
 		t.Fatalf("second lease: %v %v", second, err)
 	}
@@ -630,7 +630,7 @@ func TestStartupRecoveryInterruptsPersistedLeaseBeforeRegistration(t *testing.T)
 		t.Fatal(err)
 	}
 	job := f.enqueue(t, "interrupted", model.Build)
-	claimed, err := f.db.Claim(context.Background(), "crashed-epoch", f.now)
+	claimed, err := f.db.Claim(context.Background(), "crashed-epoch", f.now, 1)
 	if err != nil || claimed.ID != job.ID {
 		t.Fatalf("persisted claim: %v %v", claimed, err)
 	}
@@ -657,7 +657,7 @@ func TestDeadlineQuarantinesEvenWhenWorkerKeepsHeartbeating(t *testing.T) {
 	lease := f.lease(t, model.Build)
 	f.offset.Store(int64(600*time.Second + f.controller.options.CleanupTimeout + f.controller.options.DeliveryTimeout + f.controller.options.HeartbeatTimeout + time.Second))
 	f.controller.mu.Lock()
-	f.controller.active.heartbeat = f.controller.options.Now()
+	f.controller.active[0].heartbeat = f.controller.options.Now()
 	f.controller.mu.Unlock()
 	f.controller.checkActive(context.Background())
 	persisted, _ := f.db.Get(context.Background(), lease.Job.ID)
@@ -734,10 +734,10 @@ func TestReceiptRefusalCompletesUnsuccessfullyKeepingCleanup(t *testing.T) {
 				t.Fatalf("persisted completion %+v receipt %s", completion.Result.State, completion.Receipt)
 			}
 			f.controller.mu.Lock()
-			active, epoch := f.controller.active, f.controller.epoch
+			active, epoch := len(f.controller.active), f.controller.epoch
 			f.controller.mu.Unlock()
-			if active != nil || epoch == "" {
-				t.Fatalf("dispatch not released: active=%v epoch=%q", active != nil, epoch)
+			if active != 0 || epoch == "" {
+				t.Fatalf("dispatch not released: active=%d epoch=%q", active, epoch)
 			}
 		})
 	}

@@ -40,15 +40,19 @@ func (s *Store) RegisterWorker(ctx context.Context, epoch string) error {
 	if invalid {
 		return ErrLease
 	}
-	job, err := scanJob(tx.QueryRowContext(ctx, "SELECT "+jobColumns+" FROM jobs WHERE state IN ("+activeStates+")"))
-	if err == nil {
-		if job.WorkerEpoch == epoch {
-			return tx.Commit()
-		}
-		return ErrTransition
-	}
-	if !errors.Is(err, ErrNotFound) {
+	// Re-registering the epoch every active job carries changes nothing; a
+	// different epoch cannot replace a worker that still holds a lane.
+	running, err := activeJobs(ctx, tx)
+	if err != nil {
 		return err
+	}
+	if len(running) > 0 {
+		for _, job := range running {
+			if job.WorkerEpoch != epoch {
+				return ErrTransition
+			}
+		}
+		return tx.Commit()
 	}
 	var old string
 	err = tx.QueryRowContext(ctx, "SELECT acknowledged_epoch FROM service_state WHERE singleton=1").Scan(&old)
@@ -66,12 +70,8 @@ func (s *Store) RegisterWorker(ctx context.Context, epoch string) error {
 	return tx.Commit()
 }
 
-func (s *Store) Active(ctx context.Context) (model.Job, error) {
-	return scanJob(s.db.QueryRowContext(ctx, "SELECT "+jobColumns+" FROM jobs WHERE state IN ("+activeStates+")"))
-}
-
 // Fail atomically ends uncertain or controller-side preparation work. Uncertain
-// cleanup fences its epoch before releasing the global active slot.
+// cleanup fences its epoch before releasing the job's lane.
 func (s *Store) Fail(ctx context.Context, id, lease string, state model.State, cleanupOK bool, reason string, now time.Time) error {
 	return s.fail(ctx, id, lease, state, cleanupOK, true, reason, now)
 }

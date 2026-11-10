@@ -59,7 +59,7 @@ func signSetup(t *testing.T) (*fixture, model.Job, *[]string) {
 func completeJob(t *testing.T, f *fixture, job model.Job, state model.State) {
 	t.Helper()
 	ctx := context.Background()
-	claimed, err := f.db.Claim(ctx, "epoch", testTime)
+	claimed, err := f.db.Claim(ctx, "epoch", testTime, 1)
 	if err != nil || claimed.ID != job.ID {
 		t.Fatalf("claim %v %v", claimed.ID, err)
 	}

@@ -17,6 +17,15 @@ import (
 const MaxReceiptBytes = 32768
 const maxManifestBytes = 64 << 20
 
+// payloadSchema 2 adds the job's lane record (Payload.Concurrency, required)
+// and the job account's peak footprint (ResourcePolicy.HostPeakMemoryMiB);
+// the signer seals only schema 2. Schema-1 receipts, sealed before lanes,
+// carry neither and still verify and validate under the single-job rules.
+const (
+	payloadSchema       = 2
+	legacyPayloadSchema = 1
+)
+
 type ServiceIdentity struct {
 	ID           string `json:"id"`
 	HostID       string `json:"host_id"`
@@ -105,11 +114,45 @@ type Observation struct {
 	Flutter worker.FlutterObservation `json:"flutter,omitzero"`
 }
 type ResourcePolicy struct {
-	TimeoutSeconds  int   `json:"timeout_seconds"`
-	MemoryLimitMiB  int   `json:"memory_limit_mib"`
-	PeakMemoryMiB   int64 `json:"peak_memory_mib"`
-	CleanupRequired bool  `json:"cleanup_required"`
-	CleanupOK       bool  `json:"cleanup_ok"`
+	TimeoutSeconds int   `json:"timeout_seconds"`
+	MemoryLimitMiB int   `json:"memory_limit_mib"`
+	PeakMemoryMiB  int64 `json:"peak_memory_mib"`
+	// HostPeakMemoryMiB (schema 2) is the job account's peak footprint while
+	// the job ran, sibling lanes included; PeakMemoryMiB is the job's own
+	// charge. It is zero, and omitted, when the worker reported none (a
+	// pre-lane worker) and in every schema-1 receipt, so a schema-1 manifest
+	// sealed before lanes republishes byte for byte.
+	HostPeakMemoryMiB int64 `json:"host_peak_memory_mib,omitempty"`
+	CleanupRequired   bool  `json:"cleanup_required"`
+	CleanupOK         bool  `json:"cleanup_ok"`
+}
+
+// Concurrency (schema 2) is the job's lane record from the worker that ran
+// it: its 1-based lane of the worker's MaxLanes; the jobs that executed in
+// the worker while it did, bounded for publication (OverlapCount of them,
+// the PublishedOverlaps longest in OverlappedJobs, and OverlapsSHA256 over
+// the worker's complete list, which the full manifest's result carries); the
+// rule that attributed job-account processes to it (worker.Attribution*); how
+// many unattributed processes it observed; and the idle verdict its cleanup
+// ended with (worker.Idle*).
+type Concurrency struct {
+	Lane                int       `json:"lane"`
+	MaxLanes            int       `json:"max_lanes"`
+	OverlapCount        int       `json:"overlap_count"`
+	OverlappedJobs      []Overlap `json:"overlapped_jobs"`
+	OverlapsSHA256      string    `json:"overlaps_sha256"`
+	Attribution         string    `json:"attribution"`
+	UnattributedResidue int       `json:"unattributed_residue"`
+	IdleVerdict         string    `json:"idle_verdict"`
+}
+
+// PublishedOverlaps bounds Concurrency.OverlappedJobs, so a long job beside a
+// replenished queue still fits the compact receipt's publication limit.
+const PublishedOverlaps = 8
+
+type Overlap struct {
+	JobID   string `json:"job_id"`
+	Seconds int64  `json:"overlap_seconds"`
 }
 type EvidenceDigests struct {
 	Commands  string `json:"commands"`
@@ -121,6 +164,7 @@ type EvidenceDigests struct {
 
 // Payload core fields are retained verbatim in a compact receipt. Complete is
 // the signer's evidence assertion, not a replacement for the verifier's policy.
+// Concurrency is required in schema 2 and absent in schema 1.
 type Payload struct {
 	Schema      int             `json:"schema"`
 	JobID       string          `json:"job_id"`
@@ -153,6 +197,7 @@ type Payload struct {
 	SealedAt              time.Time                `json:"sealed_at"`
 	WorkerEpoch           string                   `json:"worker_epoch"`
 	Resources             ResourcePolicy           `json:"resources"`
+	Concurrency           *Concurrency             `json:"concurrency,omitempty"`
 	Tests                 TestEvidence             `json:"tests"`
 	Logs                  []evidence.Artifact      `json:"logs"`
 	LogsTruncated         bool                     `json:"logs_truncated"`

@@ -68,6 +68,18 @@ type nativeRunner struct {
 	console func() error
 	// diagnostics receives tolerated memory sampling failures; nil discards.
 	diagnostics io.Writer
+	// kill signals the unprotected cleanup's process group or direct child.
+	kill func(int, syscall.Signal) error
+	// Lane attribution (lanes.go): the tracker, its sampler, the workspace
+	// root that holds every job's workspace and the reader of an
+	// instance's executable and launchd_sim arguments.
+	lanes          *laneTracker
+	lanesOnce      sync.Once
+	samplerMu      sync.Mutex
+	samplerRunning bool
+	workspaceRoot  string
+	describe       func(int, bool) (processDescription, error)
+	lineage        func(int, string) (uint64, uint64, error)
 }
 
 // newProcessRunner is the process/pipes implementation. Production construction
@@ -82,6 +94,7 @@ func newProcessRunner() *nativeRunner {
 		termGrace:      500 * time.Millisecond,
 		killGrace:      time.Second,
 		drainTimeout:   250 * time.Millisecond,
+		kill:           syscall.Kill,
 	}
 	r.sample = func(ctx context.Context) ([]processSample, error) { return memoryProcesses(ctx, r.uid) }
 	return r
@@ -154,32 +167,41 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 	if command.MemoryLimitMiB < 0 {
 		return result, errors.New("worker command memory budget must not be negative")
 	}
-	// The job UID's GUI session is always logged in, and its footprint
-	// (including compressed and swapped memory) is outside the job's control.
-	// A command is charged only for footprint above the job UID's footprint
-	// sampled immediately before its job's first command; without that
-	// baseline it must not start.
-	baseline := command.MemoryBaseline
-	if baseline == nil {
-		baseline = &MemoryBaseline{}
+	// A command of a job in lane mode is charged its own lane's processes
+	// (laneTracker) and samples no job-UID baseline.
+	var tracker *laneTracker
+	if command.JobID != "" && r.lanes != nil && r.lanes.has(command.JobID) {
+		tracker = r.lanes
 	}
-	if !baseline.sampled {
-		baselineCtx, cancelBaseline := context.WithTimeout(ctx, r.sampleTimeout)
-		samples, err := r.sample(baselineCtx)
-		cancelBaseline()
-		if err != nil {
-			return result, fmt.Errorf("%s: sample worker memory baseline: %w", label, err)
+	// Otherwise the job UID's GUI session is always logged in, and its
+	// footprint (including compressed and swapped memory) is outside the
+	// job's control. A command is charged only for footprint above the job
+	// UID's footprint sampled immediately before its job's first command;
+	// without that baseline it must not start.
+	var baselineKiB int64
+	if tracker == nil {
+		baseline := command.MemoryBaseline
+		if baseline == nil {
+			baseline = &MemoryBaseline{}
 		}
-		kib, err := footprintKiB(samples, r.uid)
-		if err != nil {
-			return result, fmt.Errorf("%s: sample worker memory baseline: %w", label, err)
+		if !baseline.sampled {
+			baselineCtx, cancelBaseline := context.WithTimeout(ctx, r.sampleTimeout)
+			samples, err := r.sample(baselineCtx)
+			cancelBaseline()
+			if err != nil {
+				return result, fmt.Errorf("%s: sample worker memory baseline: %w", label, err)
+			}
+			kib, err := footprintKiB(samples, r.uid)
+			if err != nil {
+				return result, fmt.Errorf("%s: sample worker memory baseline: %w", label, err)
+			}
+			*baseline = MemoryBaseline{sampled: true, kib: kib}
+			if command.MemoryBaseline != nil && r.diagnostics != nil {
+				fmt.Fprintf(r.diagnostics, "macserve worker: job memory baseline: job-UID footprint %d MiB\n", kibToMiB(kib))
+			}
 		}
-		*baseline = MemoryBaseline{sampled: true, kib: kib}
-		if command.MemoryBaseline != nil && r.diagnostics != nil {
-			fmt.Fprintf(r.diagnostics, "macserve worker: job memory baseline: job-UID footprint %d MiB\n", kibToMiB(kib))
-		}
+		baselineKiB = baseline.kib
 	}
-	baselineKiB := baseline.kib
 	if stdout == nil {
 		stdout = io.Discard
 	}
@@ -216,6 +238,12 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 	pid := cmd.Process.Pid
 	uid := r.uid
 	defer cmd.Process.Release()
+	if tracker != nil {
+		// The root keeps this PID through launchctl asuser, _job-exec and
+		// the tool's exec. It is forgotten once reaped: the PID may be reused.
+		tracker.addRoot(command.JobID, pid)
+		defer tracker.removeRoot(command.JobID, pid)
+	}
 
 	pipes := make(chan pipeResult, 2)
 	var outputMu sync.Mutex
@@ -264,6 +292,20 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 		}
 	}
 	observe := func(samples []processSample) error {
+		if tracker != nil {
+			tracker.update(samples)
+			mine, total, err := tracker.footprint(samples, command.JobID)
+			if err != nil {
+				return err
+			}
+			charged := kibToMiB(mine)
+			result.PeakMemoryMiB = max(result.PeakMemoryMiB, charged)
+			result.HostPeakMemoryMiB = max(result.HostPeakMemoryMiB, kibToMiB(total))
+			if command.MemoryLimitMiB > 0 && charged > int64(command.MemoryLimitMiB) {
+				return fmt.Errorf("%w: sampled %d MiB in the job's own processes, budget %d MiB (monitored, not a hard cap)", ErrMemoryLimit, charged, command.MemoryLimitMiB)
+			}
+			return nil
+		}
 		totalKiB, err := footprintKiB(samples, uid)
 		if err != nil {
 			return err
@@ -462,14 +504,14 @@ func (r *nativeRunner) cleanupGroup(group, uid int, reap func(), reaped, waitFai
 			// A still-unreaped direct child cannot have had its PID reused.
 			// Never fall back to signalling an unverified process group.
 			if !foreignGroup && !reaped() && !waitFailed() {
-				if err := syscall.Kill(group, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
+				if err := r.kill(group, sig); !signalSettled(err) {
 					failures = errors.Join(failures, cleanupFailure("cleanup: signal direct child", err))
 				}
 			}
 			return
 		}
 		if live {
-			if err := syscall.Kill(-group, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
+			if err := r.kill(-group, sig); !signalSettled(err) {
 				failures = errors.Join(failures, cleanupFailure("cleanup: signal process group", err))
 			}
 		}
@@ -580,6 +622,17 @@ func (r *nativeRunner) cleanupProtectedGroup(group, uid int, reap func(), reaped
 		return errors.Join(ErrCleanup, cleanupFailure("protected cleanup", errors.New("direct child not reaped within the cleanup window"), ctx.Err()))
 	}
 	return nil
+}
+
+// signalSettled reports whether a cleanup signal's result leaves the
+// verdict to the confirmation listing. ESRCH: nothing left to signal. EPERM:
+// Darwin's killpg refuses a group whose member is exiting (CI macOS
+// 2026-11-10: "signal process group: operation not permitted" while the
+// leader died of the same SIGTERM). ownedGroup already refused a foreign-UID
+// member, and a member that survives is still found live by the listing and
+// fails cleanup, so neither error can pass a live process.
+func signalSettled(err error) bool {
+	return err == nil || errors.Is(err, syscall.ESRCH) || errors.Is(err, syscall.EPERM)
 }
 
 func ownedGroup(samples []processSample, group, uid int) (bool, error) {

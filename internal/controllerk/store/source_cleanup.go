@@ -21,7 +21,9 @@ PRAGMA user_version=3;
 const sourceCleanupPending = "EXISTS(SELECT 1 FROM source_cleanup LEFT JOIN jobs ON jobs.id=source_cleanup.job_id WHERE jobs.id IS NULL OR jobs.state NOT IN (" + activeStates + "))"
 
 // RequireSourceCleanup records intent before the exporter can write any bytes.
-// Active jobs already exclude other claims; their intent is not a quarantine.
+// Gating is per job: an active job's intent covers only its own export, still in
+// use, so it is not a quarantine and holds no other lane's claim. The intent of
+// a job no longer active closes admission until removal is confirmed.
 func (s *Store) RequireSourceCleanup(ctx context.Context, id string) error {
 	if !validOpaque(id, 128) {
 		return ErrInvalid

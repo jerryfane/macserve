@@ -94,7 +94,7 @@ func TestPollHostReadinessCancelRecordsBlockers(t *testing.T) {
 	f.controller.options.Gate = func(context.Context) (health.GateState, error) {
 		return health.GateState{Blockers: []string{"toolchain_validation_unavailable"}, CancelActive: true}, nil
 	}
-	if _, err := f.controller.next(context.Background(), "epoch-a"); err != nil {
+	if _, err := f.controller.next(context.Background(), "epoch-a", nil); err != nil {
 		t.Fatal(err)
 	}
 	job, err := f.db.Get(context.Background(), lease.Job.ID)

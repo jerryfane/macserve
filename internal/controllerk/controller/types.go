@@ -32,11 +32,17 @@ type Status struct {
 	Service     model.ServiceState `json:"service"`
 	WorkerReady bool               `json:"worker_ready"`
 	Quiescent   bool               `json:"quiescent"`
-	ActiveJob   string             `json:"active_job,omitempty"`
-	Gate        health.GateState   `json:"gate"`
+	// ActiveJobs lists every active job, oldest claim first.
+	ActiveJobs []string `json:"active_jobs,omitempty"`
+	// MaxConcurrentJobs is the controller's configured lanes.
+	MaxConcurrentJobs int              `json:"max_concurrent_jobs"`
+	Gate              health.GateState `json:"gate"`
 }
 type Options struct {
-	Root, Socket     string
+	Root, Socket string
+	// Lanes is max_concurrent_jobs, 1..model.MaxConcurrentJobs (0 means 1).
+	// A worker registering fewer lanes caps it.
+	Lanes            int
 	BrokerUID        uint32
 	Store            *store.Store
 	Source           SourceProvider

@@ -71,7 +71,7 @@ func TestUncertainPendingCompletionReplaysBeforeRecoveryWithoutRegistration(t *t
 				t.Errorf("unexpected startup traffic: %v", requests)
 			}
 			mu.Unlock()
-			_, pendingErr := os.Stat(filepath.Join(cfg.Root, "pending.json"))
+			_, pendingErr := os.Stat(filepath.Join(cfg.Root, pendingName("uncertain")))
 			if accepted {
 				if !os.IsNotExist(pendingErr) || len(executor.removed) != 1 {
 					t.Fatalf("acknowledged pending state not removed: %v", pendingErr)

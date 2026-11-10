@@ -13,10 +13,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,6 +38,10 @@ type Executor interface {
 	// VerifiedTree is the Git tree computed from a job's extracted source
 	// bytes, or "" when extraction did not verify one.
 	VerifiedTree(string) string
+	// LaneReady reports whether another job may start beside the running
+	// ones (worker.Engine.LaneReady); worker.ErrDrain means not until the
+	// worker is idle.
+	LaneReady(context.Context) error
 }
 
 type Client struct {
@@ -197,41 +204,114 @@ func wait(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-// Run never executes a new lease while a previous completion is awaiting durable
-// acknowledgement. Losing heartbeat or evidence delivery cancels local work.
+// laneDone is one lane's finished execution.
+type laneDone struct {
+	jobID     string
+	cleanupOK bool
+	err       error
+}
+
+// Run never executes a new lease while a saved completion from before it
+// started is awaiting durable acknowledgement. Losing heartbeat or evidence
+// delivery cancels local work.
+//
+// It executes up to max_concurrent_jobs leases at once, each on its own
+// goroutine, under one epoch. Recover runs only while no lease executes.
+// A lease whose cleanup was not verified fences its epoch at the controller;
+// the client then drains: it asks for no lease, lets the other lanes finish,
+// and registers a new epoch only after Recover verifies the idle account.
+// An engine drain (an unattributed job-account process while jobs run)
+// does the same. With one lane this is the sequential loop of a single-job
+// worker.
 func (c *Client) Run(ctx context.Context) (returned error) {
 	defer func() {
 		if ctx.Err() != nil && errors.Is(returned, ctx.Err()) {
 			returned = nil
 		}
 	}()
-	if saved, err := c.loadPending(); err != nil {
+	saved, err := c.loadPendings()
+	if err != nil {
 		return err
-	} else if saved != nil {
-		if err := c.deliver(ctx, *saved); err != nil {
+	}
+	for _, value := range saved {
+		if err := c.deliver(ctx, value); err != nil {
 			return err
 		}
 	}
-	registered := false
+	lanes := c.config.Lanes()
+	running := map[string]bool{}
+	done := make(chan laneDone, lanes)
+	var wg sync.WaitGroup
+	// Lanes finish, deliver and clean up under their own bounded contexts
+	// after ctx ends; Run returns only after every lane has.
+	defer wg.Wait()
+	var fatal error
+	registered, draining := false, false
+	finished := func(d laneDone) {
+		delete(running, d.jobID)
+		fatal = errors.Join(fatal, d.err)
+		draining = draining || !d.cleanupOK
+	}
+	// pause waits one poll interval, returning early when a lane finishes.
+	pause := func() error {
+		timer := time.NewTimer(time.Duration(c.config.PollSeconds) * time.Second)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case d := <-done:
+			finished(d)
+		case <-timer.C:
+		}
+		return nil
+	}
 	for {
+		for collected := false; !collected; {
+			select {
+			case d := <-done:
+				finished(d)
+			default:
+				collected = true
+			}
+		}
+		if fatal != nil {
+			return fatal
+		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		admissionErr := c.engine.Recover(ctx)
-		statusErr := c.saveAdmissionStatus(admissionErr)
-		if err := errors.Join(admissionErr, statusErr); err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
+		if len(running) == 0 {
+			if draining {
+				// Failed cleanup fenced the old epoch at the controller. A
+				// new epoch is registered only after Recover verifies
+				// quiescence.
+				if c.epoch, err = newEpoch(); err != nil {
+					return err
+				}
+				registered, draining = false, false
 			}
-			log.Printf("worker recovery refused admission; retrying after poll: %v", err)
-			registered = false
-			if err := wait(ctx, time.Duration(c.config.PollSeconds)*time.Second); err != nil {
+			admissionErr := c.engine.Recover(ctx)
+			statusErr := c.saveAdmissionStatus(admissionErr)
+			if err := errors.Join(admissionErr, statusErr); err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				log.Printf("worker recovery refused admission; retrying after poll: %v", err)
+				registered = false
+				if err := wait(ctx, time.Duration(c.config.PollSeconds)*time.Second); err != nil {
+					return err
+				}
+				continue
+			}
+		}
+		if draining || len(running) == lanes {
+			if err := pause(); err != nil {
 				return err
 			}
 			continue
 		}
 		if !registered {
-			_, err := c.json(ctx, http.MethodPost, "/register", c.epoch, "", protocol.Registration{Epoch: c.epoch, Quiescent: true}, nil)
+			_, err := c.json(ctx, http.MethodPost, "/register", c.epoch, "", protocol.Registration{Epoch: c.epoch, Quiescent: true, Lanes: lanes}, nil)
 			if err != nil {
 				if errors.Is(err, ErrPeerIdentity) {
 					return err
@@ -240,15 +320,29 @@ func (c *Client) Run(ctx context.Context) (returned error) {
 				if errors.As(err, &status) && status.Status >= 400 && status.Status < 500 && status.Status != 429 {
 					return err
 				}
-				if err := wait(ctx, time.Duration(c.config.PollSeconds)*time.Second); err != nil {
+				if err := pause(); err != nil {
 					return err
 				}
 				continue
 			}
 			registered = true
 		}
+		if len(running) != 0 {
+			// A lane beside running jobs: the engine must still admit one.
+			if err := c.engine.LaneReady(ctx); err != nil {
+				if errors.Is(err, worker.ErrDrain) {
+					log.Printf("worker draining until idle: %v", err)
+					draining = true
+				}
+				if err := pause(); err != nil {
+					return err
+				}
+				continue
+			}
+		}
+		request := protocol.NextRequest{Running: slices.Sorted(maps.Keys(running))}
 		var lease protocol.Lease
-		status, err := c.json(ctx, http.MethodPost, "/next", c.epoch, "", struct{}{}, &lease)
+		status, err := c.json(ctx, http.MethodPost, "/next", c.epoch, "", request, &lease)
 		if err != nil {
 			if errors.Is(err, ErrPeerIdentity) {
 				return err
@@ -259,23 +353,19 @@ func (c *Client) Run(ctx context.Context) (returned error) {
 			}
 			registered = false
 		} else if status != http.StatusNoContent {
-			cleanupOK, err := c.execute(ctx, lease)
-			if err != nil {
-				return err
+			if running[lease.Job.ID] {
+				return errors.New("controller offered a lease a lane already executes")
 			}
-			if !cleanupOK {
-				// Failed cleanup fences the old epoch at the controller. A new
-				// epoch is registered only after Recover verifies quiescence.
-				c.epoch, err = newEpoch()
-				if err != nil {
-					return err
-				}
-				registered = false
-			} else {
-				continue
-			}
+			running[lease.Job.ID] = true
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				cleanupOK, err := c.execute(ctx, lease)
+				done <- laneDone{jobID: lease.Job.ID, cleanupOK: cleanupOK, err: err}
+			}()
+			continue
 		}
-		if err := wait(ctx, time.Duration(c.config.PollSeconds)*time.Second); err != nil {
+		if err := pause(); err != nil {
 			return err
 		}
 	}
@@ -292,6 +382,8 @@ type pending struct {
 	Resolution *buildseal.Resolution `json:"resolution,omitempty"`
 	SourceTree string                `json:"source_tree,omitempty"`
 	Seal       *buildseal.Envelope   `json:"seal,omitempty"`
+	// file is the name it was loaded from; empty for a new completion.
+	file string
 }
 
 func safeID(value string) bool {
@@ -311,6 +403,8 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 		return false, errors.New("invalid controller lease")
 	}
 	lease.Job.LeaseToken = lease.Token
+	// Every request of this lease carries the epoch it was leased under.
+	epoch := lease.Job.WorkerEpoch
 	ctx, deadlineCancel := context.WithDeadline(parent, *lease.Job.Deadline)
 	defer deadlineCancel()
 	ctx, cancel := context.WithCancelCause(ctx)
@@ -329,7 +423,7 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 				return
 			case <-ticker.C:
 				var pulse protocol.Heartbeat
-				_, err := c.json(ctx, http.MethodPost, "/jobs/"+lease.Job.ID+"/heartbeat", c.epoch, lease.Token, struct{}{}, &pulse)
+				_, err := c.json(ctx, http.MethodPost, "/jobs/"+lease.Job.ID+"/heartbeat", epoch, lease.Token, struct{}{}, &pulse)
 				if err != nil {
 					cancel(fmt.Errorf("controller heartbeat: %w", err))
 					return
@@ -346,7 +440,7 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 		}
 	}()
 	defer func() { close(stopHeartbeat); <-heartbeatDone }()
-	sink := &remoteSink{client: c, ctx: ctx, jobID: lease.Job.ID, lease: lease.Token, cancel: cancel}
+	sink := &remoteSink{client: c, ctx: ctx, epoch: epoch, jobID: lease.Job.ID, lease: lease.Token, cancel: cancel}
 	result := worker.Result{State: model.Failed, Reason: "source transfer failed", Source: lease.Source, StartedAt: time.Now().UTC()}
 	executed := false
 	resolution, err := c.resolveLease(lease.Job)
@@ -354,7 +448,7 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 		result.Reason = worker.PublicReason(err)
 	} else {
 		var req *http.Request
-		req, err = c.request(ctx, http.MethodGet, "/jobs/"+lease.Job.ID+"/source", c.epoch, lease.Token, nil)
+		req, err = c.request(ctx, http.MethodGet, "/jobs/"+lease.Job.ID+"/source", epoch, lease.Token, nil)
 		if err == nil {
 			var resp *http.Response
 			resp, err = c.http.Do(req)
@@ -403,7 +497,7 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 	if !result.CleanupOK {
 		result.State = model.Failed
 	}
-	saved := pending{Epoch: c.epoch, Lease: lease, Result: result, Resolution: resolution}
+	saved := pending{Epoch: epoch, Lease: lease, Result: result, Resolution: resolution}
 	if executed {
 		saved.SourceTree = c.engine.VerifiedTree(lease.Job.ID)
 	}
@@ -429,24 +523,24 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 }
 
 type remoteSink struct {
-	client       *Client
-	ctx          context.Context
-	jobID, lease string
-	cancel       context.CancelCauseFunc
-	mu           sync.Mutex
+	client              *Client
+	ctx                 context.Context
+	epoch, jobID, lease string
+	cancel              context.CancelCauseFunc
+	mu                  sync.Mutex
 }
 
 func (s *remoteSink) Log(stream, text string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.client.json(s.ctx, http.MethodPost, "/jobs/"+s.jobID+"/logs", s.client.epoch, s.lease, protocol.Log{Stream: stream, Data: []byte(text)}, nil)
+	_, err := s.client.json(s.ctx, http.MethodPost, "/jobs/"+s.jobID+"/logs", s.epoch, s.lease, protocol.Log{Stream: stream, Data: []byte(text)}, nil)
 	if err != nil {
 		s.cancel(err)
 	}
 	return err
 }
 func (s *remoteSink) Stage(state model.State) error {
-	_, err := s.client.json(s.ctx, http.MethodPost, "/jobs/"+s.jobID+"/stage", s.client.epoch, s.lease, protocol.Stage{State: state}, nil)
+	_, err := s.client.json(s.ctx, http.MethodPost, "/jobs/"+s.jobID+"/stage", s.epoch, s.lease, protocol.Stage{State: state}, nil)
 	if err != nil {
 		s.cancel(err)
 	}
@@ -476,6 +570,12 @@ func (c *Client) saveAdmissionStatus(admissionErr error) error {
 	return nil
 }
 
+// legacyPending is the one completion file of a worker before lanes.
+const legacyPending = "pending.json"
+
+// pendingName is the completion file of jobID: one per lane's job.
+func pendingName(jobID string) string { return "pending-" + jobID + ".json" }
+
 func (c *Client) savePending(value pending) error {
 	data, err := json.Marshal(value)
 	if err != nil {
@@ -484,7 +584,7 @@ func (c *Client) savePending(value pending) error {
 	if len(data) > 64<<20 {
 		return errors.New("completion exceeds 64 MiB")
 	}
-	return c.saveState("pending.json", data)
+	return c.saveState(pendingName(value.Lease.Job.ID), data)
 }
 
 func (c *Client) saveState(name string, data []byte) error {
@@ -519,35 +619,64 @@ func (c *Client) saveState(name string, data []byte) error {
 	defer dir.Close()
 	return dir.Sync()
 }
-func (c *Client) loadPending() (*pending, error) {
-	info, err := c.root.Lstat("pending.json")
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
+
+// loadPendings reads every saved completion: one per job, and a worker's
+// from before lanes, sorted by file name.
+func (c *Client) loadPendings() ([]pending, error) {
+	dir, err := c.root.Open(".")
 	if err != nil {
 		return nil, err
+	}
+	names, err := dir.Readdirnames(-1)
+	dir.Close()
+	if err != nil {
+		return nil, err
+	}
+	slices.Sort(names)
+	var values []pending
+	for _, name := range names {
+		if name != legacyPending && !(strings.HasPrefix(name, "pending-") && strings.HasSuffix(name, ".json")) {
+			continue
+		}
+		value, err := c.loadPending(name)
+		if err != nil {
+			return nil, err
+		}
+		if name != legacyPending && name != pendingName(value.Lease.Job.ID) {
+			return nil, errors.New("pending completion file names another job")
+		}
+		values = append(values, value)
+	}
+	return values, nil
+}
+
+func (c *Client) loadPending(name string) (pending, error) {
+	var value pending
+	info, err := c.root.Lstat(name)
+	if err != nil {
+		return value, err
 	}
 	if !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 || info.Size() > 64<<20 {
-		return nil, errors.New("unsafe pending completion file")
+		return value, errors.New("unsafe pending completion file")
 	}
-	f, err := c.root.Open("pending.json")
+	f, err := c.root.Open(name)
 	if err != nil {
-		return nil, err
+		return value, err
 	}
 	defer f.Close()
 	dec := json.NewDecoder(io.LimitReader(f, (64<<20)+1))
 	dec.DisallowUnknownFields()
-	var value pending
 	if err := dec.Decode(&value); err != nil {
-		return nil, err
+		return value, err
 	}
 	if err := dec.Decode(new(any)); err != io.EOF {
-		return nil, errors.New("trailing completion JSON")
+		return value, errors.New("trailing completion JSON")
 	}
 	if !safeID(value.Lease.Job.ID) || value.Lease.Token == "" || value.Epoch == "" {
-		return nil, errors.New("invalid pending completion")
+		return value, errors.New("invalid pending completion")
 	}
-	return &value, nil
+	value.file = name
+	return value, nil
 }
 
 func (c *Client) deliver(ctx context.Context, saved pending) error {
@@ -595,7 +724,7 @@ func (c *Client) deliver(ctx context.Context, saved pending) error {
 		}
 		resp.Body.Close()
 		if resp.StatusCode == http.StatusGone {
-			return c.ackPending(jobID)
+			return c.ackPending(saved)
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			return statusError(resp)
@@ -615,13 +744,19 @@ func (c *Client) deliver(ctx context.Context, saved pending) error {
 	if err != nil && status != http.StatusGone {
 		return err
 	}
-	return c.ackPending(jobID)
+	return c.ackPending(saved)
 }
-func (c *Client) ackPending(jobID string) error {
-	if err := c.engine.RemoveExport(jobID); err != nil {
+
+// ackPending removes an acknowledged completion's export and its file.
+func (c *Client) ackPending(saved pending) error {
+	if err := c.engine.RemoveExport(saved.Lease.Job.ID); err != nil {
 		return err
 	}
-	if err := c.root.Remove("pending.json"); err != nil && !errors.Is(err, os.ErrNotExist) {
+	name := saved.file
+	if name == "" {
+		name = pendingName(saved.Lease.Job.ID)
+	}
+	if err := c.root.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil

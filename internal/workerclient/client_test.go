@@ -28,6 +28,14 @@ type fakeExecutor struct {
 	removed    []string
 	recoverErr error
 	recover    func(context.Context) error
+	laneReady  func(context.Context) error
+}
+
+func (e *fakeExecutor) LaneReady(ctx context.Context) error {
+	if e.laneReady != nil {
+		return e.laneReady(ctx)
+	}
+	return nil
 }
 
 func (e *fakeExecutor) Recover(ctx context.Context) error {
@@ -226,17 +234,18 @@ func TestCompletionRetryDoesNotRerunJob(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
-	saved, err := client.loadPending()
-	if err != nil || saved == nil {
+	pendings, err := client.loadPendings()
+	if err != nil || len(pendings) != 1 {
 		t.Fatalf("completion was not durable: %v", err)
 	}
+	saved := pendings[0]
 	if saved.Epoch != lease.Job.WorkerEpoch {
 		t.Fatal("recovery lost execution epoch")
 	}
-	if err := client.deliver(context.Background(), *saved); err != nil {
+	if err := client.deliver(context.Background(), saved); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(cfg.Root, "pending.json")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(cfg.Root, pendingName("j_retry"))); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("acknowledged completion retained: %v", err)
 	}
 	mu.Lock()

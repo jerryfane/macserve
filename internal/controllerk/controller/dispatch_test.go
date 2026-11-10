@@ -29,7 +29,7 @@ func TestDispatchRefusalDoesNotPrepareSourceOrLeaveCleanupDebt(t *testing.T) {
 			if err := f.controller.register(ctx, protocol.Registration{Epoch: "epoch-a", Quiescent: true}); err != nil {
 				t.Fatal(err)
 			}
-			if lease, err := f.controller.next(ctx, "epoch-a"); err != nil || lease != nil {
+			if lease, err := f.controller.next(ctx, "epoch-a", nil); err != nil || lease != nil {
 				t.Fatalf("unexpected rejected lease: %+v %v", lease, err)
 			}
 			f.controller.prep.Wait()
@@ -53,11 +53,11 @@ func TestDispatchRefusalDoesNotPrepareSourceOrLeaveCleanupDebt(t *testing.T) {
 			// A rejected job must not quarantine otherwise healthy admission.
 			f.controller.options.BeforeDispatch = nil
 			f.enqueue(t, "next", model.Build)
-			if _, err = f.controller.next(ctx, "epoch-a"); err != nil {
+			if _, err = f.controller.next(ctx, "epoch-a", nil); err != nil {
 				t.Fatal(err)
 			}
 			f.controller.prep.Wait()
-			lease, err := f.controller.next(ctx, "epoch-a")
+			lease, err := f.controller.next(ctx, "epoch-a", nil)
 			if err != nil || lease == nil {
 				t.Fatalf("refusal wedged later eligible work: %+v %v", lease, err)
 			}
