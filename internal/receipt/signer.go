@@ -83,6 +83,30 @@ func observed(o worker.Observation) Observation {
 	return value
 }
 
+// lanes is a worker result's lane record. A pre-lane worker reports none: it
+// ran one job at a time and ended each with the full job-account quiesce and
+// admission, so its job ran alone in lane 1 of 1 under the account-wide rule
+// (every non-baseline process is the job's, so none is unattributed), and its
+// idle verdict is that quiesce's: clean only when cleanup succeeded. A failed
+// cleanup is recorded as deferred, never clean: the account was not proven
+// clean when the job was sealed (only the worker's next idle quiesce, under a
+// new epoch, does that), and cleanup_ok=false records the failure itself.
+func lanes(r worker.Result) *Concurrency {
+	c := r.Concurrency
+	if c == nil {
+		verdict := worker.IdleDeferred
+		if r.CleanupOK {
+			verdict = worker.IdleClean
+		}
+		return &Concurrency{Lane: 1, MaxLanes: 1, OverlappedJobs: []Overlap{}, Attribution: worker.AttributionAccount, IdleVerdict: verdict}
+	}
+	overlaps := make([]Overlap, 0, len(c.OverlappedJobs))
+	for _, o := range c.OverlappedJobs {
+		overlaps = append(overlaps, Overlap(o))
+	}
+	return &Concurrency{Lane: c.Lane, MaxLanes: c.MaxLanes, OverlappedJobs: overlaps, Attribution: c.Attribution, UnattributedResidue: c.UnattributedResidue, IdleVerdict: c.IdleVerdict}
+}
+
 func (s *Signer) Seal(ctx context.Context, job model.Job, result worker.Result) (json.RawMessage, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -145,7 +169,7 @@ func (s *Signer) Seal(ctx context.Context, job model.Job, result worker.Result) 
 	if effective, err := profiles.Effective(job.Profile, result.Observation.Recipe); err == nil {
 		required = effective.RequiredTests
 	}
-	p := Payload{Schema: 1, JobID: job.ID, AttemptID: approval.AttemptID, InputDigest: inputDigest, Service: s.options.Service, Repository: repository, Approval: approval, Request: job.Request, ProfileDigest: job.ProfileDigest, ProfileVersion: job.Profile.Version, Source: result.Source, Observation: observed(result.Observation), State: result.State, Reason: result.Reason, ExitCode: result.ExitCode, Signal: result.Signal, CreatedAt: job.CreatedAt, StartedAt: result.StartedAt, FinishedAt: result.FinishedAt, Deadline: job.Deadline, SealedAt: s.options.Now().UTC(), WorkerEpoch: job.WorkerEpoch, Resources: ResourcePolicy{TimeoutSeconds: job.Request.TimeoutSeconds, MemoryLimitMiB: job.Profile.MemoryLimitMiB, PeakMemoryMiB: result.PeakMemoryMiB, CleanupRequired: true, CleanupOK: result.CleanupOK}, Tests: testEvidence(job.Request.Kind, required, result.Summary), Logs: []evidence.Artifact{}, LogsTruncated: result.LogsTruncated, CommandCount: len(result.Commands), ArtifactCount: len(result.Artifacts), Details: &Details{Profile: job.Profile, Result: result}}
+	p := Payload{Schema: payloadSchema, JobID: job.ID, AttemptID: approval.AttemptID, InputDigest: inputDigest, Service: s.options.Service, Repository: repository, Approval: approval, Request: job.Request, ProfileDigest: job.ProfileDigest, ProfileVersion: job.Profile.Version, Source: result.Source, Observation: observed(result.Observation), State: result.State, Reason: result.Reason, ExitCode: result.ExitCode, Signal: result.Signal, CreatedAt: job.CreatedAt, StartedAt: result.StartedAt, FinishedAt: result.FinishedAt, Deadline: job.Deadline, SealedAt: s.options.Now().UTC(), WorkerEpoch: job.WorkerEpoch, Resources: ResourcePolicy{TimeoutSeconds: job.Request.TimeoutSeconds, MemoryLimitMiB: job.Profile.MemoryLimitMiB, PeakMemoryMiB: result.PeakMemoryMiB, HostPeakMemoryMiB: result.HostPeakMemoryMiB, CleanupRequired: true, CleanupOK: result.CleanupOK}, Concurrency: lanes(result), Tests: testEvidence(job.Request.Kind, required, result.Summary), Logs: []evidence.Artifact{}, LogsTruncated: result.LogsTruncated, CommandCount: len(result.Commands), ArtifactCount: len(result.Artifacts), Details: &Details{Profile: job.Profile, Result: result}}
 	p.RequestDigest = job.RequestDigest
 	if job.Request.Kind == model.IOSArchive {
 		p.Release, p.ReleaseProvenance = job.Request.Release, job.ReleaseProvenance

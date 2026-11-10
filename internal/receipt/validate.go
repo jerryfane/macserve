@@ -12,6 +12,7 @@ import (
 	"github.com/jerryfane/macserve/internal/evidence"
 	"github.com/jerryfane/macserve/internal/model"
 	"github.com/jerryfane/macserve/internal/profiles"
+	"github.com/jerryfane/macserve/internal/worker"
 )
 
 func sameSimulator(a, b *model.Simulator) bool {
@@ -60,7 +61,7 @@ func incomplete(p Payload) []string {
 			missing = append(missing, field)
 		}
 	}
-	require(p.Schema == 1 && validJobID(p.JobID) && p.AttemptID != "" && p.AttemptID == p.Approval.AttemptID && validDigest(p.InputDigest), "receipt identity")
+	require(schemaShape(p) && validJobID(p.JobID) && p.AttemptID != "" && p.AttemptID == p.Approval.AttemptID && validDigest(p.InputDigest), "receipt identity")
 	require(p.Service.ID != "" && p.Service.HostID != "" && p.Service.Version != "" && validDigest(p.Service.BinarySHA256), "service identity")
 	require(p.Repository.ID > 0 && p.Repository.Name == p.Request.Repo && p.Request.Repo != "" && p.Approval.Intake != "" && p.Approval.Identity != "", "repository approval")
 	request, requestErr := json.Marshal(p.Request)
@@ -72,6 +73,14 @@ func incomplete(p Payload) []string {
 	require(!p.CreatedAt.IsZero() && !p.StartedAt.IsZero() && !p.FinishedAt.IsZero() && !p.SealedAt.IsZero() && !p.StartedAt.Before(p.CreatedAt) && !p.FinishedAt.Before(p.StartedAt) && !p.SealedAt.Before(p.FinishedAt) && p.Deadline != nil && !p.Deadline.Before(p.StartedAt) && p.WorkerEpoch != "", "execution timing")
 	// Final evidence extraction and cleanup may finish after the execution deadline.
 	require(p.Resources.TimeoutSeconds > 0 && p.Resources.TimeoutSeconds == p.Request.TimeoutSeconds && p.Resources.MemoryLimitMiB > 0 && p.Resources.PeakMemoryMiB >= 0 && p.Resources.CleanupRequired && p.Resources.CleanupOK, "resource and cleanup policy")
+	// Success needs a well-formed lane record whose cleanup reached a verdict:
+	// the full idle quiesce (clean) or a lane quiesce that left no
+	// unattributed process (not_required), never one deferred to a later idle.
+	// Residue observed and removed before that verdict is not a failure.
+	if c := p.Concurrency; c != nil {
+		require(validLanes(p), "lane record")
+		require(c.IdleVerdict == worker.IdleClean || c.IdleVerdict == worker.IdleNotRequired, "idle cleanup verdict")
+	}
 	o := p.Observation
 	require(p.Request.Xcode.Version != "" && p.Request.Xcode.Build != "" && o.Xcode == p.Request.Xcode && o.SDKVersion != "" && o.SDKBuild != "" && o.SwiftVersion != "" && o.OSVersion != "" && o.OSBuild != "" && o.Architecture == "arm64", "toolchain observation")
 	if sim := p.Request.Simulator; sim != nil {
@@ -142,6 +151,48 @@ func validLogs(logs []evidence.Artifact) bool {
 	return found["evidence/stdout.log"] && found["evidence/stderr.log"]
 }
 
+// validLanes reports whether p's lane record is well formed: lane 1 to
+// max_lanes of at most model.MaxConcurrentJobs; a known attribution, the
+// account-wide rule only for a job no other job overlapped; overlapped jobs,
+// none on a single-lane worker, with distinct valid IDs other than the
+// receipt's own and nonnegative overlap; nonnegative unattributed residue; a
+// known idle verdict. The job account's peak footprint, when sampled, is at
+// least the job's own charge.
+func validLanes(p Payload) bool {
+	c, host := p.Concurrency, p.Resources.HostPeakMemoryMiB
+	if c == nil || c.Lane < 1 || c.Lane > c.MaxLanes || c.MaxLanes > model.MaxConcurrentJobs || c.UnattributedResidue < 0 {
+		return false
+	}
+	alone := len(c.OverlappedJobs) == 0
+	switch {
+	case c.Attribution != worker.AttributionLineage && c.Attribution != worker.AttributionAccount,
+		c.Attribution == worker.AttributionAccount && !alone,
+		c.MaxLanes == 1 && !alone:
+		return false
+	}
+	seen := make(map[string]bool, len(c.OverlappedJobs))
+	for _, o := range c.OverlappedJobs {
+		if !validJobID(o.JobID) || o.JobID == p.JobID || seen[o.JobID] || o.Seconds < 0 {
+			return false
+		}
+		seen[o.JobID] = true
+	}
+	if c.IdleVerdict != worker.IdleClean && c.IdleVerdict != worker.IdleNotRequired && c.IdleVerdict != worker.IdleDeferred {
+		return false
+	}
+	// A command can end before its first memory sample: an unsampled host
+	// peak is 0 with any lane count.
+	return host == 0 || host > 0 && host >= p.Resources.PeakMemoryMiB
+}
+
+// sameLanes compares lane records; an empty overlap list equals a null one.
+func sameLanes(a, b *Concurrency) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Lane == b.Lane && a.MaxLanes == b.MaxLanes && slices.Equal(a.OverlappedJobs, b.OverlappedJobs) && a.Attribution == b.Attribution && a.UnattributedResidue == b.UnattributedResidue && a.IdleVerdict == b.IdleVerdict
+}
+
 // requiredExecuted applies the parser's required-test rule (evidence.RequiredMatch,
 // including bundle-relative Target/Class[/method] selectors) to a recorded
 // case, and also accepts the case name; only passed or expected-failure
@@ -200,6 +251,13 @@ func validateDetails(p Payload, require func(bool, string)) {
 	}
 	require(sameStrings(profile.RequiredTests, p.Tests.Required), "recipe manifest")
 	require(r.State == p.State && r.Source == p.Source && r.StartedAt.Equal(p.StartedAt) && r.FinishedAt.Equal(p.FinishedAt) && r.CleanupOK == p.Resources.CleanupOK && reflect.DeepEqual(r.ExitCode, p.ExitCode) && r.Signal == p.Signal && r.Reason == p.Reason && r.LogsTruncated == p.LogsTruncated && r.PeakMemoryMiB == p.Resources.PeakMemoryMiB && observed(r.Observation) == p.Observation, "execution manifest")
+	// A schema-1 manifest's result predates lanes; a schema-2 receipt's lane
+	// record and host peak are exactly those of its manifest's result.
+	if p.Schema == legacyPayloadSchema {
+		require(r.Concurrency == nil && r.HostPeakMemoryMiB == 0, "execution manifest")
+	} else {
+		require(sameLanes(lanes(r), p.Concurrency) && r.HostPeakMemoryMiB == p.Resources.HostPeakMemoryMiB, "execution manifest")
+	}
 	require(len(r.Commands) == p.CommandCount && len(r.Artifacts) == p.ArtifactCount, "manifest counts")
 	for _, item := range []struct {
 		value  any
