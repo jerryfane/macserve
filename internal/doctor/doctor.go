@@ -861,16 +861,36 @@ func (s *state) lanes() int {
 	// root, unreadable or malformed means one lane.
 	path := Root + "/config/lanes.json"
 	info, err := s.p.Lstat(path)
-	lanes, _ := health.LaneOverride(config.MaxConcurrentJobs, err != nil || info.Exists, func() error {
+	lanes, _ := health.LaneOverride(config.MaxConcurrentJobs, err != nil || info.Exists, func() error { return s.rootConfig(path) }, func() ([]byte, error) { return s.p.ReadFile(path, maxConfig) })
+	return lanes
+}
+
+// rootConfig is hostguard.RootConfig through doctor's probe: path (clean and
+// absolute) is a regular file and each of its ancestors a directory, every
+// one root-owned, no symlink, and not group- or world-writable.
+func (s *state) rootConfig(path string) error {
+	parent := func(p string) string {
+		if i := strings.LastIndexByte(p, '/'); i > 0 {
+			return p[:i]
+		}
+		return "/"
+	}
+	for current := path; ; current = parent(current) {
+		info, err := s.p.Lstat(current)
 		if err != nil {
 			return err
 		}
-		if !info.Mode.IsRegular() || info.UID != 0 || info.Mode.Perm()&0o022 != 0 || info.Nlink != 1 {
-			return errors.New("lanes override must be a root-owned regular file writable only by root")
+		validType := info.Mode.IsDir()
+		if current == path {
+			validType = info.Mode.IsRegular()
 		}
-		return nil
-	}, func() ([]byte, error) { return s.p.ReadFile(path, maxConfig) })
-	return lanes
+		if !info.Exists || !validType || info.UID != 0 || info.Mode.Perm()&0o022 != 0 {
+			return errors.New("configuration and its parent directories must be root-owned, non-symlink and not group/world writable")
+		}
+		if current == "/" {
+			return nil
+		}
+	}
 }
 
 // controllerProgram checks org.macserve.controller's ProgramArguments: it
