@@ -856,7 +856,19 @@ func (s *state) lanes() int {
 	if json.Unmarshal(data, &config) != nil || config.MaxConcurrentJobs < 1 || config.MaxConcurrentJobs > model.MaxConcurrentJobs {
 		return 1
 	}
-	return config.MaxConcurrentJobs
+	lanes := config.MaxConcurrentJobs
+	// The lowering-only override (health.LanesOverrideFile); a malformed
+	// one runs one lane.
+	if data, err := s.p.ReadFile(Root+"/config/lanes.json", maxConfig); err == nil {
+		var override struct {
+			MaxConcurrentJobs int `json:"max_concurrent_jobs"`
+		}
+		if json.Unmarshal(data, &override) != nil || override.MaxConcurrentJobs < 1 || override.MaxConcurrentJobs > model.MaxConcurrentJobs {
+			return 1
+		}
+		lanes = min(lanes, override.MaxConcurrentJobs)
+	}
+	return lanes
 }
 
 // controllerProgram checks org.macserve.controller's ProgramArguments: it

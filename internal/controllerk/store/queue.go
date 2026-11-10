@@ -279,7 +279,7 @@ func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time, la
 	if err != nil {
 		return model.Job{}, err
 	}
-	if job.Request.Kind.Exclusive() && len(running) > 0 {
+	if job.Request.Kind.Exclusive() && len(running) > 0 || !memoryAdmits(running, job) {
 		if err := tx.Commit(); err != nil {
 			return model.Job{}, err
 		}
@@ -467,4 +467,21 @@ func (s *Store) Prune(ctx context.Context, now time.Time) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// ConcurrentMemoryCapMiB bounds the summed memory budgets (memory_limit_mib)
+// of concurrently active jobs (PARALLEL-DESIGN.md §7.3): a job beside others
+// is claimed only while the sum, with its own, stays within it. A job alone
+// is never refused by it, so one lane behaves as before.
+const ConcurrentMemoryCapMiB = 128 << 10
+
+func memoryAdmits(running []model.Job, next model.Job) bool {
+	if len(running) == 0 {
+		return true
+	}
+	total := int64(next.Profile.MemoryLimitMiB)
+	for _, job := range running {
+		total += int64(job.Profile.MemoryLimitMiB)
+	}
+	return total <= ConcurrentMemoryCapMiB
 }

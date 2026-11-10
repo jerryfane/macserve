@@ -189,3 +189,28 @@ func TestActiveSetRegistrationRecoveryAndPause(t *testing.T) {
 		t.Fatalf("active after recovery = %+v %v", active, err)
 	}
 }
+
+// Concurrent jobs' summed memory budgets stay within ConcurrentMemoryCapMiB;
+// a job alone is never refused by the cap.
+func TestClaimKeepsConcurrentMemoryBudgetsUnderCap(t *testing.T) {
+	running := []model.Job{{Profile: model.Profile{MemoryLimitMiB: 64 << 10}}}
+	if !memoryAdmits(nil, model.Job{Profile: model.Profile{MemoryLimitMiB: 200 << 10}}) {
+		t.Fatal("cap refused a job running alone")
+	}
+	if !memoryAdmits(running, model.Job{Profile: model.Profile{MemoryLimitMiB: 64 << 10}}) {
+		t.Fatal("cap refused budgets summing to the cap")
+	}
+	if memoryAdmits(running, model.Job{Profile: model.Profile{MemoryLimitMiB: 64<<10 + 1}}) {
+		t.Fatal("cap admitted budgets above it")
+	}
+	// Through Claim: three default 32 GiB jobs fit beside each other.
+	s, _ := newStore(t, Options{})
+	for _, key := range []string{"a", "b", "c"} {
+		enqueueJob(t, s, "principal", key, testNow)
+	}
+	for i := range 3 {
+		if job := claimLanes(t, s, "epoch", testNow.Add(time.Duration(i)*time.Second), 3); job.Profile.MemoryLimitMiB*3 > ConcurrentMemoryCapMiB {
+			t.Fatalf("fixture budget %d MiB does not fit three lanes", job.Profile.MemoryLimitMiB)
+		}
+	}
+}

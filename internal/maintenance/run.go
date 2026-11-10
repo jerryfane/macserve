@@ -77,7 +77,7 @@ func Run(ctx context.Context, c Config) error {
 			// The log names the blockers the controller derives, whose disk
 			// budget depends on its max_concurrent_jobs.
 			if cc, ccErr := controllerconfig.LoadConfig(current.ControllerConfig); ccErr == nil {
-				report.lanes = cc.Lanes()
+				report.lanes = health.EffectiveLanes(cc.Lanes())
 			}
 			probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 			h, err = observe(probeCtx, current, bg)

@@ -320,7 +320,9 @@ most the smaller of its own value and the `lanes` the worker registers; with 1 t
 exactly as before. Each claimed job gets a `lane` (1-based, shown in the job view; a unique index forbids two active
 jobs in one lane, store schema version 7). The fair per-repository order still chooses the next job. `simulator_script`
 and `ios_archive` run alone: such a job at the head of the queue waits for every running job to finish, and nothing
-starts beside it. A second or third lane is claimed only when the disk reservation above holds for one more job.
+starts beside it. A second or third lane is claimed only when the disk reservation above holds for one more job, and only while the
+summed `memory_limit_mib` of the active jobs and the next one stays within 128 GiB (a job alone is never refused by
+this cap; three default 32 GiB budgets fit).
 `GET /v1/capabilities` reports `max_concurrent_jobs`; `GET /v1/admin/state` reports `active_jobs`.
 
 Readiness cancellation distinguishes host facts from capacity: a trust blocker (`isolation_unavailable`,
@@ -330,4 +332,14 @@ cancels the newest active job and re-evaluates after 30 s. A client, deadline or
 A completion with `cleanup_ok=false`, or a lost heartbeat, fences the worker epoch: running siblings finish on their
 own leases, a prepared lease not yet delivered is interrupted, and nothing is claimed until the worker registers a new
 epoch after its idle check.
+
+### Lowering concurrency without a sitting: `lanes.json`
+
+`/Library/macserve/config/lanes.json` (root-owned, mode 0644, not group- or other-writable) holds
+`{"max_concurrent_jobs": N}` with N in 1..3 and nothing else. The activation anchor does not hash it, so an
+administrator can lower concurrency, for example to 1 as a rollback, without requalification. The controller, the worker
+and maintenance read it at start; restart the controller and worker services after changing it. The effective value is
+the minimum of `controller.json`, `worker.json` and `lanes.json`: the file only lowers. An absent file is no override; a
+value above the configured maximum is ignored and logged; a malformed file, an out-of-range value, or unsafe ownership or
+mode fails closed to one lane. `doctor` applies the same rule when it sizes the disk budget.
 
