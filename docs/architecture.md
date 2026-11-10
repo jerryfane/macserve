@@ -321,8 +321,8 @@ started beside others is admitted by a lane admission: other jobs' labelled proc
 unattributed process refuses the start and *drains* the broker. A job whose finalization begins while no other job
 runs ends with the unchanged full quiesce and admission (idle verdict `clean`); no other job starts until it ends. A
 job finishing beside others deletes only its own simulator and quiesces only its labelled processes (SIGTERM, SIGKILL,
-survivor = contamination and quarantine, as before), never a shared service or a sibling's process; any unattributed
-process left makes its `cleanup_ok` false (idle verdict `deferred`, the job fails) and drains the broker. While
+survivor = contamination and quarantine, as before), never a shared service or a sibling's process; any unattributed process still running in a
+second census 1 s later (short-lived build helpers such as SwiftPM's `git` are not counted) makes its `cleanup_ok` false (idle verdict `deferred`, the job fails) and drains the broker. While
 draining, the broker claims nothing, lets running jobs finish, and the next idle `Recover` runs the full quiesce and
 admission: contamination quarantines exactly as with one job, a clean account resumes intake under a new epoch.
 Simulator creation is serialized across lanes, and a sibling's recorded device is never an unrecorded device after an
