@@ -78,7 +78,7 @@ func TestLaneReceiptValidates(t *testing.T) {
 	if p.Schema != 2 || p.Resources.HostPeakMemoryMiB != 6144 || p.Resources.PeakMemoryMiB != 2048 {
 		t.Fatalf("lane receipt identity: schema %d resources %+v", p.Schema, p.Resources)
 	}
-	want := `{"attribution":"lineage+device/v1","idle_verdict":"not_required","lane":2,"max_lanes":2,"overlap_count":1,"overlapped_jobs":[{"job_id":"job-0","overlap_seconds":7}],"overlaps_sha256":"` + overlapsDigest([]Overlap{{JobID: "job-0", Seconds: 7}}) + `","unattributed_residue":0}`
+	want := `{"attribution":"lineage+device/v1","idle_verdict":"not_required","lane":2,"max_lanes":2,"overlap_count":1,"overlapped_jobs":[{"job_id":"job-0","overlap_seconds":7}],"overlaps_sha256":"` + overlapsJSONDigest(t, []Overlap{{JobID: "job-0", Seconds: 7}}) + `","unattributed_residue":0}`
 	if got := string(signedField(t, raw, "concurrency")); got != want {
 		t.Fatalf("signed lane record %s, want %s", got, want)
 	}
@@ -128,7 +128,7 @@ func TestPreLaneResultRecordsOneLane(t *testing.T) {
 				result.State, result.Reason = model.Failed, "cleanup failed"
 			}
 			_, raw, p := sealFixture(t, options, job, result)
-			want := `{"attribution":"account/v1","idle_verdict":"` + verdict + `","lane":1,"max_lanes":1,"overlap_count":0,"overlapped_jobs":[],"overlaps_sha256":"` + overlapsDigest(nil) + `","unattributed_residue":0}`
+			want := `{"attribution":"account/v1","idle_verdict":"` + verdict + `","lane":1,"max_lanes":1,"overlap_count":0,"overlapped_jobs":[],"overlaps_sha256":"` + overlapsJSONDigest(t, []Overlap{}) + `","unattributed_residue":0}`
 			if got := string(signedField(t, raw, "concurrency")); p.Schema != 2 || got != want {
 				t.Fatalf("schema %d lane record %s, want %s", p.Schema, got, want)
 			}
@@ -334,9 +334,26 @@ func TestManyOverlapsStayPublishable(t *testing.T) {
 	if err := ValidateSuccess(p, expected); err != nil {
 		t.Fatal(err)
 	}
-	c := p.Concurrency
-	if c.OverlapCount != n || len(c.OverlappedJobs) != PublishedOverlaps || c.OverlappedJobs[0].Seconds != n-1 || c.OverlappedJobs[PublishedOverlaps-1].Seconds != n-PublishedOverlaps {
-		t.Fatalf("published overlaps: count %d, %v", c.OverlapCount, c.OverlappedJobs)
+	// Decoded from the published bytes, so the test reads the receipt as a
+	// verifier does.
+	var envelope struct {
+		Payload json.RawMessage `json:"payload"`
+	}
+	var published struct {
+		Concurrency struct {
+			Count    int       `json:"overlap_count"`
+			Overlaps []Overlap `json:"overlapped_jobs"`
+		} `json:"concurrency"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(envelope.Payload, &published); err != nil {
+		t.Fatal(err)
+	}
+	c := published.Concurrency
+	if c.Count != n || len(c.Overlaps) != 8 || c.Overlaps[0].Seconds != n-1 || c.Overlaps[7].Seconds != n-8 {
+		t.Fatalf("published overlaps: count %d, %v", c.Count, c.Overlaps)
 	}
 	full := fullManifest(t, signer, p)
 	if err := ValidateSuccess(full, expected); err != nil {
@@ -347,4 +364,14 @@ func TestManyOverlapsStayPublishable(t *testing.T) {
 	if err := ValidateSuccess(full, expected); err == nil || !strings.Contains(err.Error(), "execution manifest") {
 		t.Fatalf("unpublished overlap changed undetected: %v", err)
 	}
+}
+
+// overlapsJSONDigest is the sha256 of overlaps as a JSON array.
+func overlapsJSONDigest(t *testing.T, overlaps []Overlap) string {
+	t.Helper()
+	data, err := json.Marshal(overlaps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hashBytes(data)
 }
