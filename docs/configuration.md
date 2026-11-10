@@ -29,7 +29,14 @@ high-entropy bearer credentials belong in the caller's private credential storag
 Optional `signer` connects the controller to the [code signer](#code-signer).
 
 - `POST /v1/jobs` requires `Idempotency-Key` and a profile-matching exact-SHA request.
+- Queued jobs run one at a time in fair order. The next claim takes the oldest queued job of the repository
+  that has waited longest since its last claim (its newest retained job's start); a repository with no retained
+  started job goes first, and ties keep submission order. A burst from one repository therefore delays another
+  repository's job by at most one claim per other repository with queued jobs, and each repository's own jobs
+  keep submission order.
 - `GET /v1/capabilities` and `/v1/jobs` expose authorized profiles and jobs without controller recipes or paths.
+  Capabilities' `service_version` is the controller binary's build version: the release tag for a release build
+  (as `macserve-controller version --json` reports it).
 - `/v1/jobs/{id}` provides status, `/logs`, `/logs/stream`, `/results`, `/results/junit`, `/artifacts`,
   `/artifacts/{artifact_id}`, `/receipt`, `/receipt/manifest?sha256=DIGEST`, and `POST /cancel`.
   Missing signed receipts return `409`, not success. Non-executed cancellation/expiry or interrupted jobs with

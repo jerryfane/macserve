@@ -177,6 +177,24 @@ func TestStrictRequestsAndSnapshotReplay(t *testing.T) {
 		}
 	}
 }
+
+// Agents read service_version to learn which release serves them; it must be
+// the controller's build version, not a constant.
+func TestCapabilitiesReportsServiceVersion(t *testing.T) {
+	f := setup(t)
+	f.options.ServiceVersion = "v0.1.41"
+	h, err := New(f.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := perform(h, "GET", "/v1/capabilities", testToken, "", "")
+	var body struct {
+		ServiceVersion string `json:"service_version"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); w.Code != 200 || err != nil || body.ServiceVersion != "v0.1.41" {
+		t.Fatalf("capabilities: %d %s", w.Code, w.Body.String())
+	}
+}
 func TestAuthorizationEveryJobSurface(t *testing.T) {
 	f := setup(t)
 	job := f.submit(t, "first")

@@ -63,11 +63,11 @@ type versionInfo struct {
 	StoreSchemaVersion int    `json:"store_schema_version"`
 }
 
-func runVersion(args []string, stdout, stderr io.Writer) int {
-	if len(args) != 1 || args[0] != "--json" {
-		fmt.Fprint(stderr, usageText)
-		return 2
-	}
+// buildVersion reads this binary's build identity. A release build
+// (checks/release-build.sh, from a clone holding the tag) stamps the main
+// module version with the release tag; other builds report Go's pseudo-version
+// or "(devel)".
+func buildVersion() versionInfo {
 	v := versionInfo{Version: "(devel)", StoreSchemaVersion: store.SchemaVersion}
 	if info, ok := debug.ReadBuildInfo(); ok {
 		if info.Main.Version != "" {
@@ -79,7 +79,15 @@ func runVersion(args []string, stdout, stderr io.Writer) int {
 			}
 		}
 	}
-	if err := json.NewEncoder(stdout).Encode(v); err != nil {
+	return v
+}
+
+func runVersion(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 1 || args[0] != "--json" {
+		fmt.Fprint(stderr, usageText)
+		return 2
+	}
+	if err := json.NewEncoder(stdout).Encode(buildVersion()); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}

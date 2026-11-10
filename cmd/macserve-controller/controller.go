@@ -109,7 +109,7 @@ func serveController(parent context.Context, config controllerconfig.Config) err
 	if err := db.ReplacePrincipals(parent, config.Principals); err != nil {
 		return err
 	}
-	apiOptions := api.Options{Store: db, Profiles: registry, Status: runtime.Status, Artifact: runtime.Artifact, Receipt: runtime.Receipt, ReceiptManifest: integrations.keyholder.Manifest}
+	apiOptions := api.Options{Store: db, Profiles: registry, Status: runtime.Status, Artifact: runtime.Artifact, Receipt: runtime.Receipt, ReceiptManifest: integrations.keyholder.Manifest, ServiceVersion: buildVersion().Version}
 	// Only the GitHub App resolves the default-branch head an ios_archive
 	// job must build; without one, archive admission is refused.
 	if integrations.app != nil {

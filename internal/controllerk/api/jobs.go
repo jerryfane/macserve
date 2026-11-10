@@ -248,7 +248,7 @@ func (h *handler) capabilities(w http.ResponseWriter, r *http.Request, p control
 	if status.Service.Quarantined {
 		blocked = append(blocked, "quarantined")
 	}
-	body := map[string]any{"api_version": "v1", "service_version": "development", "repositories": p.Repositories, "profiles": items, "worker_ready": status.WorkerReady, "gui_ready": status.WorkerReady && status.Gate.Ready, "quiescent": status.Quiescent, "blocked_by": blocked, "paused": status.Service.Paused}
+	body := map[string]any{"api_version": "v1", "service_version": h.ServiceVersion, "repositories": p.Repositories, "profiles": items, "worker_ready": status.WorkerReady, "gui_ready": status.WorkerReady && status.Gate.Ready, "quiescent": status.Quiescent, "blocked_by": blocked, "paused": status.Service.Paused}
 	if templates != nil {
 		body["templates"] = templates
 	}

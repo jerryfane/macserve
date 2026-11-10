@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -214,6 +215,54 @@ func TestPrincipalScopeCapacityAndFIFO(t *testing.T) {
 	finishJob(t, s, claimed, model.Succeeded, true, testNow.Add(3*time.Second))
 	if claimed = claimJob(t, s, "epoch", testNow.Add(4*time.Second)); claimed.ID != fourth.ID {
 		t.Fatal("FIFO tail changed")
+	}
+}
+
+// A burst from one repository must not hold back another repository's job:
+// the next claim goes to the repository that has waited longest since its
+// last claim, and each repository stays FIFO.
+func TestClaimAlternatesRepositoriesFIFOWithinEach(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newStore(t, Options{QueueLimit: 32, PerPrincipalLimit: 32})
+	library := admissionFixture()
+	library.Request.Repo = "example-org/example-library"
+	library.Profile.Repo = library.Request.Repo
+	setDigest(&library)
+	now := testNow
+	tick := func() time.Time { now = now.Add(time.Second); return now }
+	enqueueLibrary := func(key string) model.Job {
+		t.Helper()
+		job, replay, err := s.Enqueue(ctx, "library", key, library, tick())
+		if err != nil || replay {
+			t.Fatalf("enqueue %s: replay=%v err=%v", key, replay, err)
+		}
+		return job
+	}
+	var running model.Job
+	next := func(want model.Job) {
+		t.Helper()
+		if running.ID != "" {
+			finishJob(t, s, running, model.Succeeded, true, tick())
+		}
+		running = claimJob(t, s, "epoch", tick())
+		if running.ID != want.ID {
+			t.Fatalf("claimed %s (%s); want %s (%s)", running.ID, running.Request.Repo, want.ID, want.Request.Repo)
+		}
+	}
+	app := []model.Job{enqueueJob(t, s, "app", "app-0", tick())}
+	next(app[0])
+	for i := 1; i <= 15; i++ {
+		app = append(app, enqueueJob(t, s, "app", fmt.Sprintf("app-%d", i), tick()))
+	}
+	// The library's job arrives behind 15 queued app jobs and runs next.
+	first := enqueueLibrary("lib-0")
+	next(first)
+	// The library was served last, so its next job waits for one app job.
+	second := enqueueLibrary("lib-1")
+	next(app[1])
+	next(second)
+	for _, job := range app[2:] {
+		next(job)
 	}
 }
 

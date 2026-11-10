@@ -42,6 +42,9 @@ type Options struct {
 	Sign      func(context.Context, string) (store.SigningRecord, error)
 	SignerKey *SignerKey
 	Now       func() time.Time
+	// ServiceVersion is the controller's build version, reported as
+	// capabilities' service_version: the release tag for a release build.
+	ServiceVersion string
 }
 
 // SignerKey is the signer receipt verification key: its key ID and base64
