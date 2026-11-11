@@ -293,7 +293,7 @@ func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time, la
 	if err != nil {
 		return model.Job{}, err
 	}
-	_, err = tx.ExecContext(ctx, "UPDATE jobs SET state='preparing',worker_epoch=?,lease_token=?,started_at=?,deadline=?,updated_at=?,lane=? WHERE id=?", workerEpoch, lease, now.UnixNano(), deadline.UnixNano(), now.UnixNano(), lane, job.ID)
+	_, err = tx.ExecContext(ctx, "UPDATE jobs SET state='preparing',worker_epoch=?,lease_token=?,started_at=?,deadline=?,updated_at=?,lane=?,reason='' WHERE id=?", workerEpoch, lease, now.UnixNano(), deadline.UnixNano(), now.UnixNano(), lane, job.ID)
 	if err != nil {
 		if contention(err) || uniqueViolation(err) {
 			return model.Job{}, ErrNoJob
@@ -340,6 +340,37 @@ func (s *Store) Transition(ctx context.Context, id, lease string, from, to model
 		return ErrTransition
 	}
 	_, err = tx.ExecContext(ctx, "UPDATE jobs SET state=?,reason=?,updated_at=?,cancel_requested=cancel_requested OR ? WHERE id=?", to, reason, now.UnixNano(), to == model.Cancelling, id)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// Requeue returns a preparing job whose lease was never delivered to the
+// queue: it releases its lane, lease, epoch, start and deadline, and keeps its
+// sequence, so the fair order claims it again (with a new deadline) as it
+// would have before. Only the controller calls it, for a lease no worker
+// received, after removing the job's source.
+func (s *Store) Requeue(ctx context.Context, id, lease, reason string, now time.Time) error {
+	if !validReason(reason) || !validTime(now) {
+		return ErrInvalid
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	job, err := getTx(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	if lease == "" || job.LeaseToken != lease {
+		return ErrLease
+	}
+	if job.State != model.Preparing || job.CancelRequested {
+		return ErrTransition
+	}
+	_, err = tx.ExecContext(ctx, "UPDATE jobs SET state='queued',worker_epoch='',lease_token='',started_at=NULL,deadline=NULL,lane=NULL,reason=?,updated_at=? WHERE id=?", reason, now.UnixNano(), id)
 	if err != nil {
 		return err
 	}

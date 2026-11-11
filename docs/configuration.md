@@ -365,12 +365,18 @@ the registration is accepted; one still preparing is cancelled and the registrat
 lease the earlier epoch received keeps its heartbeat and cleanup windows, and the registration answers 409 until they
 end it.
 When an unattributed job-account process appears beside running jobs the worker stops starting new lanes until it is
-idle, but keeps its epoch (nothing was fenced): a lease already prepared for the next lane is delivered after the idle
-check. Its log line (`worker draining until idle: ...`, once per drain) names each such process by PID, kernel parent,
-start, executable and arguments, and each audited GUI-session process that is gone without a verified relaunch by PID,
-start, launchd label and executable. An audited agent that exited on its own, with nothing unattributed beside it, does
-not drain: the idle admission accepts that state too. A registration the controller refuses with 409 because it still
-holds a lease of the earlier epoch is retried each poll; the worker does not exit.
+idle, but keeps its epoch (nothing was fenced), and stops asking the controller for work. Its log line (`worker draining
+until idle: ...`, once per drain) names each such process by PID, kernel parent, start, executable and arguments, and
+each audited GUI-session process that is gone without a verified relaunch by PID, start, launchd label and executable.
+An audited agent that exited on its own, with nothing unattributed beside it, does not drain: the idle admission accepts
+that state too. A lease the controller prepared for the next lane and could not deliver because the worker stopped
+asking returns to the queue after one minute without a work request (beside a delivered lease of the same epoch): its
+source is removed, its lane, lease and deadline are released, its reason reads `returned to queue: the worker stopped
+asking for another lane before delivery`, and it keeps its place in the fair order. It waits as `queued`, at no cost to
+its timeout, and is claimed again, with a new deadline, when the worker asks after its idle check. A lease with no
+delivered sibling is never returned: it waits for the worker's idle check however long that takes. A registration the
+controller refuses with 409 because it still holds a lease of the earlier epoch is retried each poll; the worker does
+not exit.
 
 ### Lowering concurrency without a sitting: `lanes.json`
 
