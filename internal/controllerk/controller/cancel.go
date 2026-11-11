@@ -32,12 +32,17 @@ func (c *Controller) cancelJob(ctx context.Context, job model.Job, reason string
 }
 
 // readinessCause is the cancel reason of a readiness gate that requires
-// cancellation, or that could not be evaluated.
+// cancellation, or that could not be evaluated. A gate counting maintenance
+// probes that failed without evidence names their count (#53).
 func readinessCause(gate health.GateState, err error) model.CancelReason {
 	if err != nil {
 		return model.CancelReason{Source: model.CancelGateError, Detail: err.Error()}
 	}
-	return model.CancelReason{Source: model.CancelHostReadiness, Blockers: gate.Blockers, Detail: fmt.Sprintf("free_bytes=%d used_bytes=%d", gate.FreeBytes, gate.UsedBytes)}
+	detail := fmt.Sprintf("free_bytes=%d used_bytes=%d", gate.FreeBytes, gate.UsedBytes)
+	if gate.ProbeFailures > 0 {
+		detail += fmt.Sprintf(" probe_failures=%d", gate.ProbeFailures)
+	}
+	return model.CancelReason{Source: model.CancelHostReadiness, Blockers: gate.Blockers, Detail: detail}
 }
 
 // capacityCancelInterval is how long a capacity-only cancellation spares the
@@ -90,6 +95,7 @@ func (c *Controller) cancelForGate(ctx context.Context, gate health.GateState, g
 type gateOutcome struct {
 	seen, ready, cancelActive bool
 	blockers                  []string
+	probeFailures             int
 	err                       string
 }
 
@@ -102,10 +108,10 @@ func (c *Controller) noteGate(gate health.GateState, err error) {
 		text = err.Error()
 	}
 	last := &c.gate
-	if last.seen && last.ready == gate.Ready && last.cancelActive == gate.CancelActive && last.err == text && slices.Equal(last.blockers, gate.Blockers) {
+	if last.seen && last.ready == gate.Ready && last.cancelActive == gate.CancelActive && last.probeFailures == gate.ProbeFailures && last.err == text && slices.Equal(last.blockers, gate.Blockers) {
 		return
 	}
-	*last = gateOutcome{seen: true, ready: gate.Ready, cancelActive: gate.CancelActive, blockers: slices.Clone(gate.Blockers), err: text}
+	*last = gateOutcome{seen: true, ready: gate.Ready, cancelActive: gate.CancelActive, blockers: slices.Clone(gate.Blockers), probeFailures: gate.ProbeFailures, err: text}
 	active := "none"
 	if len(c.active) > 0 {
 		ids := make([]string, len(c.active))
@@ -118,7 +124,11 @@ func (c *Controller) noteGate(gate health.GateState, err error) {
 		log.Printf("controller readiness: ready=false gate_error=%q active_job=%s", text, active)
 		return
 	}
-	log.Printf("controller readiness: ready=%t cancel_active=%t blockers=%s active_job=%s", gate.Ready, gate.CancelActive, blockerList(gate.Blockers), active)
+	failures := ""
+	if gate.ProbeFailures > 0 {
+		failures = fmt.Sprintf(" probe_failures=%d", gate.ProbeFailures)
+	}
+	log.Printf("controller readiness: ready=%t cancel_active=%t blockers=%s%s active_job=%s", gate.Ready, gate.CancelActive, blockerList(gate.Blockers), failures, active)
 }
 
 func blockerList(blockers []string) string {

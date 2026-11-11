@@ -3,7 +3,9 @@ package controller
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"reflect"
 	"strings"
@@ -68,6 +70,46 @@ func TestHostReadinessCancelRecordsBlockers(t *testing.T) {
 	}
 	if got := strings.Split(strings.TrimSpace(logs.String()), "\n"); !reflect.DeepEqual(got, wantLog) {
 		t.Fatalf("controller log:\n%s", logs)
+	}
+}
+
+// Probes that fail without evidence block admission and keep the running job
+// until the gate cancels at the third (health.ProbeFailureLimit); the job's
+// cause and the log name the count (#53).
+func TestProbeFailureCancelRecordsCount(t *testing.T) {
+	f := newRuntime(t)
+	lease := f.lease(t, model.Build)
+	logs := captureLog(t)
+	ctx := context.Background()
+	blockers := []string{"maintenance_probe_failed"}
+	for failures := 1; failures <= 3; failures++ {
+		cancel := failures == 3
+		var gate health.GateState
+		if err := json.Unmarshal([]byte(fmt.Sprintf(`{"probe_failures":%d}`, failures)), &gate); err != nil {
+			t.Fatal(err)
+		}
+		gate.Blockers, gate.CancelActive, gate.FreeBytes, gate.UsedBytes = blockers, cancel, 7, 9
+		f.controller.options.Gate = func(context.Context) (health.GateState, error) { return gate, nil }
+		f.controller.checkActive(ctx)
+		job, err := f.db.Get(ctx, lease.Job.ID)
+		if err != nil || job.CancelRequested != cancel {
+			t.Fatalf("failure %d: cancel_requested=%t %v", failures, job.CancelRequested, err)
+		}
+	}
+	job, err := f.db.Get(ctx, lease.Job.ID)
+	want := &model.CancelReason{Source: model.CancelHostReadiness, Blockers: blockers, At: f.controller.options.Now(), Detail: "free_bytes=7 used_bytes=9 probe_failures=3"}
+	if err != nil || !reflect.DeepEqual(job.CancelReason, want) {
+		t.Fatalf("probe failure cause: %+v %v", job.CancelReason, err)
+	}
+	for _, line := range []string{
+		"controller readiness: ready=false cancel_active=false blockers=maintenance_probe_failed probe_failures=1 active_job=" + job.ID,
+		"controller readiness: ready=false cancel_active=false blockers=maintenance_probe_failed probe_failures=2 active_job=" + job.ID,
+		"controller readiness: ready=false cancel_active=true blockers=maintenance_probe_failed probe_failures=3 active_job=" + job.ID,
+		`controller job cancellation requested: job=` + job.ID + ` source=host_readiness blockers=maintenance_probe_failed detail="free_bytes=7 used_bytes=9 probe_failures=3"`,
+	} {
+		if !strings.Contains(logs.String(), line+"\n") {
+			t.Fatalf("log lacks %q:\n%s", line, logs)
+		}
 	}
 }
 

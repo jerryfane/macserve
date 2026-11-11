@@ -721,8 +721,11 @@ func (s *state) healthChecks() {
 	}
 	h, now := *s.health, s.p.Now()
 	var blockers []string
-	if h.Schema != 3 || (s.env != nil && h.JobUID != s.env.JobUID) || !h.BoundaryValidated || h.CheckedAt.After(now.Add(5*time.Second)) || now.Sub(h.CheckedAt) > 45*time.Second || !h.ExpiresAt.After(now) || h.ExpiresAt.Sub(h.CheckedAt) > 45*time.Second {
+	if h.Schema != 3 || (s.env != nil && h.JobUID != s.env.JobUID) || !h.BoundaryValidated || h.CheckedAt.After(now.Add(5*time.Second)) || now.Sub(h.CheckedAt) > 45*time.Second || !h.ExpiresAt.After(now) || h.ExpiresAt.Sub(h.CheckedAt) > 45*time.Second || h.ProbeFailures < 0 {
 		blockers = append(blockers, "isolation_unavailable")
+	}
+	if h.ProbeFailures > 0 {
+		blockers = append(blockers, "maintenance_probe_failed")
 	}
 	persistOK := h.PersistenceValid && !h.PersistenceNeedsReview && !h.PersistenceLastVerified.IsZero() && !h.PersistenceLastVerified.After(now)
 	if !persistOK {
@@ -759,10 +762,14 @@ func (s *state) healthChecks() {
 	}
 	var text []string
 	for _, b := range blockers {
+		if b == "maintenance_probe_failed" {
+			text = append(text, fmt.Sprintf("%d maintenance probes in a row failed without evidence (active jobs are cancelled from %d)", h.ProbeFailures, health.ProbeFailureLimit))
+			continue
+		}
 		text = append(text, blockerText[b])
 	}
 	fix := "Start the services with macserve setup, or wait for maintenance."
-	if blockers[0] != "isolation_unavailable" {
+	if blockers[0] != "isolation_unavailable" && blockers[0] != "maintenance_probe_failed" {
 		fix = "Resolve: " + strings.Join(blockers, ", ") + "."
 	}
 	s.set("health", Fail, strings.Join(text, "; "), fix)
