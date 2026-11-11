@@ -1,15 +1,22 @@
 package worker
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
+	"log"
 	"os"
 	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // Entirely synthetic identities and paths. Only the native field grammar is
@@ -270,6 +277,108 @@ func TestProtectedCodeTreeDetectsTamperWritePermissionAndLinkEscape(t *testing.T
 	}
 	if _, err := protectedTreeDigest(context.Background(), path, writers); err == nil {
 		t.Fatal("escaping/unresolved link accepted")
+	}
+}
+
+// Accepted manifests pin tree digests, so a walk that hashed the same tree
+// differently would revoke every accepted host as contamination on upgrade.
+// The reference is the canonical format: fs.WalkDir order, and per entry its
+// slash path, mode, owner and group, then link text or size and bytes.
+func TestProtectedTreeDigestKeepsTheAcceptedFormat(t *testing.T) {
+	path := filepath.Join(privateRootFixture(t), "Fixture.app")
+	for _, dir := range []string{"Contents/MacOS", "Contents/Frameworks/Kit.framework/Versions/A", "Contents/Resources/empty", "Contents/Resources/a"} {
+		if err := os.MkdirAll(filepath.Join(path, dir), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// "a", "a-b", "a.b", "a/x" and "B" order differently by full path and by
+	// name within a directory; the walk orders by name within each directory.
+	for name, content := range map[string]string{
+		"Contents/Info.plist": "plist", "Contents/MacOS/fixture": "code",
+		"Contents/Frameworks/Kit.framework/Versions/A/Kit": "kit",
+		"Contents/Resources/a/x":                           "x", "Contents/Resources/a-b": "", "Contents/Resources/a.b": "dot", "Contents/Resources/B": "upper",
+	} {
+		if err := os.WriteFile(filepath.Join(path, name), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for link, target := range map[string]string{
+		"Contents/Frameworks/Kit.framework/Versions/Current": "A",
+		"Contents/Frameworks/Kit.framework/Kit":              "Versions/Current/Kit",
+		"Contents/Resources/up":                              "../MacOS/fixture",
+	} {
+		if err := os.Symlink(target, filepath.Join(path, link)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := sha256.New()
+	err := fs.WalkDir(os.DirFS(path), ".", func(rel string, _ fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		full := filepath.Join(path, rel)
+		info, err := os.Lstat(full)
+		if err != nil {
+			return err
+		}
+		st := info.Sys().(*syscall.Stat_t)
+		fmt.Fprintf(h, "%s\x00%d\x00%d\x00%d\x00", rel, info.Mode(), st.Uid, st.Gid)
+		switch {
+		case info.Mode()&os.ModeSymlink != 0:
+			text, err := os.Readlink(full)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(h, "%s\x00", text)
+		case info.Mode().IsRegular():
+			data, err := os.ReadFile(full)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(h, "%d\x00%s", len(data), data)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := protectedTreeDigest(context.Background(), path, registrationWritersFixture())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := hex.EncodeToString(h.Sum(nil)); got != want {
+		t.Fatalf("tree digest format changed: %s, accepted format %s", got, want)
+	}
+}
+
+// A scan that runs out of time must say where the time went: the periodic
+// scan's only record is the daemon's stderr.
+func TestRegisteredCodeInspectionLogsTheStageItsDeadlineReached(t *testing.T) {
+	var logged bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(previous) })
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	m := registrationFixture(t)
+	m.Code = map[string]RegisteredCode{}
+	acl := func(context.Context, string, registrationWriters) error { return nil }
+	digest := func(ctx context.Context, _ string, _ registrationWriters) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	command := func(context.Context, ...string) (string, error) {
+		t.Fatal("unmeasured tree reached code-signature inspection")
+		return "", nil
+	}
+	if err := collectRegistrationCode(ctx, &m, registrationWritersFixture(), acl, digest, command); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Problems) == 0 {
+		t.Fatal("tree cut short by the deadline left no problem")
+	}
+	if want := "context deadline exceeded during tree digest /Applications/Fixture.app"; !strings.Contains(logged.String(), want) {
+		t.Fatalf("scan log does not name the stage the deadline reached (%q):\n%s", want, logged.String())
 	}
 }
 
