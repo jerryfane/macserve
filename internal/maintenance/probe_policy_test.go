@@ -143,6 +143,8 @@ func TestWithoutEvidenceIsAClosedList(t *testing.T) {
 	for _, err := range []error{
 		baselineChange,
 		context.Canceled,
+		// Run's wrapping of any probe error while the daemon stops.
+		fmt.Errorf("maintenance stopping: %v", probeDeadline),
 		errors.New("context deadline exceeded"),
 		errors.New("cannot inspect protected input ACL: signal: killed"),
 		errors.New("persistence authority or attestation changed during status read"),

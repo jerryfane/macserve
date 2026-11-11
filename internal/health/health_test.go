@@ -154,6 +154,10 @@ func TestProbeFailuresBlockAdmissionAndCancelFromThird(t *testing.T) {
 		if err != nil || state.Ready || state.CancelActive != cancel || state.CapacityOnly || !reflect.DeepEqual(state.Blockers, []string{"maintenance_probe_failed"}) {
 			t.Fatalf("%d failed probes: %+v %v", failures, state, err)
 		}
+		// The controller names the count in its log and the cancel reason.
+		if data, _ := json.Marshal(state); !strings.Contains(string(data), `"probe_failures":`+strconv.Itoa(failures)) {
+			t.Fatalf("%d failed probes: gate state %s lacks the count", failures, data)
+		}
 	}
 	g, h, _ := readyGuard(t)
 	withProbeFailures(t, h, -1)

@@ -3,6 +3,7 @@ package maintenance
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -93,7 +94,13 @@ func Run(ctx context.Context, c Config) error {
 			}
 		}
 		lastValid := probes.lastValid
-		h = probes.publication(h, err, time.Now())
+		failure := err
+		if err != nil && ctx.Err() != nil {
+			// The daemon is stopping: whatever the probe returned is not a
+			// failure without evidence, so it never republishes valid health.
+			failure = fmt.Errorf("maintenance stopping: %v", err)
+		}
+		h = probes.publication(h, failure, time.Now())
 		if pubErr := publish(healthPath, h); pubErr != nil {
 			return pubErr
 		}
