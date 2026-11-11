@@ -338,8 +338,10 @@ earlier epoch never delivered is interrupted (`worker epoch fenced before lease 
 the registration is accepted; one still preparing is cancelled and the registration answers 503 until it has ended. A
 lease the earlier epoch received keeps its heartbeat and cleanup windows, and the registration answers 409 until they
 end it.
-The worker drains the same way when an unattributed job-account process appears beside running jobs; its log line
-(`worker draining until idle: ...`) names each such process by PID, kernel parent, start, executable and arguments. A
+When an unattributed job-account process appears beside running jobs the worker stops starting new lanes until it is
+idle, but keeps its epoch (nothing was fenced): a lease already prepared for the next lane is delivered after the idle
+check. Its log line (`worker draining until idle: ...`, once per drain) names each such process by PID, kernel parent,
+start, executable and arguments. A
 registration the controller refuses with 409 because it still holds a lease of the earlier epoch is retried each poll;
 the worker does not exit.
 

@@ -3,6 +3,7 @@ package workerclient
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -284,6 +285,157 @@ func TestClientDeliversEveryPendingCompletion(t *testing.T) {
 	for _, entry := range entries {
 		if strings.HasPrefix(entry.Name(), "pending") {
 			t.Fatalf("acknowledged completion kept: %s", entry.Name())
+		}
+	}
+}
+
+// stagedController claims a job on one /next and offers it on a later one,
+// as the controller does: a job claimed for an epoch is offered only to that
+// epoch, and a registration of another epoch interrupts it (never offered).
+type stagedController struct {
+	t           *testing.T
+	mu          sync.Mutex
+	queue       []string
+	claimed     map[string]string
+	epochs      []string
+	interrupted []string
+	complete    map[string]worker.Result
+}
+
+func (f *stagedController) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	path := strings.TrimPrefix(r.URL.Path, protocol.Prefix)
+	epoch := r.Header.Get(protocol.EpochHeader)
+	offer := func(id string) {
+		deadline := time.Now().Add(time.Minute)
+		json.NewEncoder(w).Encode(protocol.Lease{Job: admittedJob(f.t, id, epoch, &deadline, fixtureRequest), Token: "lease-" + id})
+	}
+	switch {
+	case path == "/register":
+		var reg protocol.Registration
+		json.NewDecoder(r.Body).Decode(&reg)
+		f.epochs = append(f.epochs, reg.Epoch)
+		for id, owner := range f.claimed {
+			if owner != reg.Epoch {
+				f.interrupted = append(f.interrupted, id)
+				delete(f.claimed, id)
+			}
+		}
+		w.WriteHeader(http.StatusNoContent)
+	case path == "/next":
+		var next protocol.NextRequest
+		json.NewDecoder(r.Body).Decode(&next)
+		for id, owner := range f.claimed {
+			if owner == epoch {
+				delete(f.claimed, id)
+				offer(id)
+				return
+			}
+		}
+		if len(f.queue) == 0 {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		id := f.queue[0]
+		f.queue = f.queue[1:]
+		if len(next.Running) == 0 {
+			offer(id)
+			return
+		}
+		// A lane beside a running job: prepared now, offered on a later /next.
+		f.claimed[id] = epoch
+		w.WriteHeader(http.StatusNoContent)
+	case strings.HasSuffix(path, "/source"):
+		w.Write([]byte("source"))
+	case strings.HasSuffix(path, "/complete"):
+		var completion protocol.Completion
+		json.NewDecoder(r.Body).Decode(&completion)
+		f.complete[strings.TrimSuffix(strings.TrimPrefix(path, "/jobs/"), "/complete")] = completion.Result
+		w.WriteHeader(http.StatusNoContent)
+	case strings.HasSuffix(path, "/heartbeat"):
+		json.NewEncoder(w).Encode(protocol.Heartbeat{Deadline: time.Now().Add(time.Minute)})
+	default:
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// An unattributed process beside a running lane (engine drain) stops new
+// lanes but keeps the epoch: the lease the controller prepared for the
+// second lane before the drain is delivered after the first lane ends and
+// Recover runs at idle. A new epoch would make the controller interrupt it
+// (Studio v0.1.44, 2026-11-11: both lane-2 jobs interrupted 1 s after lane
+// 1 ended).
+func TestEngineDrainKeepsEpochForPreparedLease(t *testing.T) {
+	controller := &stagedController{t: t, queue: []string{"j_one", "j_two"}, claimed: map[string]string{}, complete: map[string]worker.Result{}}
+	cfg, _ := unixController(t, controller)
+	cfg.MaxConcurrentJobs = 2
+	engine := newLaneExecutor("j_one", "j_two")
+	close(engine.gates["j_two"])
+	var mu sync.Mutex
+	calls := 0
+	engine.fakeExecutor.laneReady = func(context.Context) error {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		if calls == 1 {
+			return nil
+		}
+		return fmt.Errorf("%w: 1 unattributed job-account process(es): pid=900", worker.ErrDrain)
+	}
+	client, err := NewWithChecks(cfg, engine, testChecks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- client.Run(ctx) }()
+	if id := <-engine.started; id != "j_one" {
+		t.Fatalf("started %s", id)
+	}
+	for claimed := false; !claimed; time.Sleep(20 * time.Millisecond) {
+		controller.mu.Lock()
+		claimed = controller.claimed["j_two"] != ""
+		controller.mu.Unlock()
+		if ctx.Err() != nil {
+			t.Fatal("second lane never claimed")
+		}
+	}
+	// Several polls pass in the drain while the first lane runs.
+	time.Sleep(2500 * time.Millisecond)
+	close(engine.gates["j_one"])
+	select {
+	case id := <-engine.started:
+		if id != "j_two" {
+			t.Fatalf("started %s", id)
+		}
+	case <-ctx.Done():
+		controller.mu.Lock()
+		defer controller.mu.Unlock()
+		t.Fatalf("prepared lease never delivered: interrupted %v epochs %v", controller.interrupted, controller.epochs)
+	}
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		controller.mu.Lock()
+		_, ok := controller.complete["j_two"]
+		controller.mu.Unlock()
+		if ok {
+			break
+		}
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	controller.mu.Lock()
+	defer controller.mu.Unlock()
+	if len(controller.interrupted) != 0 || len(slices.Compact(slices.Clone(controller.epochs))) != 1 {
+		t.Fatalf("epoch rotated: interrupted %v epochs %v", controller.interrupted, controller.epochs)
+	}
+	for _, id := range []string{"j_one", "j_two"} {
+		if result, ok := controller.complete[id]; !ok || result.State != model.Succeeded {
+			t.Fatalf("job %s completion %+v", id, result)
 		}
 	}
 }
