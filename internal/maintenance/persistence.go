@@ -3,6 +3,7 @@ package maintenance
 import (
 	"context"
 	"errors"
+	"io"
 	"log"
 	"time"
 
@@ -75,6 +76,9 @@ type persistenceMonitor struct {
 	// in place without verifying it.
 	inconclusive int
 	now          func() time.Time
+	// scanLog receives each periodic scan's stage-timing line (the daemon's
+	// stderr); the explicit scans above leave Options.ScanLog nil.
+	scanLog io.Writer
 }
 
 func (m *persistenceMonitor) schedule(ctx context.Context, now time.Time, opts worker.Options, status worker.PersistenceAttestationMetadata, statusErr error) {
@@ -105,6 +109,7 @@ func (m *persistenceMonitor) schedule(ctx context.Context, now time.Time, opts w
 		return
 	}
 	revokeInconclusive := m.inconclusive >= persistenceInconclusiveLimit
+	opts.ScanLog = m.scanLog
 	m.nextAttempt = now.Add(persistenceScanInterval)
 	m.done = make(chan struct{})
 	done := m.done
@@ -125,8 +130,8 @@ func (m *persistenceMonitor) schedule(ctx context.Context, now time.Time, opts w
 	}()
 }
 
-func monitorPersistence(ctx context.Context, path string) {
-	m := persistenceMonitor{verify: worker.ReverifyPersistenceAttestation}
+func monitorPersistence(ctx context.Context, path string, scanLog io.Writer) {
+	m := persistenceMonitor{verify: worker.ReverifyPersistenceAttestation, scanLog: scanLog}
 	defer func() {
 		if m.done != nil {
 			<-m.done // Allow a running scan's protected publication to finish before exit.

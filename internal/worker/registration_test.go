@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"os"
@@ -352,12 +353,9 @@ func TestProtectedTreeDigestKeepsTheAcceptedFormat(t *testing.T) {
 }
 
 // A scan that runs out of time must say where the time went: the periodic
-// scan's only record is the daemon's stderr.
+// scan's only record is the maintenance daemon's stderr, its ScanLog.
 func TestRegisteredCodeInspectionLogsTheStageItsDeadlineReached(t *testing.T) {
 	var logged bytes.Buffer
-	previous := log.Writer()
-	log.SetOutput(&logged)
-	t.Cleanup(func() { log.SetOutput(previous) })
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	m := registrationFixture(t)
@@ -371,7 +369,7 @@ func TestRegisteredCodeInspectionLogsTheStageItsDeadlineReached(t *testing.T) {
 		t.Fatal("unmeasured tree reached code-signature inspection")
 		return "", nil
 	}
-	if err := collectRegistrationCode(ctx, &m, registrationWritersFixture(), acl, digest, command); err != nil {
+	if err := collectRegistrationCode(ctx, &m, registrationWritersFixture(), acl, digest, command, &logged); err != nil {
 		t.Fatal(err)
 	}
 	if len(m.Problems) == 0 {
@@ -379,6 +377,63 @@ func TestRegisteredCodeInspectionLogsTheStageItsDeadlineReached(t *testing.T) {
 	}
 	if want := "context deadline exceeded during tree digest /Applications/Fixture.app"; !strings.Contains(logged.String(), want) {
 		t.Fatalf("scan log does not name the stage the deadline reached (%q):\n%s", want, logged.String())
+	}
+}
+
+// Every command-line full scan (worker-persistence inspect and accept, which
+// macserve-admin runs for manifest-inspect and manifest-apply; worker-reset;
+// qualify begin, collect, approve and reapprove) runs with a nil ScanLog under
+// callers that refuse any stderr from a successful fixed command and classify
+// a failure by its exact stderr. Only the scan given a ScanLog, the
+// maintenance daemon's periodic scan, logs its stage timings, and only there.
+func TestFullScanLogsStagesOnlyToItsScanLog(t *testing.T) {
+	var global bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&global)
+	t.Cleanup(func() { log.SetOutput(previous) })
+	stderr, err := os.CreateTemp(t.TempDir(), "stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stderr.Close()
+	saved := os.Stderr
+	os.Stderr = stderr
+	t.Cleanup(func() { os.Stderr = saved })
+	collect := func(scanLog io.Writer) {
+		t.Helper()
+		path, executable, _ := signedBundleFixture(t)
+		m := registrationFixture(t)
+		m.Code = map[string]RegisteredCode{}
+		m.Census.Records = m.Census.Records[:1]
+		m.Census.Records[0].Fields["URL"] = filepath.Dir(filepath.Dir(filepath.Dir(path)))
+		m.Census.Records[0].Fields["Bundle Identifier"] = "test.example.preview"
+		m.Census.Records[0].Fields["Identifier"] = "2.test.example.preview"
+		verified := false
+		acl := func(context.Context, string, registrationWriters) error { return nil }
+		err := collectRegistrationCode(context.Background(), &m, registrationWritersFixture(), acl, protectedTreeDigest, fixtureSignatureCommand(t, executable, &verified), scanLog)
+		if err != nil || len(m.Problems) != 0 || !verified {
+			t.Fatalf("fixture scan did not succeed: verified=%t err=%v problems=%v", verified, err, m.Problems)
+		}
+	}
+	written := func() string {
+		t.Helper()
+		data, err := os.ReadFile(stderr.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return global.String() + string(data)
+	}
+	collect(nil)
+	if got := written(); got != "" {
+		t.Fatalf("command-line scan wrote %d bytes to stderr:\n%s", len(got), got)
+	}
+	var daemon bytes.Buffer
+	collect(&daemon)
+	if want := "macserve registered code inspection finished after "; !strings.HasPrefix(daemon.String(), want) || !strings.Contains(daemon.String(), "; slowest stages: ") || strings.Count(daemon.String(), "\n") != 1 {
+		t.Fatalf("periodic scan did not log one stage line (%q...):\n%s", want, daemon.String())
+	}
+	if got := written(); got != "" {
+		t.Fatalf("periodic scan's stage line also reached the process stderr:\n%s", got)
 	}
 }
 
@@ -865,7 +920,7 @@ func TestCollectRegistrationCodeRetainsFailedTreesAsProblems(t *testing.T) {
 		t.Fatal("failed tree reached code-signature inspection")
 		return "", nil
 	}
-	if err := collectRegistrationCode(context.Background(), &m, registrationWritersFixture(), acl, digest, command); err != nil {
+	if err := collectRegistrationCode(context.Background(), &m, registrationWritersFixture(), acl, digest, command, nil); err != nil {
 		t.Fatalf("failed tree aborted private candidate collection: %v", err)
 	}
 	if digestCalls != 1 || len(m.Code) != 0 || len(m.Problems) != 2 {
@@ -1035,7 +1090,7 @@ func TestCollectRegistrationCodeRechecksSuccessfulTrees(t *testing.T) {
 		return out, err
 	}
 	acl := func(context.Context, string, registrationWriters) error { return nil }
-	err := collectRegistrationCode(context.Background(), &m, registrationWritersFixture(), acl, protectedTreeDigest, command)
+	err := collectRegistrationCode(context.Background(), &m, registrationWritersFixture(), acl, protectedTreeDigest, command, nil)
 	if err == nil || err.Error() != "registered code tree changed during inspection" || !verified {
 		t.Fatalf("successfully measured tree was not rechecked: verified=%t err=%v problems=%v", verified, err, m.Problems)
 	}

@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -134,7 +133,7 @@ func collectPersistence(ctx context.Context, options Options) (m PersistenceMani
 	if runtime.GOOS != "darwin" {
 		return m, errors.New("native registration inspection requires macOS")
 	}
-	stages := newScanStages(ctx, "persistence scan")
+	stages := newScanStages(ctx, "persistence scan", options.ScanLog)
 	defer func() { stages.log(err, len(m.Problems)) }()
 	var writers registrationWriters
 	err = stages.run("writer policy", func() (err error) {
@@ -161,7 +160,7 @@ func collectPersistence(ctx context.Context, options Options) (m PersistenceMani
 		return m, err
 	}
 	if err := stages.run("registered code", func() error {
-		return collectRegistrationCode(ctx, &m, writers, protectedTreeACL, protectedTreeDigest, codeCommand)
+		return collectRegistrationCode(ctx, &m, writers, protectedTreeACL, protectedTreeDigest, codeCommand, options.ScanLog)
 	}); err != nil {
 		return m, err
 	}
@@ -192,8 +191,9 @@ func collectPersistence(ctx context.Context, options Options) (m PersistenceMani
 
 // Collect successful measurements separately from failures so only measured
 // trees enter the signing-race recheck. Failed trees remain candidate Problems.
-func collectRegistrationCode(ctx context.Context, m *PersistenceManifest, writers registrationWriters, treeACL func(context.Context, string, registrationWriters) error, treeDigest func(context.Context, string, registrationWriters) (string, error), command func(context.Context, ...string) (string, error)) (err error) {
-	stages := newScanStages(ctx, "registered code inspection")
+// scanLog is Options.ScanLog: nil keeps the inspection silent.
+func collectRegistrationCode(ctx context.Context, m *PersistenceManifest, writers registrationWriters, treeACL func(context.Context, string, registrationWriters) error, treeDigest func(context.Context, string, registrationWriters) (string, error), command func(context.Context, ...string) (string, error), scanLog io.Writer) (err error) {
+	stages := newScanStages(ctx, "registered code inspection", scanLog)
 	defer func() { stages.log(err, len(m.Problems)) }()
 	paths, problems := registrationPaths(m.Census)
 	m.Problems = problems
@@ -270,10 +270,13 @@ func collectRegistrationCode(ctx context.Context, m *PersistenceManifest, writer
 
 // scanStages times the stages of one full inspection so its log line names
 // where the budget went, and the stage its deadline cut short. One line per
-// inspection keeps an overrun diagnosable from the daemon's stderr alone.
+// inspection keeps an overrun of the periodic scan diagnosable from the
+// maintenance daemon's stderr alone. A nil out (every command-line scan)
+// writes nothing.
 type scanStages struct {
 	ctx   context.Context
 	name  string
+	out   io.Writer
 	began time.Time
 	spent map[string]time.Duration
 	calls map[string]int
@@ -282,8 +285,8 @@ type scanStages struct {
 	endedCause error
 }
 
-func newScanStages(ctx context.Context, name string) *scanStages {
-	return &scanStages{ctx: ctx, name: name, began: time.Now(), spent: map[string]time.Duration{}, calls: map[string]int{}}
+func newScanStages(ctx context.Context, name string, out io.Writer) *scanStages {
+	return &scanStages{ctx: ctx, name: name, out: out, began: time.Now(), spent: map[string]time.Duration{}, calls: map[string]int{}}
 }
 
 func (s *scanStages) run(stage string, f func() error) error {
@@ -304,6 +307,9 @@ const scanStagesLogged = 12
 // log reports the outcome with problems, the number of inspection Problems a
 // result that is not itself an error recorded.
 func (s *scanStages) log(err error, problems int) {
+	if s.out == nil {
+		return
+	}
 	elapsed := time.Since(s.began).Round(100 * time.Millisecond)
 	stages := make([]string, 0, len(s.spent))
 	for stage := range s.spent {
@@ -341,7 +347,7 @@ func (s *scanStages) log(err error, problems int) {
 	if s.ended != "" {
 		outcome += fmt.Sprintf(" (%v during %s)", s.endedCause, s.ended)
 	}
-	log.Printf("macserve %s %s after %s of %s; slowest stages: %s", s.name, outcome, elapsed, budget, strings.Join(slowest, ", "))
+	fmt.Fprintf(s.out, "macserve %s %s after %s of %s; slowest stages: %s\n", s.name, outcome, elapsed, budget, strings.Join(slowest, ", "))
 }
 
 func (m *PersistenceManifest) noteContamination(err error) {

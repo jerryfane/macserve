@@ -94,7 +94,7 @@ func runMaintenance(args []string, stdout, stderr io.Writer, observe bool) int {
 		}
 		return 0
 	}
-	if err := maintenance.Run(ctx, config); err != nil && !errors.Is(err, context.Canceled) {
+	if err := maintenance.Run(ctx, config, stderr); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintf(stderr, "macserve maintenance: %v\n", err)
 		return 1
 	}

@@ -66,10 +66,13 @@ either lock. No FSEvents watcher or TTL cache substitutes for live checks.
 
 Root maintenance performs one full scan every six hours in a background task, independently of its
 eight-second health observation. A full scan has a fixed 480-second deadline, does not hold the worker
-admission lock, and never overlaps another full attestation scan, even in another process. Every full
-collection logs one line to the scanning process's stderr (`maintenance.err.log` for the periodic scan)
+admission lock, and never overlaps another full attestation scan, even in another process. Each periodic
+scan logs one line per collection to `maintenance.err.log`
 with its outcome, elapsed time and slowest stages (per-tree ACL census, digest and signature check, and
-their recheck), naming the stage during which a deadline expired. Each registered tree's digest opens every
+their recheck), naming the stage during which a deadline expired. Command-line full scans
+(`worker-persistence inspect`/`accept`, `worker-reset`, `qualify begin`/`collect`/`approve`/`reapprove`)
+log no stage timings: their fixed-command callers refuse a successful command's stderr and classify a
+failure by its exact stderr. Each registered tree's digest opens every
 directory once and inspects its entries relative to it; each codesign or `ls` inspection is bounded at two
 minutes within the scan deadline. Scan-lock contention refuses that invocation without changing
 authority. Missing attestation fails admission closed
