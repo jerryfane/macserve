@@ -143,6 +143,8 @@ type processCensus struct {
 	// nothing is known about them. Not residual, but not a settled snapshot
 	// either (see stillRunning).
 	vanished []processSample
+	// gone are the audited processes absent without a verified relaunch.
+	gone []ProcessIdentity
 }
 
 // census classifies job-UID processes against the audited baseline. An audited
@@ -239,6 +241,11 @@ func (s *processScope) census(ctx context.Context, samples []processSample) (pro
 		s.adopt.adopted = append(s.adopt.adopted, adopted...)
 	}
 	c.unresolved = len(c.relaunched) < len(absent)
+	for _, p := range s.baseline.Processes {
+		if _, ok := absent[p.PID]; ok && c.relaunched[p.PID].pid == 0 {
+			c.gone = append(c.gone, p)
+		}
+	}
 	return c, nil
 }
 

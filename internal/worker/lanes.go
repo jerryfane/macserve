@@ -556,6 +556,9 @@ func (r *nativeRunner) Residue(ctx context.Context) ([]string, error) {
 	if err := r.loadBaseline(); err != nil {
 		return nil, err
 	}
+	// gone is the last census's audited processes that exited without a
+	// verified relaunch, for the log entry.
+	var gone []ProcessIdentity
 	count := func() (map[processInstance]processSample, bool, error) {
 		samples, err := r.scope.sample(ctx)
 		if err != nil {
@@ -569,6 +572,7 @@ func (r *nativeRunner) Residue(ctx context.Context) ([]string, error) {
 		for _, p := range c.residual {
 			found[processInstance{p.pid, p.start}] = p
 		}
+		gone = c.gone
 		return found, c.unresolved, nil
 	}
 	residue, unresolved, err := settledResidue(ctx, count)
@@ -580,9 +584,22 @@ func (r *nativeRunner) Residue(ctx context.Context) ([]string, error) {
 		entries = append(entries, r.residueEntry(p))
 	}
 	if unresolved {
-		entries = append(entries, "unresolved census: an audited process is gone without a verified relaunch")
+		entries = append(entries, "unresolved census: audited process(es) gone without a verified relaunch beside unattributed ones: "+goneList(gone))
 	}
 	return entries, nil
+}
+
+// goneList names audited processes by PID, start, launchd label and
+// executable, at most contaminationEntries of them, each bounded.
+func goneList(gone []ProcessIdentity) string {
+	parts := make([]string, 0, min(len(gone), contaminationEntries)+1)
+	for _, p := range gone[:min(len(gone), contaminationEntries)] {
+		parts = append(parts, fmt.Sprintf("pid=%d start=%s label=%q exe=%q", p.PID, p.Start, clip(p.Service.Label, contaminationPathBytes), clip(p.Service.Executable, contaminationPathBytes)))
+	}
+	if more := len(gone) - contaminationEntries; more > 0 {
+		parts = append(parts, fmt.Sprintf("+%d more", more))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // residueEntry names an unattributed process for the root-only worker log:
@@ -603,10 +620,13 @@ const residueArgsBytes = 400
 
 // settledResidue returns the residual instances listed by count both now
 // and residueSettle later, sorted by PID. unresolved reports a second census
-// that was unresolved with no such instance: it counts as one.
+// that was unresolved and listed residual processes, none persisting: it
+// counts as one. An audited process that exited with no unattributed process
+// beside it is not residue: launchd-managed Apple agents exit on their own,
+// and the idle admission accepts that state too.
 func settledResidue(ctx context.Context, count func() (map[processInstance]processSample, bool, error)) ([]processSample, bool, error) {
-	first, unresolved, err := count()
-	if err != nil || len(first) == 0 && !unresolved {
+	first, _, err := count()
+	if err != nil || len(first) == 0 {
 		return nil, false, err
 	}
 	// Short-lived build helpers (SwiftPM's double-forked git, live
@@ -630,9 +650,10 @@ func settledResidue(ctx context.Context, count func() (map[processInstance]proce
 		}
 	}
 	slices.SortFunc(persisting, func(a, b processSample) int { return a.pid - b.pid })
-	// An audited process gone without a verified relaunch: nothing here may
-	// judge that while jobs run.
-	return persisting, len(persisting) == 0 && unresolved, nil
+	// An audited process gone without a verified relaunch beside processes
+	// nothing attributes: one of them may be that relaunch, unverifiable
+	// while jobs run (the idle admission refuses it as well).
+	return persisting, len(persisting) == 0 && len(second) != 0 && unresolved, nil
 }
 
 // residueSettle is how long an unattributed process must persist to count

@@ -368,6 +368,9 @@ func TestUnverifiedHolderOfAuditedPIDNumberIsResidual(t *testing.T) {
 	if err != nil || !c.unresolved || !slices.ContainsFunc(c.residual, func(p processSample) bool { return p.pid == 100 && p.start == "20:0" }) {
 		t.Fatalf("census = %+v, %v; want the holder residual and the audited process unresolved", c, err)
 	}
+	if !slices.ContainsFunc(c.gone, func(p ProcessIdentity) bool { return p.PID == 100 && p.Start == "10:0" }) || !strings.Contains(goneList(c.gone), "pid=100 start=10:0 ") {
+		t.Fatalf("gone audited processes: %+v %q", c.gone, goneList(c.gone))
+	}
 	h := host(s, agents, rows)
 	if err := quiesceOnce(s); err == nil || errors.Is(err, ErrContamination) || !slices.Contains(h.signalled, 100) {
 		t.Fatalf("quiesce = %v, signalled %v", err, h.signalled)
