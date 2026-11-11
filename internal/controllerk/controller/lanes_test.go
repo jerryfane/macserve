@@ -452,3 +452,70 @@ func TestLostNextResponseReofferedOnlyWhenNotRunning(t *testing.T) {
 		}
 	}
 }
+
+// A lease prepared beside a running lane waits for a worker that stopped
+// asking for work (it drains until idle) in the queue, not in preparing:
+// after undeliveredWait it returns to queued without a deadline, keeps its
+// place, and is claimed again with a new deadline when the worker asks.
+// A lease with no delivered sibling waits however long the worker's idle
+// recovery takes. Before, it burned its deadline from the first claim
+// (Studio v0.1.46, 2026-11-11), and a later job could be claimed first.
+func TestUndeliveredLeaseReturnsToQueueWhileWorkerDrains(t *testing.T) {
+	f := newLanes(t, 2)
+	f.enqueue(t, "one", model.Build)
+	waiting := f.enqueue(t, "two", model.Build)
+	later := f.enqueue(t, "three", model.Build)
+	f.register(t, "epoch-a", 2)
+	first := f.start(t, "epoch-a")
+	f.claim(t, "epoch-a", first.Job.ID)
+	if job := f.job(t, waiting.ID); job.State != model.Preparing || job.Lane != 2 {
+		t.Fatalf("second lane: %s lane %d", job.State, job.Lane)
+	}
+	tarball := filepath.Join(f.source.directory, waiting.ID+".tar")
+	// The worker drains: it heartbeats lane 1 and asks for nothing.
+	f.offset.Store(int64(time.Minute - time.Second))
+	if code := lifecycleRequest(t, f.controller, first, "/heartbeat", struct{}{}); code != http.StatusOK {
+		t.Fatalf("heartbeat %d", code)
+	}
+	f.controller.checkActive(context.Background())
+	if job := f.job(t, waiting.ID); job.State != model.Preparing {
+		t.Fatalf("requeued early: %s", job.State)
+	}
+	f.offset.Store(int64(time.Minute + time.Second))
+	if code := lifecycleRequest(t, f.controller, first, "/heartbeat", struct{}{}); code != http.StatusOK {
+		t.Fatalf("heartbeat %d", code)
+	}
+	f.controller.checkActive(context.Background())
+	job := f.job(t, waiting.ID)
+	if job.State != model.Queued || job.Deadline != nil || job.Lane != 0 || job.WorkerEpoch != "" || job.LeaseToken != "" || job.Reason != "returned to queue: the worker stopped asking for another lane before delivery" {
+		t.Fatalf("undelivered lease while the worker drains: %+v", job)
+	}
+	if _, err := os.Stat(tarball); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("source kept: %v", err)
+	}
+	if ids := f.activeIDs(); len(ids) != 1 || ids[0] != first.Job.ID {
+		t.Fatalf("active %v", ids)
+	}
+	if err := f.controller.complete(context.Background(), first.Job, f.result(t, first), buildseal.Envelope{}); err != nil {
+		t.Fatal(err)
+	}
+	// Idle, the worker asks again: the requeued job keeps its place.
+	f.offset.Store(int64(10 * time.Minute))
+	lease := f.start(t, "epoch-a")
+	if lease.Job.ID != waiting.ID || lease.Job.Lane != 1 || !lease.Job.Deadline.Equal(f.now.Add(10*time.Minute+600*time.Second)) {
+		t.Fatalf("reclaimed lease: %+v", lease.Job)
+	}
+	if job := f.job(t, later.ID); job.State != model.Queued {
+		t.Fatalf("later job: %s", job.State)
+	}
+	// Alone, a prepared lease waits for the worker's idle recovery.
+	if err := f.controller.complete(context.Background(), lease.Job, f.result(t, lease), buildseal.Envelope{}); err != nil {
+		t.Fatal(err)
+	}
+	f.claim(t, "epoch-a")
+	f.offset.Store(int64(10*time.Minute + time.Minute + time.Minute))
+	f.controller.checkActive(context.Background())
+	if job := f.job(t, later.ID); job.State != model.Preparing {
+		t.Fatalf("lone lease requeued: %s", job.State)
+	}
+}

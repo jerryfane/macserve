@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log"
 	"os"
 	"slices"
 	"time"
@@ -134,6 +135,62 @@ func (c *Controller) endUndelivered(ctx context.Context, a *execution, job model
 	}
 }
 
+// undeliveredWait is how long a prepared lease may wait beside a delivered
+// sibling for its worker to ask for work (/next) before it returns to the
+// queue. A worker polls every poll_seconds (at most 30 s) while it has a free
+// lane; it stops asking only while it drains (an unattributed job-account
+// process beside a running job), which lasts until the sibling ends.
+const undeliveredWait = time.Minute
+
+// requeuedUndelivered is the reason of a job a requeued lease returned to
+// the queue.
+const requeuedUndelivered = "returned to queue: the worker stopped asking for another lane before delivery"
+
+// workerStoppedAsking reports whether a's prepared lease has waited
+// undeliveredWait beside a delivered sibling of its epoch without the worker
+// asking for work. A lease with no delivered sibling is never requeued: an
+// idle worker runs its idle Recover before asking, however long it takes.
+// Callers hold c.mu.
+func (c *Controller) workerStoppedAsking(a *execution, now time.Time) bool {
+	if a.fencing || now.Sub(a.readyAt) < undeliveredWait || now.Sub(c.lastNext) < undeliveredWait {
+		return false
+	}
+	return slices.ContainsFunc(c.active, func(b *execution) bool { return b != a && b.offered && b.job.WorkerEpoch == a.job.WorkerEpoch })
+}
+
+// requeueUndelivered returns a's prepared lease, never delivered, to the
+// queue: its source is removed and the job waits as queued, at no cost to its
+// deadline, until the worker asks again; it is then claimed in fair order
+// with a new deadline. A source that could not be removed ends the lease as
+// endUndelivered does. Callers hold c.mu, which is released around the
+// removal.
+func (c *Controller) requeueUndelivered(ctx context.Context, a *execution, job model.Job, now time.Time) {
+	a.fencing = true
+	c.mu.Unlock()
+	cleanupErr := c.removeSource(job.ID)
+	c.mu.Lock()
+	if !c.holds(a) || a.offered {
+		return
+	}
+	if cleanupErr != nil {
+		if c.options.Store.FailPreparation(ctx, job.ID, job.LeaseToken, model.Interrupted, false, "undelivered lease source removal failed", now) == nil {
+			c.release(a)
+			c.epoch = ""
+		}
+		return
+	}
+	if err := c.options.Store.Requeue(ctx, job.ID, job.LeaseToken, requeuedUndelivered, now); err != nil {
+		// Its source is gone: the lease can no longer be delivered.
+		log.Printf("controller undelivered lease requeue failed: job=%s: %v", job.ID, err)
+		if c.options.Store.FailPreparation(ctx, job.ID, job.LeaseToken, model.Interrupted, true, "undelivered lease could not return to the queue", now) == nil {
+			c.release(a)
+		}
+		return
+	}
+	log.Printf("controller returned undelivered lease to the queue: job=%s lane=%d: no work request for %s beside a running lane", job.ID, job.Lane, undeliveredWait)
+	c.release(a)
+}
+
 // next hands out at most one lease per call. running lists the jobs the worker
 // executes in any phase: an offered lease still preparing is offered again only
 // when the worker does not run it, meaning the earlier response was lost. A
@@ -153,6 +210,7 @@ func (c *Controller) next(ctx context.Context, epoch string, running []string) (
 		return nil, store.ErrLease
 	}
 	c.lastSeen = c.options.Now()
+	c.lastNext = c.lastSeen
 	if len(c.active) == 0 {
 		c.workerIdle = true
 	}
@@ -265,6 +323,7 @@ func (c *Controller) prepare(ctx context.Context, a *execution) {
 	if err == nil && !job.CancelRequested && !c.closed {
 		a.source = descriptor
 		a.ready = true
+		a.readyAt = c.options.Now()
 		c.mu.Unlock()
 		return
 	}
@@ -381,6 +440,9 @@ func (c *Controller) checkExecution(ctx context.Context, a *execution, now time.
 			a.cancel()
 		}
 		if !a.ready || !job.CancelRequested && !fenced {
+			if a.ready && !job.CancelRequested && c.workerStoppedAsking(a, now) {
+				c.requeueUndelivered(ctx, a, job, now)
+			}
 			c.mu.Unlock()
 			return
 		}
