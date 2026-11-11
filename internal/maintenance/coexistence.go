@@ -244,9 +244,10 @@ const launchctlNotLoaded = 113
 // is between two launchd runs: loaded but not running (a KeepAlive relaunch,
 // throttled for 10 s after a run shorter than its minimum runtime) or not
 // loaded at all (a redeploy between its bootout and bootstrap). Steady-state
-// health accepts a peer's new PID, so this is inconclusive, not a finding: the
-// last valid health stays until its own expiry (keepLastValid) and a peer that
-// is still down then publishes invalid health. Malformed or ambiguous output,
+// health accepts a peer's new PID, so this is a probe failure without
+// evidence, not a finding (withoutEvidence): the last valid health stays,
+// counting failed probes, until its own expiry, and a peer that is still down
+// then publishes invalid health. Malformed or ambiguous output,
 // another target, a diagnostic, and a missing, duplicate or noncanonical PID
 // of a running service remain findings.
 var errCoexistingServiceRestarting = errors.New("service is between two launchd runs")

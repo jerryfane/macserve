@@ -2,7 +2,10 @@ package health
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -127,5 +130,58 @@ func TestOwnerPauseDoesNotCancelDrainingWork(t *testing.T) {
 	state, err = g.Check(context.Background())
 	if err != nil || state.Ready || state.CancelActive {
 		t.Fatalf("memory pressure did not stop admission: %+v %v", state, err)
+	}
+}
+
+// withProbeFailures sets the published probe_failures count the way the
+// controller reads it, from the record's JSON.
+func withProbeFailures(t *testing.T, h *Health, failures int) {
+	t.Helper()
+	if err := json.Unmarshal([]byte(`{"probe_failures":`+strconv.Itoa(failures)+`}`), h); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Maintenance republishes the last valid health with the count of probes that
+// failed without evidence since (#53). Each blocks admission; only the third
+// in a row cancels active work, so the Studio's transient failures (two
+// failed probes in about 20 s, #108) no longer cancel a running build.
+func TestProbeFailuresBlockAdmissionAndCancelFromThird(t *testing.T) {
+	for failures, cancel := range map[int]bool{1: false, 2: false, 3: true, 4: true} {
+		g, h, _ := readyGuard(t)
+		withProbeFailures(t, h, failures)
+		state, err := g.Check(context.Background())
+		if err != nil || state.Ready || state.CancelActive != cancel || state.CapacityOnly || !reflect.DeepEqual(state.Blockers, []string{"maintenance_probe_failed"}) {
+			t.Fatalf("%d failed probes: %+v %v", failures, state, err)
+		}
+	}
+	g, h, _ := readyGuard(t)
+	withProbeFailures(t, h, -1)
+	if state, err := g.Check(context.Background()); err != nil || state.Ready || !state.CancelActive {
+		t.Fatalf("negative probe failure count admitted: %+v %v", state, err)
+	}
+}
+
+// Guard (passes before #53 by design): the count never extends health. A
+// republished last valid health is judged on its own timestamps, so once it
+// expires or goes stale (a maintenance daemon that stopped publishing) active
+// work is cancelled whatever the count; a finding published with it still
+// cancels at once.
+func TestProbeFailuresNeverOutliveLastValidHealth(t *testing.T) {
+	for name, edit := range map[string]func(*Health){
+		"expired": func(h *Health) { h.ExpiresAt = h.CheckedAt },
+		"stale": func(h *Health) {
+			h.CheckedAt = h.CheckedAt.Add(-time.Minute)
+			h.ExpiresAt = h.CheckedAt.Add(30 * time.Second)
+		},
+		"invalid":         func(h *Health) { h.BoundaryValidated = false },
+		"profile changed": func(h *Health) { h.QualifiedProfiles = map[string]string{"unit": strings.Repeat("b", 64)} },
+	} {
+		g, h, _ := readyGuard(t)
+		withProbeFailures(t, h, 1)
+		edit(h)
+		if state, err := g.Check(context.Background()); err != nil || state.Ready || !state.CancelActive {
+			t.Fatalf("%s health with one failed probe kept work: %+v %v", name, state, err)
+		}
 	}
 }

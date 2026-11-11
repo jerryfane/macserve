@@ -159,18 +159,43 @@ qualification stops admission and cancels active work. Schema-1/2 records requir
 not migration. Merely creating a profile does not qualify it. Installation and actual non-network
 boundary qualification remain separate provisioning work.
 
+A maintenance probe that *failed without evidence* is not a finding
+([#53](https://github.com/jerryfane/macserve/issues/53)): it blocks admission at once and cancels active work only
+from the third such probe in a row. Maintenance counts these probes since the last valid health and, while that
+health is unexpired, republishes it unchanged (same `checked_at`, `expires_at` and facts) with `probe_failures`
+set to the count; the gate then reports `maintenance_probe_failed`, which cancels from `probe_failures` 3. After the
+last valid health expires a failed probe publishes invalid health (which cancels) with the count. A valid probe
+resets the count; a finding resets it too and forgets the last valid health, so it cancels at once and no later
+failure can keep that health. Failures without evidence are a closed list, and anything else is a finding:
+the probe's deadline or a deadline inside it (`context deadline exceeded`, including a protected-input ACL
+inspection killed at its deadline, which reads `cannot inspect protected input ACL: signal: killed: context
+deadline exceeded`), the accepted CoreDevice `devicefs` changing during the census, and a configured coexisting
+service between two launchd runs. Findings include a changed GUI baseline or boot, a nested or crossed mount, a
+special file or permission error in the census, a protected input that changed or is not root-protected, a
+persistence attestation that is invalid, needs review or changed during its read, a coexisting service that is
+not verifiably running, any qualification or evidence mismatch, and the daemon's own shutdown. At the 10 s cadence
+the third failure is published within 38 s of the start of the probe behind the last valid health (two intervals
+plus its 8 s bound), before that health's 40 s lifetime ends, so two failures in a row (about 20 s, the longest
+transient seen on the Studio, [#108](https://github.com/jerryfane/macserve/issues/108)) never cancel a job. The
+count never extends health: a republished record keeps the last valid health's `expires_at`, so an active job never
+runs more than 40 s past the publication of the last valid health (plus the controller's 1 s readiness check; 45 s
+acceptance window) whether probes fail, are slow, or the daemon stopped publishing; a finding cancels on the
+controller's next readiness check after it is published.
+
 Every stderr line of the controller, worker and maintenance daemons
 (`/Library/macserve/var/controller/log/controller.err.log`, `/Library/macserve/var/broker/log/worker.err.log` and
 `maintenance.err.log`) starts with its RFC 3339 UTC time in milliseconds, e.g. `2026-11-07T03:16:26.412Z`, so a
 cancellation can be placed against its cause. The controller logs `controller readiness: ready=… cancel_active=…
-blockers=… active_job=<id>[,<id>…]` at its first readiness evaluation and whenever the outcome changes, and
-`controller job cancellation requested: job=… source=… blockers=… detail=…` for each cancellation it requests
-itself (deadline, readiness, gate error, log limit, shutdown), naming the cause recorded as the job's
-`cancel_reason`. Maintenance logs `published invalid health checked_at=… last_valid_until=… blockers=…
-cancels_active_job=…: <cause>` for every invalid record it publishes, including at its own start and stop, after
-the existing `probe failed` line; `last_valid_until=none` means no valid health was held, so even an inconclusive
-probe could not keep one. A valid record is logged as `published health … blockers=…` when its blockers (for
-example `host_memory_pressure`, `service_disk_budget_exceeded`) differ from the previous record's. Toolchain
+blockers=… [probe_failures=N] active_job=<id>[,<id>…]` at its first readiness evaluation and whenever the outcome
+changes, and `controller job cancellation requested: job=… source=… blockers=… detail=…` for each cancellation it
+requests itself (deadline, readiness, gate error, log limit, shutdown), naming the cause recorded as the job's
+`cancel_reason`; a readiness cancellation for failed probes ends its detail with `probe_failures=N`. Maintenance
+logs `probe failed: <error>` for every failed probe, then `published invalid health checked_at=… last_valid_until=…
+probe_failures=… blockers=… cancels_active_job=…: <cause>` for every invalid record it publishes, including at its
+own start and stop, or `republished last valid health checked_at=… expires_at=… probe_failures=… blockers=…
+cancels_active_job=…: <cause>` when a probe failed without evidence; `last_valid_until=none` means no valid health
+was held. A valid record is logged as `published health … blockers=…` when its blockers (for example
+`host_memory_pressure`, `service_disk_budget_exceeded`) differ from the previous record's. Toolchain
 qualification is the controller's own comparison and appears only in its lines.
 
 Disk admission reserves 30 GiB per job while preserving 120 GiB free: a job is claimed beside N running ones only
@@ -327,7 +352,8 @@ this cap; three default 32 GiB budgets fit).
 `GET /v1/capabilities` reports `max_concurrent_jobs`; `GET /v1/admin/state` reports `active_jobs`.
 
 Readiness cancellation distinguishes host facts from capacity: a trust blocker (`isolation_unavailable`,
-`toolchain_validation_unavailable`, `owner_pause_unavailable`, `disk_accounting_unavailable`) or a gate error cancels
+`maintenance_probe_failed` from its third failed probe, `toolchain_validation_unavailable`, `owner_pause_unavailable`,
+`disk_accounting_unavailable`) or a gate error cancels
 every active job; when only capacity blockers cancel (`disk_emergency`, `service_disk_budget_exceeded`) the controller
 cancels the newest active job and re-evaluates after 30 s. A client, deadline or log-limit cancel touches its own job.
 A completion with `cleanup_ok=false`, or a lost heartbeat, fences the worker epoch: running siblings finish on their

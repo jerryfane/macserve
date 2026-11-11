@@ -30,8 +30,11 @@ type GateState struct {
 	// CapacityOnly is set with CancelActive when every cancelling blocker
 	// is a capacity fact (disk_emergency, service_disk_budget_exceeded):
 	// cancelling the newest active job may restore the gate. Trust facts
-	// (isolation, toolchain, pause, accounting) cancel every active job.
 	CapacityOnly bool `json:"-"`
+	// ProbeFailures is the published health's count of consecutive
+	// maintenance probes that failed without evidence (Health.ProbeFailures);
+	// 0 for any other record.
+	ProbeFailures int `json:"probe_failures,omitempty"`
 }
 
 const (
@@ -42,6 +45,17 @@ const (
 	AdmissionFloorBytes int64 = 120 << 30
 	CancelFloorBytes    int64 = 100 << 30
 )
+
+// ProbeFailureLimit is the number of consecutive maintenance probes failing
+// without evidence (see Health.ProbeFailures) that cancels active work (#53);
+// health published for fewer blocks admission only. At the 10 s probe cadence
+// the third such probe starts 30 s after the one behind the last valid health
+// and publishes within its 8 s bound, before that health's 40 s lifetime
+// ends: two failed probes in a row (about 20 s, the Studio's longest
+// transient, #108) keep an active job, a third cancels it. The last valid
+// health's expiry stays the hard bound: a failure record never outlives it,
+// so slow or absent probes (a stopped daemon) cancel no later than before.
+const ProbeFailureLimit = 3
 
 // ServiceBudget is the disk macserve may account with lanes concurrent jobs
 // (max_concurrent_jobs; values below 1 mean 1): one JobReservationBytes per
@@ -87,6 +101,15 @@ type Health struct {
 	// admissions refused, without quarantine, for a persisting child of a
 	// tolerated launch; the gate reports it as worker_admission_inconclusive.
 	AdmissionInconclusive string `json:"admission_inconclusive,omitempty"`
+	// ProbeFailures counts the consecutive maintenance probes since the last
+	// valid health that failed without evidence (a deadline or a race the
+	// maintenance daemon classifies as inconclusive; any other error is a
+	// finding and publishes invalid health without it). While that health is
+	// unexpired the daemon republishes it unchanged (same checked_at,
+	// expires_at and facts) with this count; afterwards it publishes invalid
+	// health with the count. The gate reports maintenance_probe_failed, which
+	// blocks admission and, from ProbeFailureLimit, cancels active work.
+	ProbeFailures int `json:"probe_failures,omitempty"`
 }
 type GuardOptions struct {
 	Root, HealthFile, PauseFile string
@@ -168,6 +191,7 @@ func (g *Guard) Check(ctx context.Context) (GateState, error) {
 		fail("isolation_unavailable", true)
 	} else {
 		state.UsedBytes = health.AccountedBytes
+		state.ProbeFailures = health.ProbeFailures
 		for _, b := range HealthBlockers(health, g.options.Now(), g.options.JobUID, g.options.Profiles, g.options.Lanes) {
 			fail(b.Name, b.Cancel)
 		}
@@ -196,12 +220,18 @@ type Blocker struct {
 // health record, evaluated at now by a controller expecting jobUID and the
 // qualified digests in profiles and lanes concurrent jobs (see
 // ServiceBudget); nil profiles skip toolchain qualification. The maintenance
-// daemon logs these for each health record it publishes.
+// daemon logs these for each health record it publishes. A record counting
+// probes that failed without evidence (ProbeFailures) is the last valid
+// health's, judged on its own timestamps and facts, plus
+// maintenance_probe_failed, which cancels only from ProbeFailureLimit.
 func HealthBlockers(health Health, now time.Time, jobUID uint32, profiles map[string]string, lanes int) []Blocker {
 	var blockers []Blocker
 	fail := func(name string, cancel bool) { blockers = append(blockers, Blocker{name, cancel}) }
-	if health.Schema != 3 || health.JobUID != jobUID || !health.BoundaryValidated || !digestString(health.BoundaryReceiptSHA256) || health.CheckedAt.After(now.Add(5*time.Second)) || now.Sub(health.CheckedAt) > 45*time.Second || !health.ExpiresAt.After(now) || health.ExpiresAt.Sub(health.CheckedAt) > 45*time.Second || !health.ExpiresAt.After(health.CheckedAt) {
+	if health.Schema != 3 || health.JobUID != jobUID || !health.BoundaryValidated || !digestString(health.BoundaryReceiptSHA256) || health.CheckedAt.After(now.Add(5*time.Second)) || now.Sub(health.CheckedAt) > 45*time.Second || !health.ExpiresAt.After(now) || health.ExpiresAt.Sub(health.CheckedAt) > 45*time.Second || !health.ExpiresAt.After(health.CheckedAt) || health.ProbeFailures < 0 {
 		fail("isolation_unavailable", true)
+	}
+	if health.ProbeFailures > 0 {
+		fail("maintenance_probe_failed", health.ProbeFailures >= ProbeFailureLimit)
 	}
 	if !health.PersistenceValid || health.PersistenceNeedsReview || health.PersistenceLastVerified.IsZero() || health.PersistenceLastVerified.After(now) {
 		fail("persistence_attestation_unavailable", false)

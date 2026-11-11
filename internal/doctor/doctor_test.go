@@ -533,3 +533,16 @@ func TestDoctorLanesOverrideFollowsRuntimeRule(t *testing.T) {
 		})
 	}
 }
+
+// Health that maintenance republished for probes that failed without
+// evidence does not admit jobs; doctor says so with the count instead of
+// reporting fresh health (#53).
+func TestDoctorReportsProbeFailures(t *testing.T) {
+	h := healthy(t)
+	record := bytes.TrimSuffix(h.files[HealthFile], []byte("}"))
+	h.files[HealthFile] = append(record, []byte(`,"probe_failures":2}`)...)
+	c := checks(Run(context.Background(), h.probe(), Options{}))["health"]
+	if c.Status != Fail || !strings.Contains(c.Detail, "2 maintenance probes in a row failed without evidence") || c.Fix != "Start the services with macserve setup, or wait for maintenance." {
+		t.Fatalf("health %s %q %q", c.Status, c.Detail, c.Fix)
+	}
+}

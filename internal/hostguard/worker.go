@@ -144,9 +144,10 @@ func checkProtectedPathACL(parent context.Context, path string, directory, allow
 		cmd := exec.CommandContext(ctx, "/bin/ls", "-lde", current)
 		cmd.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LANG=C", "LC_ALL=C", "HOME=/private/var/root"}
 		output, err := cmd.Output()
+		err = aclCommandError(ctx, err)
 		cancel()
 		if err != nil {
-			return fmt.Errorf("cannot inspect protected input ACL: %w", err)
+			return err
 		}
 		if err := checkProtectedACL(output, allowDeny); err != nil {
 			return fmt.Errorf("%w: %s", err, current)
@@ -155,6 +156,20 @@ func checkProtectedPathACL(parent context.Context, path string, directory, allow
 			return nil
 		}
 	}
+}
+
+// aclCommandError is the error of one ACL inspection command run under ctx.
+// exec reports a command killed at ctx's deadline as its exit ("signal:
+// killed"), not the deadline; such a command found nothing, so the error also
+// wraps ctx's error and callers can tell a deadline from a finding (#108).
+func aclCommandError(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("cannot inspect protected input ACL: %w: %w", err, ctxErr)
+	}
+	return fmt.Errorf("cannot inspect protected input ACL: %w", err)
 }
 
 func checkProtectedACL(output []byte, allowDeny bool) error {
