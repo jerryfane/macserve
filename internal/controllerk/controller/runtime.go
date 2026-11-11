@@ -30,6 +30,8 @@ type execution struct {
 	// fencing marks a lease never delivered that is being ended: it is
 	// never offered, even while c.mu is released for its source removal.
 	fencing bool
+	// readyAt is when the source became ready for delivery.
+	readyAt time.Time
 }
 
 // execution returns the active execution of job id, or nil. Callers hold c.mu.
@@ -78,6 +80,8 @@ type Controller struct {
 	// capacityCancel is when a capacity-only gate last cancelled a job.
 	capacityCancel time.Time
 	lastSeen       time.Time
+	// lastNext is when the registered epoch last asked for work.
+	lastNext       time.Time
 	maintaining    bool
 	closed         bool
 	running        bool
