@@ -211,7 +211,7 @@ func TestPeriodicReverifyRevokesOnUnsafeDescendantRecordedAsProblem(t *testing.T
 					t.Fatal("failed tree reached code-signature inspection")
 					return "", nil
 				}
-				if err := collectRegistrationCode(ctx, &m, registrationWritersFixture(), acl, digest, command); err != nil {
+				if err := collectRegistrationCode(ctx, &m, registrationWritersFixture(), acl, digest, command, nil); err != nil {
 					return m, err
 				}
 				return m, tc.laterErr

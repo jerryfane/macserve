@@ -325,7 +325,10 @@ job finishing beside others deletes only its own simulator and quiesces only its
 survivor = contamination and quarantine, as before), never a shared service or a sibling's process; any unattributed process still running in a
 second census 1 s later (short-lived build helpers such as SwiftPM's `git` are not counted) makes its `cleanup_ok` false (idle verdict `deferred`, the job fails) and drains the broker. While
 draining, the broker claims nothing, lets running jobs finish, and the next idle `Recover` runs the full quiesce and
-admission: contamination quarantines exactly as with one job, a clean account resumes intake under a new epoch.
+admission: contamination quarantines exactly as with one job, a clean account resumes intake. Only a completion with
+`cleanup_ok=false` fences the epoch, so only it makes the worker register a new one; an unattributed process seen beside
+running jobs (no completion fenced anything) keeps the epoch, and a lease the controller had already prepared for the
+next lane is delivered after the idle `Recover` instead of being interrupted by the new epoch.
 Simulator creation is serialized across lanes, and a sibling's recorded device is never an unrecorded device after an
 interrupted create. A broker restart with several manifests recovers all of them at idle (full quiesce, then each
 job's simulator and workspace). Each completion is saved as `pending-<job>.json` until acknowledged (a pre-lane

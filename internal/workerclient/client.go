@@ -220,9 +220,11 @@ type laneDone struct {
 // A lease whose cleanup was not verified fences its epoch at the controller;
 // the client then drains: it asks for no lease, lets the other lanes finish,
 // and registers a new epoch only after Recover verifies the idle account.
-// An engine drain (an unattributed job-account process while jobs run)
-// does the same. With one lane this is the sequential loop of a single-job
-// worker.
+// An engine drain (an unattributed job-account process while jobs run) only
+// stops new lanes: nothing was fenced, so the epoch is kept, and a lease the
+// controller already prepared for it is delivered after the idle Recover.
+// A new epoch would make the controller interrupt that lease. With one lane
+// this is the sequential loop of a single-job worker.
 func (c *Client) Run(ctx context.Context) (returned error) {
 	defer func() {
 		if ctx.Err() != nil && errors.Is(returned, ctx.Err()) {
@@ -247,6 +249,8 @@ func (c *Client) Run(ctx context.Context) (returned error) {
 	defer wg.Wait()
 	var fatal error
 	registered, draining := false, false
+	// engineDrain: the engine refused a lane until idle (logged once).
+	engineDrain := false
 	finished := func(d laneDone) {
 		delete(running, d.jobID)
 		fatal = errors.Join(fatal, d.err)
@@ -303,6 +307,7 @@ func (c *Client) Run(ctx context.Context) (returned error) {
 				}
 				continue
 			}
+			engineDrain = false
 		}
 		if draining || len(running) == lanes {
 			if err := pause(); err != nil {
@@ -336,9 +341,9 @@ func (c *Client) Run(ctx context.Context) (returned error) {
 		if len(running) != 0 {
 			// A lane beside running jobs: the engine must still admit one.
 			if err := c.engine.LaneReady(ctx); err != nil {
-				if errors.Is(err, worker.ErrDrain) {
+				if errors.Is(err, worker.ErrDrain) && !engineDrain {
 					log.Printf("worker draining until idle: %v", err)
-					draining = true
+					engineDrain = true
 				}
 				if err := pause(); err != nil {
 					return err
