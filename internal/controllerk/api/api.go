@@ -19,6 +19,7 @@ import (
 
 	"github.com/jerryfane/macserve/internal/controllerconfig"
 	"github.com/jerryfane/macserve/internal/controllerk/controller"
+	"github.com/jerryfane/macserve/internal/controllerk/githubpull"
 	"github.com/jerryfane/macserve/internal/controllerk/store"
 	"github.com/jerryfane/macserve/internal/evidence"
 	"github.com/jerryfane/macserve/internal/githubapi"
@@ -41,7 +42,11 @@ type Options struct {
 	// receipt key it publishes in capabilities.
 	Sign      func(context.Context, string) (store.SigningRecord, error)
 	SignerKey *SignerKey
-	Now       func() time.Time
+	// GitHubRerun is the GitHub poller's requested rerun of one pull-mode
+	// run (githubpull.Poller.Rerun) for POST /v1/admin/github/rerun; nil
+	// refuses it.
+	GitHubRerun func(ctx context.Context, repositoryID int64, repository, sha, profile string, now time.Time) (store.GitHubRun, bool, error)
+	Now         func() time.Time
 	// ServiceVersion is the controller's build version, reported as
 	// capabilities' service_version: the release tag for a release build.
 	ServiceVersion string
@@ -211,6 +216,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, 200, state)
+	case path == "/v1/admin/github/rerun" && r.Method == http.MethodPost:
+		h.githubRerun(w, r)
 	default:
 		writeError(w, store.ErrNotFound)
 	}
@@ -229,6 +236,12 @@ func writeError(w http.ResponseWriter, err error) {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="macserve"`)
 	case errors.Is(err, ErrForbidden):
 		status, code, message = 403, "forbidden", "permission denied"
+	case errors.Is(err, ErrNoGitHubPull):
+		status, code, message = 422, "unsupported_request", ErrNoGitHubPull.Error()
+	case errors.Is(err, githubpull.ErrIneligible):
+		status, code, message = 409, "not_eligible", "the head is no longer an eligible open pull request head of that run"
+	case errors.Is(err, store.ErrRerunLimit):
+		status, code, message = 429, "rerun_limit", "at most two requested reruns per run in any hour"
 	case errors.Is(err, ErrNoGitHubApp):
 		status, code, message = 422, "unsupported_request", ErrNoGitHubApp.Error()
 	case errors.Is(err, controller.ErrSigningUnavailable):

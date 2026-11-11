@@ -764,6 +764,61 @@ func (p *Poller) acceptComment(ctx context.Context, policy githubwire.Policy, co
 	return err
 }
 
+// Rerun is the owner API's requested rerun (POST /v1/admin/github/rerun) of
+// one run, named by repository (ID and/or name), head SHA and profile, with
+// the comment mode=rerun rules: the head must still be an eligible open pull
+// request head whose current admission is that run, the run's latest attempt
+// must be terminal, and requested reruns are bounded at two per run in any
+// hour. The new attempt publishes to the run's check name. It returns the
+// run and whether a new attempt started (false: the latest attempt is still
+// queued or active). An unknown run is store.ErrNotFound, a head no longer
+// eligible ErrIneligible, the bound store.ErrRerunLimit.
+func (p *Poller) Rerun(ctx context.Context, repositoryID int64, repository, sha, profile string, now time.Time) (store.GitHubRun, bool, error) {
+	runs, err := p.options.Store.GitHubRunsByHead(ctx, repositoryID, repository, sha, profile)
+	if err != nil {
+		return store.GitHubRun{}, false, err
+	}
+	if len(runs) == 0 {
+		return store.GitHubRun{}, false, store.ErrNotFound
+	}
+	for _, run := range runs {
+		policy, ok := p.runPolicy(run)
+		if !ok || policy.PolicyRevision != run.PolicyRevision || !slices.Contains(policy.Profiles, run.Profile) {
+			continue
+		}
+		if policy, err = p.verifyRepository(ctx, policy); errors.Is(err, ErrIneligible) {
+			continue
+		} else if err != nil {
+			return store.GitHubRun{}, false, err
+		}
+		for _, number := range run.PullRequests {
+			pull, err := p.options.Client.Pull(ctx, run.Repository, number)
+			if err != nil {
+				return store.GitHubRun{}, false, err
+			}
+			if !eligible(policy, pull) || pull.Number != number || pull.HeadSHA != run.SHA {
+				continue
+			}
+			input, err := p.admission(policy, pull, run.Profile)
+			if errors.Is(err, ErrIneligible) {
+				continue
+			} else if err != nil {
+				return store.GitHubRun{}, false, err
+			}
+			if input.Run.Key != run.Key {
+				continue
+			}
+			input.Mode = "rerun"
+			admitted, err := p.options.Store.AdmitGitHub(ctx, input, now)
+			if err != nil {
+				return store.GitHubRun{}, false, err
+			}
+			return admitted, admitted.JobID != run.JobID, nil
+		}
+	}
+	return store.GitHubRun{}, false, ErrIneligible
+}
+
 func (p *Poller) BeforeDispatch(ctx context.Context, job model.Job) error {
 	// Preparation has a finite budget. A transient API outage must not turn an
 	// eligible queued head into a permanent authorization rejection.

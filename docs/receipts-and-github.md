@@ -105,6 +105,27 @@ Actions App. Edited comments are rejected. `ensure` joins the same logical run, 
 Explicit `mode=rerun` starts a new attempt only after termination, at most twice per head/profile per hour;
 active attempts are joined. Correlations are durable and capped at 128 per attempt.
 
+Pull mode also reruns heads the service ended (#119). When an `ensure` admission (every poll of an eligible
+head, owner-form or repository-form, and `mode=ensure` comments) finds the run's latest attempt `cancelled` or
+`interrupted` with a recorded cancel reason of `host_readiness`, `gate_error`, `controller_shutdown`,
+`admin_pause` (an administrator's `cancel_active` pause) or `client` by a principal other than the job's own
+(an operator's `POST /v1/jobs/<id>/cancel`; a GitHub attempt's principal is `github:<repository id>`, so every
+API cancel of one is an operator's), it starts one new attempt in the same logical run, published to the same
+`mac-evidence/<profile>` check. It never reruns an attempt cancelled by GitHub intake (`github`: supersession or
+ineligibility), by its deadline or log limit, an attempt interrupted without a cancel request (lost or fenced
+worker), a failed, timed-out or succeeded attempt, nor an operator-cancelled attempt that was itself an
+automatic rerun. Automatic reruns are bounded at two per head/profile per hour, separately from requested
+reruns; over the bound, or while the run's publication is in flight, the cancelled attempt stays current and
+a later poll retries.
+
+An owner (scope `service:admin`) can request a rerun without a comment:
+`POST /v1/admin/github/rerun {"repository_id": <id>, "repo": "<owner/name>", "sha": "<40 hex>", "profile": "<id>"}`
+(either or both of `repository_id` and `repo`). It follows `mode=rerun`: the head must still be an open, eligible
+pull request head whose current admission is that run, the latest attempt must be terminal, and requested
+reruns are bounded at two per head/profile per hour. Responses: 202 with the new `job_id`/`attempt_id` and
+`check_name`; 200 with `"rerun": false` while the latest attempt is queued or active; 404 for an unknown run;
+409 `not_eligible`; 429 `rerun_limit`; 422 without GitHub pull mode.
+
 Initial comment intake starts 24 hours before startup with two minutes of overlap, never at repository creation.
 One page of at most 100 comments is processed per poll; page position and scan-start watermark survive restart.
 The watermark advances after the complete scan; transactional admission/storage errors retain their page.

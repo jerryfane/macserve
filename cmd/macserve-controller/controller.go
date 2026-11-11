@@ -119,6 +119,10 @@ func serveController(parent context.Context, config controllerconfig.Config) err
 	if signerKey != nil {
 		apiOptions.Sign, apiOptions.SignerKey = runtime.Sign, signerKey
 	}
+	// Pull mode's owner rerun (POST /v1/admin/github/rerun).
+	if integrations.poller != nil {
+		apiOptions.GitHubRerun = integrations.poller.Rerun
+	}
 	handler, err := api.New(apiOptions)
 	if err != nil {
 		return err
