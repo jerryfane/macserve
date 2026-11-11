@@ -7,13 +7,16 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"io/fs"
 	"os"
 	"os/exec"
 	"os/user"
+	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -31,10 +34,17 @@ type RegisteredCode struct {
 	TreeSHA256  string `json:"tree_sha256"`
 }
 
+// registrationCommandTimeout bounds one codesign or ls inspection; the full
+// scan's own deadline bounds them all. Measured on the Studio (M5 Ultra) at
+// background QoS with the machine otherwise idle, Xcode's deep signature check
+// took 16 s and its recursive ACL census 11 s, leaving a 30 s bound under 2x
+// margin for a busy machine.
+const registrationCommandTimeout = 2 * time.Minute
+
 // All commands and switches are fixed. Registered paths are passed as a single
 // argument after --, never interpreted as switches or a shell program.
 func codeCommand(ctx context.Context, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, registrationCommandTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "/usr/bin/codesign", args...)
 	cmd.Dir = "/"
@@ -368,11 +378,12 @@ func checkOpenedRegisteredExecutable(root *os.Root, relative string, expected os
 }
 
 // Hash names, ownership, modes, link text and all regular bytes beneath a
-// protected bundle. os.Root forbids symlink traversal outside this tree; WalkDir
-// itself never follows links. Root, owner, wheel and administrator updaters are trusted,
-// changed files during a read are refused, and any later change invalidates the
-// accepted digest. One app tree is hashed once even when several nested services
-// are registered. This deliberately does not trust only a parent app's signature.
+// protected bundle. os.Root forbids symlink traversal outside this tree, and the
+// walk itself never follows links. Root, owner, wheel and administrator updaters
+// are trusted, changed files during a read are refused, and any later change
+// invalidates the accepted digest. One app tree is hashed once even when several
+// nested services are registered. This deliberately does not trust only a parent
+// app's signature.
 func protectedTreeDigest(ctx context.Context, path string, writers registrationWriters) (string, error) {
 	ancestry, err := registrationPath(path, true, writers)
 	if err != nil {
@@ -387,94 +398,146 @@ func protectedTreeDigest(ctx context.Context, path string, writers registrationW
 	if err != nil || !os.SameFile(ancestry[0].info, openedRoot) {
 		return "", errors.New("registered tree root changed during open")
 	}
-	h := sha256.New()
-	buffer := make([]byte, 128<<10)
-	var total int64
-	entries := 0
-	err = fs.WalkDir(root.FS(), ".", func(rel string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		entries++
-		if entries > 1<<20 {
-			return errors.New("registered tree entry bound exceeded")
-		}
-		info, err := root.Lstat(rel)
+	walk := protectedTreeWalk{ctx: ctx, writers: writers, tree: root, h: sha256.New(), buffer: make([]byte, 128<<10)}
+	if err := walk.entry(root, ".", "."); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(walk.h.Sum(nil)), recheckRegistrationPath(ancestry, writers)
+}
+
+// protectedTreeWalk walks a protected tree in fs.WalkDir order (pre-order, names
+// sorted bytewise) and hashes exactly what that walk hashed, so accepted digests
+// stay valid. Each directory is opened once, beneath its already-opened parent,
+// and its entries are inspected by single-component name relative to it.
+// Resolving every slash-separated path from the tree root instead costs one
+// openat per ancestor directory per operation, which made a 167,000-entry Xcode
+// tree CPU-bound for minutes under the maintenance service's background QoS.
+type protectedTreeWalk struct {
+	ctx     context.Context
+	writers registrationWriters
+	tree    *os.Root
+	h       hash.Hash
+	buffer  []byte
+	total   int64
+	entries int
+}
+
+// entry hashes name inside dir, whose path relative to the tree root is rel.
+func (w *protectedTreeWalk) entry(dir *os.Root, name, rel string) error {
+	if err := w.ctx.Err(); err != nil {
+		return err
+	}
+	w.entries++
+	if w.entries > 1<<20 {
+		return errors.New("registered tree entry bound exceeded")
+	}
+	info, err := dir.Lstat(name)
+	if err != nil {
+		return err
+	}
+	if err := w.writers.checkMode(info); err != nil {
+		return err
+	}
+	st := info.Sys().(*syscall.Stat_t)
+	fmt.Fprintf(w.h, "%s\x00%d\x00%d\x00%d\x00", rel, info.Mode(), st.Uid, st.Gid)
+	switch {
+	case info.Mode()&os.ModeSymlink != 0:
+		text, err := dir.Readlink(name)
 		if err != nil {
 			return err
 		}
-		if err := writers.checkMode(info); err != nil {
+		// Resolve from the tree root: a link may legitimately leave its own
+		// directory, but never the registered tree.
+		if _, err := w.tree.Stat(rel); err != nil {
+			return errors.New("registered tree link escapes or is unresolved")
+		}
+		w.h.Write([]byte(text))
+		w.h.Write([]byte{0})
+		return nil
+	case info.IsDir():
+		return w.directory(dir, name, rel, info)
+	case info.Mode().IsRegular():
+		return w.file(dir, name, info, st)
+	default:
+		return errors.New("unsupported object in registered code tree")
+	}
+}
+
+func (w *protectedTreeWalk) directory(parent *os.Root, name, rel string, info os.FileInfo) error {
+	dir := parent
+	if name != "." {
+		opened, err := parent.OpenRoot(name)
+		if err != nil {
 			return err
 		}
-		st := info.Sys().(*syscall.Stat_t)
-		link := info.Mode()&os.ModeSymlink != 0
-		fmt.Fprintf(h, "%s\x00%d\x00%d\x00%d\x00", rel, info.Mode(), st.Uid, st.Gid)
-		switch {
-		case link:
-			text, err := root.Readlink(rel)
-			if err != nil {
-				return err
-			}
-			if _, err := root.Stat(rel); err != nil {
-				return errors.New("registered tree link escapes or is unresolved")
-			}
-			h.Write([]byte(text))
-			h.Write([]byte{0})
-		case info.IsDir():
-		case info.Mode().IsRegular():
-			if info.Mode()&(os.ModeSetuid|os.ModeSetgid) != 0 {
-				return errors.New("privileged executable in registered tree")
-			}
-			file, err := root.Open(rel)
-			if err != nil {
-				return err
-			}
-			defer file.Close()
-			opened, err := file.Stat()
-			if err != nil || !os.SameFile(info, opened) {
-				return errors.New("registered file identity changed")
-			}
-			h.Write([]byte(strconv.FormatInt(info.Size(), 10)))
-			h.Write([]byte{0})
-			var read int64
-			for {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-				n, e := file.Read(buffer)
-				read += int64(n)
-				total += int64(n)
-				if total > 64<<30 {
-					return errors.New("registered tree byte bound exceeded")
-				}
-				h.Write(buffer[:n])
-				if e == io.EOF {
-					break
-				}
-				if e != nil {
-					return e
-				}
-			}
-			after, err := file.Stat()
-			if err != nil {
-				return err
-			}
-			afterStat, ok := after.Sys().(*syscall.Stat_t)
-			if !ok || read != info.Size() || after.Size() != info.Size() || after.ModTime() != info.ModTime() || after.Mode() != info.Mode() || afterStat.Uid != st.Uid || afterStat.Gid != st.Gid {
-				return errors.New("registered file changed during inspection")
-			}
-		default:
-			return errors.New("unsupported object in registered code tree")
-		}
-		return nil
-	})
-	if err != nil {
-		return "", err
+		defer opened.Close()
+		dir = opened
 	}
-	return hex.EncodeToString(h.Sum(nil)), recheckRegistrationPath(ancestry, writers)
+	listing, err := dir.Open(".")
+	if err != nil {
+		return err
+	}
+	children, err := listing.ReadDir(-1)
+	openedInfo, statErr := listing.Stat()
+	closeErr := listing.Close()
+	if err != nil {
+		return err
+	}
+	if statErr != nil || closeErr != nil || !os.SameFile(info, openedInfo) {
+		return errors.New("registered tree directory changed during inspection")
+	}
+	slices.SortFunc(children, func(a, b fs.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
+	for _, child := range children {
+		if err := w.entry(dir, child.Name(), path.Join(rel, child.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (w *protectedTreeWalk) file(dir *os.Root, name string, info os.FileInfo, st *syscall.Stat_t) error {
+	if info.Mode()&(os.ModeSetuid|os.ModeSetgid) != 0 {
+		return errors.New("privileged executable in registered tree")
+	}
+	file, err := dir.Open(name)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(info, opened) {
+		return errors.New("registered file identity changed")
+	}
+	w.h.Write([]byte(strconv.FormatInt(info.Size(), 10)))
+	w.h.Write([]byte{0})
+	var read int64
+	for {
+		if err := w.ctx.Err(); err != nil {
+			return err
+		}
+		n, e := file.Read(w.buffer)
+		read += int64(n)
+		w.total += int64(n)
+		if w.total > 64<<30 {
+			return errors.New("registered tree byte bound exceeded")
+		}
+		w.h.Write(w.buffer[:n])
+		if e == io.EOF {
+			break
+		}
+		if e != nil {
+			return e
+		}
+	}
+	after, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	afterStat, ok := after.Sys().(*syscall.Stat_t)
+	if !ok || read != info.Size() || after.Size() != info.Size() || after.ModTime() != info.ModTime() || after.Mode() != info.Mode() || afterStat.Uid != st.Uid || afterStat.Gid != st.Gid {
+		return errors.New("registered file changed during inspection")
+	}
+	return nil
 }
 
 var listedMode = regexp.MustCompile(`^[bcdlps-][rwxStTs-]{9}([+@ ])`)
@@ -583,7 +646,7 @@ func protectedTreeACL(ctx context.Context, path string, writers registrationWrit
 }
 
 func registrationACLCommand(ctx context.Context, writers registrationWriters, args ...string) error {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, registrationCommandTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "/bin/ls", args...)
 	cmd.Dir = "/"
