@@ -5,7 +5,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -44,19 +46,15 @@ func TestCleanupUnmountsRealImageAtMetalToolchainMountPoint(t *testing.T) {
 	if out, err := exec.CommandContext(ctx, "/usr/bin/hdiutil", "create", "-quiet", "-megabytes", "16", "-fs", "APFS", "-volname", "MetalToolchain", image).CombinedOutput(); err != nil {
 		t.Skipf("hdiutil create unavailable: %v %s", err, out)
 	}
-	out, err := exec.CommandContext(ctx, "/usr/bin/hdiutil", "attach", "-readonly", "-nobrowse", "-noautoopen", "-mountpoint", point, image).CombinedOutput()
-	if err != nil {
-		t.Skipf("hdiutil attach unavailable: %v %s", err, out)
-	}
-	// hdiutil prints the whole disk first; detaching it detaches the image.
-	device := strings.Fields(string(out))[0]
+	device := attachReadOnlyImage(t, ctx, image, point)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		if out, err := exec.CommandContext(ctx, "/usr/bin/hdiutil", "detach", "-quiet", "-force", device).CombinedOutput(); err != nil {
-			t.Errorf("hdiutil detach %s: %v %s", device, err, out)
+		if out, err := exec.CommandContext(ctx, "/usr/sbin/diskutil", "eject", device).CombinedOutput(); err != nil {
+			t.Errorf("diskutil eject %s: %v %s", device, err, out)
 		}
 	})
+	requireMountShape(t, ctx, point)
 	var st unix.Stat_t
 	if err := unix.Lstat(point, &st); err != nil {
 		t.Fatal(err)
@@ -90,4 +88,67 @@ func TestCleanupUnmountsRealImageAtMetalToolchainMountPoint(t *testing.T) {
 	if _, err := os.Lstat(workspace); !os.IsNotExist(err) {
 		t.Fatalf("workspace not removed: %v", err)
 	}
+}
+
+// wholeDisk is the first device row of an attach report: the image's whole
+// disk, which ejecting detaches with every disk synthesized from it.
+var wholeDisk = regexp.MustCompile(`(?m)^(/dev/disk[0-9]+)\s`)
+
+// attachReadOnlyImage attaches image read-only, unbrowsable, at point and
+// returns its whole disk. It uses `diskutil image attach` (macOS 27, where
+// `hdiutil attach -mountpoint` prints a deprecation warning) and falls back
+// to hdiutil where diskutil has no image verb. Only stdout is parsed. A
+// failed attach skips; an attach whose report names no device fails, after
+// ejecting whatever is mounted at point.
+func attachReadOnlyImage(t *testing.T, ctx context.Context, image, point string) string {
+	t.Helper()
+	argv := []string{"/usr/sbin/diskutil", "image", "attach", "--readOnly", "--nobrowse", "--mountPoint", point, image}
+	if err := exec.CommandContext(ctx, "/usr/sbin/diskutil", "image", "attach", "--help").Run(); err != nil {
+		argv = []string{"/usr/bin/hdiutil", "attach", "-readonly", "-nobrowse", "-noautoopen", "-mountpoint", point, image}
+	}
+	var stdout, stderr strings.Builder
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		t.Skipf("%s unavailable: %v\nstdout: %s\nstderr: %s", strings.Join(argv[:2], " "), err, stdout.String(), stderr.String())
+	}
+	match := wholeDisk.FindStringSubmatch(stdout.String())
+	if match == nil {
+		out, err := exec.CommandContext(ctx, "/usr/sbin/diskutil", "eject", point).CombinedOutput()
+		t.Fatalf("%s reported no /dev/disk device (eject by mount point: %v %s)\nstdout: %s\nstderr: %s", strings.Join(argv[:2], " "), err, out, stdout.String(), stderr.String())
+	}
+	t.Logf("%s attached %s at %s", strings.Join(argv[:2], " "), match[1], point)
+	return match[1]
+}
+
+// requireMountShape requires mount(8)'s line for point to show the shape of
+// Xcode's Metal toolchain fallback mount on the build host: apfs, nodev,
+// nosuid, read-only, mounted by the current user.
+func requireMountShape(t *testing.T, ctx context.Context, point string) {
+	t.Helper()
+	account, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.CommandContext(ctx, "/sbin/mount").Output()
+	if err != nil {
+		t.Fatalf("mount: %v", err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		_, rest, ok := strings.Cut(line, " on "+point+" (")
+		if !ok {
+			continue
+		}
+		options := map[string]bool{}
+		for _, option := range strings.Split(strings.TrimSuffix(rest, ")"), ", ") {
+			options[option] = true
+		}
+		for _, want := range []string{"apfs", "nodev", "nosuid", "read-only", "mounted by " + account.Username} {
+			if !options[want] {
+				t.Fatalf("mount line %q lacks %q", line, want)
+			}
+		}
+		return
+	}
+	t.Fatalf("no mount line for %s:\n%s", point, out)
 }
