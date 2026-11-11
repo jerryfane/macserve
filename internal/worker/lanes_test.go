@@ -438,7 +438,11 @@ func TestResidueCountsOnlyPersistingProcesses(t *testing.T) {
 		"transient":  {[]map[processInstance]processSample{snapshot(a, b), snapshot(c)}, false, nil, false},
 		"persisting": {[]map[processInstance]processSample{snapshot(a, b), snapshot(b, c)}, false, []processSample{b}, false},
 		"none":       {[]map[processInstance]processSample{snapshot(), snapshot(a)}, false, nil, false},
-		"unresolved": {[]map[processInstance]processSample{snapshot(), snapshot()}, true, nil, true},
+		// An audited agent that exited with nothing unattributed beside it
+		// is not residue (Studio v0.1.44-v0.1.46: every lane drain).
+		"audited exit alone":      {[]map[processInstance]processSample{snapshot(), snapshot()}, true, nil, false},
+		"audited exit, transient": {[]map[processInstance]processSample{snapshot(a), snapshot()}, true, nil, false},
+		"audited exit beside new": {[]map[processInstance]processSample{snapshot(a), snapshot(c)}, true, nil, true},
 	} {
 		calls := 0
 		got, unresolved, err := settledResidue(context.Background(), func() (map[processInstance]processSample, bool, error) {

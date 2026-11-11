@@ -367,9 +367,10 @@ end it.
 When an unattributed job-account process appears beside running jobs the worker stops starting new lanes until it is
 idle, but keeps its epoch (nothing was fenced): a lease already prepared for the next lane is delivered after the idle
 check. Its log line (`worker draining until idle: ...`, once per drain) names each such process by PID, kernel parent,
-start, executable and arguments. A
-registration the controller refuses with 409 because it still holds a lease of the earlier epoch is retried each poll;
-the worker does not exit.
+start, executable and arguments, and each audited GUI-session process that is gone without a verified relaunch by PID,
+start, launchd label and executable. An audited agent that exited on its own, with nothing unattributed beside it, does
+not drain: the idle admission accepts that state too. A registration the controller refuses with 409 because it still
+holds a lease of the earlier epoch is retried each poll; the worker does not exit.
 
 ### Lowering concurrency without a sitting: `lanes.json`
 
