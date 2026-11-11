@@ -90,4 +90,11 @@ type Options struct {
 	// itself, never by the job runner (see plutilJSON).
 	PlistJSON PlistDecoder
 	Now       func() time.Time
+	// ScanLog receives one line per full persistence collection: its outcome,
+	// elapsed time and slowest stages. Only the maintenance daemon sets it,
+	// to its stderr (maintenance.err.log). Nil keeps a scan silent, as every
+	// command-line scan (worker-persistence, worker-reset, qualify) must be:
+	// their fixed-command callers refuse a successful command's stderr and
+	// classify a failure by its exact stderr.
+	ScanLog io.Writer
 }

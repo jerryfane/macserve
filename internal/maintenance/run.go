@@ -3,6 +3,7 @@ package maintenance
 import (
 	"context"
 	"errors"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -23,8 +24,9 @@ import (
 // The facts a probe may take from an earlier observation are the byte census
 // and the GUI-baseline check, which run in the background and may be up to
 // censusMaxAge and guiBaselineMaxAge old (tracker); every other fact is
-// observed by the probe itself.
-func Run(ctx context.Context, c Config) error {
+// observed by the probe itself. scanLog receives each periodic full
+// persistence scan's stage-timing line (worker.Options.ScanLog).
+func Run(ctx context.Context, c Config, scanLog io.Writer) error {
 	if runtime.GOOS != "darwin" || os.Getuid() != 0 || os.Geteuid() != 0 {
 		return errors.New("maintenance requires macOS root")
 	}
@@ -60,7 +62,7 @@ func Run(ctx context.Context, c Config) error {
 	monitorDone := make(chan struct{})
 	go func() {
 		defer close(monitorDone)
-		monitorPersistence(monitorCtx, c.path)
+		monitorPersistence(monitorCtx, c.path, scanLog)
 	}()
 	defer func() {
 		stopMonitor()

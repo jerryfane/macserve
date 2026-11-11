@@ -1,6 +1,7 @@
 package maintenance
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -82,6 +83,8 @@ func TestPeriodicPersistenceMismatchPausesUntilReview(t *testing.T) {
 	}
 }
 
+// The periodic scan, alone among full scans, logs its stage timings: to the
+// daemon's stderr that Run hands the monitor.
 func TestMissingAttestationStartsScanWithoutClaimingReadiness(t *testing.T) {
 	now, q, evidence, observation := approvedFixture()
 	observation.Persistence = worker.PersistenceAttestationMetadata{}
@@ -89,7 +92,14 @@ func TestMissingAttestationStartsScanWithoutClaimingReadiness(t *testing.T) {
 		t.Fatal("missing attestation admitted")
 	}
 	called := make(chan struct{})
-	monitor := persistenceMonitor{verify: func(context.Context, worker.Options, bool) error { close(called); return nil }}
+	var daemonStderr bytes.Buffer
+	monitor := persistenceMonitor{scanLog: &daemonStderr, verify: func(_ context.Context, opts worker.Options, _ bool) error {
+		if opts.ScanLog != &daemonStderr {
+			t.Error("periodic scan does not log its stage timings to the daemon's stderr")
+		}
+		close(called)
+		return nil
+	}}
 	monitor.schedule(context.Background(), now, worker.Options{}, observation.Persistence, errors.New("missing"))
 	select {
 	case <-called:
