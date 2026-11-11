@@ -52,6 +52,46 @@ type GitHubPublication struct {
 var ErrRerunLimit = errors.New("GitHub rerun limit reached")
 var ErrCorrelationLimit = errors.New("GitHub request correlation limit reached")
 
+// github_attempts.rerun records why an attempt was created: the run's first
+// attempt (0), a requested rerun (1: comment mode=rerun or the owner API
+// POST /v1/admin/github/rerun) or an automatic rerun (2) of an attempt the
+// service ended. Requested and automatic reruns are bounded separately, each
+// at two per run in any hour.
+const (
+	attemptInitial   = 0
+	attemptRerun     = 1
+	attemptAutomatic = 2
+)
+
+// serviceEnded reports a GitHub attempt that ended because of the service or
+// its operator rather than its head, its GitHub run or its own budget: state
+// cancelled or interrupted with a recorded cancel reason whose source is
+//   - host_readiness or gate_error (the readiness gate),
+//   - controller_shutdown (the controller stopped with it active),
+//   - admin_pause (an administrator's cancel_active pause), or
+//   - client from a principal other than the job's own (an operator's
+//     POST /v1/jobs/<id>/cancel; a GitHub attempt's principal is
+//     github:<repository id>, never an API principal, so every API cancel of
+//     one is an operator's), unless the attempt was itself an automatic
+//     rerun (automatic): cancelling the service's own rerun keeps the head
+//     cancelled.
+//
+// Never github (supersession or ineligibility), deadline or log_limit, nor an
+// attempt interrupted without a cancel request (a lost worker or a fenced
+// worker epoch) or that failed, timed out or succeeded.
+func serviceEnded(job model.Job, automatic bool) bool {
+	if job.State != model.Cancelled && job.State != model.Interrupted || job.CancelReason == nil {
+		return false
+	}
+	switch job.CancelReason.Source {
+	case model.CancelHostReadiness, model.CancelGateError, model.CancelShutdown, model.CancelAdminPause:
+		return true
+	case model.CancelClient:
+		return job.CancelReason.Principal != job.Principal && !automatic
+	}
+	return false
+}
+
 // InitializeGitHub is additive for existing private-API stores. The triggers
 // make every later job transition durable publication work in its own commit.
 func (s *Store) InitializeGitHub(ctx context.Context) error {
@@ -188,15 +228,20 @@ func (s *Store) AdmitGitHub(ctx context.Context, input GitHubAdmission, now time
 		}
 	}
 	create := r.JobID == ""
-	rerun := false
-	if !create && input.Mode == "rerun" {
+	kind := attemptInitial
+	if !create {
 		job, err := getTx(ctx, tx, r.JobID)
 		if err != nil {
 			return GitHubRun{}, err
 		}
-		if job.State.Terminal() {
-			create = true
-			rerun = true
+		var current int
+		if err = tx.QueryRowContext(ctx, "SELECT rerun FROM github_attempts WHERE job_id=?", r.JobID).Scan(&current); err != nil {
+			return GitHubRun{}, err
+		}
+		if input.Mode == "rerun" && job.State.Terminal() {
+			create, kind = true, attemptRerun
+		} else if input.Mode == "ensure" && serviceEnded(job, current == attemptAutomatic) {
+			create, kind = true, attemptAutomatic
 		}
 	}
 	// Keep the current check's update and attempt replacement ordered across
@@ -206,15 +251,23 @@ func (s *Store) AdmitGitHub(ctx context.Context, input GitHubAdmission, now time
 		if err = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM github_outbox WHERE run_key=? AND lease_until>?)", r.Key, now.UnixNano()).Scan(&publishing); err != nil {
 			return GitHubRun{}, err
 		}
-		if publishing {
+		if publishing && kind == attemptAutomatic {
+			// The next poll retries the automatic rerun.
+			create, kind = false, attemptInitial
+		} else if publishing {
 			return GitHubRun{}, ErrFull
 		}
 	}
-	if rerun {
-		if err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM github_attempts WHERE run_key=? AND rerun=1 AND created_at>?", r.Key, now.Add(-time.Hour).UnixNano()).Scan(&count); err != nil {
+	if kind != attemptInitial {
+		// Requested reruns (comment mode=rerun, owner API) and automatic reruns
+		// are bounded separately, each at two per run per hour.
+		if err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM github_attempts WHERE run_key=? AND rerun=? AND created_at>?", r.Key, kind, now.Add(-time.Hour).UnixNano()).Scan(&count); err != nil {
 			return GitHubRun{}, err
 		}
-		if count >= 2 {
+		if count >= 2 && kind == attemptAutomatic {
+			// Over the bound the service-cancelled attempt stays current.
+			create, kind = false, attemptInitial
+		} else if count >= 2 {
 			return GitHubRun{}, ErrRerunLimit
 		}
 	}
@@ -236,7 +289,7 @@ func (s *Store) AdmitGitHub(ctx context.Context, input GitHubAdmission, now time
 		}
 		r.JobID = job.ID
 		r.AttemptID = attempt
-		_, err = tx.ExecContext(ctx, "INSERT INTO github_attempts(job_id,run_key,attempt_id,created_at,rerun) VALUES(?,?,?,?,?)", job.ID, r.Key, attempt, now.UnixNano(), rerun)
+		_, err = tx.ExecContext(ctx, "INSERT INTO github_attempts(job_id,run_key,attempt_id,created_at,rerun) VALUES(?,?,?,?,?)", job.ID, r.Key, attempt, now.UnixNano(), kind)
 		if err != nil {
 			return GitHubRun{}, err
 		}
@@ -296,6 +349,40 @@ func (s *Store) GitHubPulls(ctx context.Context, key string) ([]int, error) {
 		result = append(result, n)
 	}
 	return result, rows.Err()
+}
+
+// GitHubRunsByHead returns the runs of one head and profile, with their pull
+// requests, in the repository named by ID, by name, or by both (0 and ""
+// leave that one open). Several runs exist only when the policy revision,
+// pins or repository identity changed; the caller selects the one its
+// current policy admits.
+func (s *Store) GitHubRunsByHead(ctx context.Context, repositoryID int64, repository, sha, profile string) ([]GitHubRun, error) {
+	if repositoryID < 0 || repositoryID == 0 && repository == "" || !validSHA(sha) || !validOpaque(profile, 256) {
+		return nil, ErrInvalid
+	}
+	rows, err := s.db.QueryContext(ctx, "SELECT "+githubRunColumns+" FROM github_runs WHERE (?=0 OR repository_id=?) AND (?='' OR repository=?) AND sha=? AND profile=? ORDER BY run_key",
+		repositoryID, repositoryID, repository, repository, sha, profile)
+	if err != nil {
+		return nil, err
+	}
+	var runs []GitHubRun
+	for rows.Next() {
+		run, err := scanGitHubRun(rows)
+		if err != nil {
+			rows.Close()
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	if err = errors.Join(rows.Err(), rows.Close()); err != nil {
+		return nil, err
+	}
+	for i := range runs {
+		if runs[i].PullRequests, err = s.GitHubPulls(ctx, runs[i].Key); err != nil {
+			return nil, err
+		}
+	}
+	return runs, nil
 }
 
 func (s *Store) GitHubRuns(ctx context.Context, repoID int64) ([]GitHubRun, error) {

@@ -243,7 +243,8 @@ func TestGitHubPublicationRetryDeadlineSurvivesUpdatesAndReopen(t *testing.T) {
 	if err = s.FinishGitHubPublication(ctx, publication, 0, retry); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.Cancel(ctx, run.JobID, "superseded", model.CancelReason{Source: model.CancelClient, Principal: "owner"}, testNow); err != nil {
+	// GitHub supersession: an operator's cancel would start an automatic rerun (#119).
+	if _, err = s.Cancel(ctx, run.JobID, "superseded", model.CancelReason{Source: model.CancelGitHub, Detail: "superseded"}, testNow); err != nil {
 		t.Fatal(err)
 	}
 	input.Request = &GitHubRequest{CommentID: 1, RequestID: "actions:42:1", BodySHA256: strings.Repeat("a", 64)}
