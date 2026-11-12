@@ -230,17 +230,42 @@ const procPIDUniqIdentifierInfo = 17
 // confirmed by its start time after the read, so a reused PID never answers
 // for start.
 func processLineage(pid int, start string) (uint64, uint64, error) {
-	var info [56]byte
-	if _, _, errno := unix.Syscall6(unix.SYS_PROC_INFO, procInfoPIDInfo, uintptr(pid), procPIDUniqIdentifierInfo, 0, uintptr(unsafe.Pointer(&info[0])), uintptr(len(info))); errno != 0 {
-		return 0, 0, errno
+	unique, parent, err := uniqueIdentifiers(pid)
+	if err != nil {
+		return 0, 0, err
 	}
 	k, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
 	if err != nil || int(k.Proc.P_pid) != pid || startToken(&k.Proc) != start {
 		return 0, 0, errors.Join(err, errors.New("process changed during lineage read"))
+	}
+	return unique, parent, nil
+}
+
+// uniqueIdentifiers reads pid's kernel unique ID and its parent's at fork.
+func uniqueIdentifiers(pid int) (uint64, uint64, error) {
+	var info [56]byte
+	if _, _, errno := unix.Syscall6(unix.SYS_PROC_INFO, procInfoPIDInfo, uintptr(pid), procPIDUniqIdentifierInfo, 0, uintptr(unsafe.Pointer(&info[0])), uintptr(len(info))); errno != 0 {
+		return 0, 0, errno
 	}
 	unique, parent := binary.LittleEndian.Uint64(info[16:24]), binary.LittleEndian.Uint64(info[24:32])
 	if unique == 0 {
 		return 0, 0, errors.New("process unique ID unavailable")
 	}
 	return unique, parent, nil
+}
+
+// launchdForked reports whether launchd itself forked the instance: its
+// parent's unique ID at fork is launchd's (PID 1 for the whole boot). A job
+// process's descendant keeps its own parent's unique ID however it was
+// reparented, so it is never launchd-forked.
+func launchdForked(pid int, start string) (bool, error) {
+	_, parent, err := processLineage(pid, start)
+	if err != nil {
+		return false, err
+	}
+	launchd, _, err := uniqueIdentifiers(1)
+	if err != nil {
+		return false, err
+	}
+	return parent == launchd, nil
 }

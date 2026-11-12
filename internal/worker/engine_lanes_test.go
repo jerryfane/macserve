@@ -23,6 +23,8 @@ type laneFake struct {
 	mu      sync.Mutex
 	events  []string
 	residue int
+	// launchd reports the residue as launchd-forked (Residue).
+	launchd bool
 	// gates blocks a job's recipe command until closed.
 	gates map[string]chan struct{}
 	// started is signalled when a job's recipe command starts.
@@ -82,14 +84,14 @@ func (f *laneFake) QuiesceJob(ctx context.Context, job string) error {
 	f.event("quiesce " + job)
 	return ctx.Err()
 }
-func (f *laneFake) Residue(context.Context) ([]string, error) {
+func (f *laneFake) Residue(context.Context) ([]string, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	residue := make([]string, f.residue)
 	for i := range residue {
 		residue[i] = fmt.Sprintf("pid=%d exe=\"/usr/bin/leftover\"", 900+i)
 	}
-	return residue, nil
+	return residue, f.launchd && f.residue != 0, nil
 }
 func (f *laneFake) LaneAdmission(ctx context.Context) error {
 	f.event("lane-admission")
@@ -190,52 +192,65 @@ func TestLanesRunTwoJobsWithPerJobCleanup(t *testing.T) {
 	}
 }
 
-// An unattributed process left when a job ends beside another is none of
-// that job's lineage: the job's own result stands (Studio v0.1.47,
-// 2026-11-12: a passing unit_test failed for Problem Reporter and
-// SetStoreUpdateService, both launchd's), its verdict is deferred with the
-// residue recorded, and the engine drains: no new job starts. The sibling
-// finishes; Recover, at idle, runs the full quiesce and admits again.
+// An unattributed process left when a job ends beside another defers its
+// idle verdict and drains the engine: no new job starts; the sibling
+// finishes and Recover, at idle, runs the full quiesce and admits again.
+// The job's own result stands only when every such process was forked by
+// launchd itself (Studio v0.1.47, 2026-11-12: a passing unit_test failed for
+// launchd's Problem Reporter and SetStoreUpdateService). Any other may be
+// the job's own escaped child (reparented before it was labelled, or its
+// lineage unread): its cleanup is unverified and the job fails.
 func TestLaneResidueDrainsUntilIdleQuiesce(t *testing.T) {
-	runner := newLaneFake()
-	engine := laneEngine(t, runner, 2)
-	source, data := sourceFixture(t)
-	gateA, gateB := runner.gate("job-a"), runner.gate("job-b")
-	a := runLane(engine, fixtureLaneJob(t, "job-a", model.Build), source, data)
-	<-runner.started
-	b := runLane(engine, fixtureLaneJob(t, "job-b", model.Build), source, data)
-	<-runner.started
-	runner.mu.Lock()
-	runner.residue = 1
-	runner.mu.Unlock()
-	close(gateA)
-	first := <-a
-	if first.err != nil || !first.result.CleanupOK || first.result.State != model.Succeeded || first.result.Reason != "" || first.result.Concurrency.IdleVerdict != IdleDeferred || first.result.Concurrency.UnattributedResidue != 1 {
-		t.Fatalf("residue beside a sibling failed the job: %+v %v", first.result, first.err)
-	}
-	if err := engine.LaneReady(context.Background()); !errors.Is(err, ErrDrain) {
-		t.Fatalf("draining engine ready: %v", err)
-	}
-	if _, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-c", model.Build), source, bytes.NewReader(data), nil); !errors.Is(err, ErrDrain) {
-		t.Fatalf("draining engine started a job: %v", err)
-	}
-	if err := engine.Recover(context.Background()); !errors.Is(err, ErrBusy) {
-		t.Fatalf("Recover ran beside a job: %v", err)
-	}
-	runner.mu.Lock()
-	runner.residue = 0
-	runner.mu.Unlock()
-	close(gateB)
-	if second := <-b; second.err != nil || !second.result.CleanupOK {
-		t.Fatalf("sibling: %+v %v", second.result, second.err)
-	}
-	runner.take()
-	// The sibling ended alone with the full check, which ends the drain.
-	if err := engine.LaneReady(context.Background()); err != nil {
-		t.Fatalf("drain survived the idle check: %v", err)
-	}
-	if err := engine.Recover(context.Background()); err != nil {
-		t.Fatal(err)
+	for name, launchd := range map[string]bool{"launchd-forked": true, "possibly escaped child": false} {
+		t.Run(name, func(t *testing.T) {
+			runner := newLaneFake()
+			engine := laneEngine(t, runner, 2)
+			source, data := sourceFixture(t)
+			gateA, gateB := runner.gate("job-a"), runner.gate("job-b")
+			a := runLane(engine, fixtureLaneJob(t, "job-a", model.Build), source, data)
+			<-runner.started
+			b := runLane(engine, fixtureLaneJob(t, "job-b", model.Build), source, data)
+			<-runner.started
+			runner.mu.Lock()
+			runner.residue, runner.launchd = 1, launchd
+			runner.mu.Unlock()
+			close(gateA)
+			first := <-a
+			c := first.result.Concurrency
+			if c.IdleVerdict != IdleDeferred || c.UnattributedResidue != 1 {
+				t.Fatalf("residue not deferred: %+v", first.result)
+			}
+			if launchd && (first.err != nil || !first.result.CleanupOK || first.result.State != model.Succeeded || first.result.Reason != "") {
+				t.Fatalf("launchd's residue beside a sibling failed the job: %+v %v", first.result, first.err)
+			}
+			if !launchd && (first.result.CleanupOK || first.result.State != model.Failed || !strings.Contains(first.result.Reason, "unattributed")) {
+				t.Fatalf("residue that may be the job's own left its cleanup verified: %+v", first.result)
+			}
+			if err := engine.LaneReady(context.Background()); !errors.Is(err, ErrDrain) {
+				t.Fatalf("draining engine ready: %v", err)
+			}
+			if _, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-c", model.Build), source, bytes.NewReader(data), nil); !errors.Is(err, ErrDrain) {
+				t.Fatalf("draining engine started a job: %v", err)
+			}
+			if err := engine.Recover(context.Background()); !errors.Is(err, ErrBusy) {
+				t.Fatalf("Recover ran beside a job: %v", err)
+			}
+			runner.mu.Lock()
+			runner.residue = 0
+			runner.mu.Unlock()
+			close(gateB)
+			if second := <-b; second.err != nil || !second.result.CleanupOK {
+				t.Fatalf("sibling: %+v %v", second.result, second.err)
+			}
+			runner.take()
+			// The sibling ended alone with the full check, which ends the drain.
+			if err := engine.LaneReady(context.Background()); err != nil {
+				t.Fatalf("drain survived the idle check: %v", err)
+			}
+			if err := engine.Recover(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
