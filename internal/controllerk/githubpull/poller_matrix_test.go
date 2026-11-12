@@ -12,30 +12,35 @@ import (
 	"github.com/jerryfane/macserve/internal/model"
 )
 
+// The matrix fixture is herdrup's: three UI test shards on iPhone and iPad
+// and one script shard, beside the org build template.
 const (
-	matrixRepo   = "themartianapp/app"
-	matrixRepoID = int64(501)
-	uiTemplate   = "org-uitest-v1"
-	scriptTmpl   = "org-script-v1"
-	matrixConfig = `{"version":1,"work_dir":".","project":"App.xcodeproj","scheme":"App",
- "ui_test":{"shards":{"chat":["AppUITests/ChatTests"],"gram":["AppUITests/GramTests","AppUITests/GramColumnTests"]}},
- "script":{"shards":{"duo-column":{"run":"Tools/ci/duo-column.sh"}}}}`
+	matrixRepo   = "themartianapp/herdrup"
+	matrixRepoID = int64(1318951363)
+	uiTemplate   = "org-ios-sim-uitest-v1"
+	scriptTmpl   = "org-ios-sim-script-v1"
+	matrixConfig = `{"version":1,"work_dir":".","project":"Herdr.xcodeproj","scheme":"Herdr","xcodegen":true,"resolve_packages":true,
+ "ui_test":{"shards":{
+  "iphone-terminal":["HerdrUITests/TerminalControlTests","HerdrUITests/ChatViewTests"],
+  "iphone-app":["HerdrFontTests/TerminalFontTests","HerdrUITests/StatusMotionTests"],
+  "ipad":["HerdrUITests/TerminalResizeTests","HerdrUITests/DuoTransitionTests"]}},
+ "script":{"shards":{"ipad-script":{"run":"Tools/ci/macserve-ipad-script.sh"},"duo-column":{"run":"Tools/ci/duo-column.sh"}}}}`
 )
 
 var (
 	iPhone = model.Simulator{Runtime: "com.apple.CoreSimulator.SimRuntime.iOS-27-0", RuntimeBuild: "24A434", DeviceType: "com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro"}
-	duo    = model.Simulator{Runtime: "com.apple.CoreSimulator.SimRuntime.iOS-27-1", RuntimeBuild: "24A94425", DeviceType: "com.apple.CoreSimulator.SimDeviceType.iPhone-Duo"}
 	iPad   = model.Simulator{Runtime: "com.apple.CoreSimulator.SimRuntime.iOS-27-0", RuntimeBuild: "24A434", DeviceType: "com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M5-12GB"}
+	duo    = model.Simulator{Runtime: "com.apple.CoreSimulator.SimRuntime.iOS-27-1", RuntimeBuild: "24A94425", DeviceType: "com.apple.CoreSimulator.SimDeviceType.iPhone-Duo"}
 )
 
-// matrixTemplates adds a UI test template pinning iPhone and Duo and a script
-// template pinning iPhone to the org build templates.
+// matrixTemplates adds the Studio's UI test template (iPhone, iPad, Duo) and
+// script template (iPhone, Duo) to the org build templates.
 func matrixTemplates() []model.Template {
 	templates := orgTemplates()
 	ui := templates[0]
-	ui.ID, ui.Kind, ui.Simulators = uiTemplate, model.SimulatorUITest, []model.Simulator{iPhone, duo}
+	ui.ID, ui.Kind, ui.Simulators = uiTemplate, model.SimulatorUITest, []model.Simulator{iPhone, iPad, duo}
 	script := ui
-	script.ID, script.Kind, script.Simulators = scriptTmpl, model.SimulatorScript, []model.Simulator{iPhone}
+	script.ID, script.Kind, script.Simulators = scriptTmpl, model.SimulatorScript, []model.Simulator{iPhone, duo}
 	return append(templates, ui, script)
 }
 
@@ -43,9 +48,10 @@ func matrixPolicy() githubwire.Policy {
 	return githubwire.Policy{RepositoryID: matrixRepoID, Repository: matrixRepo, AuthorIDs: []int64{ownerAuthor}, BaseBranches: []string{"main"}, PolicyRevision: 1,
 		Profiles: []string{nativeBuild, uiTemplate, scriptTmpl},
 		Matrix: []githubwire.MatrixEntry{
-			{Profile: uiTemplate, Shard: "chat", Simulator: iPhone},
-			{Profile: uiTemplate, Shard: "gram", Simulator: duo},
-			{Profile: scriptTmpl, Shard: "duo-column", Simulator: iPhone},
+			{Profile: uiTemplate, Shard: "iphone-terminal", Simulator: iPhone},
+			{Profile: uiTemplate, Shard: "iphone-app", Simulator: iPhone},
+			{Profile: uiTemplate, Shard: "ipad", Simulator: iPad},
+			{Profile: scriptTmpl, Shard: "ipad-script", Simulator: iPhone},
 		}}
 }
 
@@ -59,8 +65,12 @@ func newMatrixFixture(t *testing.T, policy githubwire.Policy) *ownerFixture {
 	return f
 }
 
-// runsByCheck maps each run of the matrix repository's current snapshot, by
-// its check name, to the run and its job (zero for a jobless run).
+func matrixPull(number int, sha string) githubapi.PullRequest {
+	return githubapi.PullRequest{Number: number, HeadSHA: sha, HeadRepositoryID: matrixRepoID, AuthorID: ownerAuthor, BaseRef: "main"}
+}
+
+// runsByCheck maps each stored run of the matrix repository at sha by its
+// check name.
 func (f *ownerFixture) runsByCheck(t *testing.T, sha string) map[string]store.GitHubRun {
 	t.Helper()
 	all, err := f.s.GitHubRuns(context.Background(), matrixRepoID)
@@ -104,14 +114,13 @@ func TestMatrixPolicyValidation(t *testing.T) {
 	}
 	for name, mutate := range map[string]func(*githubwire.Policy){
 		"profile not in profiles":     func(p *githubwire.Policy) { p.Profiles = []string{nativeBuild, uiTemplate} },
-		"duplicate profile and shard": func(p *githubwire.Policy) { p.Matrix[1].Shard = "chat" },
-		"invalid shard name":          func(p *githubwire.Policy) { p.Matrix[0].Shard = "Chat" },
+		"duplicate profile and shard": func(p *githubwire.Policy) { p.Matrix[1].Shard = "iphone-terminal" },
+		"invalid shard name":          func(p *githubwire.Policy) { p.Matrix[0].Shard = "iPhone" },
 		"empty shard":                 func(p *githubwire.Policy) { p.Matrix[0].Shard = "" },
 		"incomplete simulator":        func(p *githubwire.Policy) { p.Matrix[0].Simulator.RuntimeBuild = "" },
-		"simulator not pinned":        func(p *githubwire.Policy) { p.Matrix[0].Simulator = iPad },
-		"simulator of another entry":  func(p *githubwire.Policy) { p.Matrix[2].Simulator = duo },
+		"simulator not pinned":        func(p *githubwire.Policy) { p.Matrix[3].Simulator = iPad },
 		"build profile entry":         func(p *githubwire.Policy) { p.Matrix[0].Profile = nativeBuild },
-		"template without entries":    func(p *githubwire.Policy) { p.Matrix = p.Matrix[:2] },
+		"template without entries":    func(p *githubwire.Policy) { p.Matrix = p.Matrix[:3] },
 		"skip drafts without a matrix": func(p *githubwire.Policy) {
 			p.Profiles, p.Matrix, p.MatrixSkipDrafts = []string{nativeBuild}, nil, true
 		},
@@ -124,7 +133,7 @@ func TestMatrixPolicyValidation(t *testing.T) {
 		}
 	}
 	owner := ownerPolicy("themartianapp", martianID)
-	owner.Matrix = []githubwire.MatrixEntry{{Profile: nativeBuild, Shard: "chat", Simulator: iPhone}}
+	owner.Matrix = []githubwire.MatrixEntry{{Profile: nativeBuild, Shard: "ipad", Simulator: iPad}}
 	if _, err := newOrgFixture(t, matrixTemplates(), owner); err == nil || !strings.Contains(err.Error(), "matrix") {
 		t.Errorf("owner policy matrix accepted or wrong error: %v", err)
 	}
@@ -139,15 +148,16 @@ func TestMatrixPolicyValidation(t *testing.T) {
 // re-admitting every open head), request, profile snapshot and check name.
 // The golden values are those 589a4c33 (v0.1.48) produces.
 func TestBuildOnlyPolicyRunUnchanged(t *testing.T) {
-	policy := githubwire.Policy{RepositoryID: matrixRepoID, Repository: matrixRepo, AuthorIDs: []int64{ownerAuthor}, BaseBranches: []string{"main"}, Profiles: []string{nativeBuild}, PolicyRevision: 3}
+	const repo, id = "themartianapp/app", int64(501)
+	policy := githubwire.Policy{RepositoryID: id, Repository: repo, AuthorIDs: []int64{ownerAuthor}, BaseBranches: []string{"main"}, Profiles: []string{nativeBuild}, PolicyRevision: 3}
 	f, err := newOwnerFixture(t, policy)
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.remote.install(matrixRepo, matrixRepoID, martianID, "")
-	f.pull(matrixRepo, githubapi.PullRequest{Number: 4, HeadSHA: headSHA('1'), HeadRepositoryID: matrixRepoID, AuthorID: ownerAuthor, BaseRef: "main"}, nativeConfig)
+	f.remote.install(repo, id, martianID, "")
+	f.pull(repo, githubapi.PullRequest{Number: 4, HeadSHA: headSHA('1'), HeadRepositoryID: id, AuthorID: ownerAuthor, BaseRef: "main"}, nativeConfig)
 	f.poll(t)
-	runs := f.active(t, matrixRepoID)
+	runs := f.active(t, id)
 	if len(runs) != 1 {
 		t.Fatalf("runs %+v", runs)
 	}
@@ -164,21 +174,22 @@ func TestBuildOnlyPolicyRunUnchanged(t *testing.T) {
 }
 
 // One eligible head admits the build profile and one job per matrix entry,
-// each with the entry's shard and simulator, each published to its own check;
-// a new head supersedes every one of the old head's jobs.
+// of either template kind, each with the entry's shard and simulator and its
+// own check; a new head supersedes every one of the old head's jobs.
 func TestMatrixAdmitsEntriesAndSupersedesThemTogether(t *testing.T) {
 	f := newMatrixFixture(t, matrixPolicy())
-	f.pull(matrixRepo, githubapi.PullRequest{Number: 1, HeadSHA: headSHA('1'), HeadRepositoryID: matrixRepoID, AuthorID: ownerAuthor, BaseRef: "main"}, matrixConfig)
+	f.pull(matrixRepo, matrixPull(1, headSHA('1')), matrixConfig)
 	f.poll(t)
 	want := map[string]struct {
 		kind      model.Kind
 		shard     string
 		simulator *model.Simulator
 	}{
-		"mac-evidence/" + nativeBuild:                {model.Build, "", nil},
-		"mac-evidence/" + uiTemplate + "/chat":       {model.SimulatorUITest, "chat", &iPhone},
-		"mac-evidence/" + uiTemplate + "/gram":       {model.SimulatorUITest, "gram", &duo},
-		"mac-evidence/" + scriptTmpl + "/duo-column": {model.SimulatorScript, "duo-column", &iPhone},
+		"mac-evidence/org-build-v1":                          {model.Build, "", nil},
+		"mac-evidence/org-ios-sim-uitest-v1/iphone-terminal": {model.SimulatorUITest, "iphone-terminal", &iPhone},
+		"mac-evidence/org-ios-sim-uitest-v1/iphone-app":      {model.SimulatorUITest, "iphone-app", &iPhone},
+		"mac-evidence/org-ios-sim-uitest-v1/ipad":            {model.SimulatorUITest, "ipad", &iPad},
+		"mac-evidence/org-ios-sim-script-v1/ipad-script":     {model.SimulatorScript, "ipad-script", &iPhone},
 	}
 	first := f.runsByCheck(t, headSHA('1'))
 	checks := f.checksOf(headSHA('1'))
@@ -200,7 +211,8 @@ func TestMatrixAdmitsEntriesAndSupersedesThemTogether(t *testing.T) {
 	}
 	// Polling again joins the same runs; nothing new is admitted.
 	f.poll(t)
-	if again := f.runsByCheck(t, headSHA('1')); len(again) != len(want) || again["mac-evidence/"+uiTemplate+"/gram"].JobID != first["mac-evidence/"+uiTemplate+"/gram"].JobID {
+	ipad := "mac-evidence/org-ios-sim-uitest-v1/ipad"
+	if again := f.runsByCheck(t, headSHA('1')); len(again) != len(want) || again[ipad].JobID != first[ipad].JobID {
 		t.Fatalf("repoll changed runs: %v", again)
 	}
 
@@ -226,25 +238,26 @@ func TestMatrixAdmitsEntriesAndSupersedesThemTogether(t *testing.T) {
 // is refused that way.
 func TestMatrixMissingShardRequiresAction(t *testing.T) {
 	f := newMatrixFixture(t, matrixPolicy())
-	noGram := strings.Replace(matrixConfig, `"gram":`, `"other":`, 1)
-	f.pull(matrixRepo, githubapi.PullRequest{Number: 1, HeadSHA: headSHA('1'), HeadRepositoryID: matrixRepoID, AuthorID: ownerAuthor, BaseRef: "main"}, noGram)
-	f.pull(matrixRepo, githubapi.PullRequest{Number: 2, HeadSHA: headSHA('2'), HeadRepositoryID: matrixRepoID, AuthorID: ownerAuthor, BaseRef: "main"}, "")
+	noIPad := strings.Replace(matrixConfig, `"ipad":`, `"other":`, 1)
+	f.pull(matrixRepo, matrixPull(1, headSHA('1')), noIPad)
+	f.pull(matrixRepo, matrixPull(2, headSHA('2')), "")
 	f.poll(t)
-	gram := "mac-evidence/" + uiTemplate + "/gram"
+	ipad := "mac-evidence/org-ios-sim-uitest-v1/ipad"
 	runs, checks := f.runsByCheck(t, headSHA('1')), f.checksOf(headSHA('1'))
-	if run := runs[gram]; run.JobID != "" || !strings.Contains(run.Blocked, `ui_test shard "gram"`) {
-		t.Fatalf("gram run %+v", run)
+	if run := runs[ipad]; run.JobID != "" || !strings.Contains(run.Blocked, `ui_test shard "ipad"`) {
+		t.Fatalf("ipad run %+v", run)
 	}
-	if check := checks[gram]; check.Status != "completed" || check.Conclusion != "action_required" {
-		t.Fatalf("gram check %+v", check)
+	if check := checks[ipad]; check.Status != "completed" || check.Conclusion != "action_required" {
+		t.Fatalf("ipad check %+v", check)
 	}
-	for _, name := range []string{"mac-evidence/" + nativeBuild, "mac-evidence/" + uiTemplate + "/chat", "mac-evidence/" + scriptTmpl + "/duo-column"} {
+	// The script section still declares ipad-script: shards are per kind.
+	for _, name := range []string{"mac-evidence/org-build-v1", "mac-evidence/org-ios-sim-uitest-v1/iphone-terminal", "mac-evidence/org-ios-sim-uitest-v1/iphone-app", "mac-evidence/org-ios-sim-script-v1/ipad-script"} {
 		if run := runs[name]; run.JobID == "" || run.Blocked != "" || checks[name].Status != "queued" {
 			t.Fatalf("%s: run %+v check %+v", name, run, checks[name])
 		}
 	}
 	runs, checks = f.runsByCheck(t, headSHA('2')), f.checksOf(headSHA('2'))
-	if len(runs) != 4 || runs["mac-evidence/"+nativeBuild].JobID == "" {
+	if len(runs) != 5 || runs["mac-evidence/org-build-v1"].JobID == "" {
 		t.Fatalf("head without .macserve.json: %v", runs)
 	}
 	for _, entry := range matrixPolicy().Matrix {
@@ -261,10 +274,12 @@ func TestMatrixSkipsDraftsUntilReady(t *testing.T) {
 	policy := matrixPolicy()
 	policy.MatrixSkipDrafts = true
 	f := newMatrixFixture(t, policy)
-	f.pull(matrixRepo, githubapi.PullRequest{Number: 1, Draft: true, HeadSHA: headSHA('1'), HeadRepositoryID: matrixRepoID, AuthorID: ownerAuthor, BaseRef: "main"}, matrixConfig)
+	pull := matrixPull(1, headSHA('1'))
+	pull.Draft = true
+	f.pull(matrixRepo, pull, matrixConfig)
 	f.poll(t)
 	runs, checks := f.runsByCheck(t, headSHA('1')), f.checksOf(headSHA('1'))
-	build := "mac-evidence/" + nativeBuild
+	build := "mac-evidence/org-build-v1"
 	if len(runs) != 1 || runs[build].JobID == "" || len(checks) != 1 || checks[build].Status != "queued" {
 		t.Fatalf("draft head: runs %v checks %v", runs, checks)
 	}
@@ -272,7 +287,7 @@ func TestMatrixSkipsDraftsUntilReady(t *testing.T) {
 	f.setPull(matrixRepo, func(p *githubapi.PullRequest) { p.Draft = false })
 	f.poll(t)
 	ready := f.runsByCheck(t, headSHA('1'))
-	if len(ready) != 4 || len(f.checksOf(headSHA('1'))) != 4 || ready[build].JobID != runs[build].JobID {
+	if len(ready) != 5 || len(f.checksOf(headSHA('1'))) != 5 || ready[build].JobID != runs[build].JobID {
 		t.Fatalf("ready head: runs %v", ready)
 	}
 
@@ -284,39 +299,65 @@ func TestMatrixSkipsDraftsUntilReady(t *testing.T) {
 			t.Fatalf("%s: back-to-draft job %s", name, job.State)
 		}
 	}
-	if active := f.active(t, matrixRepoID); len(active) != 4 {
+	if active := f.active(t, matrixRepoID); len(active) != 5 {
 		t.Fatalf("active runs after back to draft: %v", active)
 	}
 	// The kept matrix jobs still pass the dispatch recheck.
-	job := f.job(t, ready["mac-evidence/"+uiTemplate+"/chat"].JobID)
+	job := f.job(t, ready["mac-evidence/org-ios-sim-uitest-v1/ipad"].JobID)
 	if err := f.p.checkDispatch(context.Background(), job); err != nil {
 		t.Fatalf("dispatch of a kept matrix job: %v", err)
 	}
 }
 
-// A matrix run is rerun through the owner API by its shard; the response's
-// run names the shard and keeps its check.
+// A matrix run is rerun through the owner API by its shard; the new attempt
+// keeps its check.
 func TestMatrixOwnerRerunNamesShard(t *testing.T) {
 	ctx := context.Background()
 	f := newMatrixFixture(t, matrixPolicy())
-	f.pull(matrixRepo, githubapi.PullRequest{Number: 1, HeadSHA: headSHA('1'), HeadRepositoryID: matrixRepoID, AuthorID: ownerAuthor, BaseRef: "main"}, matrixConfig)
+	f.pull(matrixRepo, matrixPull(1, headSHA('1')), matrixConfig)
 	f.poll(t)
-	chat := f.runsByCheck(t, headSHA('1'))["mac-evidence/"+uiTemplate+"/chat"]
-	if _, err := f.s.Cancel(ctx, chat.JobID, "client", model.CancelReason{Source: model.CancelGitHub}, f.options.Now()); err != nil {
+	ipad := f.runsByCheck(t, headSHA('1'))["mac-evidence/org-ios-sim-uitest-v1/ipad"]
+	if _, err := f.s.Cancel(ctx, ipad.JobID, "client", model.CancelReason{Source: model.CancelGitHub}, f.options.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := f.p.Rerun(ctx, matrixRepoID, "", headSHA('1'), uiTemplate, "", f.options.Now()); err == nil {
 		t.Fatal("rerun of a matrix template without its shard accepted")
 	}
-	run, started, err := f.p.Rerun(ctx, matrixRepoID, "", headSHA('1'), uiTemplate, "chat", f.options.Now())
-	if err != nil || !started || run.Key != chat.Key || run.Shard != "chat" || run.JobID == chat.JobID {
+	run, started, err := f.p.Rerun(ctx, matrixRepoID, "", headSHA('1'), uiTemplate, "ipad", f.options.Now())
+	if err != nil || !started || run.Key != ipad.Key || run.Shard != "ipad" || run.JobID == ipad.JobID {
 		t.Fatalf("rerun: %+v %v %v", run, started, err)
 	}
-	if job := f.job(t, run.JobID); job.Request.Shard != "chat" || *job.Request.Simulator != iPhone {
+	if job := f.job(t, run.JobID); job.Request.Shard != "ipad" || *job.Request.Simulator != iPad {
 		t.Fatalf("rerun job request %+v", job.Request)
 	}
 	f.poll(t)
-	if check := f.checksOf(headSHA('1'))["mac-evidence/"+uiTemplate+"/chat"]; check.ID != chat.CheckID || check.ExternalID != run.JobID {
-		t.Fatalf("rerun check %+v (first %d)", check, chat.CheckID)
+	if check := f.checksOf(headSHA('1'))["mac-evidence/org-ios-sim-uitest-v1/ipad"]; check.ID != ipad.CheckID || check.ExternalID != run.JobID {
+		t.Fatalf("rerun check %+v (first %d)", check, ipad.CheckID)
+	}
+}
+
+// /mac-evidence comments keep their grammar, which has no shard: a comment
+// naming a matrix template is skipped like any ineligible request and the
+// scan continues to the next comment.
+func TestMatrixCommentIntakeSkipsMatrixTemplates(t *testing.T) {
+	policy := matrixPolicy()
+	policy.ActionsBotID = ownerBot
+	f := newMatrixFixture(t, policy)
+	f.pull(matrixRepo, matrixPull(1, headSHA('1')), matrixConfig)
+	f.remote.mu.Lock()
+	now := f.remote.now
+	for id, profile := range map[int64]string{1: uiTemplate, 2: nativeBuild} {
+		body := "/mac-evidence sha=" + headSHA('1') + " profile=" + profile + " request=actions:7:1 mode=ensure"
+		f.remote.comments[matrixRepo] = append(f.remote.comments[matrixRepo], githubapi.Comment{ID: id, Body: body, AuthorID: ownerBot, PullRequest: 1, CreatedAt: now, UpdatedAt: now})
+	}
+	f.remote.mu.Unlock()
+	f.poll(t)
+	runs := f.runsByCheck(t, headSHA('1'))
+	if _, ok := runs["mac-evidence/"+uiTemplate]; ok || len(runs) != 5 {
+		t.Fatalf("runs %v", runs)
+	}
+	requests, err := f.s.GitHubRequests(context.Background(), runs["mac-evidence/org-build-v1"].JobID)
+	if err != nil || len(requests) != 1 || requests[0].CommentID != 2 {
+		t.Fatalf("build requests %+v %v", requests, err)
 	}
 }

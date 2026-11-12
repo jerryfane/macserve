@@ -47,6 +47,7 @@ type orgGitHub struct {
 	pulls    map[string][]githubapi.PullRequest
 	files    map[string]string // full name + "@" + sha → .macserve.json
 	checks   map[int64]githubapi.Check
+	comments map[string][]githubapi.Comment // full name → one page of PR comments
 	fileGets int
 	listings int
 }
@@ -121,7 +122,13 @@ func (g *orgGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(http.StatusNotFound)
 	case rest == "issues/comments":
-		encode([]any{})
+		items := make([]any, 0)
+		if r.URL.Query().Get("page") == "1" {
+			for _, c := range g.comments[name] {
+				items = append(items, map[string]any{"id": c.ID, "body": c.Body, "user": map[string]any{"id": c.AuthorID}, "issue_url": g.server.URL + "/repos/" + name + "/issues/" + strconv.Itoa(c.PullRequest), "created_at": c.CreatedAt.Format(time.RFC3339), "updated_at": c.UpdatedAt.Format(time.RFC3339)})
+			}
+		}
+		encode(items)
 	case rest == "contents/.macserve.json":
 		g.fileGets++
 		content, ok := g.files[name+"@"+r.URL.Query().Get("ref")]
@@ -237,7 +244,7 @@ func newOwnerFixture(t *testing.T, policies ...githubwire.Policy) (*ownerFixture
 // newOrgFixture is an org GitHub and a poller over a registry of templates.
 func newOrgFixture(t *testing.T, templates []model.Template, policies ...githubwire.Policy) (*ownerFixture, error) {
 	t.Helper()
-	remote := &orgGitHub{now: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC), repos: make(map[string]githubapi.Repository), listing: make(map[string][]string), pulls: make(map[string][]githubapi.PullRequest), files: make(map[string]string), checks: make(map[int64]githubapi.Check)}
+	remote := &orgGitHub{now: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC), repos: make(map[string]githubapi.Repository), listing: make(map[string][]string), pulls: make(map[string][]githubapi.PullRequest), files: make(map[string]string), checks: make(map[int64]githubapi.Check), comments: make(map[string][]githubapi.Comment)}
 	remote.server = httptest.NewServer(http.HandlerFunc(remote.serve))
 	t.Cleanup(remote.server.Close)
 	now := func() time.Time { remote.mu.Lock(); defer remote.mu.Unlock(); return remote.now }

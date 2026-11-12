@@ -40,6 +40,11 @@ func TestGitHubRunShard(t *testing.T) {
 		t.Fatalf("run shard unlike its request's admitted: %v", err)
 	}
 	blocked := mismatched.Run
+	invalid := blocked
+	invalid.Shard = strings.Repeat("a", 33)
+	if err := s.BlockGitHub(ctx, invalid, "no shard", testNow); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("over-long shard blocked: %v", err)
+	}
 	if err := s.BlockGitHub(ctx, blocked, "no shard", testNow); err != nil {
 		t.Fatal(err)
 	}
