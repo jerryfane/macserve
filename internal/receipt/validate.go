@@ -73,13 +73,17 @@ func incomplete(p Payload) []string {
 	require(!p.CreatedAt.IsZero() && !p.StartedAt.IsZero() && !p.FinishedAt.IsZero() && !p.SealedAt.IsZero() && !p.StartedAt.Before(p.CreatedAt) && !p.FinishedAt.Before(p.StartedAt) && !p.SealedAt.Before(p.FinishedAt) && p.Deadline != nil && !p.Deadline.Before(p.StartedAt) && p.WorkerEpoch != "", "execution timing")
 	// Final evidence extraction and cleanup may finish after the execution deadline.
 	require(p.Resources.TimeoutSeconds > 0 && p.Resources.TimeoutSeconds == p.Request.TimeoutSeconds && p.Resources.MemoryLimitMiB > 0 && p.Resources.PeakMemoryMiB >= 0 && p.Resources.CleanupRequired && p.Resources.CleanupOK, "resource and cleanup policy")
-	// Success needs a well-formed lane record whose cleanup reached a verdict:
-	// the full idle quiesce (clean) or a lane quiesce that left no
-	// unattributed process (not_required), never one deferred to a later idle.
-	// Residue observed and removed before that verdict is not a failure.
+	// Success needs a well-formed lane record whose cleanup reached a verdict
+	// for the job's own processes: the full idle quiesce (clean), a lane
+	// quiesce that left no unattributed process (not_required), or a lane
+	// quiesce beside other jobs after which unattributed processes, none of
+	// the job's lineage, remained (deferred with unattributed_residue > 0:
+	// the worker's next idle quiesce judges them). A deferred verdict without
+	// residue is an unverified cleanup. Residue observed and removed before a
+	// clean verdict is not a failure.
 	if c := p.Concurrency; c != nil {
 		require(validLanes(p), "lane record")
-		require(c.IdleVerdict == worker.IdleClean || c.IdleVerdict == worker.IdleNotRequired, "idle cleanup verdict")
+		require(c.IdleVerdict == worker.IdleClean || c.IdleVerdict == worker.IdleNotRequired || c.IdleVerdict == worker.IdleDeferred && c.UnattributedResidue > 0 && c.OverlapCount > 0, "idle cleanup verdict")
 	}
 	o := p.Observation
 	require(p.Request.Xcode.Version != "" && p.Request.Xcode.Build != "" && o.Xcode == p.Request.Xcode && o.SDKVersion != "" && o.SDKBuild != "" && o.SwiftVersion != "" && o.OSVersion != "" && o.OSBuild != "" && o.Architecture == "arm64", "toolchain observation")

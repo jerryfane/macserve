@@ -29,7 +29,8 @@ import (
 //   - a job whose finalization begins beside others stops only its own
 //     simulator and labelled processes (QuiesceJob) and then counts
 //     unattributed processes: none gives idle verdict "not_required"; any
-//     gives "deferred", an unverified cleanup, and drains the engine;
+//     gives "deferred": the job's own result stands, and the engine drains
+//     until the idle Recover judges them;
 //   - while draining no job starts; Recover, which runs only when no job
 //     runs, applies the full quiesce and admission and then admits again.
 //
@@ -297,8 +298,6 @@ func (e *Engine) holdsAccount(jobID string) bool {
 	return e.accountHeld == jobID
 }
 
-var errLaneResidue = errors.New("unattributed job-account processes remained while other jobs ran; cleanup is verified when the worker is idle")
-
 // siblingManifests reports whether every resource manifest in names belongs
 // to another running job: any other manifest is unrecovered state.
 func (e *Engine) siblingManifests(jobID string, names []string) bool {
@@ -314,8 +313,12 @@ func (e *Engine) siblingManifests(jobID string, names []string) bool {
 }
 
 // laneResidue counts unattributed job-account processes after a job's lane
-// quiesce beside running jobs. Any, or a failed count, leaves the job's
-// cleanup unverified until the idle quiesce (errLaneResidue).
+// quiesce beside running jobs. They are no process of this job's lineage,
+// which its lane quiesce stopped, so they do not fail it: the job records
+// them (finishLane: idle verdict "deferred") and the engine drains, so no
+// job starts until the idle Recover's full quiesce and admission judge them
+// (a survivor there quarantines the account). A count that fails leaves the
+// job's cleanup unverified.
 func (e *Engine) laneResidue(ctx context.Context, jobID string, result *Result) error {
 	residue, err := e.laneRunner().Residue(ctx)
 	if err != nil {
@@ -324,7 +327,7 @@ func (e *Engine) laneResidue(ctx context.Context, jobID string, result *Result) 
 	result.Concurrency.UnattributedResidue = len(residue)
 	if len(residue) != 0 {
 		log.Printf("worker job %s lane cleanup deferred to the idle quiesce: %d unattributed job-account process(es): %s", jobID, len(residue), residueList(residue))
-		return errLaneResidue
+		e.setDrain(fmt.Sprintf("%d unattributed job-account process(es) after job %s", len(residue), jobID))
 	}
 	return nil
 }
@@ -342,6 +345,7 @@ func residueList(residue []string) string {
 // and its idle verdict. A cleanup that is not verified drains the engine,
 // and a job that ended beside others leaves the full-account check to the
 // next idle Recover. A verified cleanup of a job alone is that idle check.
+// Unattributed residue beside others defers the verdict to that check.
 func (e *Engine) finishLane(jobID string, alone bool, result *Result) {
 	c := result.Concurrency
 	c.OverlappedJobs = e.overlaps(jobID)
@@ -354,6 +358,8 @@ func (e *Engine) finishLane(jobID string, alone bool, result *Result) {
 		c.IdleVerdict = IdleDeferred
 	case alone:
 		c.IdleVerdict = IdleClean
+	case c.UnattributedResidue != 0:
+		c.IdleVerdict = IdleDeferred
 	default:
 		c.IdleVerdict = IdleNotRequired
 	}

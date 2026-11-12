@@ -323,7 +323,9 @@ unattributed process refuses the start and *drains* the broker. A job whose fina
 runs ends with the unchanged full quiesce and admission (idle verdict `clean`); no other job starts until it ends. A
 job finishing beside others deletes only its own simulator and quiesces only its labelled processes (SIGTERM, SIGKILL,
 survivor = contamination and quarantine, as before), never a shared service or a sibling's process; any unattributed process still running in a
-second census 1 s later (short-lived build helpers such as SwiftPM's `git` are not counted) makes its `cleanup_ok` false (idle verdict `deferred`, the job fails) and drains the broker. While
+second census 1 s later (short-lived build helpers such as SwiftPM's `git` are not counted) is none of the job's lineage, which its lane quiesce stopped: the job's result stands, its idle verdict is
+`deferred` with `unattributed_residue` recorded, and the broker drains, so the idle `Recover`'s full quiesce judges
+those processes (a survivor there quarantines the account). While
 draining, the broker claims nothing, lets running jobs finish, and the next idle `Recover` runs the full quiesce and
 admission: contamination quarantines exactly as with one job, a clean account resumes intake. Only a completion with
 `cleanup_ok=false` fences the epoch, so only it makes the worker register a new one; an unattributed process seen beside

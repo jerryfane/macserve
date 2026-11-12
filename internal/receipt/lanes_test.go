@@ -96,6 +96,11 @@ func TestLaneReceiptValidates(t *testing.T) {
 		"residue removed before idle": func(c *worker.Concurrency, _ *worker.Result) {
 			c.UnattributedResidue, c.IdleVerdict = 2, worker.IdleClean
 		},
+		// Residue beside a sibling, none of the job's lineage: the verdict is
+		// deferred to the worker's idle quiesce and the job's result stands.
+		"residue deferred to idle": func(c *worker.Concurrency, _ *worker.Result) {
+			c.UnattributedResidue, c.IdleVerdict = 2, worker.IdleDeferred
+		},
 		"account rule running alone": func(c *worker.Concurrency, _ *worker.Result) {
 			c.Attribution, c.OverlappedJobs = worker.AttributionAccount, nil
 		},
