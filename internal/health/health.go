@@ -46,17 +46,6 @@ const (
 	CancelFloorBytes    int64 = 100 << 30
 )
 
-// ProbeFailureLimit is the number of consecutive maintenance probes failing
-// without evidence (see Health.ProbeFailures) that cancels active work (#53);
-// health published for fewer blocks admission only. At the 10 s probe cadence
-// the third such probe starts 30 s after the one behind the last valid health
-// and publishes within its 8 s bound, before that health's 40 s lifetime
-// ends: two failed probes in a row (about 20 s, the Studio's longest
-// transient, #108) keep an active job, a third cancels it. The last valid
-// health's expiry stays the hard bound: a failure record never outlives it,
-// so slow or absent probes (a stopped daemon) cancel no later than before.
-const ProbeFailureLimit = 3
-
 // ServiceBudget is the disk macserve may account with lanes concurrent jobs
 // (max_concurrent_jobs; values below 1 mean 1): one JobReservationBytes per
 // lane above a fixed base. One lane is the single-job budget of 80 GiB.
@@ -108,7 +97,10 @@ type Health struct {
 	// unexpired the daemon republishes it unchanged (same checked_at,
 	// expires_at and facts) with this count; afterwards it publishes invalid
 	// health with the count. The gate reports maintenance_probe_failed, which
-	// blocks admission and, from ProbeFailureLimit, cancels active work.
+	// blocks admission only: active work is cancelled when the last valid
+	// health expires (isolation_unavailable) or a probe finds something, never
+	// for failed probes alone while that health is in force (two lanes booting
+	// simulators made three probes in a row time out, 2026-11-12).
 	ProbeFailures int `json:"probe_failures,omitempty"`
 }
 type GuardOptions struct {
@@ -223,7 +215,8 @@ type Blocker struct {
 // daemon logs these for each health record it publishes. A record counting
 // probes that failed without evidence (ProbeFailures) is the last valid
 // health's, judged on its own timestamps and facts, plus
-// maintenance_probe_failed, which cancels only from ProbeFailureLimit.
+// maintenance_probe_failed, which blocks admission and never cancels: the
+// record's own expiry does.
 func HealthBlockers(health Health, now time.Time, jobUID uint32, profiles map[string]string, lanes int) []Blocker {
 	var blockers []Blocker
 	fail := func(name string, cancel bool) { blockers = append(blockers, Blocker{name, cancel}) }
@@ -231,7 +224,7 @@ func HealthBlockers(health Health, now time.Time, jobUID uint32, profiles map[st
 		fail("isolation_unavailable", true)
 	}
 	if health.ProbeFailures > 0 {
-		fail("maintenance_probe_failed", health.ProbeFailures >= ProbeFailureLimit)
+		fail("maintenance_probe_failed", false)
 	}
 	if !health.PersistenceValid || health.PersistenceNeedsReview || health.PersistenceLastVerified.IsZero() || health.PersistenceLastVerified.After(now) {
 		fail("persistence_attestation_unavailable", false)
