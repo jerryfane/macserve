@@ -2,13 +2,11 @@ package maintenance
 
 import "time"
 
-// healthLifetime is how long one published observation stays valid. With a
-// 10 s probe cadence it must outlast health.ProbeFailureLimit (3) consecutive
-// probes that failed without evidence (seen on the Studio under build load:
-// the third starts at +30 s and publishes within its 8 s bound), so that count
-// rather than expiry decides when failed probes cancel active work, and stay
-// within the controller's 45 s acceptance window (internal/health). It is also
-// the bound on how long a republished last valid health keeps active work.
+// healthLifetime is how long one published observation stays valid, within
+// the controller's 45 s acceptance window (internal/health). It is the bound
+// on how long probes that failed without evidence keep active work: the last
+// valid health is republished with their count, which blocks admission only,
+// until it expires.
 const healthLifetime = 40 * time.Second
 
 // censusBudget bounds one background byte census (see censusTracker). Under

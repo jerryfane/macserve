@@ -74,8 +74,8 @@ func TestHostReadinessCancelRecordsBlockers(t *testing.T) {
 }
 
 // Probes that fail without evidence block admission and keep the running job
-// until the gate cancels at the third (health.ProbeFailureLimit); the job's
-// cause and the log name the count (#53).
+// until the gate cancels (the last valid health expired); the job's cause and
+// the log name the count (#53).
 func TestProbeFailureCancelRecordsCount(t *testing.T) {
 	f := newRuntime(t)
 	lease := f.lease(t, model.Build)

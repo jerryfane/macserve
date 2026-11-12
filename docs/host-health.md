@@ -20,8 +20,8 @@ qualification/evidence bindings, the job's `;ShadowHash;` authentication authori
 digests, memory pressure and mutable storage including the entire job home. Since v0.1.17 only critical
 kernel memory pressure blocks admission; warning admits (unknown levels and sysctl errors still fail
 closed). A finding publishes invalid health; startup/shutdown invalidate it. A probe that failed without
-evidence (for example its deadline) blocks admission and cancels active work from the third in a row, never
-later than the last valid health's expiry (see [configuration](configuration.md)). Probe cadence is
+evidence (for example its deadline) blocks admission; active work is cancelled only when the last valid health
+expires (see [configuration](configuration.md)). Probe cadence is
 measured from probe start, not completion.
 `maintenance-observe` collects live inputs without approving the host or writing health. Both require
 macOS root; neither modifies host policy, adopts processes or generates boundary-test evidence.

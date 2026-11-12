@@ -143,11 +143,13 @@ func withProbeFailures(t *testing.T, h *Health, failures int) {
 }
 
 // Maintenance republishes the last valid health with the count of probes that
-// failed without evidence since (#53). Each blocks admission; only the third
-// in a row cancels active work, so the Studio's transient failures (two
-// failed probes in about 20 s, #108) no longer cancel a running build.
-func TestProbeFailuresBlockAdmissionAndCancelFromThird(t *testing.T) {
-	for failures, cancel := range map[int]bool{1: false, 2: false, 3: true, 4: true} {
+// failed without evidence since (#53). Each blocks admission; none cancels
+// active work while that health is in force: its expiry does. Two lanes
+// booting simulators made three probes in a row time out 9 s before the
+// last valid health expired, and the third cancelled both jobs although the
+// next probe passed (Studio v0.1.47, 2026-11-12 12:28Z).
+func TestProbeFailuresBlockAdmissionOnly(t *testing.T) {
+	for failures, cancel := range map[int]bool{1: false, 2: false, 3: false, 4: false} {
 		g, h, _ := readyGuard(t)
 		withProbeFailures(t, h, failures)
 		state, err := g.Check(context.Background())
