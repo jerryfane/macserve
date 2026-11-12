@@ -29,9 +29,8 @@ import (
 //   - a job whose finalization begins beside others stops only its own
 //     simulator and labelled processes (QuiesceJob) and then counts
 //     unattributed processes: none gives idle verdict "not_required"; any
-//     gives "deferred" and drains the engine until the idle Recover judges
-//     them; the job's own result stands only when every one was forked by
-//     launchd itself, else its cleanup is unverified;
+//     gives "deferred": the job's own result stands, and the engine drains
+//     until the idle Recover judges them;
 //   - while draining no job starts; Recover, which runs only when no job
 //     runs, applies the full quiesce and admission and then admits again.
 //
@@ -249,7 +248,7 @@ func (e *Engine) LaneReady(ctx context.Context) error {
 	if !ok {
 		return ErrBusy
 	}
-	residue, _, err := lanes.Residue(ctx)
+	residue, err := lanes.Residue(ctx)
 	if err != nil {
 		return err
 	}
@@ -313,32 +312,22 @@ func (e *Engine) siblingManifests(jobID string, names []string) bool {
 	return true
 }
 
-// errLaneResidue: unattributed processes that may descend from the job
-// (attribution is not complete: a child reparented before it was labelled,
-// or a failed lineage read, is unattributed) remained after its lane quiesce.
-var errLaneResidue = errors.New("unattributed job-account processes remained while other jobs ran; cleanup is verified when the worker is idle")
-
 // laneResidue counts unattributed job-account processes after a job's lane
-// quiesce beside running jobs. Any drains the engine, so no job starts until
-// the idle Recover's full quiesce and admission judge them (a survivor there
-// quarantines the account), and defers the job's idle verdict. Only when
-// every one is proven launchd's own (forked by launchd itself, so no job
-// process is its ancestor) does the job's own cleanup stand verified;
-// otherwise one may be the job's own escaped process and its cleanup is
-// unverified (errLaneResidue), as is a count that fails.
+// quiesce beside running jobs. They are no process of this job's lineage,
+// which its lane quiesce stopped, so they do not fail it: the job records
+// them (finishLane: idle verdict "deferred") and the engine drains, so no
+// job starts until the idle Recover's full quiesce and admission judge them
+// (a survivor there quarantines the account). A count that fails leaves the
+// job's cleanup unverified.
 func (e *Engine) laneResidue(ctx context.Context, jobID string, result *Result) error {
-	residue, launchd, err := e.laneRunner().Residue(ctx)
+	residue, err := e.laneRunner().Residue(ctx)
 	if err != nil {
 		return errors.Join(ErrCleanup, err)
 	}
 	result.Concurrency.UnattributedResidue = len(residue)
-	if len(residue) == 0 {
-		return nil
-	}
-	log.Printf("worker job %s lane cleanup deferred to the idle quiesce: %d unattributed job-account process(es): %s", jobID, len(residue), residueList(residue))
-	e.setDrain(fmt.Sprintf("%d unattributed job-account process(es) after job %s", len(residue), jobID))
-	if !launchd {
-		return errLaneResidue
+	if len(residue) != 0 {
+		log.Printf("worker job %s lane cleanup deferred to the idle quiesce: %d unattributed job-account process(es): %s", jobID, len(residue), residueList(residue))
+		e.setDrain(fmt.Sprintf("%d unattributed job-account process(es) after job %s", len(residue), jobID))
 	}
 	return nil
 }

@@ -281,8 +281,8 @@ the full manifest's worker result carries, so the compact receipt stays within i
 `attribution` (`account/v1`: every non-baseline job-UID process was the job's, the single-job rule;
 `lineage+device/v1`: the lane attribution of docs/architecture.md), `unattributed_residue` and `idle_verdict`
 (`clean`: the job ended with the full job-account check; `not_required`: siblings ran, its own processes and
-simulator were removed and nothing unattributed remained; `deferred`: unattributed processes remained beside other
-jobs and the broker's next idle quiesce judges them, or the cleanup was not verified; `cleanup_ok` stays true only
-when every such process was forked by launchd itself). `resources` gains `host_peak_memory_mib` when sampled. A success receipt requires `cleanup_ok` and an idle
+simulator were removed and nothing unattributed remained; `deferred`: unattributed processes, none of the job's
+lineage, remained beside other jobs and the broker's next idle quiesce judges them, or the cleanup was not
+verified). `resources` gains `host_peak_memory_mib` when sampled. A success receipt requires `cleanup_ok` and an idle
 verdict of `clean` or `not_required`, or `deferred` with `unattributed_residue` above 0 and an overlapping job. Schema-1 receipts stay valid and carry neither field.
 

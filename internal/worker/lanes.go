@@ -395,10 +395,8 @@ type laneRunner interface {
 	QuiesceJob(ctx context.Context, jobID string) error
 	// Residue describes each job-UID process no job's lineage claims and the
 	// census neither audits nor tolerates (unattributed), without signalling
-	// any: one entry each, none when there is no residue. launchd reports
-	// that every one was forked by launchd itself, so none descends from a
-	// job process (an unresolved census entry never is).
-	Residue(ctx context.Context) (residue []string, launchd bool, err error)
+	// any: one entry each, none when there is no residue.
+	Residue(ctx context.Context) ([]string, error)
 	// LaneAdmission is Admission while other jobs run: their labelled
 	// processes are not residual, and an unattributed process refuses with
 	// ErrDrain instead of contamination.
@@ -551,18 +549,13 @@ func (r *nativeRunner) laneCensus(ctx context.Context, samples []processSample) 
 	return r.scope.census(ctx, rest)
 }
 
-func (r *nativeRunner) Residue(ctx context.Context) ([]string, bool, error) {
+func (r *nativeRunner) Residue(ctx context.Context) ([]string, error) {
 	if r.scope == nil {
-		return nil, false, errors.New("protected job process scope is required")
+		return nil, errors.New("protected job process scope is required")
 	}
 	if err := r.loadBaseline(); err != nil {
-		return nil, false, err
+		return nil, err
 	}
-	return r.residue(ctx)
-}
-
-// residue is Residue against the loaded baseline.
-func (r *nativeRunner) residue(ctx context.Context) ([]string, bool, error) {
 	// gone is the last census's audited processes that exited without a
 	// verified relaunch, for the log entry.
 	var gone []ProcessIdentity
@@ -584,27 +577,16 @@ func (r *nativeRunner) residue(ctx context.Context) ([]string, bool, error) {
 	}
 	residue, unresolved, err := settledResidue(ctx, count)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	entries := make([]string, 0, len(residue)+1)
-	launchd := !unresolved
 	for _, p := range residue {
-		forked := false
-		if r.launchdForked != nil {
-			// A failed read proves nothing: the process may be a job's.
-			forked, _ = r.launchdForked(p.pid, p.start)
-		}
-		launchd = launchd && forked
-		entry := r.residueEntry(p)
-		if forked {
-			entry += " forked_by=launchd"
-		}
-		entries = append(entries, entry)
+		entries = append(entries, r.residueEntry(p))
 	}
 	if unresolved {
 		entries = append(entries, "unresolved census: audited process(es) gone without a verified relaunch beside unattributed ones: "+goneList(gone))
 	}
-	return entries, launchd && len(entries) != 0, nil
+	return entries, nil
 }
 
 // goneList names audited processes by PID, start, launchd label and

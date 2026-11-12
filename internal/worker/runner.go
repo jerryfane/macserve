@@ -80,9 +80,6 @@ type nativeRunner struct {
 	workspaceRoot  string
 	describe       func(int, bool) (processDescription, error)
 	lineage        func(int, string) (uint64, uint64, error)
-	// launchdForked reports whether launchd itself forked an instance
-	// (Residue); nil proves none.
-	launchdForked func(int, string) (bool, error)
 }
 
 // newProcessRunner is the process/pipes implementation. Production construction

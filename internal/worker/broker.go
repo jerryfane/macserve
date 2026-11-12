@@ -492,7 +492,6 @@ func nativeRunnerFor(options Options) *nativeRunner {
 	runner.workspaceRoot = options.WorkspaceRoot
 	runner.describe = describeProcess
 	runner.lineage = processLineage
-	runner.launchdForked = launchdForked
 	return runner
 }
 

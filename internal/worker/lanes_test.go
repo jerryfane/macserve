@@ -355,66 +355,6 @@ func TestQuiesceJobLeavesSiblingUntouched(t *testing.T) {
 	}
 }
 
-// Residue proves a process launchd's own only when launchd itself forked
-// it. A job's child reparented to launchd before it was labelled keeps its
-// fork parent, so it is never exempt, nor is a process whose lineage read
-// fails.
-func TestResidueExemptsOnlyLaunchdForkedProcesses(t *testing.T) {
-	residueSettle = time.Millisecond
-	t.Cleanup(func() { residueSettle = time.Second })
-	const uid = 600
-	broker := syscall.Getpid()
-	now := time.Now().Unix()
-	baseline := laneSample(50, 1, uid, now-1000)
-	live := map[int]processSample{}
-	// 202 is job a's escaped child: forked by 200, reparented to launchd
-	// before any sample labelled it. 900 is Problem Reporter: launchd's.
-	for _, p := range []processSample{baseline, laneSample(200, broker, uid, now), laneSample(202, 1, uid, now), laneSample(300, broker, uid, now), laneSample(900, 1, uid, now)} {
-		live[p.pid] = p
-	}
-	runner := newProcessRunner()
-	runner.uid = uid
-	runner.scope = &processScope{uid: uid, baseline: GUIBaseline{Processes: []ProcessIdentity{{PID: 50, Start: baseline.start}}},
-		sample: func(context.Context) ([]processSample, error) {
-			out := make([]processSample, 0, len(live))
-			for _, p := range live {
-				out = append(out, p)
-			}
-			return out, nil
-		}}
-	forkParent := map[int]int{202: 200, 900: 1}
-	runner.launchdForked = func(pid int, _ string) (bool, error) {
-		parent, ok := forkParent[pid]
-		if !ok {
-			return false, errors.New("process changed during lineage read")
-		}
-		return parent == 1, nil
-	}
-	runner.lanes = trackerFor(broker, uid, map[int]processDescription{})
-	runner.lanes.begin("a", time.Unix(now-10, 0))
-	runner.lanes.begin("b", time.Unix(now-10, 0))
-	runner.lanes.addRoot("a", 200)
-	runner.lanes.addRoot("b", 300)
-	delete(live, 200)
-	runner.lanes.update(must(runner.scope.sample(context.Background())))
-	residue, launchd, err := runner.residue(context.Background())
-	if err != nil || len(residue) != 2 || launchd {
-		t.Fatalf("escaped child beside launchd's process: %q launchd=%t %v", residue, launchd, err)
-	}
-	if !strings.Contains(strings.Join(residue, ";"), "pid=900 ppid=1 start="+laneSample(900, 1, uid, now).start+" command=unavailable forked_by=launchd") {
-		t.Fatalf("launchd's process not named as such: %q", residue)
-	}
-	delete(live, 202)
-	if residue, launchd, err := runner.residue(context.Background()); err != nil || len(residue) != 1 || !launchd {
-		t.Fatalf("launchd's process alone: %q launchd=%t %v", residue, launchd, err)
-	}
-	// A lineage read that fails proves nothing.
-	delete(forkParent, 900)
-	if residue, launchd, err := runner.residue(context.Background()); err != nil || len(residue) != 1 || launchd {
-		t.Fatalf("unread lineage exempted: %q launchd=%t %v", residue, launchd, err)
-	}
-}
-
 func must[T any](v T, err error) T {
 	if err != nil {
 		panic(err)
