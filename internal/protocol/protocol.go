@@ -42,8 +42,12 @@ type Heartbeat struct {
 	Deadline time.Time `json:"deadline"`
 }
 
+// Stage reports a lease's stage. Held (with Finalizing) reports that the
+// job's completion waits for the worker's next idle check: unattributed
+// job-account processes remained after its lane cleanup beside other jobs.
 type Stage struct {
 	State model.State `json:"state"`
+	Held  bool        `json:"held,omitempty"`
 }
 
 type Log struct {

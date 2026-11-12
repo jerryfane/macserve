@@ -67,6 +67,8 @@ func (c *Controller) complete(ctx context.Context, job model.Job, result worker.
 	if a.finalizingSince.IsZero() {
 		a.finalizingSince = c.options.Now()
 	}
+	// A held completion's deadline is judged when it was held.
+	heldAt := a.heldAt
 	source := a.source.Source
 	c.mu.Unlock()
 	normalized, err := c.verifyResult(ctx, job, result, source)
@@ -90,7 +92,11 @@ func (c *Controller) complete(ctx context.Context, job model.Job, result worker.
 		if err != nil {
 			return err
 		}
-		normalizeCancellation(&normalized, current, c.options.Now())
+		judged := c.options.Now()
+		if !heldAt.IsZero() {
+			judged = heldAt
+		}
+		normalizeCancellation(&normalized, current, judged)
 		completion := Completion{InputDigest: digest, Result: normalized}
 		if len(seal.Seal) > 0 {
 			completion.Seal = &seal

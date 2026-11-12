@@ -174,7 +174,7 @@ func (c *Controller) heartbeat(w http.ResponseWriter, r *http.Request) {
 		}
 		a.heartbeat = c.options.Now()
 		c.lastSeen = a.heartbeat
-		return protocol.Heartbeat{Cancel: c.closed || job.CancelRequested || !c.options.Now().Before(*job.Deadline), Deadline: *job.Deadline}, nil
+		return protocol.Heartbeat{Cancel: c.closed || job.CancelRequested || !a.judgedAt(c.options.Now()).Before(*job.Deadline), Deadline: *job.Deadline}, nil
 	}()
 	respond(w, r, value, err)
 }
@@ -185,7 +185,7 @@ func (c *Controller) stage(w http.ResponseWriter, r *http.Request) {
 		respond(w, r, nil, err)
 		return
 	}
-	if value.State != model.Running && value.State != model.Finalizing {
+	if value.State != model.Running && value.State != model.Finalizing || value.Held && value.State != model.Finalizing {
 		respond(w, r, nil, store.ErrTransition)
 		return
 	}
@@ -202,6 +202,11 @@ func (c *Controller) stage(w http.ResponseWriter, r *http.Request) {
 		}
 		if value.State == model.Finalizing && a.finalizingSince.IsZero() {
 			a.finalizingSince = c.options.Now()
+		}
+		if value.Held && a.heldAt.IsZero() {
+			// Held once: the completion waits for the worker's idle check.
+			a.heldAt = c.options.Now()
+			a.heartbeat = a.heldAt
 		}
 		if job.State == value.State {
 			return nil

@@ -233,7 +233,7 @@ func (c *Controller) next(ctx context.Context, epoch string, running []string) (
 		if err != nil {
 			return nil, err
 		}
-		if now := c.options.Now(); job.Deadline != nil && !now.Before(*job.Deadline) {
+		if now := c.options.Now(); job.Deadline != nil && !a.judgedAt(now).Before(*job.Deadline) {
 			if _, err := c.cancelJob(ctx, job, "job deadline exceeded", model.CancelReason{Source: model.CancelDeadline}, now); err != nil {
 				return nil, err
 			}
@@ -253,6 +253,11 @@ func (c *Controller) next(ctx context.Context, epoch string, running []string) (
 			offer.heartbeat = c.options.Now()
 		}
 		return lease, nil
+	}
+	// A held completion waits for the worker's idle check: nothing new
+	// starts beside the processes it waits on.
+	if slices.ContainsFunc(c.active, func(a *execution) bool { return !a.heldAt.IsZero() }) {
+		return nil, nil
 	}
 	lanes := c.lanes()
 	if !gate.Ready || gate.CancelActive || len(c.active) >= lanes {
@@ -393,7 +398,7 @@ func (c *Controller) checkActive(ctx context.Context) {
 			c.mu.Unlock()
 			return
 		}
-		if job.Deadline != nil && !now.Before(*job.Deadline) {
+		if job.Deadline != nil && !a.judgedAt(now).Before(*job.Deadline) {
 			if _, err := c.cancelJob(ctx, job, "job deadline exceeded", model.CancelReason{Source: model.CancelDeadline}, now); err != nil {
 				c.mu.Unlock()
 				return
@@ -426,7 +431,7 @@ func (c *Controller) checkExecution(ctx context.Context, a *execution, now time.
 		c.mu.Unlock()
 		return
 	}
-	deadline := job.Deadline != nil && !now.Before(*job.Deadline)
+	deadline := job.Deadline != nil && !a.judgedAt(now).Before(*job.Deadline)
 	if job.CancelRequested && a.cancellingSince.IsZero() {
 		a.cancellingSince = now
 		// A late monitor tick must not restart the worker's cleanup budget.
@@ -450,26 +455,7 @@ func (c *Controller) checkExecution(ctx context.Context, a *execution, now time.
 		c.mu.Unlock()
 		return
 	}
-	// A cancelled execution stops its execution-context heartbeat while the
-	// worker still owns bounded cleanup and evidence-delivery work. Finalizing
-	// is likewise live work, not a lost worker. Neither heartbeats nor repeated
-	// stage requests extend these fixed windows indefinitely.
-	finishing := a.cancellingSince
-	if !a.finalizingSince.IsZero() && (finishing.IsZero() || a.finalizingSince.Before(finishing)) {
-		finishing = a.finalizingSince
-	}
-	if !finishing.IsZero() {
-		window := c.options.CleanupTimeout + c.options.DeliveryTimeout + c.options.HeartbeatTimeout
-		if job.Request.Kind == model.IOSArchive {
-			// The worker builds, seals and exports the archive evidence in
-			// its own window after the job has stopped.
-			window += worker.ArchiveEvidenceTimeout
-		}
-		if now.Sub(finishing) <= window {
-			c.mu.Unlock()
-			return
-		}
-	} else if now.Sub(a.heartbeat) <= c.options.HeartbeatTimeout {
+	if c.alive(a, job, now) {
 		c.mu.Unlock()
 		return
 	}
@@ -486,6 +472,37 @@ func (c *Controller) checkExecution(ctx context.Context, a *execution, now time.
 	a.cancel()
 	c.mu.Unlock()
 	_ = c.removeSource(job.ID)
+}
+
+// alive reports whether a's delivered lease is within its windows. A held
+// completion waits for the worker's idle check, which runs once no other
+// unheld execution is active: it lives on heartbeats while another is, then
+// for the idle check and its delivery. A cancelled execution stops its
+// execution-context heartbeat while the worker still owns bounded cleanup
+// and evidence-delivery work. Finalizing is likewise live work, not a lost
+// worker. Neither heartbeats nor repeated stage requests extend these fixed
+// windows indefinitely. Callers hold c.mu.
+func (c *Controller) alive(a *execution, job model.Job, now time.Time) bool {
+	window := c.options.CleanupTimeout + c.options.DeliveryTimeout + c.options.HeartbeatTimeout
+	if !a.heldAt.IsZero() {
+		if a.idleSince.IsZero() && !slices.ContainsFunc(c.active, func(b *execution) bool { return b != a && b.heldAt.IsZero() }) {
+			a.idleSince = now
+		}
+		return now.Sub(a.heartbeat) <= c.options.HeartbeatTimeout && (a.idleSince.IsZero() || now.Sub(a.idleSince) <= window)
+	}
+	finishing := a.cancellingSince
+	if !a.finalizingSince.IsZero() && (finishing.IsZero() || a.finalizingSince.Before(finishing)) {
+		finishing = a.finalizingSince
+	}
+	if finishing.IsZero() {
+		return now.Sub(a.heartbeat) <= c.options.HeartbeatTimeout
+	}
+	if job.Request.Kind == model.IOSArchive {
+		// The worker builds, seals and exports the archive evidence in
+		// its own window after the job has stopped.
+		window += worker.ArchiveEvidenceTimeout
+	}
+	return now.Sub(finishing) <= window
 }
 
 // sweep removes only ID-addressed private exports, then prunes their metadata.

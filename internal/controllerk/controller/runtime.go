@@ -32,6 +32,19 @@ type execution struct {
 	fencing bool
 	// readyAt is when the source became ready for delivery.
 	readyAt time.Time
+	// heldAt is when the worker held the completion for its idle check
+	// (protocol.Stage Held); idleSince is when no other unheld execution
+	// was active any more, so the idle check could run.
+	heldAt, idleSince time.Time
+}
+
+// judgedAt is when a's deadline is judged: when its completion was held, a
+// wait that is not part of the job's execution, or else now.
+func (a *execution) judgedAt(now time.Time) time.Time {
+	if !a.heldAt.IsZero() {
+		return a.heldAt
+	}
+	return now
 }
 
 // execution returns the active execution of job id, or nil. Callers hold c.mu.

@@ -190,12 +190,13 @@ func TestLanesRunTwoJobsWithPerJobCleanup(t *testing.T) {
 	}
 }
 
-// An unattributed process left when a job ends beside another is none of
-// that job's lineage: the job's own result stands (Studio v0.1.47,
-// 2026-11-12: a passing unit_test failed for Problem Reporter and
-// SetStoreUpdateService, both launchd's), its verdict is deferred with the
-// residue recorded, and the engine drains: no new job starts. The sibling
-// finishes; Recover, at idle, runs the full quiesce and admits again.
+// An unattributed process left when a job ends beside another may be the
+// job's own (attribution is not complete): the engine records it, gives the
+// deferred verdict with the job's own cleanup result (the client holds the
+// completion until the idle check, see workerclient), and drains: no new job
+// starts. The sibling finishes; Recover, at idle, runs the full quiesce and
+// admits again (Studio v0.1.47, 2026-11-12: a passing unit_test failed for
+// launchd's Problem Reporter and SetStoreUpdateService beside the other lane).
 func TestLaneResidueDrainsUntilIdleQuiesce(t *testing.T) {
 	runner := newLaneFake()
 	engine := laneEngine(t, runner, 2)

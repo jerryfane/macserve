@@ -52,6 +52,9 @@ type Client struct {
 	epoch   string
 	sealKey ed25519.PrivateKey
 	checks  Checks
+	// holds receives the lanes whose completion waits for the idle check
+	// (see Run); nil outside Run, where no completion is held.
+	holds chan laneHold
 }
 
 var ErrPeerIdentity = errors.New("controller Unix peer UID mismatch")
@@ -211,6 +214,21 @@ type laneDone struct {
 	err       error
 }
 
+// laneHold is a lane whose job ended beside other jobs with unattributed
+// job-account processes (idle verdict deferred): its completion waits for
+// verdict, the result of the next idle Recover.
+type laneHold struct {
+	jobID   string
+	verdict chan error
+}
+
+// heldForIdle reports whether result is a completion held for the idle
+// check: the job's own cleanup succeeded, but unattributed processes
+// remained beside other jobs, and they may be the job's own.
+func heldForIdle(result worker.Result) bool {
+	return result.CleanupOK && result.Concurrency != nil && result.Concurrency.IdleVerdict == worker.IdleDeferred
+}
+
 // Run never executes a new lease while a saved completion from before it
 // started is awaiting durable acknowledgement. Losing heartbeat or evidence
 // delivery cancels local work.
@@ -220,6 +238,12 @@ type laneDone struct {
 // A lease whose cleanup was not verified fences its epoch at the controller;
 // the client then drains: it asks for no lease, lets the other lanes finish,
 // and registers a new epoch only after Recover verifies the idle account.
+// A job that ended beside others with unattributed job-account processes
+// left is held: its completion waits for the next idle Recover, the full
+// quiesce and admission, and is delivered then with that verdict (clean, or
+// its cleanup unverified). No lease is asked for while one is held; the
+// held lane leaves running, so Recover runs once the others have finished,
+// also when Run returns.
 // An engine drain (an unattributed job-account process while jobs run) only
 // stops new lanes: nothing was fenced, so the epoch is kept, and a lease the
 // controller already prepared for it is delivered after the idle Recover.
@@ -243,20 +267,56 @@ func (c *Client) Run(ctx context.Context) (returned error) {
 	lanes := c.config.Lanes()
 	running := map[string]bool{}
 	done := make(chan laneDone, lanes)
+	c.holds = make(chan laneHold, lanes)
+	held := map[string]chan error{}
+	// delivering are released held lanes until they finish.
+	delivering := map[string]bool{}
 	var wg sync.WaitGroup
-	// Lanes finish, deliver and clean up under their own bounded contexts
-	// after ctx ends; Run returns only after every lane has.
-	defer wg.Wait()
 	var fatal error
 	registered, draining := false, false
 	// engineDrain: the engine refused a lane until idle (logged once).
 	engineDrain := false
 	finished := func(d laneDone) {
 		delete(running, d.jobID)
+		delete(delivering, d.jobID)
 		fatal = errors.Join(fatal, d.err)
 		draining = draining || !d.cleanupOK
 	}
-	// pause waits one poll interval, returning early when a lane finishes.
+	hold := func(h laneHold) {
+		delete(running, h.jobID)
+		held[h.jobID] = h.verdict
+	}
+	// release hands the idle verdict to every held lane, which then
+	// delivers its completion.
+	release := func(verdict error) {
+		for id, ch := range held {
+			ch <- verdict
+			delivering[id] = true
+		}
+		clear(held)
+	}
+	// Lanes finish, deliver and clean up under their own bounded contexts
+	// after ctx ends; Run returns only after every lane has. A held lane
+	// gets its verdict from a Recover under its own bound once the other
+	// lanes have finished.
+	defer func() {
+		for len(running) != 0 {
+			select {
+			case d := <-done:
+				finished(d)
+			case h := <-c.holds:
+				hold(h)
+			}
+		}
+		if len(held) != 0 {
+			recoverCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			release(c.engine.Recover(recoverCtx))
+			cancel()
+		}
+		wg.Wait()
+	}()
+	// pause waits one poll interval, returning early when a lane finishes
+	// or is held.
 	pause := func() error {
 		timer := time.NewTimer(time.Duration(c.config.PollSeconds) * time.Second)
 		defer timer.Stop()
@@ -265,6 +325,8 @@ func (c *Client) Run(ctx context.Context) (returned error) {
 			return ctx.Err()
 		case d := <-done:
 			finished(d)
+		case h := <-c.holds:
+			hold(h)
 		case <-timer.C:
 		}
 		return nil
@@ -274,6 +336,8 @@ func (c *Client) Run(ctx context.Context) (returned error) {
 			select {
 			case d := <-done:
 				finished(d)
+			case h := <-c.holds:
+				hold(h)
 			default:
 				collected = true
 			}
@@ -295,6 +359,10 @@ func (c *Client) Run(ctx context.Context) (returned error) {
 				registered, draining = false, false
 			}
 			admissionErr := c.engine.Recover(ctx)
+			if len(held) != 0 && ctx.Err() == nil {
+				// The idle check every held completion waited for.
+				release(admissionErr)
+			}
 			statusErr := c.saveAdmissionStatus(admissionErr)
 			if err := errors.Join(admissionErr, statusErr); err != nil {
 				if ctx.Err() != nil {
@@ -309,7 +377,9 @@ func (c *Client) Run(ctx context.Context) (returned error) {
 			}
 			engineDrain = false
 		}
-		if draining || len(running) == lanes {
+		// No lease while a completion is held for, or still delivers
+		// after, the idle check.
+		if draining || len(held) != 0 || len(delivering) != 0 || len(running) == lanes {
 			if err := pause(); err != nil {
 				return err
 			}
@@ -450,7 +520,8 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 			}
 		}
 	}()
-	defer func() { close(stopHeartbeat); <-heartbeatDone }()
+	stopBeat := sync.OnceFunc(func() { close(stopHeartbeat); <-heartbeatDone })
+	defer stopBeat()
 	sink := &remoteSink{client: c, ctx: ctx, epoch: epoch, jobID: lease.Job.ID, lease: lease.Token, cancel: cancel}
 	result := worker.Result{State: model.Failed, Reason: "source transfer failed", Source: lease.Source, StartedAt: time.Now().UTC()}
 	executed := false
@@ -472,6 +543,30 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 				}
 				resp.Body.Close()
 			}
+		}
+	}
+	// The cause of an early end is judged when the job's execution ended: a
+	// held completion's wait for the idle check is not part of its
+	// execution, so neither its deadline nor a cancellation during the hold
+	// changes its result.
+	held, heldCause := false, error(nil)
+	if executed && c.holds != nil && heldForIdle(result) {
+		held, heldCause = true, context.Cause(ctx)
+		stopBeat()
+		stopHold := c.holdHeartbeat(lease, epoch)
+		defer stopHold()
+		verdict := make(chan error, 1)
+		c.holds <- laneHold{jobID: lease.Job.ID, verdict: verdict}
+		if err := <-verdict; err != nil {
+			log.Printf("worker job %s idle check after its unattributed residue failed: %v", lease.Job.ID, err)
+			result.CleanupOK = false
+			reason := "idle check of unattributed job-account processes failed: " + worker.PublicReason(err)
+			if result.Reason != "" {
+				reason = result.Reason + "; " + reason
+			}
+			result.Reason = reason
+		} else {
+			result.Concurrency.IdleVerdict = worker.IdleClean
 		}
 	}
 	if !executed {
@@ -497,7 +592,11 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 	if result.FinishedAt.IsZero() {
 		result.FinishedAt = time.Now().UTC()
 	}
-	if cause := context.Cause(ctx); cause != nil {
+	cause := context.Cause(ctx)
+	if held {
+		cause = heldCause
+	}
+	if cause != nil {
 		if errors.Is(cause, context.DeadlineExceeded) {
 			result.State = model.TimedOut
 		} else {
@@ -531,6 +630,39 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 		log.Printf("worker job %s cleanup unverified; retrying recovery after poll", lease.Job.ID)
 	}
 	return result.CleanupOK, nil
+}
+
+// holdHeartbeat reports a held completion to the controller and keeps its
+// lease alive until the returned stop is called: through the wait for the
+// idle check and the delivery after it, past the job's deadline (the
+// controller does not apply it to a held completion). A failed request is
+// logged; the hold itself ends only with the idle check.
+func (c *Client) holdHeartbeat(lease protocol.Lease, epoch string) (stop func()) {
+	ctx, cancel := context.WithCancel(context.Background())
+	path := "/jobs/" + lease.Job.ID
+	if _, err := c.json(ctx, http.MethodPost, path+"/stage", epoch, lease.Token, protocol.Stage{State: model.Finalizing, Held: true}, nil); err != nil {
+		log.Printf("worker job %s held completion not recorded by the controller: %v", lease.Job.ID, err)
+	} else {
+		log.Printf("worker job %s completion held for the idle check", lease.Job.ID)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(time.Duration(c.config.HeartbeatSeconds) * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				var pulse protocol.Heartbeat
+				if _, err := c.json(ctx, http.MethodPost, path+"/heartbeat", epoch, lease.Token, struct{}{}, &pulse); err != nil && ctx.Err() == nil {
+					log.Printf("worker job %s held completion heartbeat: %v", lease.Job.ID, err)
+				}
+			}
+		}
+	}()
+	return func() { cancel(); <-done }
 }
 
 type remoteSink struct {
