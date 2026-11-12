@@ -190,10 +190,13 @@ func TestLanesRunTwoJobsWithPerJobCleanup(t *testing.T) {
 	}
 }
 
-// An unattributed process left when a job ends beside another leaves that
-// job's cleanup unverified (deferred) and drains the engine: no new job
+// An unattributed process left when a job ends beside another may be the
+// job's own (attribution is not complete): the engine records it, gives the
+// deferred verdict with the job's own cleanup result (the client holds the
+// completion until the idle check, see workerclient), and drains: no new job
 // starts. The sibling finishes; Recover, at idle, runs the full quiesce and
-// admits again.
+// admits again (Studio v0.1.47, 2026-11-12: a passing unit_test failed for
+// launchd's Problem Reporter and SetStoreUpdateService beside the other lane).
 func TestLaneResidueDrainsUntilIdleQuiesce(t *testing.T) {
 	runner := newLaneFake()
 	engine := laneEngine(t, runner, 2)
@@ -208,8 +211,8 @@ func TestLaneResidueDrainsUntilIdleQuiesce(t *testing.T) {
 	runner.mu.Unlock()
 	close(gateA)
 	first := <-a
-	if first.result.CleanupOK || first.result.State != model.Failed || first.result.Concurrency.IdleVerdict != IdleDeferred || first.result.Concurrency.UnattributedResidue != 1 || !strings.Contains(first.result.Reason, "unattributed") {
-		t.Fatalf("residue not deferred: %+v", first.result)
+	if first.err != nil || !first.result.CleanupOK || first.result.State != model.Succeeded || first.result.Reason != "" || first.result.Concurrency.IdleVerdict != IdleDeferred || first.result.Concurrency.UnattributedResidue != 1 {
+		t.Fatalf("residue beside a sibling failed the job: %+v %v", first.result, first.err)
 	}
 	if err := engine.LaneReady(context.Background()); !errors.Is(err, ErrDrain) {
 		t.Fatalf("draining engine ready: %v", err)

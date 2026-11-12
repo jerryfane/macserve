@@ -323,7 +323,17 @@ unattributed process refuses the start and *drains* the broker. A job whose fina
 runs ends with the unchanged full quiesce and admission (idle verdict `clean`); no other job starts until it ends. A
 job finishing beside others deletes only its own simulator and quiesces only its labelled processes (SIGTERM, SIGKILL,
 survivor = contamination and quarantine, as before), never a shared service or a sibling's process; any unattributed process still running in a
-second census 1 s later (short-lived build helpers such as SwiftPM's `git` are not counted) makes its `cleanup_ok` false (idle verdict `deferred`, the job fails) and drains the broker. While
+second census 1 s later (short-lived build helpers such as SwiftPM's `git` are not counted) drains the broker and
+*holds* the job's completion. Attribution is not complete (a child reparented before it was labelled, or whose
+lineage could not be read, is unattributed), so such a process may be the job's own, and only the idle check can tell.
+The worker reports the hold to the controller (stage `finalizing`, `held`), keeps the lease alive by heartbeat, asks for
+no lease, and delivers the completion after the next idle `Recover`: with its own result and idle verdict `clean` when
+that full quiesce and admission pass (the residue count stays recorded), else with `cleanup_ok` false (the job fails,
+and a survivor quarantines the account). A worker that stops while a completion is held still waits for the other
+lanes and runs that `Recover` first. The controller claims nothing while a completion is held and keeps it on its
+heartbeats while another unheld lease is active, then for the idle check and delivery
+(cleanup + delivery + heartbeat windows); a held job's deadline is judged when it was held, so the wait never times it
+out. A lost heartbeat (a worker restart) ends it as for any lease: interrupted, quiescence required. While
 draining, the broker claims nothing, lets running jobs finish, and the next idle `Recover` runs the full quiesce and
 admission: contamination quarantines exactly as with one job, a clean account resumes intake. Only a completion with
 `cleanup_ok=false` fences the epoch, so only it makes the worker register a new one; an unattributed process seen beside

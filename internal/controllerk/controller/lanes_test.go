@@ -18,6 +18,7 @@ import (
 	"github.com/jerryfane/macserve/internal/health"
 	"github.com/jerryfane/macserve/internal/model"
 	"github.com/jerryfane/macserve/internal/protocol"
+	"github.com/jerryfane/macserve/internal/worker"
 )
 
 // laneFixture is a runtime whose controller runs lanes jobs at once behind a
@@ -517,5 +518,117 @@ func TestUndeliveredLeaseReturnsToQueueWhileWorkerDrains(t *testing.T) {
 	f.controller.checkActive(context.Background())
 	if job := f.job(t, later.ID); job.State != model.Preparing {
 		t.Fatalf("lone lease requeued: %s", job.State)
+	}
+}
+
+// pulse sends lease's heartbeat and returns the controller's reply.
+func pulse(t *testing.T, c *Controller, lease protocol.Lease) protocol.Heartbeat {
+	t.Helper()
+	r := httptest.NewRequest(http.MethodPost, protocol.Prefix+"/jobs/"+lease.Job.ID+"/heartbeat", bytes.NewReader([]byte("{}")))
+	r = r.WithContext(context.WithValue(r.Context(), peerKey{}, true))
+	r.Header.Set(protocol.EpochHeader, lease.Job.WorkerEpoch)
+	r.Header.Set(protocol.LeaseHeader, lease.Token)
+	w := httptest.NewRecorder()
+	c.handler().ServeHTTP(w, r)
+	var value protocol.Heartbeat
+	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &value) != nil {
+		t.Fatalf("heartbeat %d %s", w.Code, w.Body.Bytes())
+	}
+	return value
+}
+
+// A completion the worker holds for its idle check (unattributed residue
+// remained beside a sibling) lives on heartbeats past the finalizing window
+// and past the job's deadline, which is judged when it was held; nothing is
+// claimed beside it; once the sibling has ended it completes with its
+// result.
+func TestHeldCompletionWaitsForIdleCheck(t *testing.T) {
+	f := newLanes(t, 2)
+	admission := runtimeAdmission(model.Build)
+	admission.Request.TimeoutSeconds = 60
+	if _, _, err := f.db.Enqueue(context.Background(), "owner", "one", admission, f.now); err != nil {
+		t.Fatal(err)
+	}
+	f.enqueue(t, "two", model.Build)
+	waiting := f.enqueue(t, "three", model.Build)
+	f.register(t, "epoch-a", 2)
+	first := f.start(t, "epoch-a")
+	second := f.start(t, "epoch-a", first.Job.ID)
+	if code := lifecycleRequest(t, f.controller, first, "/stage", protocol.Stage{State: model.Running, Held: true}); code != http.StatusConflict {
+		t.Fatalf("held running stage: %d", code)
+	}
+	if code := lifecycleRequest(t, f.controller, first, "/stage", protocol.Stage{State: model.Finalizing, Held: true}); code != http.StatusNoContent {
+		t.Fatalf("held stage: %d", code)
+	}
+	// The sibling runs past the held job's deadline and finalizing window.
+	o := f.controller.options
+	end := first.Job.Deadline.Sub(f.now) + o.CleanupTimeout + o.DeliveryTimeout + o.HeartbeatTimeout + time.Minute
+	if end >= second.Job.Deadline.Sub(f.now) {
+		t.Fatalf("sibling deadline %s within the hold %s", second.Job.Deadline.Sub(f.now), end)
+	}
+	for at := time.Duration(0); at <= end; at += 20 * time.Second {
+		f.offset.Store(int64(at))
+		if p := pulse(t, f.controller, first); p.Cancel {
+			t.Fatalf("held completion told to cancel at +%s", at)
+		}
+		pulse(t, f.controller, second)
+		f.controller.checkActive(context.Background())
+	}
+	if job := f.job(t, first.Job.ID); job.State != model.Finalizing || job.CancelRequested {
+		t.Fatalf("held completion: %s cancel=%t", job.State, job.CancelRequested)
+	}
+	if err := f.controller.complete(context.Background(), second.Job, f.result(t, second), buildseal.Envelope{}); err != nil {
+		t.Fatal(err)
+	}
+	if lease, err := f.controller.next(context.Background(), "epoch-a", []string{first.Job.ID}); lease != nil || err != nil {
+		t.Fatalf("claimed beside a held completion: %v %v", lease, err)
+	}
+	f.controller.prep.Wait()
+	if job := f.job(t, waiting.ID); job.State != model.Queued {
+		t.Fatalf("claimed beside a held completion: %s", job.State)
+	}
+	if err := f.controller.complete(context.Background(), first.Job, f.result(t, first), buildseal.Envelope{}); err != nil {
+		t.Fatal(err)
+	}
+	if job := f.job(t, first.Job.ID); job.State != model.Succeeded || !job.CleanupOK {
+		t.Fatalf("held completion after its deadline: %s %q", job.State, job.Reason)
+	}
+}
+
+// A held completion whose worker stops (a restart) ends once its heartbeat
+// is lost, quiescence required, and the worker's next epoch registers; one
+// still held after the idle check's window ends likewise.
+func TestHeldCompletionEndsWithoutWorker(t *testing.T) {
+	for name, heartbeats := range map[string]bool{"worker restart": false, "hold past idle window": true} {
+		t.Run(name, func(t *testing.T) {
+			f := newLanes(t, 2)
+			f.enqueue(t, "one", model.Build)
+			f.register(t, "epoch-a", 2)
+			lease := f.start(t, "epoch-a")
+			if code := lifecycleRequest(t, f.controller, lease, "/stage", protocol.Stage{State: model.Finalizing, Held: true}); code != http.StatusNoContent {
+				t.Fatalf("held stage: %d", code)
+			}
+			o := f.controller.options
+			limit := o.HeartbeatTimeout + time.Second
+			if heartbeats {
+				limit = o.CleanupTimeout + o.DeliveryTimeout + o.HeartbeatTimeout + time.Minute
+			}
+			for at := time.Duration(0); at <= limit; at += 10 * time.Second {
+				f.offset.Store(int64(at))
+				if heartbeats {
+					lifecycleRequest(t, f.controller, lease, "/heartbeat", struct{}{})
+				}
+				f.controller.checkActive(context.Background())
+			}
+			f.offset.Store(int64(limit))
+			f.controller.checkActive(context.Background())
+			if job := f.job(t, lease.Job.ID); job.State != model.Interrupted || job.CleanupOK || job.Reason != "worker heartbeat lost; quiescence required" {
+				t.Fatalf("held completion without its idle check: %s %q", job.State, job.Reason)
+			}
+			if err := f.controller.complete(context.Background(), lease.Job, worker.Result{State: model.Succeeded, CleanupOK: true}, buildseal.Envelope{}); !errors.Is(err, store.ErrLease) {
+				t.Fatalf("late completion of an ended hold: %v", err)
+			}
+			f.register(t, "epoch-b", 2)
+		})
 	}
 }
