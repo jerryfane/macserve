@@ -22,8 +22,8 @@ import (
 // shutdown; no failure path extends the lifetime of a successful observation.
 // A probe that failed without evidence (keepLastValid) is not a finding
 // (#53): the last valid health is republished unchanged with the count of
-// such probes in a row, which blocks admission and, from
-// health.ProbeFailureLimit, cancels active work, until that health expires.
+// such probes in a row, which blocks admission until that health expires;
+// only its expiry (or a finding) cancels active work.
 // The facts a probe may take from an earlier observation are the byte census
 // and the GUI-baseline check, which run in the background and may be up to
 // censusMaxAge and guiBaselineMaxAge old (tracker); every other fact is
@@ -129,7 +129,7 @@ type probeRecord struct {
 // err at now. A valid probe publishes h and restarts the count. A probe that
 // failed without evidence after valid health counts one more failure and
 // republishes that health, still valid but with the count (the gate blocks
-// admission, and cancels from health.ProbeFailureLimit), or once it has
+// admission only; its expiry cancels active work), or once it has
 // expired publishes invalid h with the count. Any other failure is a finding:
 // it publishes invalid h and forgets the last valid health, so the next
 // failure of any kind cannot keep it either.

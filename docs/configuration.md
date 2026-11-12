@@ -160,11 +160,13 @@ not migration. Merely creating a profile does not qualify it. Installation and a
 boundary qualification remain separate provisioning work.
 
 A maintenance probe that *failed without evidence* is not a finding
-([#53](https://github.com/jerryfane/macserve/issues/53)): it blocks admission at once and cancels active work only
-from the third such probe in a row. Maintenance counts these probes since the last valid health and, while that
+([#53](https://github.com/jerryfane/macserve/issues/53)): it blocks admission at once and never cancels active work
+while the last valid health is in force. Maintenance counts these probes since the last valid health and, while that
 health is unexpired, republishes it unchanged (same `checked_at`, `expires_at` and facts) with `probe_failures`
-set to the count; the gate then reports `maintenance_probe_failed`, which cancels from `probe_failures` 3. After the
-last valid health expires a failed probe publishes invalid health (which cancels) with the count. A valid probe
+set to the count; the gate then reports `maintenance_probe_failed`, which blocks admission only. After the last valid
+health expires (40 s after its check) a failed probe publishes invalid health (which cancels) with the count. Two lanes
+booting simulators made three probes in a row time out while the last valid health had 9 s left and the next probe
+passed; cancelling from the third, as v0.1.46 and v0.1.47 did, ended both jobs for nothing. A valid probe
 resets the count; a finding resets it too and forgets the last valid health, so it cancels at once and no later
 failure can keep that health. Failures without evidence are a closed list, and anything else is a finding:
 the probe's deadline or a deadline inside it (`context deadline exceeded`, including a protected-input ACL

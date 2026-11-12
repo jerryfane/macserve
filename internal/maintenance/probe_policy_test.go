@@ -86,10 +86,13 @@ func TestTwoFailedProbesBlockAdmissionWithoutCancelling(t *testing.T) {
 	}
 }
 
-// The third probe in a row that failed without evidence cancels active work
-// (health.ProbeFailureLimit), before the last valid health expires; once it
-// has expired the next one publishes invalid health with the count.
-func TestThirdFailedProbeCancels(t *testing.T) {
+// Probes that fail without evidence block admission and keep active work
+// while the last valid health is in force, however many in a row; once it
+// has expired the next one publishes invalid health with the count, which
+// cancels. Studio v0.1.47, 2026-11-12: valid health 12:27:46, failed probes
+// 12:27:58, 12:28:07, 12:28:17 (the third cancelled both lanes), a valid
+// probe again 12:28:26 before expiry.
+func TestFailedProbesCancelOnlyAtExpiry(t *testing.T) {
 	gates := replayPublications(t, []probeStep{
 		{0, 3 * time.Second, nil},
 		{10 * time.Second, 8 * time.Second, probeDeadline},
@@ -100,8 +103,8 @@ func TestThirdFailedProbeCancels(t *testing.T) {
 	if g := gates[2]; g.cancel || g.failures != 2 {
 		t.Fatalf("second failed probe: %+v", g)
 	}
-	if g := gates[3]; !g.cancel || g.failures != 3 || strings.Join(g.blockers, ",") != "maintenance_probe_failed" {
-		t.Fatalf("third failed probe: %+v", g)
+	if g := gates[3]; g.cancel || g.failures != 3 || strings.Join(g.blockers, ",") != "maintenance_probe_failed" {
+		t.Fatalf("third failed probe before expiry: %+v", g)
 	}
 	if g := gates[4]; !g.cancel || g.failures != 4 || g.blockers[0] != "isolation_unavailable" {
 		t.Fatalf("failed probe after expiry: %+v", g)

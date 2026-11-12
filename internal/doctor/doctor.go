@@ -763,7 +763,7 @@ func (s *state) healthChecks() {
 	var text []string
 	for _, b := range blockers {
 		if b == "maintenance_probe_failed" {
-			text = append(text, fmt.Sprintf("%d maintenance probes in a row failed without evidence (active jobs are cancelled from %d)", h.ProbeFailures, health.ProbeFailureLimit))
+			text = append(text, fmt.Sprintf("%d maintenance probes in a row failed without evidence (active jobs are cancelled only when the last valid health expires)", h.ProbeFailures))
 			continue
 		}
 		text = append(text, blockerText[b])
