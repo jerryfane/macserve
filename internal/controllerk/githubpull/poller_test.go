@@ -586,7 +586,7 @@ func TestHTTPObsoleteForkHistoryDoesNotDriveFullPollPublication(t *testing.T) {
 	for i := 1; i <= 200; i++ {
 		pull := f.remote.pull
 		pull.HeadSHA = fmt.Sprintf("%040x", i)
-		input, err := f.p.admission(f.options.Policies[0], pull, testProfile)
+		input, err := f.p.admission(f.options.Policies[0], pull, testProfile, "")
 		if err != nil {
 			t.Fatal(err)
 		}

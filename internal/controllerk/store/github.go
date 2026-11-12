@@ -12,13 +12,14 @@ import (
 )
 
 // GitHubRun is the durable logical requirement. Attempts and request mappings
-// remain immutable when the current attempt changes.
+// remain immutable when the current attempt changes. Shard is a policy matrix
+// entry's shard, part of the run's check name; empty for every other run.
 type GitHubRun struct {
-	Key, Repository, SHA, Profile, JobID, AttemptID, Blocked string
-	RepositoryID                                             int64
-	PolicyRevision                                           int
-	CheckID                                                  int64
-	PullRequests                                             []int
+	Key, Repository, SHA, Profile, Shard, JobID, AttemptID, Blocked string
+	RepositoryID                                                    int64
+	PolicyRevision                                                  int
+	CheckID                                                         int64
+	PullRequests                                                    []int
 }
 
 type GitHubRequest struct {
@@ -103,6 +104,16 @@ func (s *Store) InitializeGitHub(ctx context.Context) error {
 	if _, err = tx.ExecContext(ctx, githubSchema); err != nil {
 		return err
 	}
+	// Runs admitted before policy matrices have no shard.
+	var sharded bool
+	if err = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM pragma_table_info('github_runs') WHERE name='shard')").Scan(&sharded); err != nil {
+		return err
+	}
+	if !sharded {
+		if _, err = tx.ExecContext(ctx, "ALTER TABLE github_runs ADD COLUMN shard TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
 }
 
@@ -158,11 +169,11 @@ BEGIN
 END;
 `
 
-const githubRunColumns = "run_key,repository_id,repository,sha,profile,policy_revision,current_job,attempt_id,check_id,blocked"
+const githubRunColumns = "run_key,repository_id,repository,sha,profile,shard,policy_revision,current_job,attempt_id,check_id,blocked"
 
 func scanGitHubRun(row scanner) (GitHubRun, error) {
 	var run GitHubRun
-	err := row.Scan(&run.Key, &run.RepositoryID, &run.Repository, &run.SHA, &run.Profile, &run.PolicyRevision, &run.JobID, &run.AttemptID, &run.CheckID, &run.Blocked)
+	err := row.Scan(&run.Key, &run.RepositoryID, &run.Repository, &run.SHA, &run.Profile, &run.Shard, &run.PolicyRevision, &run.JobID, &run.AttemptID, &run.CheckID, &run.Blocked)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = ErrNotFound
 	}
@@ -178,7 +189,7 @@ func githubDirty(ctx context.Context, tx *sql.Tx, key string) error {
 // transaction as Enqueue. A worker can never see an unlinked GitHub job.
 func (s *Store) AdmitGitHub(ctx context.Context, input GitHubAdmission, now time.Time) (GitHubRun, error) {
 	r := input.Run
-	if !validOpaque(r.Key, 256) || r.RepositoryID <= 0 || r.PolicyRevision <= 0 || input.PullRequest <= 0 || !validTime(now) || (input.Mode != "ensure" && input.Mode != "rerun") || r.Repository != input.Admission.Request.Repo || r.SHA != input.Admission.Request.SHA || r.Profile != input.Admission.Request.Profile {
+	if !validOpaque(r.Key, 256) || r.RepositoryID <= 0 || r.PolicyRevision <= 0 || input.PullRequest <= 0 || !validTime(now) || (input.Mode != "ensure" && input.Mode != "rerun") || r.Repository != input.Admission.Request.Repo || r.SHA != input.Admission.Request.SHA || r.Profile != input.Admission.Request.Profile || r.Shard != input.Admission.Request.Shard {
 		return GitHubRun{}, ErrInvalid
 	}
 	if q := input.Request; q != nil && (q.CommentID <= 0 || !validOpaque(q.RequestID, 128) || len(q.BodySHA256) != 64) {
@@ -273,7 +284,7 @@ func (s *Store) AdmitGitHub(ctx context.Context, input GitHubAdmission, now time
 	}
 	dirty := create || r.Blocked != "" || input.Request != nil
 	if !found {
-		_, err = tx.ExecContext(ctx, "INSERT INTO github_runs(run_key,repository_id,repository,sha,profile,policy_revision) VALUES(?,?,?,?,?,?)", r.Key, r.RepositoryID, r.Repository, r.SHA, r.Profile, r.PolicyRevision)
+		_, err = tx.ExecContext(ctx, "INSERT INTO github_runs(run_key,repository_id,repository,sha,profile,shard,policy_revision) VALUES(?,?,?,?,?,?,?)", r.Key, r.RepositoryID, r.Repository, r.SHA, r.Profile, r.Shard, r.PolicyRevision)
 		if err != nil {
 			return GitHubRun{}, err
 		}
@@ -320,6 +331,11 @@ func (s *Store) AdmitGitHub(ctx context.Context, input GitHubAdmission, now time
 	return r, nil
 }
 
+// GitHubRun returns the run of key, ErrNotFound when none was recorded.
+func (s *Store) GitHubRun(ctx context.Context, key string) (GitHubRun, error) {
+	return scanGitHubRun(s.db.QueryRowContext(ctx, "SELECT "+githubRunColumns+" FROM github_runs WHERE run_key=?", key))
+}
+
 func (s *Store) GitHubByJob(ctx context.Context, jobID string) (GitHubRun, error) {
 	run, err := scanGitHubRun(s.db.QueryRowContext(ctx, "SELECT "+githubRunColumns+" FROM github_runs WHERE run_key=(SELECT run_key FROM github_attempts WHERE job_id=?)", jobID))
 	if err != nil {
@@ -351,17 +367,17 @@ func (s *Store) GitHubPulls(ctx context.Context, key string) ([]int, error) {
 	return result, rows.Err()
 }
 
-// GitHubRunsByHead returns the runs of one head and profile, with their pull
-// requests, in the repository named by ID, by name, or by both (0 and ""
-// leave that one open). Several runs exist only when the policy revision,
-// pins or repository identity changed; the caller selects the one its
-// current policy admits.
-func (s *Store) GitHubRunsByHead(ctx context.Context, repositoryID int64, repository, sha, profile string) ([]GitHubRun, error) {
-	if repositoryID < 0 || repositoryID == 0 && repository == "" || !validSHA(sha) || !validOpaque(profile, 256) {
+// GitHubRunsByHead returns the runs of one head, profile and shard ("" for a
+// run of no policy matrix entry), with their pull requests, in the repository
+// named by ID, by name, or by both (0 and "" leave that one open). Several
+// runs exist only when the policy revision, pins or repository identity
+// changed; the caller selects the one its current policy admits.
+func (s *Store) GitHubRunsByHead(ctx context.Context, repositoryID int64, repository, sha, profile, shard string) ([]GitHubRun, error) {
+	if repositoryID < 0 || repositoryID == 0 && repository == "" || !validSHA(sha) || !validOpaque(profile, 256) || shard != "" && !validOpaque(shard, 32) {
 		return nil, ErrInvalid
 	}
-	rows, err := s.db.QueryContext(ctx, "SELECT "+githubRunColumns+" FROM github_runs WHERE (?=0 OR repository_id=?) AND (?='' OR repository=?) AND sha=? AND profile=? ORDER BY run_key",
-		repositoryID, repositoryID, repository, repository, sha, profile)
+	rows, err := s.db.QueryContext(ctx, "SELECT "+githubRunColumns+" FROM github_runs WHERE (?=0 OR repository_id=?) AND (?='' OR repository=?) AND sha=? AND profile=? AND shard=? ORDER BY run_key",
+		repositoryID, repositoryID, repository, repository, sha, profile, shard)
 	if err != nil {
 		return nil, err
 	}
@@ -465,7 +481,7 @@ func (s *Store) GitHubRequests(ctx context.Context, jobID string) ([]GitHubReque
 // BlockGitHub records a non-success requirement without ever admitting code.
 // Existing active work is cancelled atomically with the publication request.
 func (s *Store) BlockGitHub(ctx context.Context, r GitHubRun, reason string, now time.Time) error {
-	if !validOpaque(r.Key, 256) || r.RepositoryID <= 0 || !controllerconfig.ValidRepository(r.Repository) || !validSHA(r.SHA) || !validOpaque(r.Profile, 256) || r.PolicyRevision <= 0 || !validReason(reason) || reason == "" || !validTime(now) {
+	if !validOpaque(r.Key, 256) || r.RepositoryID <= 0 || !controllerconfig.ValidRepository(r.Repository) || !validSHA(r.SHA) || !validOpaque(r.Profile, 256) || r.Shard != "" && !validOpaque(r.Shard, 32) || r.PolicyRevision <= 0 || !validReason(reason) || reason == "" || !validTime(now) {
 		return ErrInvalid
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -482,7 +498,7 @@ func (s *Store) BlockGitHub(ctx context.Context, r GitHubRun, reason string, now
 	}
 	old, err := scanGitHubRun(tx.QueryRowContext(ctx, "SELECT "+githubRunColumns+" FROM github_runs WHERE run_key=?", r.Key))
 	if errors.Is(err, ErrNotFound) {
-		_, err = tx.ExecContext(ctx, "INSERT INTO github_runs(run_key,repository_id,repository,sha,profile,policy_revision,blocked) VALUES(?,?,?,?,?,?,?)", r.Key, r.RepositoryID, r.Repository, r.SHA, r.Profile, r.PolicyRevision, reason)
+		_, err = tx.ExecContext(ctx, "INSERT INTO github_runs(run_key,repository_id,repository,sha,profile,shard,policy_revision,blocked) VALUES(?,?,?,?,?,?,?,?)", r.Key, r.RepositoryID, r.Repository, r.SHA, r.Profile, r.Shard, r.PolicyRevision, reason)
 	} else if err == nil {
 		if old.Blocked == reason {
 			return nil

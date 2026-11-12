@@ -214,7 +214,7 @@ func TestGitHubRunsByHead(t *testing.T) {
 		id   int64
 		name string
 	}{{123, ""}, {0, input.Run.Repository}, {123, input.Run.Repository}} {
-		runs, err := s.GitHubRunsByHead(ctx, by.id, by.name, input.Run.SHA, input.Run.Profile)
+		runs, err := s.GitHubRunsByHead(ctx, by.id, by.name, input.Run.SHA, input.Run.Profile, "")
 		if err != nil || len(runs) != 1 || runs[0].Key != run.Key || runs[0].JobID != run.JobID || len(runs[0].PullRequests) != 1 || runs[0].PullRequests[0] != 7 {
 			t.Fatalf("by %v: %+v %v", by, runs, err)
 		}
@@ -223,11 +223,11 @@ func TestGitHubRunsByHead(t *testing.T) {
 		id   int64
 		name string
 	}{{124, ""}, {0, "other/repo"}, {123, "other/repo"}} {
-		if runs, err := s.GitHubRunsByHead(ctx, by.id, by.name, input.Run.SHA, input.Run.Profile); err != nil || len(runs) != 0 {
+		if runs, err := s.GitHubRunsByHead(ctx, by.id, by.name, input.Run.SHA, input.Run.Profile, ""); err != nil || len(runs) != 0 {
 			t.Fatalf("by %v: %+v %v", by, runs, err)
 		}
 	}
-	if _, err := s.GitHubRunsByHead(ctx, 0, "", input.Run.SHA, input.Run.Profile); !errors.Is(err, ErrInvalid) {
+	if _, err := s.GitHubRunsByHead(ctx, 0, "", input.Run.SHA, input.Run.Profile, ""); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("unnamed repository: %v", err)
 	}
 }

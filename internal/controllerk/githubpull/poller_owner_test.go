@@ -97,7 +97,7 @@ func (g *orgGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		rest = parts[2]
 	}
 	pullJSON := func(p githubapi.PullRequest) any {
-		return map[string]any{"number": p.Number, "state": p.State, "head": map[string]any{"sha": p.HeadSHA, "repo": map[string]any{"id": p.HeadRepositoryID}}, "user": map[string]any{"id": p.AuthorID}, "base": map[string]any{"ref": p.BaseRef}, "updated_at": g.now.Format(time.RFC3339)}
+		return map[string]any{"number": p.Number, "state": p.State, "draft": p.Draft, "head": map[string]any{"sha": p.HeadSHA, "repo": map[string]any{"id": p.HeadRepositoryID}}, "user": map[string]any{"id": p.AuthorID}, "base": map[string]any{"ref": p.BaseRef}, "updated_at": g.now.Format(time.RFC3339)}
 	}
 	checkJSON := func(c githubapi.Check) any {
 		return map[string]any{"id": c.ID, "name": c.Name, "head_sha": c.HeadSHA, "external_id": c.ExternalID, "status": c.Status, "conclusion": c.Conclusion, "app": map[string]any{"id": c.AppID}, "output": c.Output}
@@ -231,6 +231,12 @@ func ownerPolicy(owner string, id int64) githubwire.Policy {
 
 func newOwnerFixture(t *testing.T, policies ...githubwire.Policy) (*ownerFixture, error) {
 	t.Helper()
+	return newOrgFixture(t, orgTemplates(), policies...)
+}
+
+// newOrgFixture is an org GitHub and a poller over a registry of templates.
+func newOrgFixture(t *testing.T, templates []model.Template, policies ...githubwire.Policy) (*ownerFixture, error) {
+	t.Helper()
 	remote := &orgGitHub{now: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC), repos: make(map[string]githubapi.Repository), listing: make(map[string][]string), pulls: make(map[string][]githubapi.PullRequest), files: make(map[string]string), checks: make(map[int64]githubapi.Check)}
 	remote.server = httptest.NewServer(http.HandlerFunc(remote.serve))
 	t.Cleanup(remote.server.Close)
@@ -239,7 +245,7 @@ func newOwnerFixture(t *testing.T, policies ...githubwire.Policy) (*ownerFixture
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry, err := profiles.New(nil, orgTemplates())
+	registry, err := profiles.New(nil, templates)
 	if err != nil {
 		t.Fatal(err)
 	}

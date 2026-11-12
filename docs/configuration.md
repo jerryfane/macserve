@@ -9,8 +9,12 @@ a dedicated non-login, non-admin controller account distinct from the owner and 
 `principals`, `health_file`, `receipt`, `keyholder`, and optional `allowed_networks`, `pause_file`, `github`.
 `github.policies` entries are either repository-form (a pinned `repository`/`repository_id`) or owner-form
 (`owner`/`owner_id`, covering every repository the owner's App installation lists); a policy setting both is
-refused. Each owner-form owner must also be in `receipt.owners`. See
-[receipts and GitHub](receipts-and-github.md#owner-policies) for the fields, threat model and migration.
+refused. Each owner-form owner must also be in `receipt.owners`, and each repository-form repository in
+`receipt.repositories` with its numeric ID. A repository-form policy may add a `matrix` of simulator test and
+script template jobs (each entry a `profile`, `shard` and `simulator`, checked as `mac-evidence/<profile>/<shard>`)
+and `matrix_skip_drafts`; owner-form policies refuse both. See
+[receipts and GitHub](receipts-and-github.md#owner-policies) for the fields, threat model and migration, and
+[policy matrices](receipts-and-github.md#policy-matrices) for the matrix.
 Profiles and the public TLS certificate are root-controlled. The TLS private key is a controller-private file; the
 receipt and App private keys are the [keyholder](#keyholder)'s, and `receipt.private_key_file` and
 `github.private_key_file` name them only for the keyholder (exactly

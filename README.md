@@ -41,7 +41,7 @@ needs network credentials for your private network. No VM required.
 | **No command injection** | Controller-owned, versioned profiles and templates fix the xcodebuild command line; clients cannot inject shell commands, environment variables or paths. |
 | **Rich results** | Status, paged and streamed (SSE) logs, an `xcresult` summary as JSON or JUnit, artifacts and range downloads. |
 | **Signed receipts** | Ed25519 signatures over RFC 8785 canonical JSON, verified against pinned keys. |
-| **GitHub pull mode** | A GitHub App polls allowlisted repositories, or every installed repository of an allowlisted owner, and publishes `mac-evidence/<profile>` check runs, which can be required checks. |
+| **GitHub pull mode** | A GitHub App polls allowlisted repositories, or every installed repository of an allowlisted owner, and publishes `mac-evidence/<profile>` check runs (`mac-evidence/<profile>/<shard>` for each simulator test or script shard of a repository policy's matrix), which can be required checks. |
 | **Linux CI waiter** | `macserve wait` lets a Linux workflow request exact-head evidence and verify the pinned receipt. |
 | **Agent-side TestFlight upload** | `macserve testflight-upload` verifies a signed job's signer receipt and `App.ipa`, then uploads it through the App Store Connect Build Upload API with keyring-signed JWTs; no Apple key on the Mac or in the agent. [Details](docs/testflight.md). |
 | **Fail-closed health** | Short-lived, root-owned host health; missing, stale or changed qualification stops admission and cancels active work. |

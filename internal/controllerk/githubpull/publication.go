@@ -63,7 +63,7 @@ func (p *Poller) publish(ctx context.Context) error {
 
 func (p *Poller) checkInput(ctx context.Context, run store.GitHubRun) (githubapi.CheckInput, error) {
 	packet := githubwire.Packet{Schema: 1, JobID: run.JobID, AttemptID: run.AttemptID, Requests: make([]githubwire.Correlation, 0)}
-	input := githubapi.CheckInput{Name: "mac-evidence/" + run.Profile, HeadSHA: run.SHA, ExternalID: run.JobID, Status: "queued", Output: githubapi.CheckOutput{Title: "Mac evidence queued", Summary: "Waiting for controller execution; no signed result yet."}}
+	input := githubapi.CheckInput{Name: githubwire.CheckName(run.Profile, run.Shard), HeadSHA: run.SHA, ExternalID: run.JobID, Status: "queued", Output: githubapi.CheckOutput{Title: "Mac evidence queued", Summary: "Waiting for controller execution; no signed result yet."}}
 	if run.JobID == "" {
 		input.ExternalID = "denied:" + run.Key
 	}
@@ -178,7 +178,7 @@ func (p *Poller) publishOne(ctx context.Context, run store.GitHubRun) (int64, er
 	if policy.OwnerScoped() && p.discovered[run.RepositoryID] != run.Repository {
 		return run.CheckID, nil
 	}
-	current, err := p.admission(policy, githubapi.PullRequest{Number: 1, HeadSHA: run.SHA}, run.Profile)
+	current, err := p.admission(policy, githubapi.PullRequest{Number: 1, HeadSHA: run.SHA}, run.Profile, run.Shard)
 	if errors.Is(err, ErrIneligible) {
 		return run.CheckID, nil
 	}

@@ -70,7 +70,8 @@ numeric receipt repository identities then come from administrator configuration
 
 Each policy names exactly one repository or one owner; a policy that sets both forms (or neither) is refused at
 configuration load and controller start. A repository-form policy supplies `repository_id`, `repository`,
-`author_ids`, `base_branches`, `profiles`, `policy_revision`, and optional `actions_bot_id`, `actions_app_id`.
+`author_ids`, `base_branches`, `profiles`, `policy_revision`, and optional `actions_bot_id`, `actions_app_id`,
+`matrix` and `matrix_skip_drafts` ([policy matrices](#policy-matrices)).
 Numeric author and repository identity, not display names or commit author text, control admission. Repository
 writers must all be trusted: allowlisting a PR author does not authenticate everyone who can push to their branch.
 
@@ -82,7 +83,8 @@ server or rate-limit failures retry within the bounded preparation deadline. Act
 per poll rather than blocking on that retry loop. Removing GitHub configuration does not turn previously
 enrolled jobs into private-API work.
 
-Require `mac-evidence/<profile>` **from the configured App**. Checks target the PR head, never the synthetic
+Require `mac-evidence/<profile>` (and `mac-evidence/<profile>/<shard>` for each [matrix](#policy-matrices) entry)
+**from the configured App**. Checks target the PR head, never the synthetic
 merge commit. Only the current attempt may update the stable check; publication retry/restart reconciles
 `external_id=job-id` rather than rerunning work. Failure, timeout, cancellation, missing evidence and policy
 rejection cannot publish success; policy rejection uses `action_required`, not passing `neutral`/`skipped`.
@@ -120,7 +122,8 @@ a later poll retries.
 
 An owner (scope `service:admin`) can request a rerun without a comment:
 `POST /v1/admin/github/rerun {"repository_id": <id>, "repo": "<owner/name>", "sha": "<40 hex>", "profile": "<id>"}`
-(either or both of `repository_id` and `repo`). It follows `mode=rerun`: the head must still be an open, eligible
+(either or both of `repository_id` and `repo`; add `"shard": "<name>"` for a matrix entry's run, which the
+response then echoes). It follows `mode=rerun`: the head must still be an open, eligible
 pull request head whose current admission is that run, the latest attempt must be terminal, and requested
 reruns are bounded at two per head/profile per hour. Responses: 202 with the new `job_id`/`attempt_id` and
 `check_name`; 200 with `"rerun": false` while the latest attempt is queued or active; 404 for an unknown run;
@@ -188,6 +191,50 @@ templates, set `default_branch` or `base_branches`) and remove the repository-fo
 with their `receipt.repositories` pins if nothing else needs them. A repository-form policy left in place keeps
 governing its repository exactly as before. Runs admitted under a removed repository policy are no longer
 dispatched or published; the owner policy admits the same heads as new runs (new run keys, new checks).
+
+### Policy matrices
+
+A repository-form policy runs simulator test and script templates (`simulator_ui_test`, `unit_test`,
+`simulator_script`) through a `matrix`: one job per entry for every eligible head, each with its own check.
+
+```json
+{"repository": "themartianapp/herdrup", "repository_id": 1318951363, "author_ids": [38183696],
+ "base_branches": ["main"], "policy_revision": 1, "matrix_skip_drafts": true,
+ "profiles": ["org-ios-sim-build-v1", "org-ios-sim-uitest-v1"],
+ "matrix": [
+  {"profile": "org-ios-sim-uitest-v1", "shard": "chat", "simulator": {
+    "runtime": "com.apple.CoreSimulator.SimRuntime.iOS-27-0", "runtime_build": "24A434",
+    "device_type": "com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro"}}]}
+```
+
+Each entry names a `profile` of the policy's `profiles`, a `shard` (`^[a-z0-9][a-z0-9-]{0,31}$`) and a
+`simulator` (`runtime`, `runtime_build`, `device_type`) that the template pins exactly; a `(profile, shard)` pair
+appears once. Every simulator test or script template in `profiles` needs at least one entry and runs only through
+its entries; build profiles in `profiles` keep running exactly as before, one job per head. A policy that breaks
+these rules is refused at configuration load (shape) or controller start (templates and simulators). Owner-form
+policies refuse `matrix` and `matrix_skip_drafts`.
+
+Checks: a matrix entry publishes `mac-evidence/<profile>/<shard>` (for example
+`mac-evidence/org-ios-sim-uitest-v1/chat`); other profiles keep `mac-evidence/<profile>`. Require every one of them
+in branch protection, from the configured App. Before admitting an entry the controller reads the head's root
+`.macserve.json` and requires the entry's shard in the section of the template's kind (`ui_test.shards`,
+`unit_test.shards` or `script.shards`) and a recipe the worker can derive from it; a head that lacks it gets an
+`action_required` check for that entry and no job, never success. Fork, author and base rules, supersession (a new
+head cancels every unfinished job of the old head, matrix jobs included), automatic reruns of service-ended
+attempts and the owner rerun API apply per entry. `/mac-evidence` comments cannot name a matrix template: their
+grammar has no shard.
+
+`matrix_skip_drafts: true` (default false; requires a matrix) holds matrix entries back while the pull request is a
+draft: a draft head admits only the policy's other profiles and publishes no matrix check. Marking it ready for
+review admits the matrix for the current head on the next poll. Converting it back to a draft cancels nothing:
+matrix runs the head already has stay current and finish, and no new matrix attempt starts while it is a draft.
+
+A repository-form policy replaces the owner-form policy for its repository: the owner policy's build no longer
+runs there, so list the build template (e.g. `org-ios-sim-build-v1`) in the repository policy's `profiles` to keep
+`mac-evidence/<build profile>`. The repository also needs a `receipt.repositories` pin
+(`"themartianapp/herdrup": 1318951363`). Its runs are new runs (new run keys), so checks the owner policy already
+published for open heads stop updating, and each head's build check is published again, under the same name, by
+the repository policy's run.
 
 ## Signer receipts
 

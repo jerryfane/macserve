@@ -38,7 +38,7 @@ func TestPublicationPassIsBoundedAndMakesProgress(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 	for i := range 25 {
-		input, err := f.p.admission(f.p.policies[testRepo], githubapi.PullRequest{Number: i + 1, HeadSHA: fmt.Sprintf("%040x", i+1)}, testProfile)
+		input, err := f.p.admission(f.p.policies[testRepo], githubapi.PullRequest{Number: i + 1, HeadSHA: fmt.Sprintf("%040x", i+1)}, testProfile, "")
 		if err != nil {
 			t.Fatal(err)
 		}
