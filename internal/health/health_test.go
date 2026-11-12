@@ -117,6 +117,61 @@ func TestDiskReservationAndEmergencyHaveDifferentCancellationSemantics(t *testin
 		}
 	}
 }
+
+// The service budget is 50 + 30·lanes GiB (170 GiB at four lanes, 230 at
+// six), and the last lane is claimed only with 120 + 30·lanes GiB free and at
+// most 50 GiB accounted. Seven lanes is refused.
+func TestDiskBudgetAtFourAndSixLanes(t *testing.T) {
+	for _, tc := range []struct {
+		lanes        int
+		budget, free int64
+	}{{4, 170 << 30, 240 << 30}, {6, 230 << 30, 300 << 30}} {
+		g, h, free := readyGuard(t)
+		options := g.options
+		options.Lanes = tc.lanes
+		configured, err := NewGuard(options)
+		if err != nil {
+			t.Fatalf("%d lanes refused: %v", tc.lanes, err)
+		}
+		configured.readHealth, configured.freeBytes = g.readHealth, g.freeBytes
+		if got := ServiceBudget(tc.lanes); got != tc.budget {
+			t.Fatalf("%d lanes: budget %d GiB", tc.lanes, got>>30)
+		}
+		check := func(freeBytes, used int64) GateState {
+			*free, h.AccountedBytes = freeBytes, used
+			state, err := configured.Check(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			return state
+		}
+		if state := check(tc.free, tc.budget-JobReservationBytes); !state.Ready {
+			t.Fatalf("%d lanes: one reservation left refused: %+v", tc.lanes, state)
+		}
+		if state := check(tc.free, tc.budget-JobReservationBytes+1); state.Ready || state.CancelActive {
+			t.Fatalf("%d lanes: no reservation left: %+v", tc.lanes, state)
+		}
+		if state := check(tc.free, tc.budget+1); !state.CancelActive {
+			t.Fatalf("%d lanes: over budget did not cancel: %+v", tc.lanes, state)
+		}
+		last := tc.lanes - 1
+		if state := check(tc.free, 50<<30); !AdmitsAnother(state, last, tc.lanes) {
+			t.Fatalf("%d lanes: last lane refused at %d GiB free, 50 GiB accounted", tc.lanes, tc.free>>30)
+		}
+		if state := check(tc.free-1, 50<<30); AdmitsAnother(state, last, tc.lanes) {
+			t.Fatalf("%d lanes: last lane admitted below %d GiB free", tc.lanes, tc.free>>30)
+		}
+		if state := check(tc.free, 50<<30+1); AdmitsAnother(state, last, tc.lanes) {
+			t.Fatalf("%d lanes: last lane admitted above 50 GiB accounted", tc.lanes)
+		}
+	}
+	g, _, _ := readyGuard(t)
+	options := g.options
+	options.Lanes = 7
+	if _, err := NewGuard(options); err == nil {
+		t.Fatal("seven lanes accepted")
+	}
+}
 func TestOwnerPauseDoesNotCancelDrainingWork(t *testing.T) {
 	g, h, _ := readyGuard(t)
 	g.options.PauseFile = "/service/control/pause"

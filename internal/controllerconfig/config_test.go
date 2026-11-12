@@ -26,3 +26,24 @@ func TestPrivateListenerPolicyRejectsPublicWildcardAndMappedAddresses(t *testing
 		t.Fatal("public CIDR expanded listener policy")
 	}
 }
+
+// controller.json takes max_concurrent_jobs 1..6 (omitted means 1); 7 is
+// refused.
+func TestControllerConfigLanesUpToSix(t *testing.T) {
+	base := Config{Root: "/service/data", Socket: "/service/run/worker.sock", JobUID: 502, OwnerUID: 501, ProfilesFile: "/service/config/profiles.json", TLSCertificate: "/service/config/tls.crt", TLSKey: "/service/secrets/tls.key", HealthFile: "/service/config/health.json", Listen: "100.64.0.1:9443"}
+	base.Receipt = ReceiptConfig{KeyID: "test", PrivateKeyFile: "/service/secrets/receipt.key", ServiceID: "test", HostID: "test", Repositories: map[string]int64{"example-org/example-app": 123}}
+	for _, lanes := range []int{4, 5, 6} {
+		c := base
+		c.MaxConcurrentJobs = lanes
+		if err := c.validate(); err != nil || c.Lanes() != lanes {
+			t.Fatalf("max_concurrent_jobs %d: lanes %d, %v", lanes, c.Lanes(), err)
+		}
+	}
+	for _, lanes := range []int{-1, 7} {
+		c := base
+		c.MaxConcurrentJobs = lanes
+		if err := c.validate(); err == nil {
+			t.Fatalf("max_concurrent_jobs %d accepted", lanes)
+		}
+	}
+}

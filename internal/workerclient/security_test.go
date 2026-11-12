@@ -45,6 +45,26 @@ func TestProtectedBrokerConfigurationSeparatesIdentityAndStorage(t *testing.T) {
 	}
 }
 
+// worker.json takes max_concurrent_jobs 1..6 (omitted means 1); 7 is refused.
+func TestWorkerConfigLanesUpToSix(t *testing.T) {
+	base := Config{Socket: "/service/controller.sock", ControllerUID: 503, OwnerUID: 501, JobUID: 502, JobGID: 20, Root: "/service/control", ExportRoot: "/service/exports", WorkspaceRoot: "/service/workspaces", HelperPath: "/service/bin/macserve", BaselinePath: "/service/control/gui-baseline.json", PersistencePath: "/service/control/reviewed-persistence.json"}
+	for _, lanes := range []int{4, 5, 6} {
+		c := base
+		c.MaxConcurrentJobs = lanes
+		got, err := normalize(c)
+		if err != nil || got.Lanes() != lanes || got.EngineOptions().Lanes != lanes {
+			t.Fatalf("max_concurrent_jobs %d: %+v %v", lanes, got, err)
+		}
+	}
+	for _, lanes := range []int{-1, 7} {
+		c := base
+		c.MaxConcurrentJobs = lanes
+		if _, err := normalize(c); err == nil {
+			t.Fatalf("max_concurrent_jobs %d accepted", lanes)
+		}
+	}
+}
+
 func TestSourceTransferFailureCannotInventSuccessfulCleanup(t *testing.T) {
 	for _, uncertain := range []bool{false, true} {
 		t.Run(map[bool]string{false: "quiescent", true: "residual-process"}[uncertain], func(t *testing.T) {

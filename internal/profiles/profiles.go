@@ -58,8 +58,9 @@ type Registry struct {
 
 // New validates and normalizes copies of controller-approved profiles and
 // templates. Missing timeouts default to 1800 seconds (2400 for UI tests, 3600
-// for scripts), with a 3600-second maximum (7200 for scripts); missing memory
-// budgets default to 32768 MiB. It does not probe installed tools.
+// for scripts), with a 3600-second maximum (7200 for scripts); a UI-test
+// recipe may set a maximum up to 7200. Missing memory budgets default to
+// 32768 MiB. It does not probe installed tools.
 func New(profiles []model.Profile, templates []model.Template) (*Registry, error) {
 	r := &Registry{entries: make([]entry, 0, len(profiles)), byID: make(map[string]int, len(profiles)), byTmplID: make(map[string]int, len(templates))}
 	for _, original := range profiles {
@@ -402,6 +403,12 @@ func normalizeBudgets(kind model.Kind, defaultTimeout, maxTimeout, memory *int) 
 	}
 	if *maxTimeout == 0 {
 		*maxTimeout = kind.MaxTimeoutSeconds()
+		if kind == model.SimulatorUITest {
+			// An omitted maximum stays 3600: UI-test recipes opt into the
+			// 7200-second cap explicitly, and the normalized maximum is part
+			// of the qualified profile and template digests.
+			*maxTimeout = 3600
+		}
 	}
 	if *defaultTimeout < 1 || *maxTimeout < 1 || *maxTimeout > kind.MaxTimeoutSeconds() || *defaultTimeout > *maxTimeout {
 		return fmt.Errorf("%w: timeout limits", ErrInvalid)

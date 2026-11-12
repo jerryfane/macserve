@@ -136,7 +136,8 @@ func TestNormalizeTemplateAcceptsUITestKind(t *testing.T) {
 		"build with a simulator":  strings.Replace(buildTemplate, `"developer_dir"`, `"simulators":[`+pin+`],"developer_dir"`, 1),
 		"unit test no simulators": withSimulators(unitTemplate, ``),
 		"unknown kind":            strings.Replace(uiTemplate, `"kind":"simulator_ui_test"`, `"kind":"ui_test"`, 1),
-		"timeout above cap":       strings.Replace(uiTemplate, `"max_timeout_seconds":3600`, `"max_timeout_seconds":7200`, 1),
+		"timeout above cap":       strings.Replace(uiTemplate, `"max_timeout_seconds":3600`, `"max_timeout_seconds":7201`, 1),
+		"unit test above cap":     strings.Replace(unitTemplate, `"max_timeout_seconds":3600`, `"max_timeout_seconds":7200`, 1),
 	}
 	for name, template := range invalid {
 		t.Run(name, func(t *testing.T) {
@@ -144,6 +145,39 @@ func TestNormalizeTemplateAcceptsUITestKind(t *testing.T) {
 				t.Fatalf("invalid template loaded: %s", template)
 			}
 		})
+	}
+}
+
+// A UI-test template may raise its maximum timeout to 7200 seconds and admits
+// requests up to it, beside a template keeping 3600; an omitted maximum stays
+// 3600, so templates that omit it keep their digests.
+func TestUITestTemplateMaxTimeoutUpTo7200(t *testing.T) {
+	long := strings.Replace(strings.Replace(uiTemplate, `"max_timeout_seconds":3600`, `"max_timeout_seconds":7200`, 1), "org-ios-sim-uitest-v1", "org-ios-sim-uitest-long-v1", 1)
+	r := templatesFile(t, uiTemplate+","+long)
+	templates := r.Templates()
+	if len(templates) != 2 || templates[0].MaxTimeoutSeconds != 3600 || templates[1].MaxTimeoutSeconds != 7200 {
+		t.Fatalf("templates: %+v", templates)
+	}
+	q := testRequest(t, model.SimulatorUITest, "iphone-terminal")
+	q.Profile, q.TimeoutSeconds = "org-ios-sim-uitest-long-v1", 7200
+	if a, err := r.Resolve(q); err != nil || a.Request.TimeoutSeconds != 7200 || a.Profile.MaxTimeoutSeconds != 7200 {
+		t.Fatalf("7200-second request: %+v %v", a.Request, err)
+	}
+	q.TimeoutSeconds = 7201
+	if _, err := r.Resolve(q); err == nil {
+		t.Fatal("request above the template maximum admitted")
+	}
+	q.Profile, q.TimeoutSeconds = "org-ios-sim-uitest-v1", 3601
+	if _, err := r.Resolve(q); err == nil {
+		t.Fatal("request above the 3600-second template maximum admitted")
+	}
+	omitted := strings.Replace(uiTemplate, `"default_timeout_seconds":2400,"max_timeout_seconds":3600,`, ``, 1)
+	defaulted := templatesFile(t, omitted)
+	if got := defaulted.Templates()[0]; got.DefaultTimeoutSeconds != 2400 || got.MaxTimeoutSeconds != 3600 {
+		t.Fatalf("omitted budgets: %+v", got)
+	}
+	if defaulted.Digests()["org-ios-sim-uitest-v1"] != r.Digests()["org-ios-sim-uitest-v1"] {
+		t.Fatal("omitted maximum changed the template digest")
 	}
 }
 

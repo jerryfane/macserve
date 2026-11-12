@@ -56,7 +56,7 @@ func LaneOverride(configured int, present bool, check func() error, read func() 
 	raw, ok := fields["max_concurrent_jobs"]
 	var n int
 	if !ok || len(fields) != 1 || json.Unmarshal(raw, &n) != nil || n < 1 || n > model.MaxConcurrentJobs {
-		return fail(errors.New(`must be exactly {"max_concurrent_jobs": 1..3}`))
+		return fail(fmt.Errorf(`must be exactly {"max_concurrent_jobs": 1..%d}`, model.MaxConcurrentJobs))
 	}
 	if n > configured {
 		return configured, fmt.Sprintf("%s max_concurrent_jobs %d above the configured %d ignored", LanesOverrideFile, n, configured)

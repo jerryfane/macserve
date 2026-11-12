@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -57,6 +58,31 @@ func TestClaimFillsLowestFreeLaneUpToLanes(t *testing.T) {
 	}
 	if got := getJob(t, s, first.ID); got.Lane != 1 {
 		t.Fatalf("finished job lost its lane: %d", got.Lane)
+	}
+}
+
+// Six lanes hold six active claims on lanes 1..6; a seventh waits.
+func TestClaimFillsSixLanes(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newStore(t, Options{})
+	for _, key := range []string{"a", "b", "c", "d", "e", "f", "g"} {
+		enqueueJob(t, s, "principal", key, testNow)
+	}
+	for lane := 1; lane <= 6; lane++ {
+		if job := claimLanes(t, s, "epoch", testNow.Add(time.Duration(lane)*time.Second), 6); job.Lane != lane {
+			t.Fatalf("claim %d got lane %d", lane, job.Lane)
+		}
+	}
+	_, err := s.Claim(ctx, "epoch", testNow.Add(7*time.Second), 6)
+	requireError(t, err, ErrNoJob)
+	active, err := s.ActiveJobs(ctx)
+	if err != nil || len(active) != 6 {
+		t.Fatalf("active = %d %v", len(active), err)
+	}
+	for i, job := range active {
+		if job.Lane != i+1 {
+			t.Fatalf("active[%d] on lane %d", i, job.Lane)
+		}
 	}
 }
 
@@ -190,27 +216,25 @@ func TestActiveSetRegistrationRecoveryAndPause(t *testing.T) {
 	}
 }
 
-// Concurrent jobs' summed memory budgets stay within ConcurrentMemoryCapMiB;
-// a job alone is never refused by the cap.
+// Concurrent jobs' summed memory budgets stay within ConcurrentMemoryCapMiB
+// (192 GiB: six default 32 GiB budgets); a job alone is never refused by it.
 func TestClaimKeepsConcurrentMemoryBudgetsUnderCap(t *testing.T) {
-	running := []model.Job{{Profile: model.Profile{MemoryLimitMiB: 64 << 10}}}
-	if !memoryAdmits(nil, model.Job{Profile: model.Profile{MemoryLimitMiB: 200 << 10}}) {
+	running := []model.Job{{Profile: model.Profile{MemoryLimitMiB: 96 << 10}}}
+	if !memoryAdmits(nil, model.Job{Profile: model.Profile{MemoryLimitMiB: 300 << 10}}) {
 		t.Fatal("cap refused a job running alone")
 	}
-	if !memoryAdmits(running, model.Job{Profile: model.Profile{MemoryLimitMiB: 64 << 10}}) {
+	if !memoryAdmits(running, model.Job{Profile: model.Profile{MemoryLimitMiB: 96 << 10}}) {
 		t.Fatal("cap refused budgets summing to the cap")
 	}
-	if memoryAdmits(running, model.Job{Profile: model.Profile{MemoryLimitMiB: 64<<10 + 1}}) {
+	if memoryAdmits(running, model.Job{Profile: model.Profile{MemoryLimitMiB: 96<<10 + 1}}) {
 		t.Fatal("cap admitted budgets above it")
 	}
-	// Through Claim: three default 32 GiB jobs fit beside each other.
-	s, _ := newStore(t, Options{})
-	for _, key := range []string{"a", "b", "c"} {
-		enqueueJob(t, s, "principal", key, testNow)
+	defaultJob := model.Job{Profile: model.Profile{MemoryLimitMiB: 32768}}
+	five := slices.Repeat([]model.Job{defaultJob}, 5)
+	if !memoryAdmits(five, defaultJob) {
+		t.Fatal("cap refused a sixth default 32 GiB budget")
 	}
-	for i := range 3 {
-		if job := claimLanes(t, s, "epoch", testNow.Add(time.Duration(i)*time.Second), 3); job.Profile.MemoryLimitMiB*3 > ConcurrentMemoryCapMiB {
-			t.Fatalf("fixture budget %d MiB does not fit three lanes", job.Profile.MemoryLimitMiB)
-		}
+	if memoryAdmits(append(five, defaultJob), defaultJob) {
+		t.Fatal("cap admitted a seventh default 32 GiB budget")
 	}
 }
