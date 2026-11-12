@@ -35,10 +35,17 @@ type holdWorld struct {
 	// recoverErr is the verdict of the first Recover after a hold.
 	recoverErr error
 	held       bool
+	// failHeld is how many held-stage requests fail (503) before one is
+	// recorded. window is the controller's finalizing window: a completion
+	// not recorded as held by then is refused (410), the lease ended.
+	failHeld   int
+	window     time.Duration
+	finalizing map[string]time.Time
+	heldAcked  map[string]bool
 }
 
 func newHoldWorld(t *testing.T, queue ...string) *holdWorld {
-	w := &holdWorld{t: t, queue: queue, deadlines: map[string]time.Time{}, complete: map[string]worker.Result{}, gates: map[string]chan struct{}{}, started: make(chan string, 8)}
+	w := &holdWorld{t: t, queue: queue, deadlines: map[string]time.Time{}, complete: map[string]worker.Result{}, gates: map[string]chan struct{}{}, started: make(chan string, 8), finalizing: map[string]time.Time{}, heldAcked: map[string]bool{}}
 	for _, id := range queue {
 		w.gates[id] = make(chan struct{})
 	}
@@ -98,10 +105,23 @@ func (w *holdWorld) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	case strings.HasSuffix(path, "/stage"):
 		var stage protocol.Stage
 		json.NewDecoder(r.Body).Decode(&stage)
+		if stage.State == model.Finalizing && w.finalizing[id].IsZero() {
+			w.finalizing[id] = time.Now()
+		}
 		if stage.Held {
+			if w.failHeld > 0 {
+				w.failHeld--
+				w.events = append(w.events, "held refused "+id)
+				rw.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			w.heldAcked[id] = true
 			w.events = append(w.events, "held "+id)
 		}
 		rw.WriteHeader(http.StatusNoContent)
+	case strings.HasSuffix(path, "/complete") && w.window != 0 && !w.heldAcked[id] && time.Since(w.finalizing[id]) > w.window:
+		w.events = append(w.events, "gone "+id)
+		rw.WriteHeader(http.StatusGone)
 	case strings.HasSuffix(path, "/complete"):
 		var completion protocol.Completion
 		json.NewDecoder(r.Body).Decode(&completion)
@@ -260,5 +280,43 @@ func TestHeldCompletionSettlesAtShutdown(t *testing.T) {
 	}
 	if errors.Is(context.Cause(runCtx), context.DeadlineExceeded) {
 		t.Fatal("test deadline")
+	}
+}
+
+// The held stage is what lets a held lease outlast the controller's
+// finalizing window; a first request that fails is resent until the
+// controller records it, so a sibling running longer than that window does
+// not cost the held job its result.
+func TestHeldStageRetriedUntilRecorded(t *testing.T) {
+	w := newHoldWorld(t, "j_held", "j_sib")
+	w.failHeld, w.window = 1, 1500*time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	done, _ := w.run(ctx)
+	<-w.started
+	<-w.started
+	close(w.gates["j_held"])
+	w.wait(ctx, "held refused j_held")
+	// The sibling outlasts the finalizing window.
+	time.Sleep(3 * time.Second)
+	close(w.gates["j_sib"])
+	w.wait(ctx, "complete j_sib")
+	for !slices.Contains(w.snapshot(), "complete j_held") && !slices.Contains(w.snapshot(), "gone j_held") {
+		select {
+		case <-ctx.Done():
+			t.Fatalf("held completion never delivered: %v", w.snapshot())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	cancel()
+	<-done
+	events := w.snapshot()
+	if !before(events, "held refused j_held", "held j_held") || !slices.Contains(events, "complete j_held") {
+		t.Fatalf("held stage not resent until recorded: %v", events)
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if result := w.complete["j_held"]; result.State != model.Succeeded || !result.CleanupOK || result.Concurrency.IdleVerdict != worker.IdleClean {
+		t.Fatalf("held completion: %+v", result)
 	}
 }

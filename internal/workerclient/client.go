@@ -635,16 +635,27 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 // holdHeartbeat reports a held completion to the controller and keeps its
 // lease alive until the returned stop is called: through the wait for the
 // idle check and the delivery after it, past the job's deadline (the
-// controller does not apply it to a held completion). A failed request is
-// logged; the hold itself ends only with the idle check.
+// controller does not apply it to a held completion). Only the held stage
+// lets the lease outlast the controller's finalizing window, so the
+// idempotent stage request is resent on every heartbeat tick until the
+// controller acknowledges it.
 func (c *Client) holdHeartbeat(lease protocol.Lease, epoch string) (stop func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	path := "/jobs/" + lease.Job.ID
-	if _, err := c.json(ctx, http.MethodPost, path+"/stage", epoch, lease.Token, protocol.Stage{State: model.Finalizing, Held: true}, nil); err != nil {
-		log.Printf("worker job %s held completion not recorded by the controller: %v", lease.Job.ID, err)
-	} else {
-		log.Printf("worker job %s completion held for the idle check", lease.Job.ID)
+	acknowledged, failures := false, 0
+	report := func() {
+		_, err := c.json(ctx, http.MethodPost, path+"/stage", epoch, lease.Token, protocol.Stage{State: model.Finalizing, Held: true}, nil)
+		switch {
+		case err == nil:
+			acknowledged = true
+			log.Printf("worker job %s completion held for the idle check", lease.Job.ID)
+		case ctx.Err() == nil:
+			if failures++; failures == 1 {
+				log.Printf("worker job %s held completion not yet recorded by the controller; retrying each heartbeat: %v", lease.Job.ID, err)
+			}
+		}
 	}
+	report()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -655,6 +666,9 @@ func (c *Client) holdHeartbeat(lease protocol.Lease, epoch string) (stop func())
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				if !acknowledged {
+					report()
+				}
 				var pulse protocol.Heartbeat
 				if _, err := c.json(ctx, http.MethodPost, path+"/heartbeat", epoch, lease.Token, struct{}{}, &pulse); err != nil && ctx.Err() == nil {
 					log.Printf("worker job %s held completion heartbeat: %v", lease.Job.ID, err)
