@@ -444,11 +444,15 @@ const (
 	CancelShutdown CancelSource = "controller_shutdown"
 	// CancelGitHub is GitHub intake superseding or blocking the job's run.
 	CancelGitHub CancelSource = "github"
+	// CancelWorkerAdmission is the worker refusing the job before it ran for
+	// a cause of the service's own (protocol.AdmissionRefusal), recorded by
+	// the controller when that completion arrives.
+	CancelWorkerAdmission CancelSource = "worker_admission"
 )
 
 func (s CancelSource) Valid() bool {
 	switch s {
-	case CancelClient, CancelAdminPause, CancelDeadline, CancelHostReadiness, CancelGateError, CancelLogLimit, CancelShutdown, CancelGitHub:
+	case CancelClient, CancelAdminPause, CancelDeadline, CancelHostReadiness, CancelGateError, CancelLogLimit, CancelShutdown, CancelGitHub, CancelWorkerAdmission:
 		return true
 	}
 	return false

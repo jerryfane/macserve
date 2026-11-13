@@ -31,6 +31,7 @@ func TestGitHubEnsureRerunsOnlyServiceCancelledAttempts(t *testing.T) {
 		"controller shutdown":  {model.CancelReason{Source: model.CancelShutdown}, true},
 		"admin pause":          {model.CancelReason{Source: model.CancelAdminPause, Principal: "owner"}, true},
 		"operator cancel":      {model.CancelReason{Source: model.CancelClient, Principal: "owner"}, true},
+		"worker admission":     {model.CancelReason{Source: "worker_admission", Detail: "lane admission: registered tree ACL census unavailable"}, true},
 		"github supersede":     {model.CancelReason{Source: model.CancelGitHub, Detail: "superseded"}, false},
 		"own principal cancel": {model.CancelReason{Source: model.CancelClient, Principal: "github:123"}, false},
 		"deadline":             {model.CancelReason{Source: model.CancelDeadline}, false},
@@ -83,9 +84,10 @@ func TestGitHubEnsureRerunsOnlyServiceCancelledAttempts(t *testing.T) {
 	}
 }
 
-// An interrupted attempt whose cancel reason is the controller's shutdown is
-// rerun; one interrupted without a cancel request (a lost worker) or that
-// failed is not.
+// A claimed attempt the service ended after a cancel request of its own (the
+// controller's shutdown, interrupted; a worker's admission refusal,
+// cancelled) is rerun; one interrupted without a cancel request (a lost
+// worker) or that failed is not.
 func TestGitHubEnsureRerunsShutdownInterruptedAttempt(t *testing.T) {
 	for name, tc := range map[string]struct {
 		end   func(t *testing.T, s *Store, job model.Job)
@@ -98,6 +100,16 @@ func TestGitHubEnsureRerunsShutdownInterruptedAttempt(t *testing.T) {
 			if err := s.Fail(context.Background(), job.ID, job.LeaseToken, model.Interrupted, false, "controller shutdown", testNow); err != nil {
 				t.Fatal(err)
 			}
+		}, true},
+		// The controller's record of a worker's refusal before the job ran
+		// for a cause of the service's own (a completion with
+		// protocol.AdmissionRefused), then the cancelled completion.
+		"worker admission": {func(t *testing.T, s *Store, job model.Job) {
+			cancelled, err := s.Cancel(context.Background(), job.ID, "worker refused admission: acl_census_unavailable", model.CancelReason{Source: "worker_admission"}, testNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			finishJob(t, s, cancelled, model.Cancelled, true, testNow)
 		}, true},
 		"lost worker": {func(t *testing.T, s *Store, job model.Job) {
 			if err := s.Fail(context.Background(), job.ID, job.LeaseToken, model.Interrupted, false, "worker heartbeat lost", testNow); err != nil {

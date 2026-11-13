@@ -53,7 +53,7 @@ func matchPersistenceCensus(expected PersistenceManifest, build string, current 
 // Only each accepted registration ROOT and its ancestors are checked. Nested
 // registered bundles are roots too; unrelated descendants, executable content,
 // signing and recursive ACLs belong exclusively to the full attestation scan.
-// A probe its deadline cut short (errACLCensusUnavailable) observed nothing:
+// A probe its deadline cut short (ErrACLCensusUnavailable) observed nothing:
 // the census continues with a fresh allocation, at most rootACLAttempts in
 // all and always within the caller's deadline, and probes that completed are
 // not repeated. Any other failure, or positive evidence, ends it at once.
@@ -61,7 +61,7 @@ func inspectRegistrationRoots(ctx context.Context, expected PersistenceManifest,
 	seen := make(map[string]bool, len(expected.Code))
 	for attempt := 1; ; attempt++ {
 		err := inspectRegistrationRootsOnce(ctx, expected, writers, acl, seen)
-		if attempt == rootACLAttempts || !errors.Is(err, errACLCensusUnavailable) || ctx.Err() != nil {
+		if attempt == rootACLAttempts || !errors.Is(err, ErrACLCensusUnavailable) || ctx.Err() != nil {
 			return err
 		}
 	}
@@ -103,11 +103,11 @@ func inspectRegistrationRootsOnce(ctx context.Context, expected PersistenceManif
 	return aclCensusCut(ctx.Err())
 }
 
-// aclCensusCut is errACLCensusUnavailable for a census its deadline ended,
+// aclCensusCut is ErrACLCensusUnavailable for a census its deadline ended,
 // else err.
 func aclCensusCut(err error) error {
 	if errors.Is(err, context.DeadlineExceeded) {
-		return errACLCensusUnavailable
+		return ErrACLCensusUnavailable
 	}
 	return err
 }

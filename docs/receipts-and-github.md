@@ -120,7 +120,9 @@ active attempts are joined. Correlations are durable and capped at 128 per attem
 Pull mode also reruns heads the service ended (#119). When an `ensure` admission (every poll of an eligible
 head, owner-form or repository-form, and `mode=ensure` comments) finds the run's latest attempt `cancelled` or
 `interrupted` with a recorded cancel reason of `host_readiness`, `gate_error`, `controller_shutdown`,
-`admin_pause` (an administrator's `cancel_active` pause) or `client` by a principal other than the job's own
+`admin_pause` (an administrator's `cancel_active` pause), `worker_admission` (the worker refused the job before it
+ran for a cause of the service's own, such as a registered tree ACL census cut short on a loaded host) or `client`
+by a principal other than the job's own
 (an operator's `POST /v1/jobs/<id>/cancel`; a GitHub attempt's principal is `github:<repository id>`, so every
 API cancel of one is an operator's), it starts one new attempt in the same logical run, published to the same
 `mac-evidence/<profile>` check. It never reruns an attempt cancelled by GitHub intake (`github`: supersession or

@@ -458,13 +458,15 @@ func (c *Client) Run(ctx context.Context) (returned error) {
 // and SourceTree are the worker's own lease resolution and computed source
 // tree; Seal is the signed build seal over them and the result. A pending
 // file written before seals existed has none and is sealed on delivery.
+// AdmissionRefused is protocol.Completion's.
 type pending struct {
-	Epoch      string                `json:"epoch"`
-	Lease      protocol.Lease        `json:"lease"`
-	Result     worker.Result         `json:"result"`
-	Resolution *buildseal.Resolution `json:"resolution,omitempty"`
-	SourceTree string                `json:"source_tree,omitempty"`
-	Seal       *buildseal.Envelope   `json:"seal,omitempty"`
+	Epoch            string                    `json:"epoch"`
+	Lease            protocol.Lease            `json:"lease"`
+	Result           worker.Result             `json:"result"`
+	Resolution       *buildseal.Resolution     `json:"resolution,omitempty"`
+	SourceTree       string                    `json:"source_tree,omitempty"`
+	Seal             *buildseal.Envelope       `json:"seal,omitempty"`
+	AdmissionRefused protocol.AdmissionRefusal `json:"admission_refused,omitempty"`
 	// file is the name it was loaded from; empty for a new completion.
 	file string
 }
@@ -612,6 +614,12 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 	saved := pending{Epoch: epoch, Lease: lease, Result: result, Resolution: resolution}
 	if executed {
 		saved.SourceTree = c.engine.VerifiedTree(lease.Job.ID)
+	}
+	// The engine refused the job before it ran because its admission's ACL
+	// census was cut short on a loaded host, and the idle check then passed:
+	// the service, not the job, caused the failure (protocol.Completion).
+	if executed && result.State == model.Failed && result.CleanupOK && errors.Is(err, worker.ErrACLCensusUnavailable) {
+		saved.AdmissionRefused = protocol.AdmissionACLCensusUnavailable
 	}
 	seal, err := c.seal(saved)
 	if err != nil {
@@ -831,7 +839,7 @@ func (c *Client) loadPending(name string) (pending, error) {
 	if err := dec.Decode(new(any)); err != io.EOF {
 		return value, errors.New("trailing completion JSON")
 	}
-	if !safeID(value.Lease.Job.ID) || value.Lease.Token == "" || value.Epoch == "" {
+	if !safeID(value.Lease.Job.ID) || value.Lease.Token == "" || value.Epoch == "" || !value.AdmissionRefused.Valid() {
 		return value, errors.New("invalid pending completion")
 	}
 	value.file = name
@@ -899,7 +907,7 @@ func (c *Client) deliver(ctx context.Context, saved pending) error {
 		}
 		saved.Seal = &seal
 	}
-	status, err := c.json(ctx, http.MethodPost, "/jobs/"+jobID+"/complete", saved.Epoch, saved.Lease.Token, protocol.Completion{Result: saved.Result, Seal: *saved.Seal}, nil)
+	status, err := c.json(ctx, http.MethodPost, "/jobs/"+jobID+"/complete", saved.Epoch, saved.Lease.Token, protocol.Completion{Result: saved.Result, Seal: *saved.Seal, AdmissionRefused: saved.AdmissionRefused}, nil)
 	if err != nil && status != http.StatusGone {
 		return err
 	}

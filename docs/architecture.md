@@ -334,8 +334,11 @@ An admission whose registered-root ACL census was still cut short by its deadlin
 which is no evidence either way. It holds the completion and drains the broker at any lane count too: when a job ends
 alone, the job keeps its own result and successful cleanup until the idle check; when the job is starting, it is refused
 before it runs, with reason `lane admission: registered tree ACL census unavailable` (`admission: …` for a job starting
-alone) and `cleanup_ok` true, since nothing of it ran. A census that ran and failed, or that found a writable ACL, fails
-the cleanup as before.
+alone) and `cleanup_ok` true, since nothing of it ran. When the idle check passes, that completion carries
+`admission_refused: acl_census_unavailable`, and the controller records the cancellation `worker_admission` before
+judging it: the job ends `cancelled` by the service, so pull mode reruns its head (#119). A controller from before this
+field refuses such a completion (the worker transport refuses unknown fields), so the worker and the controller of one
+release ship together. A census that ran and failed, or that found a writable ACL, fails the cleanup as before.
 The worker reports the hold to the controller (stage `finalizing`, `held`), keeps the lease alive by heartbeat, asks for
 no lease, and delivers the completion after the next idle `Recover`: with its own result and idle verdict `clean` when
 that full quiesce and admission pass (the residue count stays recorded), else with `cleanup_ok` false (the job fails,

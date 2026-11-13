@@ -157,7 +157,7 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 	} else {
 		err = e.laneAdmission(parent)
 	}
-	if errors.Is(err, errACLCensusUnavailable) && !errors.Is(err, ErrContamination) {
+	if errors.Is(err, ErrACLCensusUnavailable) && !errors.Is(err, ErrContamination) {
 		// The census observed nothing, and nothing of the job ran, so it
 		// has nothing of its own to clean up. The account is left to the
 		// idle Recover: the engine drains, and the client holds this
@@ -266,7 +266,7 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 			if alone {
 				if inspector, ok := e.options.Runner.(interface{ Admission(context.Context) error }); ok {
 					quietErr = inspector.Admission(finalCtx)
-					if errors.Is(quietErr, errACLCensusUnavailable) && !errors.Is(quietErr, ErrContamination) {
+					if errors.Is(quietErr, ErrACLCensusUnavailable) && !errors.Is(quietErr, ErrContamination) {
 						// Its own quiesce passed; the census observed nothing.
 						log.Printf("worker job %s cleanup verification deferred to the idle check: %v", job.ID, quietErr)
 						deferred, quietErr = "registered tree ACL census unavailable after job "+job.ID, nil
