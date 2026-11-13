@@ -87,7 +87,7 @@ func TestCancellationAtEveryNonterminalStage(t *testing.T) {
 				if cancelled.FinishedAt == nil {
 					t.Fatal("queued cancellation lacks finish timestamp")
 				}
-				_, err := s.Claim(ctx, "epoch", testNow.Add(3*time.Second), 1)
+				_, err := s.Claim(ctx, "epoch", testNow.Add(3*time.Second), 1, false)
 				requireError(t, err, ErrNoJob)
 				return
 			}
@@ -121,7 +121,7 @@ func TestPauseDrainAndCancelActive(t *testing.T) {
 		t.Fatal("drain cancelled active work")
 	}
 	finishJob(t, s, active, model.Succeeded, true, testNow.Add(time.Second))
-	_, err = s.Claim(ctx, "epoch", testNow.Add(2*time.Second), 1)
+	_, err = s.Claim(ctx, "epoch", testNow.Add(2*time.Second), 1, false)
 	requireError(t, err, ErrNoJob)
 	state, err := s.Resume(ctx)
 	if err != nil || state.Paused || state.PauseReason != "" || state.PauseMode != "" || state.Generation <= paused.Generation {
@@ -184,13 +184,13 @@ func TestCleanupFailureQuarantineSurvivesReopen(t *testing.T) {
 	if err != nil || state.Paused || !state.Quarantined {
 		t.Fatalf("resume cleared quarantine: %+v %v", state, err)
 	}
-	_, err = s.Claim(ctx, "new-epoch", testNow.Add(3*time.Second), 1)
+	_, err = s.Claim(ctx, "new-epoch", testNow.Add(3*time.Second), 1, false)
 	requireError(t, err, ErrNoJob)
 	requireError(t, s.AcknowledgeQuiescent(ctx, "old-epoch"), ErrLease)
 	if err := s.AcknowledgeQuiescent(ctx, "new-epoch"); err != nil {
 		t.Fatal(err)
 	}
-	_, err = s.Claim(ctx, "old-epoch", testNow.Add(4*time.Second), 1)
+	_, err = s.Claim(ctx, "old-epoch", testNow.Add(4*time.Second), 1, false)
 	requireError(t, err, ErrLease)
 	if got := claimJob(t, s, "new-epoch", testNow.Add(4*time.Second)); got.ID != second.ID {
 		t.Fatal("quiescence did not restore dispatch")

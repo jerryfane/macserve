@@ -76,7 +76,7 @@ func TestPolicyNamingTemplateEnrollsAndReceiptBindsTemplateDigest(t *testing.T) 
 		t.Fatalf("template enrollment not exact: %+v %+v", run, check)
 	}
 	ctx := context.Background()
-	job, err := f.s.Claim(ctx, "worker-epoch", f.options.Now(), 1)
+	job, err := f.s.Claim(ctx, "worker-epoch", f.options.Now(), 1, false)
 	if err != nil {
 		t.Fatal(err)
 	}

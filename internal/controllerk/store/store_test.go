@@ -71,7 +71,7 @@ func enqueueJob(t *testing.T, s *Store, principal, key string, now time.Time) mo
 
 func claimJob(t *testing.T, s *Store, epoch string, now time.Time) model.Job {
 	t.Helper()
-	job, err := s.Claim(context.Background(), epoch, now, 1)
+	job, err := s.Claim(context.Background(), epoch, now, 1, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +150,7 @@ func TestRestartPreservesSnapshotsLeasesAndPause(t *testing.T) {
 	if err != nil || next != 1 || truncated || len(logs) != 1 || logs[0].Text != "partial output\n" {
 		t.Fatalf("logs after reopen: %+v %d %v %v", logs, next, truncated, err)
 	}
-	_, err = s.Claim(ctx, "epoch-two", testNow, 1)
+	_, err = s.Claim(ctx, "epoch-two", testNow, 1, false)
 	requireError(t, err, ErrNoJob)
 }
 
@@ -284,7 +284,7 @@ func TestIndependentHandlesClaimExactlyOne(t *testing.T) {
 		go func(handle *Store) {
 			defer group.Done()
 			<-start
-			job, err := handle.Claim(ctx, "worker", testNow, 1)
+			job, err := handle.Claim(ctx, "worker", testNow, 1, false)
 			results <- result{job, err}
 		}(handle)
 	}
@@ -433,7 +433,7 @@ func TestBoundaryRejectsMalformedAdmission(t *testing.T) {
 			mutate(&admission)
 			_, _, err := s.Enqueue(context.Background(), "principal", "key", admission, testNow)
 			requireError(t, err, ErrInvalid)
-			_, err = s.Claim(context.Background(), "epoch", testNow, 1)
+			_, err = s.Claim(context.Background(), "epoch", testNow, 1, false)
 			requireError(t, err, ErrNoJob)
 		})
 	}

@@ -461,11 +461,20 @@ func TestLostNextResponseReofferedOnlyWhenNotRunning(t *testing.T) {
 // A lease with no delivered sibling waits however long the worker's idle
 // recovery takes. Before, it burned its deadline from the first claim
 // (Studio v0.1.46, 2026-11-11), and a later job could be claimed first.
+// Simulator jobs return and are claimed again alike: the start stagger
+// (simulatorStartGap) allows the second lane's claim beside a running
+// simulator job and the returned job's claim once the worker asks again.
 func TestUndeliveredLeaseReturnsToQueueWhileWorkerDrains(t *testing.T) {
+	for _, kind := range []model.Kind{model.Build, model.SimulatorUITest} {
+		t.Run(string(kind), func(t *testing.T) { undeliveredLeaseReturnsToQueue(t, kind) })
+	}
+}
+
+func undeliveredLeaseReturnsToQueue(t *testing.T, kind model.Kind) {
 	f := newLanes(t, 2)
-	f.enqueue(t, "one", model.Build)
-	waiting := f.enqueue(t, "two", model.Build)
-	later := f.enqueue(t, "three", model.Build)
+	f.enqueue(t, "one", kind)
+	waiting := f.enqueue(t, "two", kind)
+	later := f.enqueue(t, "three", kind)
 	f.register(t, "epoch-a", 2)
 	first := f.start(t, "epoch-a")
 	f.claim(t, "epoch-a", first.Job.ID)
@@ -518,6 +527,108 @@ func TestUndeliveredLeaseReturnsToQueueWhileWorkerDrains(t *testing.T) {
 	f.controller.checkActive(context.Background())
 	if job := f.job(t, later.ID); job.State != model.Preparing {
 		t.Fatalf("lone lease requeued: %s", job.State)
+	}
+}
+
+// Six lanes, six queued simulator UI test jobs and a build: a simulator job is
+// claimed only while no other is starting, so the six are claimed over
+// minutes instead of one per work request (four within 8 s overloaded the
+// Studio, 2026-11-13). A simulator job is starting until it reports running
+// or until simulatorStartGap after its delivery; one not yet delivered holds
+// however long its source takes. The build, at the fair head, is claimed
+// beside a starting simulator job, and all six simulator jobs run.
+func TestSimulatorStartsAreStaggered(t *testing.T) {
+	f := newLanes(t, 6)
+	release := make(chan struct{})
+	f.source.release = release
+	ui := []model.Job{f.enqueue(t, "ui-1", model.SimulatorUITest)}
+	build := f.enqueue(t, "build", model.Build)
+	for _, key := range []string{"ui-2", "ui-3", "ui-4", "ui-5", "ui-6"} {
+		ui = append(ui, f.enqueue(t, key, model.SimulatorUITest))
+	}
+	f.register(t, "epoch-a", 6)
+	var running []string
+	ask := func(at time.Duration) *protocol.Lease {
+		t.Helper()
+		f.offset.Store(int64(at))
+		lease, err := f.controller.next(context.Background(), "epoch-a", running)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if lease != nil {
+			running = append(running, lease.Job.ID)
+		}
+		return lease
+	}
+	claims := func(at time.Duration, want model.Job) {
+		t.Helper()
+		before := len(f.activeIDs())
+		if lease := ask(at); lease != nil {
+			t.Fatalf("at %s delivered %s, want a claim of %s", at, lease.Job.ID, want.ID)
+		}
+		if ids := f.activeIDs(); len(ids) != before+1 || ids[before] != want.ID {
+			t.Fatalf("at %s active %v, want %s claimed", at, ids, want.ID)
+		}
+	}
+	holds := func(at time.Duration) {
+		t.Helper()
+		before := f.activeIDs()
+		if lease := ask(at); lease != nil || len(f.activeIDs()) != len(before) {
+			t.Fatalf("at %s: lease %v, active %v, want nothing claimed beside %v", at, lease, f.activeIDs(), before)
+		}
+	}
+	delivers := func(at time.Duration, want model.Job) protocol.Lease {
+		t.Helper()
+		f.controller.prep.Wait()
+		lease := ask(at)
+		if lease == nil || lease.Job.ID != want.ID {
+			t.Fatalf("at %s delivered %v, want %s", at, lease, want.ID)
+		}
+		return *lease
+	}
+	runs := func(lease protocol.Lease) {
+		t.Helper()
+		if code := lifecycleRequest(t, f.controller, lease, "/stage", protocol.Stage{State: model.Running}); code != http.StatusNoContent {
+			t.Fatalf("running stage of %s: %d", lease.Job.ID, code)
+		}
+	}
+	claims(0, ui[0])
+	claims(0, build)
+	holds(time.Minute)
+	holds(2 * time.Minute)
+	close(release)
+	leases := []protocol.Lease{delivers(2*time.Minute, ui[0])}
+	built := delivers(2*time.Minute, build)
+	holds(2 * time.Minute)
+	holds(3*time.Minute - time.Second)
+	claims(3*time.Minute, ui[1])
+	leases = append(leases, delivers(3*time.Minute, ui[1]))
+	// Running, a simulator job no longer holds the next start.
+	runs(leases[1])
+	claims(3*time.Minute, ui[2])
+	leases = append(leases, delivers(3*time.Minute, ui[2]))
+	runs(built)
+	if err := f.controller.complete(context.Background(), built.Job, f.result(t, built), buildseal.Envelope{}); err != nil {
+		t.Fatal(err)
+	}
+	for i, at := range []time.Duration{4 * time.Minute, 5 * time.Minute, 6 * time.Minute} {
+		holds(at - time.Second)
+		claims(at, ui[3+i])
+		leases = append(leases, delivers(at, ui[3+i]))
+	}
+	lanes := map[int]bool{}
+	for i, lease := range leases {
+		if i != 1 {
+			runs(lease)
+		}
+		job := f.job(t, lease.Job.ID)
+		if job.State != model.Running || lanes[job.Lane] {
+			t.Fatalf("%s: %s in lane %d, lanes taken %v", job.ID, job.State, job.Lane, lanes)
+		}
+		lanes[job.Lane] = true
+	}
+	if len(lanes) != 6 {
+		t.Fatalf("lanes %v", lanes)
 	}
 }
 

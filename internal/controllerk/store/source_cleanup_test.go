@@ -40,7 +40,7 @@ func TestSourceDebtSurvivesPruningReopenAndWorkerAcknowledgment(t *testing.T) {
 		t.Fatalf("pruning lost source cleanup ID: %v %v", pending, err)
 	}
 	queued := enqueueJob(t, s, "owner", "waiting", testNow.Add(2*time.Hour))
-	_, err = s.Claim(ctx, "epoch-b", testNow.Add(2*time.Hour), 1)
+	_, err = s.Claim(ctx, "epoch-b", testNow.Add(2*time.Hour), 1, false)
 	requireError(t, err, ErrNoJob)
 	requireError(t, s.ConfirmSourceCleanup(ctx, job.ID), nil)
 	claimed := claimJob(t, s, "epoch-b", testNow.Add(2*time.Hour))

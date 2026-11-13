@@ -15,7 +15,7 @@ import (
 func TestLanesReportedByCapabilitiesAdminStateAndJob(t *testing.T) {
 	f := setup(t)
 	job := f.submit(t, "first")
-	claimed, err := f.db.Claim(context.Background(), "epoch", testTime, 2)
+	claimed, err := f.db.Claim(context.Background(), "epoch", testTime, 2, false)
 	if err != nil || claimed.ID != job.ID {
 		t.Fatalf("claim: %+v %v", claimed, err)
 	}
