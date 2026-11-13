@@ -191,11 +191,36 @@ func (c *Controller) requeueUndelivered(ctx context.Context, a *execution, job m
 	c.release(a)
 }
 
+// simulatorStartGap staggers the starts of simulator jobs. A simulator job is
+// starting from its claim until the worker reports it running or until
+// simulatorStartGap after its lease was delivered, whichever comes first;
+// while one is, no other simulator job is claimed (store.Claim's
+// holdSimulators). The worker reports running only after source extraction,
+// toolchain observation, the simulator's boot and the prepare commands (a
+// template's build-for-testing or build), so running alone would hold the
+// next start for a whole build; the delivery bound releases it once the boot
+// is over. Evidence on the Studio: four simulator jobs claimed within 8 s
+// slowed every maintenance probe past its deadline for about 50 s, until the
+// last valid health expired and readiness cancelled them, while jobs that
+// started one at a time did not; booting simulators kept the GUI-baseline
+// check near the probe deadline for over 40 s (#108). A minute after delivery
+// one job's boot is over before the next job's begins, and six lanes fill in
+// about five minutes.
+const simulatorStartGap = time.Minute
+
+// startingSimulator reports whether a, whose current record is job, is a
+// simulator job still starting (simulatorStartGap): not yet running, and not
+// delivered or delivered less than simulatorStartGap ago. Callers hold c.mu.
+func startingSimulator(a *execution, job model.Job, now time.Time) bool {
+	return job.Request.Kind.UsesSimulator() && job.State == model.Preparing && (!a.offered || now.Sub(a.offeredAt) < simulatorStartGap)
+}
+
 // next hands out at most one lease per call. running lists the jobs the worker
 // executes in any phase: an offered lease still preparing is offered again only
 // when the worker does not run it, meaning the earlier response was lost. A
 // worker before lanes sends none and runs one job, so its preparing lease is
-// always offered again. Otherwise a job is claimed when a lane is free.
+// always offered again. Otherwise a job is claimed when a lane is free; a
+// simulator job only while no other is starting (startingSimulator).
 func (c *Controller) next(ctx context.Context, epoch string, running []string) (*protocol.Lease, error) {
 	gate, err := c.options.Gate(ctx)
 	if err != nil {
@@ -228,6 +253,7 @@ func (c *Controller) next(ctx context.Context, epoch string, running []string) (
 	}
 	var offer *execution
 	var lease *protocol.Lease
+	starting := false
 	for _, a := range c.active {
 		job, err := c.options.Store.Get(ctx, a.job.ID)
 		if err != nil {
@@ -239,6 +265,7 @@ func (c *Controller) next(ctx context.Context, epoch string, running []string) (
 			}
 			continue
 		}
+		starting = starting || startingSimulator(a, job, c.options.Now())
 		// A preparing lease may be retried when its HTTP response was lost. Running
 		// and finalizing leases are never handed out a second time, nor is a
 		// lease being fenced or claimed by another epoch.
@@ -250,7 +277,8 @@ func (c *Controller) next(ctx context.Context, epoch string, running []string) (
 	if offer != nil {
 		if !offer.offered {
 			offer.offered = true
-			offer.heartbeat = c.options.Now()
+			offer.offeredAt = c.options.Now()
+			offer.heartbeat = offer.offeredAt
 		}
 		return lease, nil
 	}
@@ -267,7 +295,7 @@ func (c *Controller) next(ctx context.Context, epoch string, running []string) (
 	if len(c.active) > 0 && !health.AdmitsAnother(gate, len(c.active), lanes) {
 		return nil, nil
 	}
-	job, err := c.options.Store.Claim(ctx, epoch, c.options.Now(), lanes)
+	job, err := c.options.Store.Claim(ctx, epoch, c.options.Now(), lanes, starting)
 	if errors.Is(err, store.ErrNoJob) {
 		return nil, nil
 	}

@@ -229,10 +229,14 @@ const fairOrder = `SELECT ` + jobColumns + ` FROM jobs AS queued WHERE state='qu
 // claimed like a test job, but only while no other such job is active (the
 // worker attributes the simulators a script creates to the one such job
 // running); while one is, the next such job waits without blocking the jobs
-// behind it, which are claimed in the fair order. The database additionally
+// behind it, which are claimed in the fair order. holdSimulators is set while
+// another simulator job is still starting (the controller's start stagger): a
+// head that uses a simulator then waits like an exclusive head, and nothing
+// behind it is claimed meanwhile; any other head is claimed as usual. The
+// database additionally
 // prohibits two active rows on one lane, even if a future caller bypasses the
 // normal dispatch path.
-func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time, lanes int) (model.Job, error) {
+func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time, lanes int, holdSimulators bool) (model.Job, error) {
 	if !validOpaque(workerEpoch, 256) || !validTime(now) || lanes < 1 || lanes > model.MaxConcurrentJobs {
 		return model.Job{}, ErrInvalid
 	}
@@ -287,7 +291,7 @@ func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time, la
 	if err != nil {
 		return model.Job{}, err
 	}
-	if job.Exclusive() && len(running) > 0 || !memoryAdmits(running, job) {
+	if job.Exclusive() && len(running) > 0 || holdSimulators && job.Request.Kind.UsesSimulator() || !memoryAdmits(running, job) {
 		if err := tx.Commit(); err != nil {
 			return model.Job{}, err
 		}

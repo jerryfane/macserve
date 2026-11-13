@@ -349,7 +349,7 @@ func TestSourceCleanupDebtSurvivesRegistrationAndRestart(t *testing.T) {
 		t.Fatalf("registration cleared source debt: %+v %v", service, err)
 	}
 	f.enqueue(t, "waiting", model.Build)
-	if _, err := f.db.Claim(context.Background(), "epoch-b", f.now, 1); !errors.Is(err, store.ErrNoJob) {
+	if _, err := f.db.Claim(context.Background(), "epoch-b", f.now, 1, false); !errors.Is(err, store.ErrNoJob) {
 		t.Fatalf("source debt allowed direct claim: %v", err)
 	}
 	if err := c.Close(); err != nil {

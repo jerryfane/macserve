@@ -403,6 +403,19 @@ only while the summed `memory_limit_mib` of the active jobs and the next one sta
 refused by this cap; six default 32 GiB budgets fit, and the `host_memory_pressure` blocker remains the runtime guard).
 `GET /v1/capabilities` reports `max_concurrent_jobs`; `GET /v1/admin/state` reports `active_jobs`.
 
+Simulator jobs (`unit_test`, `simulator_ui_test`, `simulator_script`) start one at a time. A simulator job is starting
+from its claim until it reports `running` (after its source extraction, toolchain observation, simulator boot and
+prepare commands, such as a template's build-for-testing) or until one minute after its lease was delivered, whichever
+comes first; one whose source is still being prepared, or that waits for the worker to ask for it, is starting
+however long that takes. While one is starting, a simulator job at the head of the queue waits and, as behind a job
+that runs alone, nothing behind it is claimed, so the fair order is unchanged; a `build` at the head is claimed beside
+it as usual. Six queued simulator jobs fill six lanes over about five minutes instead of in one burst: on the Studio
+four simulator jobs claimed within 8 s (2026-11-13) slowed every maintenance probe past its deadline for about 50 s,
+until the last valid health expired and readiness cancelled them, while jobs started one at a time did not; booting
+simulators kept the GUI-baseline check near the probe deadline for over 40 s (see above). The waiting head is claimed
+at most one minute after the starting job's delivery, when a lane is free. The one-minute bound is a controller
+constant, not a setting.
+
 Readiness cancellation distinguishes host facts from capacity: a trust blocker (`isolation_unavailable`,
 `maintenance_probe_failed` from its third failed probe, `toolchain_validation_unavailable`, `owner_pause_unavailable`,
 `disk_accounting_unavailable`) or a gate error cancels
