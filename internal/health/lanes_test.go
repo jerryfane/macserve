@@ -20,7 +20,10 @@ func TestLaneOverrideOnlyLowers(t *testing.T) {
 		`{"max_concurrent_jobs":2}`:       {3, 2},
 		`{"max_concurrent_jobs":3}`:       {2, 2}, // never raises
 		`{"max_concurrent_jobs":0}`:       {2, 1},
-		`{"max_concurrent_jobs":4}`:       {3, 1},
+		`{"max_concurrent_jobs":4}`:       {6, 4},
+		`{"max_concurrent_jobs":5}`:       {4, 4}, // never raises
+		`{"max_concurrent_jobs":6}`:       {6, 6},
+		`{"max_concurrent_jobs":7}`:       {6, 1},
 		`{}`:                              {2, 1},
 		`{"max_concurrent_jobs":"2"}`:     {2, 1},
 		`{"max_concurrent_jobs":2,"x":1}`: {2, 1},
