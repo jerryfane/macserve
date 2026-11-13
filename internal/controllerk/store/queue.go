@@ -503,8 +503,10 @@ func (s *Store) Prune(ctx context.Context, now time.Time) error {
 // ConcurrentMemoryCapMiB bounds the summed memory budgets (memory_limit_mib)
 // of concurrently active jobs (PARALLEL-DESIGN.md §7.3): a job beside others
 // is claimed only while the sum, with its own, stays within it. A job alone
-// is never refused by it, so one lane behaves as before.
-const ConcurrentMemoryCapMiB = 128 << 10
+// is never refused by it, so one lane behaves as before. 192 GiB fits six
+// default 32 GiB budgets on the 256 GiB Studio; host_memory_pressure remains
+// the runtime guard.
+const ConcurrentMemoryCapMiB = 192 << 10
 
 func memoryAdmits(running []model.Job, next model.Job) bool {
 	if len(running) == 0 {

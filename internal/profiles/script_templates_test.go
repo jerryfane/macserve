@@ -31,7 +31,7 @@ func TestNormalizeScriptTemplatePinsAndBudgets(t *testing.T) {
 	if got.Kind != model.SimulatorScript || len(got.Simulators) != 2 || got.DefaultTimeoutSeconds != 3600 || got.MaxTimeoutSeconds != 7200 {
 		t.Fatalf("script template: %+v", got)
 	}
-	// The other kinds keep their defaults and 3600-second cap.
+	// The other kinds keep their defaults; an omitted UI-test maximum stays 3600.
 	ui := r.Templates()[1]
 	if ui.MaxTimeoutSeconds != 3600 {
 		t.Fatalf("UI template budget changed: %+v", ui)
@@ -51,7 +51,7 @@ func TestNormalizeScriptTemplatePinsAndBudgets(t *testing.T) {
 		"duplicate simulator":     withScriptSimulators(`"simulators":[` + pin + `,` + pin + `],`),
 		"timeout above 7200":      strings.Replace(scriptTemplate, `"memory_limit_mib"`, `"max_timeout_seconds":7201,"memory_limit_mib"`, 1),
 		"default above maximum":   strings.Replace(scriptTemplate, `"memory_limit_mib"`, `"default_timeout_seconds":5000,"max_timeout_seconds":4000,"memory_limit_mib"`, 1),
-		"UI timeout above 3600":   strings.Replace(uiTemplate, `"max_timeout_seconds":3600`, `"max_timeout_seconds":7200`, 1),
+		"unit timeout above 3600": strings.Replace(unitTemplate, `"max_timeout_seconds":3600`, `"max_timeout_seconds":3601`, 1),
 		"unknown script spelling": strings.Replace(scriptTemplate, `"simulator_script"`, `"script"`, 1),
 	}
 	for name, template := range invalid {

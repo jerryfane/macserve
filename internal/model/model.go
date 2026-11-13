@@ -54,12 +54,12 @@ func (k Kind) Exclusive() bool {
 
 // MaxConcurrentJobs bounds the max_concurrent_jobs setting of the worker
 // and the controller; 1 is the single-job service.
-const MaxConcurrentJobs = 3
+const MaxConcurrentJobs = 6
 
 // MaxTimeoutSeconds is the largest job timeout a recipe of kind k may allow.
 func (k Kind) MaxTimeoutSeconds() int {
 	switch k {
-	case SimulatorScript:
+	case SimulatorScript, SimulatorUITest:
 		return 7200
 	case IOSArchive:
 		return 5400

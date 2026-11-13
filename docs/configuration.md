@@ -206,8 +206,20 @@ qualification is the controller's own comparison and appears only in its lines.
 
 Disk admission reserves 30 GiB per job while preserving 120 GiB free: a job is claimed beside N running ones only
 with at least 120 + 30·(N+1) GiB free and at most budget − 30·(N+1) GiB accounted. Below 100 GiB free active work is
-cancelled. The total accounted mutable-data budget is 50 + 30·`max_concurrent_jobs` GiB (80 GiB with one lane, 110
-with two, 140 with three); maintenance, `doctor` and the controller read `max_concurrent_jobs` from `controller.json`. The retained evidence pool reserves 1 GiB for store log
+cancelled. The total accounted mutable-data budget is 50 + 30·`max_concurrent_jobs` GiB; maintenance, `doctor` and the
+controller read `max_concurrent_jobs` from `controller.json` (lowered by `lanes.json`). Claiming the last lane, beside
+`max_concurrent_jobs` − 1 running jobs, needs:
+
+| lanes | accounted budget | free disk to claim the last lane | accounted to claim the last lane |
+| ----- | ---------------- | -------------------------------- | -------------------------------- |
+| 1     | 80 GiB           | 150 GiB                          | at most 50 GiB                   |
+| 2     | 110 GiB          | 180 GiB                          | at most 50 GiB                   |
+| 3     | 140 GiB          | 210 GiB                          | at most 50 GiB                   |
+| 4     | 170 GiB          | 240 GiB                          | at most 50 GiB                   |
+| 5     | 200 GiB          | 270 GiB                          | at most 50 GiB                   |
+| 6     | 230 GiB          | 300 GiB                          | at most 50 GiB                   |
+
+The retained evidence pool reserves 1 GiB for store log
 rows and 14 GiB for artifacts, with seven-day expiry/oldest-terminal eviction. Metadata persists for 90 days;
 expired downloads, log pages and newly opened log streams return `410`.
 These are monitored application budgets, not filesystem quotas. Controller test parsing uses sealed JSON
@@ -347,14 +359,14 @@ section, `POST /v1/jobs/{id}/sign` reports signing unavailable.
 
 ## Concurrent jobs (`max_concurrent_jobs`)
 
-`controller.json` and `worker.json` each take `max_concurrent_jobs` (1–3; omitted means 1). The controller leases at
+`controller.json` and `worker.json` each take `max_concurrent_jobs` (1–6; omitted means 1). The controller leases at
 most the smaller of its own value and the `lanes` the worker registers; with 1 the service runs one job at a time
 exactly as before. Each claimed job gets a `lane` (1-based, shown in the job view; a unique index forbids two active
 jobs in one lane, store schema version 7). The fair per-repository order still chooses the next job. `simulator_script`
 and `ios_archive` run alone: such a job at the head of the queue waits for every running job to finish, and nothing
-starts beside it. A second or third lane is claimed only when the disk reservation above holds for one more job, and only while the
-summed `memory_limit_mib` of the active jobs and the next one stays within 128 GiB (a job alone is never refused by
-this cap; three default 32 GiB budgets fit).
+starts beside it. A lane beyond the first is claimed only when the disk reservation above holds for one more job, and
+only while the summed `memory_limit_mib` of the active jobs and the next one stays within 192 GiB (a job alone is never
+refused by this cap; six default 32 GiB budgets fit, and the `host_memory_pressure` blocker remains the runtime guard).
 `GET /v1/capabilities` reports `max_concurrent_jobs`; `GET /v1/admin/state` reports `active_jobs`.
 
 Readiness cancellation distinguishes host facts from capacity: a trust blocker (`isolation_unavailable`,
@@ -387,7 +399,7 @@ not exit.
 ### Lowering concurrency without a sitting: `lanes.json`
 
 `/Library/macserve/config/lanes.json` (root-owned, mode 0644, not group- or other-writable) holds
-`{"max_concurrent_jobs": N}` with N in 1..3 and nothing else. The activation anchor does not hash it, so an
+`{"max_concurrent_jobs": N}` with N in 1..6 and nothing else. The activation anchor does not hash it, so an
 administrator can lower concurrency, for example to 1 as a rollback, without requalification. The controller, the worker
 and maintenance read it at start; restart the controller and worker services after changing it. The effective value is
 the minimum of `controller.json`, `worker.json` and `lanes.json`: the file only lowers. An absent file is no override; a
