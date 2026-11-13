@@ -74,10 +74,11 @@ func (f *laneFake) gate(job string) chan struct{} {
 	return ch
 }
 
-func (f *laneFake) Admission(ctx context.Context) error { f.event("admission"); return ctx.Err() }
-func (f *laneFake) BeginJob(job string, _ time.Time)    { f.event("begin " + job) }
-func (f *laneFake) EndJob(job string)                   { f.event("end " + job) }
-func (f *laneFake) AttachDevice(job, udid string)       { f.event("device " + job) }
+func (f *laneFake) Admission(ctx context.Context) error  { f.event("admission"); return ctx.Err() }
+func (f *laneFake) BeginJob(job string, _ time.Time)     { f.event("begin " + job) }
+func (f *laneFake) EndJob(job string)                    { f.event("end " + job) }
+func (f *laneFake) AttachDevice(job, udid string)        { f.event("device " + job + " " + udid) }
+func (f *laneFake) AdoptDevices(job string, _ time.Time) { f.event("adopt " + job) }
 func (f *laneFake) QuiesceJob(ctx context.Context, job string) error {
 	f.event("quiesce " + job)
 	return ctx.Err()

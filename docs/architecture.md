@@ -344,3 +344,17 @@ interrupted create. A broker restart with several manifests recovers all of them
 job's simulator and workspace). Each completion is saved as `pending-<job>.json` until acknowledged (a pre-lane
 `pending.json` is still delivered).
 
+**Concurrent scripts.** `simulator_script` and `ios_archive` jobs run alone (`model.Job.Exclusive`), except a script
+job of a template with `"concurrent": true` (`model.Profile.Concurrent`), which the controller claims and the engine
+admits beside other jobs but beside no other such job. Its script runs arbitrary repository shell, and the simulators
+it creates with `simctl` are booted by CoreSimulator, not by the script, so lineage alone would leave them
+unattributed. Just before the script starts the engine records the device inventory in the job's manifest (under the
+creation lock, so no engine creation is in flight) and makes the job the tracker's one *adopter*: a `launchd_sim` (or a
+process executing from a device directory) of a device no running job created, started since, seeds the script job's
+label. At finalization, again under the creation lock, every device then listed that was not in the recorded
+inventory, is not recorded by another manifest and is not the job's own becomes one of the job's `script_devices`
+(also attached to the tracker); they are shut down, deleted and proven absent with its own simulator, before the lane
+quiesce, and a survivor is contamination. Recovery after a restart does the same from the manifest. Anything else the
+script leaves follows the residue, hold and idle-verdict rules above. The engine cannot detect a script acting on a
+sibling's simulator or on CoreSimulator; the contract in [configuration.md](configuration.md) forbids it.
+

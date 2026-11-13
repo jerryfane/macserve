@@ -47,7 +47,8 @@ func (k Kind) UsesSimulator() bool {
 // is active, and keeps every other job from starting while it runs: a
 // simulator_script job runs arbitrary repository shell in the shared job
 // account, and an ios_archive job's evidence requires the job account
-// stopped.
+// stopped. A simulator_script job whose template opts in
+// (Template.Concurrent) is not exclusive; Job.Exclusive decides for a job.
 func (k Kind) Exclusive() bool {
 	return k == SimulatorScript || k == IOSArchive
 }
@@ -243,6 +244,12 @@ type Profile struct {
 	Release *ReleaseRequest `json:"release,omitempty"`
 }
 
+// Concurrent reports whether p is the snapshot of a simulator_script
+// template job whose template opts in to running beside other jobs.
+func (p Profile) Concurrent() bool {
+	return p.Kind == SimulatorScript && p.Template != nil && p.Template.Concurrent
+}
+
 // Template is a controller-owned, owner-scoped recipe. Every repository of a
 // listed GitHub account may use it by declaring its Xcode project or workspace
 // and scheme, and for a test or script template its shards, in .macserve.json;
@@ -262,6 +269,11 @@ type Template struct {
 	MaxTimeoutSeconds     int         `json:"max_timeout_seconds"`
 	MemoryLimitMiB        int         `json:"memory_limit_mib"`
 	Flutter               *FlutterPin `json:"flutter,omitempty"`
+	// Concurrent lets a simulator_script template's jobs run beside other
+	// jobs, as test jobs do, instead of alone (Job.Exclusive). Only script
+	// templates may set it. It is omitted when false, so a template without
+	// it keeps its digest.
+	Concurrent bool `json:"concurrent,omitempty"`
 }
 
 // FlutterPin is a Flutter template's exact tool identity: the Flutter SDK
@@ -401,6 +413,14 @@ type Job struct {
 	// version 6, have none. It is job-record metadata only: receipts never
 	// carry it.
 	CancelReason *CancelReason `json:"cancel_reason,omitempty"`
+}
+
+// Exclusive reports whether job runs only while no other job is active and
+// keeps every other job from starting while it runs: a job of an exclusive
+// kind (Kind.Exclusive), unless it is a simulator_script job whose template
+// opts in to concurrency (Profile.Concurrent).
+func (j Job) Exclusive() bool {
+	return j.Request.Kind.Exclusive() && !(j.Request.Kind == SimulatorScript && j.Profile.Concurrent())
 }
 
 // CancelSource names what requested a job's cancellation.

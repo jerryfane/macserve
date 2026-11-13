@@ -152,14 +152,17 @@ func environment(workspace, developer, account string) []string {
 	return []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "USER=" + account, "LOGNAME=" + account, "DEVELOPER_DIR=" + developer, "HOME=" + filepath.Join(workspace, "home"), "TMPDIR=" + filepath.Join(workspace, "tmp"), "TMP=" + filepath.Join(workspace, "tmp"), "TEMP=" + filepath.Join(workspace, "tmp"), "CFFIXED_USER_HOME=" + filepath.Join(workspace, "home"), "XDG_CACHE_HOME=" + filepath.Join(workspace, "caches"), "CLANG_MODULE_CACHE_PATH=" + filepath.Join(workspace, "caches", "clang"), "SWIFT_MODULECACHE_PATH=" + filepath.Join(workspace, "caches", "swift"), "LANG=en_US.UTF-8", "LC_ALL=en_US.UTF-8"}
 }
 
-// stopWriters stops m's simulator and then the job processes jobID's
-// cleanup may stop (accountQuiesce); jobID "" is recovery, which stops every
-// job process.
+// stopWriters stops m's simulators (its own and those its script created)
+// and then the job processes jobID's cleanup may stop (accountQuiesce);
+// jobID "" is recovery, which stops every job process.
 func (e *Engine) stopWriters(ctx context.Context, m *manifest, jobID string) error {
 	ctx, cancel := context.WithTimeout(ctx, e.options.CleanupTimeout)
 	defer cancel()
 	var simulatorErr error
 	if err := e.verifyDeviceCreation(ctx, m); err != nil {
+		return err
+	}
+	if err := e.adoptScriptDevices(ctx, m); err != nil {
 		return err
 	}
 	if m.DeviceUDID != "" {
@@ -168,6 +171,7 @@ func (e *Engine) stopWriters(ctx context.Context, m *manifest, jobID string) err
 		}
 		simulatorErr = e.stopDevice(ctx, m)
 	}
+	simulatorErr = errors.Join(simulatorErr, e.stopScriptDevices(ctx, m))
 	quietErr := e.accountQuiesce(ctx, jobID)
 	if quietErr != nil {
 		return errors.Join(ErrRecovery, simulatorErr, quietErr)
@@ -180,27 +184,8 @@ func (e *Engine) stopDevice(ctx context.Context, m *manifest) error {
 		if !udidPattern.MatchString(m.DeviceUDID) {
 			return ErrRecovery
 		}
-		command := Command{Executable: "/usr/bin/xcrun", Dir: "/", Env: environment(filepath.Join(e.options.WorkspaceRoot, m.JobID), m.DeveloperDir, e.options.JobUser), JobID: m.JobID}
-		var failures []error
-		for _, action := range []string{"shutdown", "delete"} {
-			command.Args = []string{"simctl", action, m.DeviceUDID}
-			output := &boundedBuffer{max: 1 << 20}
-			stderr := &boundedBuffer{max: 1 << 20}
-			result, err := e.run(ctx, command, output, stderr)
-			if !result.CleanupOK {
-				return errors.Join(err, ErrRecovery)
-			}
-			if action == "shutdown" && alreadyShutdown(err, result, output, stderr) {
-				// A device that failed to boot may already be shut down; the
-				// delete and the absence proof below still decide ownership.
-				continue
-			}
-			if err != nil || result.ExitCode != 0 || result.Signal != "" || output.err != nil || stderr.err != nil {
-				failures = append(failures, fmt.Errorf("simulator %s failed: %w", action, errors.Join(err, output.err, stderr.err, fmt.Errorf("exit %d signal %s: %s %s", result.ExitCode, result.Signal, output.String(), stderr.String()))))
-			}
-		}
-		if len(failures) != 0 {
-			return errors.Join(failures...)
+		if err := e.removeDevice(ctx, m, m.DeviceUDID); err != nil {
+			return err
 		}
 		if err := e.reconcileDevice(ctx, m); err != nil {
 			return err
@@ -208,6 +193,132 @@ func (e *Engine) stopDevice(ctx context.Context, m *manifest) error {
 		if m.DeviceUDID != "" {
 			return fmt.Errorf("%w: recorded simulator remains after deletion", ErrContamination)
 		}
+	}
+	return nil
+}
+
+// removeDevice shuts down and deletes the simulator udid that m records.
+func (e *Engine) removeDevice(ctx context.Context, m *manifest, udid string) error {
+	command := Command{Executable: "/usr/bin/xcrun", Dir: "/", Env: environment(filepath.Join(e.options.WorkspaceRoot, m.JobID), m.DeveloperDir, e.options.JobUser), JobID: m.JobID}
+	var failures []error
+	for _, action := range []string{"shutdown", "delete"} {
+		command.Args = []string{"simctl", action, udid}
+		output := &boundedBuffer{max: 1 << 20}
+		stderr := &boundedBuffer{max: 1 << 20}
+		result, err := e.run(ctx, command, output, stderr)
+		if !result.CleanupOK {
+			return errors.Join(err, ErrRecovery)
+		}
+		if action == "shutdown" && alreadyShutdown(err, result, output, stderr) {
+			// A device that failed to boot may already be shut down; the
+			// delete and the absence proof still decide ownership.
+			continue
+		}
+		if err != nil || result.ExitCode != 0 || result.Signal != "" || output.err != nil || stderr.err != nil {
+			failures = append(failures, fmt.Errorf("simulator %s failed: %w", action, errors.Join(err, output.err, stderr.err, fmt.Errorf("exit %d signal %s: %s %s", result.ExitCode, result.Signal, output.String(), stderr.String()))))
+		}
+	}
+	return errors.Join(failures...)
+}
+
+// beginScriptDevices runs just before a concurrent script job's script
+// (model.Profile.Concurrent): it records the simulator inventory the script
+// starts from in m, and has the lane attribution give the job the processes
+// of simulators no job created through the engine (laneRunner.AdoptDevices).
+// The job's cleanup then adopts and deletes the devices its script added
+// (adoptScriptDevices, stopScriptDevices). It runs under deviceMu, so no
+// engine creation is in flight.
+func (e *Engine) beginScriptDevices(ctx context.Context, m *manifest) error {
+	e.deviceMu.Lock()
+	defer e.deviceMu.Unlock()
+	before, err := e.deviceInventory(ctx, m)
+	if err != nil {
+		return err
+	}
+	m.ScriptDevicesPending, m.ScriptDevicesBefore = true, before
+	if err := e.saveManifest(*m); err != nil {
+		return err
+	}
+	if lanes := e.laneRunner(); lanes != nil && e.laneMode() {
+		lanes.AdoptDevices(m.JobID, e.options.Now())
+	}
+	return nil
+}
+
+// adoptScriptDevices ends a recorded script start (beginScriptDevices): every
+// simulator listed now that was not in the inventory the script started
+// from, is not m's own and that no other manifest records becomes one of m's
+// ScriptDevices. Only one concurrent script job runs at a time (the store
+// claims one, enter admits one), and every engine creation is recorded in
+// its manifest before deviceMu, held here, is released: such a device is
+// one the script created. It also applies after a restart (Recover).
+func (e *Engine) adoptScriptDevices(ctx context.Context, m *manifest) error {
+	if !m.ScriptDevicesPending {
+		return nil
+	}
+	e.deviceMu.Lock()
+	defer e.deviceMu.Unlock()
+	ids, err := e.deviceInventory(ctx, m)
+	if err != nil {
+		return err
+	}
+	recorded, err := e.recordedDevices(m.JobID)
+	if err != nil {
+		return err
+	}
+	before := make(map[string]bool, len(m.ScriptDevicesBefore))
+	for _, id := range m.ScriptDevicesBefore {
+		before[strings.ToUpper(id)] = true
+	}
+	for _, id := range ids {
+		key := strings.ToUpper(id)
+		if before[key] || recorded[key] || key == strings.ToUpper(m.DeviceUDID) || slices.ContainsFunc(m.ScriptDevices, func(own string) bool { return strings.EqualFold(own, id) }) {
+			continue
+		}
+		m.ScriptDevices = append(m.ScriptDevices, id)
+		if lanes := e.laneRunner(); lanes != nil && e.laneMode() {
+			lanes.AttachDevice(m.JobID, id)
+		}
+	}
+	m.ScriptDevicesPending, m.ScriptDevicesBefore = false, nil
+	return e.saveManifest(*m)
+}
+
+// stopScriptDevices shuts down and deletes every simulator m's script
+// created that is still listed and proves them all absent; m keeps only
+// those that remain, which is contamination.
+func (e *Engine) stopScriptDevices(ctx context.Context, m *manifest) error {
+	if len(m.ScriptDevices) == 0 {
+		return nil
+	}
+	if slices.ContainsFunc(m.ScriptDevices, func(id string) bool { return !udidPattern.MatchString(id) }) {
+		return ErrRecovery
+	}
+	ids, err := e.deviceInventory(ctx, m)
+	if err != nil {
+		return err
+	}
+	var failures []error
+	for _, udid := range m.ScriptDevices {
+		if slices.Contains(ids, udid) {
+			failures = append(failures, e.removeDevice(ctx, m, udid))
+		}
+	}
+	if err := errors.Join(failures...); err != nil {
+		return err
+	}
+	if ids, err = e.deviceInventory(ctx, m); err != nil {
+		return err
+	}
+	m.ScriptDevices = slices.DeleteFunc(m.ScriptDevices, func(id string) bool { return !slices.Contains(ids, id) })
+	if len(m.ScriptDevices) == 0 {
+		m.ScriptDevices = nil
+	}
+	if err := e.saveManifest(*m); err != nil {
+		return err
+	}
+	if len(m.ScriptDevices) != 0 {
+		return fmt.Errorf("%w: %d script-created simulator(s) remain after deletion", ErrContamination, len(m.ScriptDevices))
 	}
 	return nil
 }
@@ -229,7 +340,7 @@ func alreadyShutdown(err error, result ProcessResult, output, stderr *boundedBuf
 func (e *Engine) cleanup(ctx context.Context, m *manifest) error {
 	ctx, cancel := context.WithTimeout(ctx, e.options.CleanupTimeout)
 	defer cancel()
-	if m.DeviceCreatePending || m.DeviceUDID != "" {
+	if m.DeviceCreatePending || m.DeviceUDID != "" || m.ScriptDevicesPending || len(m.ScriptDevices) != 0 {
 		return fmt.Errorf("%w: unresolved simulator ownership", ErrRecovery)
 	}
 	if err := e.unmountMetalToolchain(ctx, m); err != nil {
@@ -303,10 +414,11 @@ func (e *Engine) reconcileDevice(ctx context.Context, m *manifest) error {
 }
 
 // verifyDeviceCreation resolves an interrupted creation: every device now
-// listed must be in the pre-create snapshot or recorded by another job's
+// listed must be in the pre-create snapshot, recorded by another job's
 // manifest (a sibling's own device, created after this one's creation
-// ended); anything else is an unrecorded device. It runs under deviceMu, so
-// no sibling creation is in flight.
+// ended) or one a concurrent script job's cleanup adopts (absent from its
+// recorded start inventory); anything else is an unrecorded device. It runs
+// under deviceMu, so no sibling creation is in flight.
 func (e *Engine) verifyDeviceCreation(ctx context.Context, m *manifest) error {
 	if !m.DeviceCreatePending {
 		return nil
@@ -321,6 +433,10 @@ func (e *Engine) verifyDeviceCreation(ctx context.Context, m *manifest) error {
 	if err != nil {
 		return err
 	}
+	scripts, err := e.scriptStarts(m.JobID)
+	if err != nil {
+		return err
+	}
 	if m.DevicesBefore == nil && len(ids) != 0 {
 		return errors.New("interrupted legacy create lacks a protected baseline inventory")
 	}
@@ -329,7 +445,8 @@ func (e *Engine) verifyDeviceCreation(ctx context.Context, m *manifest) error {
 		before[id] = true
 	}
 	for _, id := range ids {
-		if !before[id] && !recorded[strings.ToUpper(id)] {
+		adopted := slices.ContainsFunc(scripts, func(start map[string]bool) bool { return !start[strings.ToUpper(id)] })
+		if !before[id] && !recorded[strings.ToUpper(id)] && !adopted {
 			return fmt.Errorf("%w: unrecorded simulator after interrupted creation: %s; worker-reset required", ErrContamination, id)
 		}
 	}
@@ -394,13 +511,53 @@ func (e *Engine) resetDeviceCreation(ctx context.Context, m *manifest) error {
 }
 
 // recordedDevices is the set of device UDIDs (upper case) other jobs'
-// manifests record as theirs.
+// manifests record as theirs: their own devices and their scripts' devices.
 func (e *Engine) recordedDevices(except string) (map[string]bool, error) {
-	names, err := e.registryNames()
+	others, err := e.otherManifests(except)
 	if err != nil {
 		return nil, err
 	}
 	recorded := map[string]bool{}
+	for _, other := range others {
+		if other.DeviceUDID != "" {
+			recorded[strings.ToUpper(other.DeviceUDID)] = true
+		}
+		for _, id := range other.ScriptDevices {
+			recorded[strings.ToUpper(id)] = true
+		}
+	}
+	return recorded, nil
+}
+
+// scriptStarts is the start inventory (UDIDs, upper case) of every other
+// job's recorded script start that its cleanup has not yet adopted from
+// (beginScriptDevices): a device absent from one is that script's to adopt.
+func (e *Engine) scriptStarts(except string) ([]map[string]bool, error) {
+	others, err := e.otherManifests(except)
+	if err != nil {
+		return nil, err
+	}
+	var starts []map[string]bool
+	for _, other := range others {
+		if !other.ScriptDevicesPending {
+			continue
+		}
+		start := make(map[string]bool, len(other.ScriptDevicesBefore))
+		for _, id := range other.ScriptDevicesBefore {
+			start[strings.ToUpper(id)] = true
+		}
+		starts = append(starts, start)
+	}
+	return starts, nil
+}
+
+// otherManifests reads every resource manifest but except's.
+func (e *Engine) otherManifests(except string) ([]manifest, error) {
+	names, err := e.registryNames()
+	if err != nil {
+		return nil, err
+	}
+	var others []manifest
 	for _, name := range names {
 		if name == except+".json" || !strings.HasSuffix(name, ".json") {
 			continue
@@ -412,9 +569,7 @@ func (e *Engine) recordedDevices(except string) (map[string]bool, error) {
 			}
 			return nil, err
 		}
-		if other.DeviceUDID != "" {
-			recorded[strings.ToUpper(other.DeviceUDID)] = true
-		}
+		others = append(others, other)
 	}
-	return recorded, nil
+	return others, nil
 }

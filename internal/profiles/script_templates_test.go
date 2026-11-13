@@ -297,3 +297,50 @@ func TestEffectiveScriptRecipe(t *testing.T) {
 		})
 	}
 }
+
+// "concurrent": true loads only on a script template, where it marks the
+// admitted snapshot; it is part of the digest only when set, so a template
+// without it keeps its digest, and false is the same template.
+func TestConcurrentScriptTemplate(t *testing.T) {
+	concurrent := strings.Replace(scriptTemplate, `"memory_limit_mib"`, `"concurrent":true,"memory_limit_mib"`, 1)
+	r := templatesFile(t, buildTemplate+","+concurrent)
+	if member(t, r.Templates()[1], "concurrent") != "true" {
+		t.Fatalf("concurrent script template: %+v", r.Templates()[1])
+	}
+	a, err := r.Resolve(scriptRequest(t, "duo-screenshots"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if member(t, *a.Profile.Template, "concurrent") != "true" || a.ProfileDigest != r.Digests()["org-ios-sim-script-v1"] {
+		t.Fatalf("admitted snapshot: %+v %s", a.Profile.Template, a.ProfileDigest)
+	}
+	plain := templatesFile(t, buildTemplate+","+scriptTemplate)
+	explicitFalse := templatesFile(t, buildTemplate+","+strings.Replace(scriptTemplate, `"memory_limit_mib"`, `"concurrent":false,"memory_limit_mib"`, 1))
+	base := plain.Digests()["org-ios-sim-script-v1"]
+	// The digest origin/main computed for this template before the field
+	// existed.
+	if base != "ef6576e2497fd81362da513c0d1946e6c6ba4226e0e846ae2a5cda52900287d6" {
+		t.Fatalf("template without the field changed digest: %s", base)
+	}
+	if r.Digests()["org-ios-sim-script-v1"] == base || explicitFalse.Digests()["org-ios-sim-script-v1"] != base {
+		t.Fatalf("digests: concurrent %s, false %s, without %s", r.Digests()["org-ios-sim-script-v1"], explicitFalse.Digests()["org-ios-sim-script-v1"], base)
+	}
+	if without, err := plain.Resolve(scriptRequest(t, "duo-screenshots")); err != nil || member(t, *without.Profile.Template, "concurrent") != "" {
+		t.Fatalf("snapshot without the field: %v", err)
+	}
+	for name, template := range map[string]string{
+		"ui test":     strings.Replace(uiTemplate, `"memory_limit_mib"`, `"concurrent":true,"memory_limit_mib"`, 1),
+		"unit test":   strings.Replace(unitTemplate, `"memory_limit_mib"`, `"concurrent":true,"memory_limit_mib"`, 1),
+		"build":       strings.Replace(buildTemplate, `"version":1`, `"version":1,"concurrent":true`, 1),
+		"ios_archive": strings.Replace(archiveTemplate, `"memory_limit_mib"`, `"concurrent":true,"memory_limit_mib"`, 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !strings.Contains(template, `"concurrent":true`) {
+				t.Fatalf("fixture lacks the field: %s", template)
+			}
+			if _, err := loadTemplates(template); !errors.Is(err, profiles.ErrInvalid) || !strings.Contains(err.Error(), "only simulator_script templates may set concurrent") {
+				t.Fatalf("concurrent %s template: %v", name, err)
+			}
+		})
+	}
+}

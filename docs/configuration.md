@@ -84,6 +84,30 @@ symlink or special file under it fails the job. Script jobs have no `/results` t
 per-shard timeouts. Preparation has a 30-minute budget. The full
 `.macserve.json` rules are in [install.md](install.md#onboarding-a-repository).
 
+A script job runs alone (see [Concurrent jobs](#concurrent-jobs-max_concurrent_jobs)) unless its template sets `"concurrent": true`, which only a
+`simulator_script` template may set (any other kind refuses to load). The field is part of the template digest only when
+set: a template without it keeps its digest, and adding it requires requalification like any template edit. Such a job
+runs beside other jobs in the one job account, so its script must keep to this contract:
+
+- touch only `MACSERVE_SIMULATOR_ID` and the simulators it creates itself with `xcrun simctl create` (in the default
+  device set), and delete those it creates before it exits;
+- never act on all simulators or on CoreSimulator itself: no `simctl shutdown all`, `simctl erase all`,
+  `simctl delete all|unavailable`, killing or restarting `CoreSimulatorService`, `simdiskimaged` or `launchd_sim`, and
+  no `simctl runtime` changes; no `pkill`/`killall` by name;
+- keep `xcodebuild` test runs on its own devices (`-destination id=…`), with `-parallel-testing-enabled NO` or clones
+  only in XCTest's own clone set.
+
+The worker enforces what it can attribute. Just before the script starts it records the simulator inventory in the
+job's manifest, and while the script runs the processes of every simulator no running job created (each booted
+device's `launchd_sim` and its children, started since) are the script job's: they count against its memory budget,
+and are its processes, not unattributed residue. At the end, before its own simulator, every device listed then that
+was not in that inventory, is not another job's recorded device and is not its own becomes the job's: it is shut
+down and deleted with the job's own simulator, and one that survives deletion is contamination (quarantine). A
+worker restart recovers them from the manifest the same way. Only one such job runs at a time, so a new device is
+never ambiguous. The worker cannot see a script act on another job's simulator or on CoreSimulator: such a violation
+shows up only as the other job's failure, and the residue rules of *Concurrent jobs in one job account* in
+[architecture.md](architecture.md) still apply to anything it leaves.
+
 A Flutter template (one with a `flutter` pin: `version`, `sdk_sha256`, `ruby_sha256`, `cocoapods_version`,
 `gems_sha256`) runs `build`, `unit_test`, `simulator_ui_test` or `ios_archive` jobs for repositories whose `.macserve.json` has a
 `flutter` section, `{"app_dir": "apps/mobile", "prepare_ruby": ["scripts/add_call_directory_target.rb"]}` (at most 8
@@ -364,7 +388,10 @@ most the smaller of its own value and the `lanes` the worker registers; with 1 t
 exactly as before. Each claimed job gets a `lane` (1-based, shown in the job view; a unique index forbids two active
 jobs in one lane, store schema version 7). The fair per-repository order still chooses the next job. `simulator_script`
 and `ios_archive` run alone: such a job at the head of the queue waits for every running job to finish, and nothing
-starts beside it. A lane beyond the first is claimed only when the disk reservation above holds for one more job, and
+starts beside it. A `simulator_script` job of a template with `"concurrent": true` (see the script contract above) is
+the exception: it is claimed like a test job, beside other jobs and they beside it, but beside no other such job; while
+one runs, the next waits without holding up the jobs behind it, which are claimed in the fair order. A lane beyond the
+first is claimed only when the disk reservation above holds for one more job, and
 only while the summed `memory_limit_mib` of the active jobs and the next one stays within 192 GiB (a job alone is never
 refused by this cap; six default 32 GiB budgets fit, and the `host_memory_pressure` blocker remains the runtime guard).
 `GET /v1/capabilities` reports `max_concurrent_jobs`; `GET /v1/admin/state` reports `active_jobs`.

@@ -319,6 +319,9 @@ func normalizeTemplate(t *model.Template) error {
 	default:
 		return fmt.Errorf("%w: templates support only build, unit_test, simulator_ui_test, simulator_script and ios_archive jobs", ErrUnsupported)
 	}
+	if t.Concurrent && t.Kind != model.SimulatorScript {
+		return fmt.Errorf("%w: only simulator_script templates may set concurrent", ErrInvalid)
+	}
 	if len(t.Owners) == 0 {
 		return fmt.Errorf("%w: at least one owner is required", ErrInvalid)
 	}
