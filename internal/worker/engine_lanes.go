@@ -34,11 +34,17 @@ import (
 //   - while draining no job starts; Recover, which runs only when no job
 //     runs, applies the full quiesce and admission and then admits again.
 //
-// simulator_script and ios_archive jobs run only alone (model.Kind.Exclusive).
+// simulator_script and ios_archive jobs run only alone (model.Job.Exclusive),
+// except a simulator_script job whose template opts in to concurrency
+// (model.Profile.Concurrent). Such a job runs beside others, but beside no
+// other such job: the simulators its script creates are attributed to it as
+// the one script that may create them (beginScriptDevices).
 
 type laneEntry struct {
 	start     time.Time
 	exclusive bool
+	// script marks a concurrent simulator_script job.
+	script bool
 }
 
 type laneSpan struct {
@@ -87,18 +93,19 @@ func (e *Engine) enter(ctx context.Context, job model.Job) (solo bool, err error
 				e.mu.Unlock()
 				return false, fmt.Errorf("%w: %s", ErrDrain, reason)
 			}
-			exclusive := job.Request.Kind.Exclusive()
+			exclusive, scripts := job.Exclusive(), false
 			for _, other := range e.running {
 				exclusive = exclusive || other.exclusive
+				scripts = scripts || other.script && job.Profile.Concurrent()
 			}
-			if len(e.running) >= e.lanes() || len(e.running) != 0 && exclusive {
+			if len(e.running) >= e.lanes() || len(e.running) != 0 && exclusive || scripts {
 				e.mu.Unlock()
 				return false, ErrBusy
 			}
 		}
 		if e.accountHeld == "" {
 			solo = len(e.running) == 0
-			e.running[job.ID] = &laneEntry{start: e.options.Now(), exclusive: job.Request.Kind.Exclusive()}
+			e.running[job.ID] = &laneEntry{start: e.options.Now(), exclusive: job.Exclusive(), script: job.Profile.Concurrent()}
 			if solo && e.laneMode() {
 				e.accountHeld = job.ID
 			}

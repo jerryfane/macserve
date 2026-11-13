@@ -400,6 +400,13 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 			return result, err
 		}
 	}
+	if job.Profile.Concurrent() {
+		// The simulators the script creates are this job's (see
+		// beginScriptDevices); stopWriters deletes them with its own.
+		if err := e.beginScriptDevices(ctx, &x.manifest); err != nil {
+			return result, err
+		}
+	}
 	returned = x.recipe(ctx, x.job.Profile.Run, x.runEnvironment()...)
 	return result, returned
 }

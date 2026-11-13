@@ -25,7 +25,9 @@ import (
 //     tool's exec); every launchd_sim whose arguments name a device directory
 //     .../CoreSimulator/Devices/<UDID>/ of a UDID the job created; every
 //     process whose executable lies under the job's workspace or one of its
-//     device directories;
+//     device directories; for the one job adopting devices (a concurrent
+//     script job's script, AdoptDevices), every such launchd_sim or process
+//     started since of a device no running job created;
 //   - propagation: a process first seen with a labelled parent instance
 //     (same PID, started no later than the child) inherits its label;
 //   - labels are sticky for the instance's lifetime: a daemon reparented to
@@ -75,6 +77,9 @@ type laneJob struct {
 	// roots are command root PIDs the broker started and has not reaped.
 	roots map[int]bool
 	udids map[string]bool
+	// adopt is when the job began adopting devices no job created; zero
+	// when it does not.
+	adopt time.Time
 }
 
 // laneLabelConflict marks an instance two jobs claim.
@@ -128,6 +133,32 @@ func (t *laneTracker) addDevice(jobID, udid string) {
 	if j := t.jobs[jobID]; j != nil {
 		j.udids[strings.ToUpper(udid)] = true
 	}
+}
+
+// adoptDevices makes jobID the adopter of devices no running job created,
+// from from on.
+func (t *laneTracker) adoptDevices(jobID string, from time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if j := t.jobs[jobID]; j != nil {
+		j.adopt = from
+	}
+}
+
+// adopter is the one job adopting devices and since when; "" when none or
+// several do. Callers hold t.mu.
+func (t *laneTracker) adopter() (string, time.Time) {
+	id, from := "", time.Time{}
+	for jobID, j := range t.jobs {
+		if j.adopt.IsZero() {
+			continue
+		}
+		if id != "" {
+			return "", time.Time{}
+		}
+		id, from = jobID, j.adopt
+	}
+	return id, from
 }
 
 func (t *laneTracker) has(jobID string) bool {
@@ -331,7 +362,30 @@ func (t *laneTracker) seed(p processSample) string {
 			}
 		}
 	}
+	// A device directory of no running job's device belongs to the adopter,
+	// for an instance started since it adopts: the simulators a concurrent
+	// script creates are booted by CoreSimulator, not by the script.
+	if adopter, from := t.adopter(); adopter != "" && startOK && !started.Before(from.Add(-time.Second)) {
+		for _, text := range []string{d.executable, d.args} {
+			for _, m := range deviceDirectory.FindAllStringSubmatch(text, -1) {
+				if !t.created(strings.ToUpper(m[1])) {
+					claim(adopter)
+				}
+			}
+		}
+	}
 	return found
+}
+
+// created reports whether a running job created the device udid (upper
+// case). Callers hold t.mu.
+func (t *laneTracker) created(udid string) bool {
+	for _, j := range t.jobs {
+		if j.udids[udid] {
+			return true
+		}
+	}
+	return false
 }
 
 // laneClass splits samples: every live job-UID instance labelled jobID,
@@ -389,6 +443,10 @@ type laneRunner interface {
 	EndJob(jobID string)
 	// AttachDevice records a simulator UDID jobID created.
 	AttachDevice(jobID, udid string)
+	// AdoptDevices gives jobID, from from on, the processes of simulators no
+	// running job created (AttachDevice): those a concurrent script job's
+	// script creates. While several jobs adopt, none does.
+	AdoptDevices(jobID string, from time.Time)
 	// QuiesceJob terminates jobID's labelled processes only: never a
 	// baseline, tolerated, unattributed or another job's process. A survivor
 	// is contamination.
@@ -421,6 +479,10 @@ func (r *nativeRunner) BeginJob(jobID string, started time.Time) {
 func (r *nativeRunner) EndJob(jobID string) { r.laneTracker().end(jobID) }
 
 func (r *nativeRunner) AttachDevice(jobID, udid string) { r.laneTracker().addDevice(jobID, udid) }
+
+func (r *nativeRunner) AdoptDevices(jobID string, from time.Time) {
+	r.laneTracker().adoptDevices(jobID, from)
+}
 
 // startLaneSampler keeps labels current while any job runs, so a child is
 // first seen while its parent is still listed (laneSampleInterval bounds

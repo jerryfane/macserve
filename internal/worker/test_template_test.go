@@ -28,12 +28,17 @@ var fixtureSimulator = model.Simulator{Runtime: "com.apple.CoreSimulator.SimRunt
 // leaving the simulator to the template's first pin.
 func testTemplateJob(t *testing.T, kind model.Kind, shard string) model.Job {
 	t.Helper()
-	template := model.Template{ID: "org-test-v1", Version: 1, Kind: kind, Owners: []string{"example-org"}, Xcode: model.Xcode{Version: "16.0", Build: "16A242d"}, DeveloperDir: "/Applications/Xcode.app/Contents/Developer", Simulators: []model.Simulator{fixtureSimulator}}
+	return admitTemplateJob(t, model.Template{ID: "org-test-v1", Version: 1, Kind: kind, Owners: []string{"example-org"}, Xcode: model.Xcode{Version: "16.0", Build: "16A242d"}, DeveloperDir: "/Applications/Xcode.app/Contents/Developer", Simulators: []model.Simulator{fixtureSimulator}}, shard)
+}
+
+// admitTemplateJob admits a job of template for shard as job-1.
+func admitTemplateJob(t *testing.T, template model.Template, shard string) model.Job {
+	t.Helper()
 	registry, err := profiles.New(nil, []model.Template{template})
 	if err != nil {
 		t.Fatal(err)
 	}
-	admission, err := registry.Resolve(model.Request{Repo: "example-org/new-app", SHA: strings.Repeat("a", 40), Kind: kind, Profile: template.ID, Xcode: template.Xcode, Shard: shard})
+	admission, err := registry.Resolve(model.Request{Repo: "example-org/new-app", SHA: strings.Repeat("a", 40), Kind: template.Kind, Profile: template.ID, Xcode: template.Xcode, Shard: shard})
 	if err != nil {
 		t.Fatal(err)
 	}

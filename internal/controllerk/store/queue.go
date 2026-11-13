@@ -207,22 +207,29 @@ func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, principal, key string
 	return job, false, nil
 }
 
-// fairNext selects the sequence of the next queued job: the oldest queued job
-// of the repository that has waited longest since its last claim. A
+// fairOrder lists every queued job in the fair order: first the oldest queued
+// job of the repository that has waited longest since its last claim, then
+// the rest of that repository's queued jobs, then the next repository's. A
 // repository's last claim is the newest started_at among its retained jobs
 // (only Claim sets started_at); a repository with none goes first, and ties
-// fall back to submission order. A burst from one repository therefore
-// delays another repository's job by at most one claim per other waiting
-// repository, and each repository stays FIFO. The order relies on the claim
-// clock not stepping backwards; a backwards step only reorders repositories
-// until the clock passes the earlier claims again.
-const fairNext = `SELECT head.sequence FROM (SELECT repo,MIN(sequence) AS sequence FROM jobs WHERE state='queued' GROUP BY repo) AS head ORDER BY (SELECT MAX(started_at) FROM jobs WHERE jobs.repo=head.repo) NULLS FIRST,head.sequence LIMIT 1`
+// fall back to submission order of the repositories' oldest queued jobs. A
+// burst from one repository therefore delays another repository's job by at
+// most one claim per other waiting repository, and each repository stays
+// FIFO. The order relies on the claim clock not stepping backwards; a
+// backwards step only reorders repositories until the clock passes the
+// earlier claims again.
+const fairOrder = `SELECT ` + jobColumns + ` FROM jobs AS queued WHERE state='queued' ORDER BY (SELECT MAX(started_at) FROM jobs WHERE jobs.repo=queued.repo) NULLS FIRST,(SELECT MIN(sequence) FROM jobs WHERE jobs.repo=queued.repo AND state='queued'),sequence`
 
 // Claim holds a database write reservation from eligibility checks through lease
 // assignment. It claims only while fewer than lanes jobs are active and none of
-// them is an exclusive kind, and assigns the lowest free lane. The fair head is
-// chosen over every queued job: an exclusive head waits until no job is active,
-// and nothing behind it is claimed meanwhile. The database additionally
+// them is exclusive (model.Job.Exclusive), and assigns the lowest free lane. The
+// fair head is chosen over every queued job: an exclusive head waits until no
+// job is active, and nothing behind it is claimed meanwhile. A simulator_script
+// job whose template opts in to concurrency (model.Profile.Concurrent) is
+// claimed like a test job, but only while no other such job is active (the
+// worker attributes the simulators a script creates to the one such job
+// running); while one is, the next such job waits without blocking the jobs
+// behind it, which are claimed in the fair order. The database additionally
 // prohibits two active rows on one lane, even if a future caller bypasses the
 // normal dispatch path.
 func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time, lanes int) (model.Job, error) {
@@ -249,7 +256,7 @@ func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time, la
 		return model.Job{}, err
 	}
 	lane := freeLane(running, lanes)
-	if blocked || len(running) >= lanes || lane == 0 || slices.ContainsFunc(running, func(job model.Job) bool { return job.Request.Kind.Exclusive() }) {
+	if blocked || len(running) >= lanes || lane == 0 || slices.ContainsFunc(running, model.Job.Exclusive) {
 		if err := tx.Commit(); err != nil {
 			return model.Job{}, err
 		}
@@ -269,7 +276,8 @@ func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time, la
 	if acknowledged != "" && acknowledged != workerEpoch {
 		return model.Job{}, ErrLease
 	}
-	job, err := scanJob(tx.QueryRowContext(ctx, "SELECT "+jobColumns+" FROM jobs WHERE sequence=("+fairNext+")"))
+	concurrent := slices.ContainsFunc(running, func(active model.Job) bool { return active.Profile.Concurrent() })
+	job, err := nextFair(ctx, tx, concurrent)
 	if errors.Is(err, ErrNotFound) {
 		if err := tx.Commit(); err != nil {
 			return model.Job{}, err
@@ -279,7 +287,7 @@ func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time, la
 	if err != nil {
 		return model.Job{}, err
 	}
-	if job.Request.Kind.Exclusive() && len(running) > 0 || !memoryAdmits(running, job) {
+	if job.Exclusive() && len(running) > 0 || !memoryAdmits(running, job) {
 		if err := tx.Commit(); err != nil {
 			return model.Job{}, err
 		}
@@ -311,6 +319,31 @@ func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time, la
 		return model.Job{}, err
 	}
 	return job, nil
+}
+
+// nextFair is the first queued job in the fair order (fairOrder), passing
+// over concurrent simulator_script jobs (model.Profile.Concurrent) when
+// skipConcurrent is set, for a claim while one such job is active;
+// ErrNotFound when there is none.
+func nextFair(ctx context.Context, tx *sql.Tx, skipConcurrent bool) (model.Job, error) {
+	rows, err := tx.QueryContext(ctx, fairOrder)
+	if err != nil {
+		return model.Job{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		job, err := scanJob(rows)
+		if err != nil {
+			return model.Job{}, err
+		}
+		if !skipConcurrent || !job.Profile.Concurrent() {
+			return job, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return model.Job{}, err
+	}
+	return model.Job{}, ErrNotFound
 }
 
 func active(state model.State) bool {

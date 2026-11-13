@@ -287,6 +287,58 @@ func TestLaneConflictingSeedsAttributeToNoJob(t *testing.T) {
 	}
 }
 
+// The one job adopting devices (a concurrent script) gets the launchd_sim,
+// and so the processes, of a simulator no running job created, started
+// since it adopts; never a device another job created, an older instance,
+// or anything while two jobs adopt.
+func TestLaneAdopterClaimsUncreatedDevices(t *testing.T) {
+	const broker, uid = 100, 600
+	now := time.Now().Unix()
+	script, sibling := "CCCCCCCC-0000-0000-0000-000000000003", "BBBBBBBB-0000-0000-0000-000000000002"
+	sim := func(udid string) processDescription {
+		return processDescription{executable: "launchd_sim", args: "launchd_sim /Users/u/Library/Developer/CoreSimulator/Devices/" + udid + "/data/var/run/launchd_bootstrap.plist"}
+	}
+	exe := map[int]processDescription{400: sim(script), 401: {executable: "/Users/u/Library/Developer/CoreSimulator/Devices/" + script + "/data/Containers/Bundle/Application/X/Herdr.app/Herdr"}, 500: sim(sibling), 600: sim(script)}
+	key := func(pid int, start int64) processInstance {
+		return processInstance{pid, strconv.FormatInt(start, 10) + ":0"}
+	}
+	// Reached through an interface, so the test also builds, and fails,
+	// against a tracker without device adoption.
+	adopt := func(tracker any, job string, from time.Time) {
+		adopter, ok := tracker.(interface{ adoptDevices(string, time.Time) })
+		if !ok {
+			t.Fatal("tracker cannot adopt devices")
+		}
+		adopter.adoptDevices(job, from)
+	}
+	tracker := trackerFor(broker, uid, exe)
+	tracker.begin("script", time.Unix(now-100, 0))
+	tracker.begin("ui", time.Unix(now-100, 0))
+	tracker.addDevice("ui", sibling)
+	// Before adoption the script's device processes are nobody's.
+	tracker.update([]processSample{laneSample(600, 1, uid, now-50)})
+	if label, ok := tracker.labels[key(600, now-50)]; ok {
+		t.Fatalf("device process labelled %q without an adopter", label)
+	}
+	adopt(tracker, "script", time.Unix(now-10, 0))
+	tracker.update([]processSample{laneSample(400, 1, uid, now), laneSample(401, 1, uid, now), laneSample(500, 1, uid, now), laneSample(600, 1, uid, now-50)})
+	for pid, want := range map[int]string{400: "script", 401: "script", 500: "ui"} {
+		if got := tracker.labels[key(pid, now)]; got != want {
+			t.Fatalf("process %d labelled %q, want %q", pid, got, want)
+		}
+	}
+	if label, ok := tracker.labels[key(600, now-50)]; ok {
+		t.Fatalf("instance started before adoption labelled %q", label)
+	}
+	// Two adopters: an uncreated device is ambiguous, so nobody's.
+	adopt(tracker, "ui", time.Unix(now-10, 0))
+	exe[402] = sim(script)
+	tracker.update([]processSample{laneSample(400, 1, uid, now), laneSample(402, 1, uid, now+1)})
+	if label, ok := tracker.labels[key(402, now+1)]; ok {
+		t.Fatalf("device process labelled %q while two jobs adopt", label)
+	}
+}
+
 // QuiesceJob signals only the job's own labelled processes: never its
 // sibling's, a shared service, the baseline or an unattributed process.
 // A labelled survivor is contamination.

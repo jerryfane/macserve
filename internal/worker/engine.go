@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -122,6 +123,13 @@ type manifest struct {
 	DeviceUDID          string   `json:"device_udid,omitempty"`
 	DeviceCreatePending bool     `json:"device_create_pending,omitempty"`
 	DevicesBefore       []string `json:"devices_before"`
+	// A concurrent script job's run records the simulator inventory it
+	// started from (ScriptDevicesPending, ScriptDevicesBefore); its cleanup
+	// adopts every device added since that no other manifest records as
+	// ScriptDevices, and then deletes them (see beginScriptDevices).
+	ScriptDevicesPending bool     `json:"script_devices_pending,omitempty"`
+	ScriptDevicesBefore  []string `json:"script_devices_before,omitempty"`
+	ScriptDevices        []string `json:"script_devices,omitempty"`
 }
 
 // Decode old resource records without retaining their quarantine authority.
@@ -434,7 +442,7 @@ func (e *Engine) recoverOwned(ctx context.Context, reset bool) error {
 			failures = append(failures, err)
 			continue
 		}
-		if !identifier.MatchString(m.JobID) || name != m.JobID+".json" || !filepath.IsAbs(m.DeveloperDir) || (m.DeviceUDID != "" && !udidPattern.MatchString(m.DeviceUDID)) {
+		if !identifier.MatchString(m.JobID) || name != m.JobID+".json" || !filepath.IsAbs(m.DeveloperDir) || (m.DeviceUDID != "" && !udidPattern.MatchString(m.DeviceUDID)) || slices.ContainsFunc(m.ScriptDevices, func(id string) bool { return !udidPattern.MatchString(id) }) {
 			failures = append(failures, ErrRecovery)
 			continue
 		}
