@@ -274,6 +274,17 @@ observation that finds something is reported by every probe until a newer one co
 other baseline or persistence records is never reused, and every other health fact is still observed by each
 probe. The free-disk floors above are checked by the controller itself every second and do not depend on it.
 
+The maintenance daemon runs at launchd `ProcessType=Standard` (with `Nice=10`), not `Background`. Job commands
+run clamped to the background band (`taskpolicy -b`), while the simulators they boot run at default priority or
+above (one iOS simulator boot sampled on the Studio used about 13 cores at once). At `ProcessType=Background`
+the observer shared the jobs' band and ran only when the scheduler kept that band from starving: with four to six
+jobs, several of them simulator jobs, a probe's persistence-status read (about 29 `ls -lde` forks) ran past its
+5 s bound, `launchctl print` of a coexisting service past its 2 s bound and the GUI-baseline check past its 30 s
+budget; every probe for over 40 s failed without evidence, health expired and the controller cancelled every
+running job (Studio, 2026-11-13). A probe forks some 60 short inspection commands and a GUI-baseline check some
+500 (`launchctl print` and `plutil` for each launchd-started job agent), so their time is that of their forks.
+At `Standard` the observer's CPU stays bounded by `GOMAXPROCS=2` plus those short-lived children.
+
 Offered/running workers retain the ordinary 30-second heartbeat-loss fence. Cancellation, deadline or finalizing
 starts a fixed cleanup/delivery grace (two minutes each, plus heartbeat tolerance); repeated heartbeats cannot
 extend it. Source streaming instead receives the ten-minute preparation budget plus heartbeat tolerance.

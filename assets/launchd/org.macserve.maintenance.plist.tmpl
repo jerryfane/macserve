@@ -11,7 +11,8 @@
 <key>ThrottleInterval</key><integer>60</integer>
 <!-- Allow the bounded full scan to cancel and durably revoke before shutdown. -->
 <key>ExitTimeOut</key><integer>600</integer>
-<key>ProcessType</key><string>Background</string>
+<!-- Standard, not Background: jobs run clamped to the background band, so the health observer must outrank them. -->
+<key>ProcessType</key><string>Standard</string>
 <key>Nice</key><integer>10</integer>
 <key>Umask</key><integer>63</integer>
 <key>WorkingDirectory</key><string>/Library/macserve/var/broker</string>
