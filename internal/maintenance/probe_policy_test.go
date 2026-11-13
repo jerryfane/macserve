@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -86,6 +87,31 @@ func TestTwoFailedProbesBlockAdmissionWithoutCancelling(t *testing.T) {
 	}
 }
 
+// Studio v0.1.49, 2026-11-13 11:01:24Z: `launchctl print` of a configured
+// coexisting service exited but its pipes did not close within WaitDelay
+// (exec.ErrWaitDelay), a timing failure of the inspection, not a finding. It
+// published invalid health and cancelled the running job; the next probe was
+// clean. It must republish the last valid health and only block admission.
+func TestCoexistingServiceWaitDelayBlocksAdmissionWithoutCancelling(t *testing.T) {
+	c, f := coexistenceInputs()
+	f["print system/org.example.gateway"] = coexistenceReply{err: exec.ErrWaitDelay}
+	_, waitDelay := observeCoexistenceWithCommands(context.Background(), c, f.command, f.command)
+	if waitDelay == nil {
+		t.Fatal("coexistence observation ignored the WaitDelay failure")
+	}
+	gates := replayPublications(t, []probeStep{
+		{0, 3 * time.Second, nil},
+		{10 * time.Second, 2 * time.Second, waitDelay},
+		{20 * time.Second, 3 * time.Second, nil},
+	})
+	if g := gates[1]; g.cancel || g.failures != 1 || strings.Join(g.blockers, ",") != "maintenance_probe_failed" {
+		t.Fatalf("WaitDelay probe: %+v (%v)", g, waitDelay)
+	}
+	if g := gates[2]; g.cancel || g.failures != 0 || len(g.blockers) != 0 {
+		t.Fatalf("valid probe after WaitDelay: %+v", g)
+	}
+}
+
 // Probes that fail without evidence block admission and keep active work
 // while the last valid health is in force, however many in a row; once it
 // has expired the next one publishes invalid health with the count, which
@@ -138,7 +164,7 @@ func TestFindingsAndExpiryStillCancelAtOnce(t *testing.T) {
 // Only the closed list of failures without evidence is counted; anything else,
 // including the daemon's own shutdown and look-alike text, is a finding.
 func TestWithoutEvidenceIsAClosedList(t *testing.T) {
-	for _, err := range []error{probeDeadline, aclKilled, fmt.Errorf("census: %w", errAcceptedMountChanged), fmt.Errorf("coexisting: %w", errCoexistingServiceRestarting)} {
+	for _, err := range []error{probeDeadline, aclKilled, fmt.Errorf("census: %w", errAcceptedMountChanged), fmt.Errorf("coexisting: %w", errCoexistingServiceRestarting), fmt.Errorf("coexisting: %w", exec.ErrWaitDelay)} {
 		if !withoutEvidence(err) {
 			t.Errorf("%v: counted as a finding", err)
 		}
@@ -152,6 +178,8 @@ func TestWithoutEvidenceIsAClosedList(t *testing.T) {
 		errors.New("cannot inspect protected input ACL: signal: killed"),
 		errors.New("persistence authority or attestation changed during status read"),
 		errors.New("maintenance qualification or live observation mismatch"),
+		errors.New("exec: WaitDelay expired before I/O complete"),
+		&exec.ExitError{},
 	} {
 		if withoutEvidence(err) {
 			t.Errorf("%v: counted as a failure without evidence", err)

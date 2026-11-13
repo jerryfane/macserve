@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"time"
@@ -163,12 +164,16 @@ func (r *probeRecord) publication(h health.Health, err error, now time.Time) hea
 //   - the accepted CoreDevice devicefs changed mid-census (errAcceptedMountChanged:
 //     Xcode does this as a build finishes);
 //   - a configured coexisting service between two launchd runs
-//     (errCoexistingServiceRestarting: a KeepAlive relaunch or its own redeploy).
+//     (errCoexistingServiceRestarting: a KeepAlive relaunch or its own redeploy);
+//   - an inspection subprocess that exited but whose output pipes did not
+//     close within its WaitDelay (exec.ErrWaitDelay: a timing failure of the
+//     read, not its result; Studio 2026-11-13, `launchctl print` of a
+//     coexisting service, the next probe clean).
 //
 // Only the daemon's own shutdown cancels a probe otherwise (context.Canceled),
 // which is a finding.
 func withoutEvidence(err error) bool {
-	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errAcceptedMountChanged) || errors.Is(err, errCoexistingServiceRestarting)
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errAcceptedMountChanged) || errors.Is(err, errCoexistingServiceRestarting) || errors.Is(err, exec.ErrWaitDelay)
 }
 
 // keepLastValid reports whether a probe that failed without evidence
