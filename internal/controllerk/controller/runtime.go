@@ -32,6 +32,8 @@ type execution struct {
 	fencing bool
 	// readyAt is when the source became ready for delivery.
 	readyAt time.Time
+	// offeredAt is when the lease was first delivered to the worker.
+	offeredAt time.Time
 	// heldAt is when the worker held the completion for its idle check
 	// (protocol.Stage Held); idleSince is when no other unheld execution
 	// was active any more, so the idle check could run.

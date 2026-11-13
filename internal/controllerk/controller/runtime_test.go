@@ -635,7 +635,7 @@ func TestStartupRecoveryInterruptsPersistedLeaseBeforeRegistration(t *testing.T)
 		t.Fatal(err)
 	}
 	job := f.enqueue(t, "interrupted", model.Build)
-	claimed, err := f.db.Claim(context.Background(), "crashed-epoch", f.now, 1)
+	claimed, err := f.db.Claim(context.Background(), "crashed-epoch", f.now, 1, false)
 	if err != nil || claimed.ID != job.ID {
 		t.Fatalf("persisted claim: %v %v", claimed, err)
 	}

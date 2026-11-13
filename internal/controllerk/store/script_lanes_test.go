@@ -85,7 +85,7 @@ func TestClaimQueuedConcurrentScriptDoesNotBlockJobsBehindIt(t *testing.T) {
 	if got := claimLanes(t, s, "epoch", testNow.Add(4*time.Second), 4); got.ID != behind.ID {
 		t.Fatalf("claimed %s, want the job behind the waiting script %s", got.ID, behind.ID)
 	}
-	_, err := s.Claim(ctx, "epoch", testNow.Add(5*time.Second), 4)
+	_, err := s.Claim(ctx, "epoch", testNow.Add(5*time.Second), 4, false)
 	requireError(t, err, ErrNoJob)
 	if got := getJob(t, s, waiting.ID); got.State != model.Queued {
 		t.Fatalf("second concurrent script claimed beside the first: %s", got.State)
@@ -110,7 +110,7 @@ func TestClaimPlainScriptStaysExclusive(t *testing.T) {
 	if running.ID != first.ID {
 		t.Fatalf("claimed %s, want %s", running.ID, first.ID)
 	}
-	_, err := s.Claim(ctx, "epoch", testNow.Add(4*time.Second), 4)
+	_, err := s.Claim(ctx, "epoch", testNow.Add(4*time.Second), 4, false)
 	requireError(t, err, ErrNoJob)
 	if got := getJob(t, s, later.ID); got.State != model.Queued {
 		t.Fatalf("job behind an exclusive script head claimed: %s", got.State)
@@ -119,6 +119,6 @@ func TestClaimPlainScriptStaysExclusive(t *testing.T) {
 	if got := claimLanes(t, s, "epoch", testNow.Add(6*time.Second), 4); got.ID != script.ID {
 		t.Fatalf("claimed %s, want %s", got.ID, script.ID)
 	}
-	_, err = s.Claim(ctx, "epoch", testNow.Add(7*time.Second), 4)
+	_, err = s.Claim(ctx, "epoch", testNow.Add(7*time.Second), 4, false)
 	requireError(t, err, ErrNoJob)
 }

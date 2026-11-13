@@ -27,7 +27,7 @@ func TestCancelReasonInJobViewAndList(t *testing.T) {
 	}
 
 	f.submit(t, "active")
-	active, err := f.db.Claim(ctx, "api-test", testTime, 1)
+	active, err := f.db.Claim(ctx, "api-test", testTime, 1, false)
 	if err != nil {
 		t.Fatal(err)
 	}
