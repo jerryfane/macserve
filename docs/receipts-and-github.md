@@ -71,7 +71,7 @@ numeric receipt repository identities then come from administrator configuration
 Each policy names exactly one repository or one owner; a policy that sets both forms (or neither) is refused at
 configuration load and controller start. A repository-form policy supplies `repository_id`, `repository`,
 `author_ids`, `base_branches`, `profiles`, `policy_revision`, and optional `actions_bot_id`, `actions_app_id`,
-`matrix` and `matrix_skip_drafts` ([policy matrices](#policy-matrices)).
+`matrix`, `matrix_skip_drafts` and `matrix_skip_paths` ([policy matrices](#policy-matrices)).
 Numeric author and repository identity, not display names or commit author text, control admission. Repository
 writers must all be trusted: allowlisting a PR author does not authenticate everyone who can push to their branch.
 
@@ -212,7 +212,7 @@ Each entry names a `profile` of the policy's `profiles`, a `shard` (`^[a-z0-9][a
 appears once. Every simulator test or script template in `profiles` needs at least one entry and runs only through
 its entries; build profiles in `profiles` keep running exactly as before, one job per head. A policy that breaks
 these rules is refused at configuration load (shape) or controller start (templates and simulators). Owner-form
-policies refuse `matrix` and `matrix_skip_drafts`.
+policies refuse `matrix`, `matrix_skip_drafts` and `matrix_skip_paths`.
 
 Checks: a matrix entry publishes `mac-evidence/<profile>/<shard>` (for example
 `mac-evidence/org-ios-sim-uitest-v1/chat`); other profiles keep `mac-evidence/<profile>`. Require every one of them
@@ -228,6 +228,31 @@ grammar has no shard.
 draft: a draft head admits only the policy's other profiles and publishes no matrix check. Marking it ready for
 review admits the matrix for the current head on the next poll. Converting it back to a draft cancels nothing:
 matrix runs the head already has stay current and finish, and no new matrix attempt starts while it is a draft.
+
+`matrix_skip_paths` (requires a matrix) skips the matrix for a change that only touches files the owner judged
+unable to affect it, such as documentation:
+
+```json
+"matrix_skip_paths": {"include": ["docs/**", "LICENSE", "**/*.md"], "exclude": ["App/**"]}
+```
+
+A path is selected when an `include` glob matches it and no `exclude` glob does (exclude wins). Globs are matched
+against the full repository path, segment by segment, with Go `path.Match` syntax inside a segment (`*`, `?`,
+`[...]` never cross `/`) and a whole `**` segment matching zero or more segments; matching is case-sensitive.
+`include` takes 1–32 globs and `exclude` at most 32, each relative, at most 96 bytes, with no empty, `.` or `..`
+segment and at most two `**`. The rule lives only in the controller configuration: macserve never reads it
+from, or runs, the repository's own scope logic.
+
+For each eligible head the poller asks GitHub for the head's changed files against its base commit
+(`GET /repos/<repo>/compare/<base sha>...<head sha>`, cached per head and base). When every listed file was
+`added` or `modified` and is selected, each matrix entry publishes a completed `neutral` check, "Not run:
+docs/version-only change", whose summary gives the file count and the include globs that matched, and admits no
+job; `neutral` satisfies branch protection without claiming evidence. Build profiles always run. Anything doubtful
+runs the matrix: a failed comparison, a list of 300 or more files (GitHub's compare limit, so possibly truncated),
+no changed file, no base commit, or any removed, renamed, copied or mode-changed (`changed`) file. The decision is
+per head: a later push that touches anything else runs the matrix for the new head. A matrix run that already
+has a job (admitted before the skip, or rerun by the owner API) keeps it. Content rules, such as a
+version-only edit of a project file, cannot be expressed; such changes run the matrix.
 
 A repository-form policy replaces the owner-form policy for its repository: the owner policy's build no longer
 runs there, so list the build template (e.g. `org-ios-sim-build-v1`) in the repository policy's `profiles` to keep

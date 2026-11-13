@@ -87,7 +87,9 @@ func TestGitHubPolicyMatrix(t *testing.T) {
 	for name, policy := range map[string]string{
 		"no matrix": repository(""),
 		"matrix":    repository(`,"matrix_skip_drafts":true,"matrix":[{"profile":"org-ios-sim-uitest-v1","shard":"chat","simulator":` + sim + `},{"profile":"org-ios-sim-uitest-v1","shard":"gram","simulator":` + sim + `},{"profile":"org-ios-sim-script-v1","shard":"chat","simulator":` + sim + `}]`),
-		"owner":     owner + `}`,
+		"skip paths": repository(`,"matrix":[{"profile":"org-ios-sim-uitest-v1","shard":"chat","simulator":` + sim + `},{"profile":"org-ios-sim-script-v1","shard":"chat","simulator":` + sim + `}],
+ "matrix_skip_paths":{"include":["docs/**",".github/ISSUE_TEMPLATE/**","LICENSE","**/*.md"],"exclude":["App/**","Vendor/**"]}`),
+		"owner": owner + `}`,
 	} {
 		if err := validate(policy); err != nil {
 			t.Errorf("%s refused: %v", name, err)
@@ -106,9 +108,38 @@ func TestGitHubPolicyMatrix(t *testing.T) {
 		"skip drafts without matrix": repository(`,"matrix_skip_drafts":true`),
 		"owner matrix":               owner + `,"matrix":[` + entry("org-ios-sim-build-v1", "chat", sim) + `]}`,
 		"owner skip drafts":          owner + `,"matrix_skip_drafts":true}`,
+		"skip paths without matrix":  repository(`,"matrix_skip_paths":{"include":["docs/**"]}`),
+		"owner skip paths":           owner + `,"matrix_skip_paths":{"include":["docs/**"]}}`,
 	} {
 		if err := validate(policy); err == nil || !strings.Contains(err.Error(), "matrix") {
 			t.Errorf("%s accepted or wrong error: %v", name, err)
 		}
+	}
+	matrix := `,"matrix":[` + entry("org-ios-sim-uitest-v1", "chat", sim) + `,` + entry("org-ios-sim-script-v1", "chat", sim) + `]`
+	tooMany := make([]string, 33)
+	for i := range tooMany {
+		tooMany[i] = `"d` + strings.Repeat("x", i) + `"`
+	}
+	for name, paths := range map[string]string{
+		"no include":        `{"exclude":["App/**"]}`,
+		"empty include":     `{"include":[]}`,
+		"dot-dot segment":   `{"include":["docs/../App/**"]}`,
+		"absolute":          `{"include":["/docs/**"]}`,
+		"empty segment":     `{"include":["docs//x.md"]}`,
+		"partial globstar":  `{"include":["docs/a**"]}`,
+		"three globstars":   `{"include":["**/a/**/b/**"]}`,
+		"bad class":         `{"include":["docs/[a.md"]}`,
+		"repeated include":  `{"include":["docs/**","docs/**"]}`,
+		"invalid exclude":   `{"include":["docs/**"],"exclude":["App/../**"]}`,
+		"too long":          `{"include":["` + strings.Repeat("a", 97) + `"]}`,
+		"control character": `{"include":["docs/\u0001"]}`,
+		"too many include":  `{"include":[` + strings.Join(tooMany, ",") + `]}`,
+	} {
+		if err := validate(repository(matrix + `,"matrix_skip_paths":` + paths)); err == nil || !strings.Contains(err.Error(), "matrix_skip_paths") {
+			t.Errorf("skip paths %s accepted or wrong error: %v", name, err)
+		}
+	}
+	if err := validate(repository(matrix + `,"matrix_skip_paths":{"include":["docs/**"],"exclude":["docs/**"]}`)); err != nil {
+		t.Errorf("one glob in both lists refused: %v", err)
 	}
 }

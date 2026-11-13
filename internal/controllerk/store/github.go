@@ -14,12 +14,14 @@ import (
 // GitHubRun is the durable logical requirement. Attempts and request mappings
 // remain immutable when the current attempt changes. Shard is a policy matrix
 // entry's shard, part of the run's check name; empty for every other run.
+// Skipped is why a jobless matrix run was not run (SkipGitHub), published as
+// a neutral check; Blocked, a refusal published as action_required.
 type GitHubRun struct {
-	Key, Repository, SHA, Profile, Shard, JobID, AttemptID, Blocked string
-	RepositoryID                                                    int64
-	PolicyRevision                                                  int
-	CheckID                                                         int64
-	PullRequests                                                    []int
+	Key, Repository, SHA, Profile, Shard, JobID, AttemptID, Blocked, Skipped string
+	RepositoryID                                                             int64
+	PolicyRevision                                                           int
+	CheckID                                                                  int64
+	PullRequests                                                             []int
 }
 
 type GitHubRequest struct {
@@ -104,14 +106,16 @@ func (s *Store) InitializeGitHub(ctx context.Context) error {
 	if _, err = tx.ExecContext(ctx, githubSchema); err != nil {
 		return err
 	}
-	// Runs admitted before policy matrices have no shard.
-	var sharded bool
-	if err = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM pragma_table_info('github_runs') WHERE name='shard')").Scan(&sharded); err != nil {
-		return err
-	}
-	if !sharded {
-		if _, err = tx.ExecContext(ctx, "ALTER TABLE github_runs ADD COLUMN shard TEXT NOT NULL DEFAULT ''"); err != nil {
+	// Runs admitted before policy matrices have no shard and were not skipped.
+	for _, column := range []string{"shard", "skipped"} {
+		var exists bool
+		if err = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM pragma_table_info('github_runs') WHERE name=?)", column).Scan(&exists); err != nil {
 			return err
+		}
+		if !exists {
+			if _, err = tx.ExecContext(ctx, "ALTER TABLE github_runs ADD COLUMN "+column+" TEXT NOT NULL DEFAULT ''"); err != nil {
+				return err
+			}
 		}
 	}
 	return tx.Commit()
@@ -169,11 +173,11 @@ BEGIN
 END;
 `
 
-const githubRunColumns = "run_key,repository_id,repository,sha,profile,shard,policy_revision,current_job,attempt_id,check_id,blocked"
+const githubRunColumns = "run_key,repository_id,repository,sha,profile,shard,policy_revision,current_job,attempt_id,check_id,blocked,skipped"
 
 func scanGitHubRun(row scanner) (GitHubRun, error) {
 	var run GitHubRun
-	err := row.Scan(&run.Key, &run.RepositoryID, &run.Repository, &run.SHA, &run.Profile, &run.Shard, &run.PolicyRevision, &run.JobID, &run.AttemptID, &run.CheckID, &run.Blocked)
+	err := row.Scan(&run.Key, &run.RepositoryID, &run.Repository, &run.SHA, &run.Profile, &run.Shard, &run.PolicyRevision, &run.JobID, &run.AttemptID, &run.CheckID, &run.Blocked, &run.Skipped)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = ErrNotFound
 	}
@@ -257,7 +261,7 @@ func (s *Store) AdmitGitHub(ctx context.Context, input GitHubAdmission, now time
 	}
 	// Keep the current check's update and attempt replacement ordered across
 	// independent controller handles. A crashed publisher's reservation expires.
-	if create || r.Blocked != "" {
+	if create || r.Blocked != "" || r.Skipped != "" {
 		var publishing bool
 		if err = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM github_outbox WHERE run_key=? AND lease_until>?)", r.Key, now.UnixNano()).Scan(&publishing); err != nil {
 			return GitHubRun{}, err
@@ -282,7 +286,7 @@ func (s *Store) AdmitGitHub(ctx context.Context, input GitHubAdmission, now time
 			return GitHubRun{}, ErrRerunLimit
 		}
 	}
-	dirty := create || r.Blocked != "" || input.Request != nil
+	dirty := create || r.Blocked != "" || r.Skipped != "" || input.Request != nil
 	if !found {
 		_, err = tx.ExecContext(ctx, "INSERT INTO github_runs(run_key,repository_id,repository,sha,profile,shard,policy_revision) VALUES(?,?,?,?,?,?,?)", r.Key, r.RepositoryID, r.Repository, r.SHA, r.Profile, r.Shard, r.PolicyRevision)
 		if err != nil {
@@ -305,8 +309,8 @@ func (s *Store) AdmitGitHub(ctx context.Context, input GitHubAdmission, now time
 			return GitHubRun{}, err
 		}
 	}
-	r.Blocked = ""
-	_, err = tx.ExecContext(ctx, "UPDATE github_runs SET current_job=?,attempt_id=?,blocked='' WHERE run_key=?", r.JobID, r.AttemptID, r.Key)
+	r.Blocked, r.Skipped = "", ""
+	_, err = tx.ExecContext(ctx, "UPDATE github_runs SET current_job=?,attempt_id=?,blocked='',skipped='' WHERE run_key=?", r.JobID, r.AttemptID, r.Key)
 	if err != nil {
 		return GitHubRun{}, err
 	}
@@ -500,10 +504,10 @@ func (s *Store) BlockGitHub(ctx context.Context, r GitHubRun, reason string, now
 	if errors.Is(err, ErrNotFound) {
 		_, err = tx.ExecContext(ctx, "INSERT INTO github_runs(run_key,repository_id,repository,sha,profile,shard,policy_revision,blocked) VALUES(?,?,?,?,?,?,?,?)", r.Key, r.RepositoryID, r.Repository, r.SHA, r.Profile, r.Shard, r.PolicyRevision, reason)
 	} else if err == nil {
-		if old.Blocked == reason {
+		if old.Blocked == reason && old.Skipped == "" {
 			return nil
 		}
-		_, err = tx.ExecContext(ctx, "UPDATE github_runs SET blocked=? WHERE run_key=?", reason, r.Key)
+		_, err = tx.ExecContext(ctx, "UPDATE github_runs SET blocked=?,skipped='' WHERE run_key=?", reason, r.Key)
 		if err == nil && old.JobID != "" {
 			var job model.Job
 			job, err = getTx(ctx, tx, old.JobID)
@@ -511,6 +515,46 @@ func (s *Store) BlockGitHub(ctx context.Context, r GitHubRun, reason string, now
 				err = cancelTx(ctx, tx, job, reason, model.CancelReason{Source: model.CancelGitHub, Detail: reason}, now)
 			}
 		}
+	}
+	if err != nil {
+		return err
+	}
+	if err = githubDirty(ctx, tx, r.Key); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// SkipGitHub records that a matrix run is not run (why: summary), published
+// as a neutral check, without admitting code. Only a run without an attempt
+// can be skipped: ErrConflict refuses a run that already has a job.
+func (s *Store) SkipGitHub(ctx context.Context, r GitHubRun, summary string, now time.Time) error {
+	if !validOpaque(r.Key, 256) || r.RepositoryID <= 0 || !controllerconfig.ValidRepository(r.Repository) || !validSHA(r.SHA) || !validOpaque(r.Profile, 256) || !validOpaque(r.Shard, 32) || r.PolicyRevision <= 0 || !validReason(summary) || summary == "" || !validTime(now) {
+		return ErrInvalid
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var publishing bool
+	if err = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM github_outbox WHERE run_key=? AND lease_until>?)", r.Key, now.UnixNano()).Scan(&publishing); err != nil {
+		return err
+	}
+	if publishing {
+		return ErrFull
+	}
+	old, err := scanGitHubRun(tx.QueryRowContext(ctx, "SELECT "+githubRunColumns+" FROM github_runs WHERE run_key=?", r.Key))
+	if errors.Is(err, ErrNotFound) {
+		_, err = tx.ExecContext(ctx, "INSERT INTO github_runs(run_key,repository_id,repository,sha,profile,shard,policy_revision,skipped) VALUES(?,?,?,?,?,?,?,?)", r.Key, r.RepositoryID, r.Repository, r.SHA, r.Profile, r.Shard, r.PolicyRevision, summary)
+	} else if err == nil {
+		if old.JobID != "" {
+			return ErrConflict
+		}
+		if old.Skipped == summary && old.Blocked == "" {
+			return nil
+		}
+		_, err = tx.ExecContext(ctx, "UPDATE github_runs SET skipped=?,blocked='' WHERE run_key=?", summary, r.Key)
 	}
 	if err != nil {
 		return err

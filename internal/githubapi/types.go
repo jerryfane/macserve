@@ -90,7 +90,19 @@ type PullRequest struct {
 	HeadRepositoryID int64
 	AuthorID         int64
 	BaseRef          string
-	UpdatedAt        time.Time
+	// BaseSHA is the base branch's commit the pull request currently
+	// targets; "" in pull lists stored before it was recorded.
+	BaseSHA   string
+	UpdatedAt time.Time
+}
+
+// ChangedFile is one file of a commit comparison: its path, its previous
+// path for a rename or copy, and GitHub's status (added, removed, modified,
+// renamed, copied, changed or unchanged).
+type ChangedFile struct {
+	Filename         string
+	PreviousFilename string
+	Status           string
 }
 
 type Comment struct {

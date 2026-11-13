@@ -23,6 +23,7 @@ type pullWire struct {
 	} `json:"user"`
 	Base struct {
 		Ref string `json:"ref"`
+		SHA string `json:"sha"`
 	} `json:"base"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -32,7 +33,7 @@ func (p pullWire) value() PullRequest {
 	if p.Head.Repo != nil {
 		repoID = p.Head.Repo.ID
 	}
-	return PullRequest{Number: p.Number, State: p.State, Draft: p.Draft, HeadSHA: p.Head.SHA, HeadRepositoryID: repoID, AuthorID: p.User.ID, BaseRef: p.Base.Ref, UpdatedAt: p.UpdatedAt}
+	return PullRequest{Number: p.Number, State: p.State, Draft: p.Draft, HeadSHA: p.Head.SHA, HeadRepositoryID: repoID, AuthorID: p.User.ID, BaseRef: p.Base.Ref, BaseSHA: p.Base.SHA, UpdatedAt: p.UpdatedAt}
 }
 
 type commentWire struct {
@@ -402,4 +403,44 @@ func (c *Client) CreateComment(ctx context.Context, repo string, number int, bod
 		return Comment{}, errors.New("GitHub created comment mismatch")
 	}
 	return comment, nil
+}
+
+// MaxCompareFiles is the most changed files GitHub's compare API lists; a
+// comparison listing this many may be truncated.
+const MaxCompareFiles = 300
+
+// CompareFiles lists the files changed between the merge base of base and
+// head and head (GET /repos/<repo>/compare/<base>...<head>). complete is
+// false when the list may be truncated (MaxCompareFiles or more files).
+func (c *Client) CompareFiles(ctx context.Context, repo, base, head string) (files []ChangedFile, complete bool, err error) {
+	if !validSHA(base) || !validSHA(head) {
+		return nil, false, errors.New("invalid GitHub commit SHA")
+	}
+	ctx, cancel := context.WithTimeout(ctx, operationTimeout)
+	defer cancel()
+	token, err := c.auth(ctx, repo)
+	if err != nil {
+		return nil, false, err
+	}
+	var wire struct {
+		Files *[]struct {
+			Filename         string `json:"filename"`
+			PreviousFilename string `json:"previous_filename"`
+			Status           string `json:"status"`
+		} `json:"files"`
+	}
+	if _, _, err = c.request(ctx, http.MethodGet, "/repos/"+repo+"/compare/"+base+"..."+head, token, "", nil, &wire); err != nil {
+		return nil, false, err
+	}
+	if wire.Files == nil {
+		return nil, false, errors.New("invalid GitHub compare response")
+	}
+	files = make([]ChangedFile, 0, len(*wire.Files))
+	for _, f := range *wire.Files {
+		if f.Filename == "" || f.Status == "" {
+			return nil, false, errors.New("invalid GitHub compare file")
+		}
+		files = append(files, ChangedFile{Filename: f.Filename, PreviousFilename: f.PreviousFilename, Status: f.Status})
+	}
+	return files, len(files) < MaxCompareFiles, nil
 }

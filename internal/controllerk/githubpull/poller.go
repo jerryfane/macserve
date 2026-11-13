@@ -64,12 +64,18 @@ type Poller struct {
 	mu       sync.Mutex
 	// Guarded by mu (held by Poll): the current name of each repository ID
 	// the owner listings cover (replaced by every complete cycle), and each
-	// owner-form head's parsed .macserve.json (key: repository ID, SHA; nil
-	// when missing or invalid), kept while the head is still observed. The
-	// template is selected from it against the governing policy on every use.
+	// head's parsed .macserve.json (key: repository ID, SHA; nil when missing
+	// or invalid) and matrix_skip_paths decision, kept while the head is still
+	// observed. An owner-form template is selected from the file against the
+	// governing policy on every use.
 	discovered map[int64]string
 	configs    map[string]*model.RepoConfig
+	scopes     map[string]matrixScope
 }
+
+// matrixScope is a head's matrix_skip_paths decision against its base
+// commit: summary is why its matrix is not run, "" to run it.
+type matrixScope struct{ base, summary string }
 
 func New(options Options) (*Poller, error) {
 	if options.Store == nil || options.Profiles == nil || options.Client == nil || options.Client.AppID() <= 0 || options.VerifyReceipt == nil || options.PollInterval < 0 {
@@ -81,7 +87,7 @@ func New(options Options) (*Poller, error) {
 	if options.PollInterval == 0 {
 		options.PollInterval = 45 * time.Second
 	}
-	p := &Poller{options: options, policies: make(map[string]githubwire.Policy), owners: make(map[string]githubwire.Policy), pinned: make(map[int64]bool), recipes: make(map[string]model.Profile), tmpls: make(map[string]model.Template), discovered: make(map[int64]string), configs: make(map[string]*model.RepoConfig)}
+	p := &Poller{options: options, policies: make(map[string]githubwire.Policy), owners: make(map[string]githubwire.Policy), pinned: make(map[int64]bool), recipes: make(map[string]model.Profile), tmpls: make(map[string]model.Template), discovered: make(map[int64]string), configs: make(map[string]*model.RepoConfig), scopes: make(map[string]matrixScope)}
 	for _, profile := range options.Profiles.List() {
 		p.recipes[profile.ID] = profile
 	}
@@ -114,6 +120,9 @@ func New(options Options) (*Poller, error) {
 		policy.BaseBranches = slices.Clone(policy.BaseBranches)
 		policy.Profiles = slices.Clone(policy.Profiles)
 		policy.Matrix = slices.Clone(policy.Matrix)
+		if s := policy.MatrixSkipPaths; s != nil {
+			policy.MatrixSkipPaths = &githubwire.SkipPaths{Include: slices.Clone(s.Include), Exclude: slices.Clone(s.Exclude)}
+		}
 		if policy.OwnerScoped() {
 			if err := p.ownerPolicy(policy); err != nil {
 				return nil, err
@@ -340,11 +349,17 @@ func (p *Poller) pollOwners(ctx context.Context, observed map[string]bool) []err
 	return failures
 }
 
-// pruneConfigs drops the parsed .macserve.json files of heads not observed.
+// pruneConfigs drops the parsed .macserve.json files and matrix_skip_paths
+// decisions of heads not observed.
 func (p *Poller) pruneConfigs(observed map[string]bool) {
 	for key := range p.configs {
 		if !observed[key] {
 			delete(p.configs, key)
+		}
+	}
+	for key := range p.scopes {
+		if !observed[key] {
+			delete(p.scopes, key)
 		}
 	}
 }
@@ -830,8 +845,11 @@ func policyRuns(policy githubwire.Policy) []githubwire.MatrixEntry {
 // has current without starting anything. A head whose .macserve.json does not
 // declare the entry's shard for the template's kind, or from which the
 // worker could not derive the entry's recipe, gets the run blocked: an
-// action_required check and no job. failure is a store refusal the poll
-// reports and continues past; err ends the repository's poll.
+// action_required check and no job. A head matrix_skip_paths skips gets the
+// run skipped, a neutral check and no job, unless the run already has a job
+// (admitted before, or by an owner rerun), which it keeps. failure is a store
+// refusal the poll reports and continues past; err ends the repository's
+// poll.
 func (p *Poller) admitMatrix(ctx context.Context, policy githubwire.Policy, pull githubapi.PullRequest, input store.GitHubAdmission, observed map[string]bool, currentKeys map[string]bool, now time.Time) (failure, err error) {
 	key := input.Run.Key
 	if policy.MatrixSkipDrafts && pull.Draft {
@@ -854,8 +872,66 @@ func (p *Poller) admitMatrix(ctx context.Context, policy githubwire.Policy, pull
 		return p.options.Store.BlockGitHub(ctx, input.Run, reason, now), nil
 	}
 	currentKeys[key] = true
+	if summary := p.skipSummary(ctx, policy, pull, observed); summary != "" {
+		existing, err := p.options.Store.GitHubRun(ctx, key)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, err
+		}
+		if err != nil || existing.JobID == "" {
+			return p.options.Store.SkipGitHub(ctx, input.Run, summary, now), nil
+		}
+	}
 	_, failure = p.options.Store.AdmitGitHub(ctx, input, now)
 	return failure, nil
+}
+
+// skipSummary is why matrix_skip_paths skips the policy's matrix at pull's
+// head, "" to run it. The decision is GitHub's comparison of the head with
+// its base commit, cached per head and base while the head is observed. Any
+// doubt runs the matrix: no base commit, a failed comparison (logged), and
+// every case scopeSummary refuses.
+func (p *Poller) skipSummary(ctx context.Context, policy githubwire.Policy, pull githubapi.PullRequest, observed map[string]bool) string {
+	if policy.MatrixSkipPaths == nil {
+		return ""
+	}
+	key := strconv.FormatInt(policy.RepositoryID, 10) + "/" + pull.HeadSHA
+	observed[key] = true
+	if cached, ok := p.scopes[key]; ok && cached.base == pull.BaseSHA {
+		return cached.summary
+	}
+	summary := ""
+	files, complete, err := p.options.Client.CompareFiles(ctx, policy.Repository, pull.BaseSHA, pull.HeadSHA)
+	if err != nil {
+		log.Printf("GitHub matrix_skip_paths comparison failed, running the matrix: repository=%s pull=%d head=%s: %v", policy.Repository, pull.Number, pull.HeadSHA, err)
+	} else if complete {
+		summary = scopeSummary(*policy.MatrixSkipPaths, files)
+	}
+	p.scopes[key] = matrixScope{base: pull.BaseSHA, summary: summary}
+	return summary
+}
+
+// scopeSummary is the neutral check summary of a complete comparison whose
+// every file was added or modified and is selected by paths, "" otherwise
+// (no changed file, or any removed, renamed, copied, mode-changed or
+// unselected file).
+func scopeSummary(paths githubwire.SkipPaths, files []githubapi.ChangedFile) string {
+	if len(files) == 0 {
+		return ""
+	}
+	var matched []string
+	for _, file := range files {
+		if file.Status != "added" && file.Status != "modified" || file.PreviousFilename != "" {
+			return ""
+		}
+		glob, ok := paths.Match(file.Filename)
+		if !ok {
+			return ""
+		}
+		if !slices.Contains(matched, glob) {
+			matched = append(matched, glob)
+		}
+	}
+	return fmt.Sprintf("Not run: all %d changed files match the policy's matrix_skip_paths (%s). No job ran, so this check is not test evidence.", len(files), strings.Join(matched, ", "))
 }
 
 // shardProblem is why a matrix entry's admitted snapshot cannot run at a head
