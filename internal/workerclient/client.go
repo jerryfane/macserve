@@ -223,8 +223,10 @@ type laneHold struct {
 }
 
 // heldForIdle reports whether result is a completion held for the idle
-// check: the job's own cleanup succeeded, but unattributed processes
-// remained beside other jobs, and they may be the job's own.
+// check: the job's own cleanup succeeded, but the engine could not verify
+// the account (idle verdict deferred): unattributed processes remained
+// beside other jobs, and they may be the job's own, or an admission's
+// registered tree ACL census was cut short by its deadline.
 func heldForIdle(result worker.Result) bool {
 	return result.CleanupOK && result.Concurrency != nil && result.Concurrency.IdleVerdict == worker.IdleDeferred
 }
@@ -238,12 +240,12 @@ func heldForIdle(result worker.Result) bool {
 // A lease whose cleanup was not verified fences its epoch at the controller;
 // the client then drains: it asks for no lease, lets the other lanes finish,
 // and registers a new epoch only after Recover verifies the idle account.
-// A job that ended beside others with unattributed job-account processes
-// left is held: its completion waits for the next idle Recover, the full
-// quiesce and admission, and is delivered then with that verdict (clean, or
-// its cleanup unverified). No lease is asked for while one is held; the
-// held lane leaves running, so Recover runs once the others have finished,
-// also when Run returns.
+// A job whose completion the engine could not verify (heldForIdle) is held:
+// its completion waits for the next idle Recover, the full quiesce and
+// admission, and is delivered then with that verdict (clean, or its cleanup
+// unverified). No lease is asked for while one is held; the held lane
+// leaves running, so Recover runs once the others have finished, also when
+// Run returns.
 // An engine drain (an unattributed job-account process while jobs run) only
 // stops new lanes: nothing was fenced, so the epoch is kept, and a lease the
 // controller already prepared for it is delivered after the idle Recover.
@@ -558,9 +560,9 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 		verdict := make(chan error, 1)
 		c.holds <- laneHold{jobID: lease.Job.ID, verdict: verdict}
 		if err := <-verdict; err != nil {
-			log.Printf("worker job %s idle check after its unattributed residue failed: %v", lease.Job.ID, err)
+			log.Printf("worker job %s deferred idle check failed: %v", lease.Job.ID, err)
 			result.CleanupOK = false
-			reason := "idle check of unattributed job-account processes failed: " + worker.PublicReason(err)
+			reason := "deferred idle check failed: " + worker.PublicReason(err)
 			if result.Reason != "" {
 				reason = result.Reason + "; " + reason
 			}

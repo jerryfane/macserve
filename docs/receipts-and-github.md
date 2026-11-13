@@ -374,8 +374,9 @@ the full manifest's worker result carries, so the compact receipt stays within i
 `lineage+device/v1`: the lane attribution of docs/architecture.md), `unattributed_residue` and `idle_verdict`
 (`clean`: the job ended with the full job-account check; `not_required`: siblings ran, its own processes and
 simulator were removed and nothing unattributed remained; `deferred`: cleanup unverified). A job whose lane cleanup
-left unattributed processes beside other jobs is completed only after the worker's next idle check: `clean` (with
-`unattributed_residue` above 0) when it passed, else `deferred` with `cleanup_ok` false. `resources` gains
+left unattributed processes beside other jobs, or whose admission's registered-root ACL census was cut short by its
+deadline (docs/architecture.md, Cleanup), is completed only after the worker's next idle check: `clean` (with any
+`unattributed_residue` recorded) when it passed, else `deferred` with `cleanup_ok` false. `resources` gains
 `host_peak_memory_mib` when sampled. A success receipt requires `cleanup_ok` and an idle verdict of `clean` or
 `not_required`. Schema-1 receipts stay valid and carry neither field.
 

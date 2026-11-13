@@ -424,3 +424,176 @@ func TestRecoverCleansEveryLaneManifest(t *testing.T) {
 		t.Fatalf("crash recovery did not use the full quiesce: %v", events)
 	}
 }
+
+// censusFake is laneFake whose admissions first run the hot registered-root
+// ACL census (inspectRegistrationRoots) over the root "/", with an ls the
+// test controls.
+type censusFake struct {
+	*laneFake
+	cmu sync.Mutex
+	// cut is how many ls probes their deadline cuts short next; -1: all.
+	cut int
+	// probe answers a probe that is not cut short; nil: a clean listing.
+	probe func(context.Context, registrationWriters, ...string) error
+}
+
+func newCensusFake() *censusFake { return &censusFake{laneFake: newLaneFake()} }
+
+func (f *censusFake) set(cut int, probe func(context.Context, registrationWriters, ...string) error) {
+	f.cmu.Lock()
+	defer f.cmu.Unlock()
+	f.cut, f.probe = cut, probe
+}
+
+func (f *censusFake) acl(ctx context.Context, writers registrationWriters, args ...string) error {
+	f.cmu.Lock()
+	cut, probe := f.cut != 0, f.probe
+	if f.cut > 0 {
+		f.cut--
+	}
+	f.cmu.Unlock()
+	if cut {
+		// The production ls at a deadline that has passed: killed, or
+		// never started, at it, as on a loaded host.
+		expired, cancel := context.WithDeadline(ctx, time.Now())
+		defer cancel()
+		return registrationACLCommand(expired, writers, args...)
+	}
+	if probe != nil {
+		return probe(ctx, writers, args...)
+	}
+	return nil
+}
+
+func (f *censusFake) census(ctx context.Context) error {
+	f.event("census")
+	roots := PersistenceManifest{Code: map[string]RegisteredCode{"fixture": {Path: "/"}}}
+	return inspectRegistrationRoots(ctx, roots, registrationWritersFixture(), f.acl)
+}
+
+func (f *censusFake) Admission(ctx context.Context) error {
+	if err := f.census(ctx); err != nil {
+		return err
+	}
+	return f.laneFake.Admission(ctx)
+}
+
+func (f *censusFake) LaneAdmission(ctx context.Context) error {
+	if err := f.census(ctx); err != nil {
+		return err
+	}
+	return f.laneFake.LaneAdmission(ctx)
+}
+
+// A registered tree ACL census its deadline cut short observed nothing; the
+// census retries and a job whose census then completes keeps its result
+// (Studio v0.1.49, 2026-11-13: four lanes beside the periodic full scan).
+func TestACLCensusCutShortIsRetried(t *testing.T) {
+	runner := newCensusFake()
+	engine := laneEngine(t, runner, 2)
+	source, data := sourceFixture(t)
+	runner.set(1, nil)
+	result, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-a", model.Build), source, bytes.NewReader(data), nil)
+	if err != nil || result.State != model.Succeeded || !result.CleanupOK || result.Reason != "" || result.Concurrency.IdleVerdict != IdleClean {
+		t.Fatalf("census timeout failed the job: %+v %v", result, err)
+	}
+}
+
+// A census still cut short when a job ends alone leaves the job's own
+// successful cleanup to the idle Recover: the job keeps its result with its
+// cleanup (idle verdict deferred, which the client holds until that check),
+// and the engine drains until the check passes.
+func TestACLCensusUnavailableAtJobEndDefersToIdleCheck(t *testing.T) {
+	runner := newCensusFake()
+	engine := laneEngine(t, runner, 2)
+	source, data := sourceFixture(t)
+	gate := runner.gate("job-a")
+	a := runLane(engine, fixtureLaneJob(t, "job-a", model.Build), source, data)
+	<-runner.started
+	runner.set(-1, nil)
+	close(gate)
+	first := <-a
+	if first.err != nil || first.result.State != model.Succeeded || !first.result.CleanupOK || first.result.Reason != "" || first.result.Concurrency.IdleVerdict != IdleDeferred || first.result.Concurrency.UnattributedResidue != 0 {
+		t.Fatalf("unavailable census at job end: %+v %v", first.result, first.err)
+	}
+	if err := engine.LaneReady(context.Background()); !errors.Is(err, ErrDrain) {
+		t.Fatalf("engine admits before the idle check: %v", err)
+	}
+	if _, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-b", model.Build), source, bytes.NewReader(data), nil); !errors.Is(err, ErrDrain) {
+		t.Fatalf("job started before the idle check: %v", err)
+	}
+	runner.set(0, nil)
+	runner.take()
+	if err := engine.Recover(context.Background()); err != nil {
+		t.Fatalf("clean idle check: %v", err)
+	}
+	if events := runner.take(); len(events) < 3 || events[0] != "quiesce" || !contains(events, "census") || !contains(events, "admission") {
+		t.Fatalf("idle check was not the full quiesce and admission: %v", events)
+	}
+	if err := engine.LaneReady(context.Background()); err != nil {
+		t.Fatalf("drain survived the idle check: %v", err)
+	}
+}
+
+// A census still cut short at a lane admission (the Studio failure: lane 4
+// beside three jobs) refuses the job before it runs, with the service's
+// admission as its reason, without failing its cleanup: nothing of it ran,
+// so its completion is held for the idle check, and nothing starts until
+// then.
+func TestLaneAdmissionACLCensusUnavailableKeepsCleanup(t *testing.T) {
+	runner := newCensusFake()
+	engine := laneEngine(t, runner, 2)
+	source, data := sourceFixture(t)
+	gate := runner.gate("job-a")
+	a := runLane(engine, fixtureLaneJob(t, "job-a", model.Build), source, data)
+	<-runner.started
+	runner.set(-1, nil)
+	result, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-b", model.Build), source, bytes.NewReader(data), nil)
+	if err == nil || result.State != model.Failed || !result.CleanupOK || result.Reason != "lane admission: registered tree ACL census unavailable" || result.Concurrency.IdleVerdict != IdleDeferred || result.FinishedAt.IsZero() {
+		t.Fatalf("unavailable census at lane admission: %+v %v", result, err)
+	}
+	if err := engine.LaneReady(context.Background()); !errors.Is(err, ErrDrain) {
+		t.Fatalf("engine admits beside the job before the idle check: %v", err)
+	}
+	runner.set(0, nil)
+	close(gate)
+	if first := <-a; first.err != nil || first.result.State != model.Succeeded || !first.result.CleanupOK || first.result.Concurrency.IdleVerdict != IdleClean {
+		t.Fatalf("sibling: %+v %v", first.result, first.err)
+	}
+	if err := engine.Recover(context.Background()); err != nil {
+		t.Fatalf("clean idle check: %v", err)
+	}
+}
+
+// A census that ran fails the job's cleanup as before: an ACL that grants
+// the job account writes quarantines, and an ls that failed before its
+// deadline leaves the cleanup unverified. Both pass without the deferral.
+func TestACLCensusThatRanStillFailsCleanup(t *testing.T) {
+	for name, probe := range map[string]func(context.Context, registrationWriters, ...string) error{
+		"acl drift": func(_ context.Context, writers registrationWriters, _ ...string) error {
+			return writers.checkACL(" 0: user:job allow write")
+		},
+		"ls failed": func(ctx context.Context, writers registrationWriters, _ ...string) error {
+			return registrationACLCommand(ctx, writers, "-ldeb", "/nonexistent-macserve-fixture")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			runner := newCensusFake()
+			engine := laneEngine(t, runner, 2)
+			source, data := sourceFixture(t)
+			gate := runner.gate("job-a")
+			a := runLane(engine, fixtureLaneJob(t, "job-a", model.Build), source, data)
+			<-runner.started
+			runner.set(0, probe)
+			close(gate)
+			first := <-a
+			if first.err == nil || first.result.State != model.Failed || first.result.CleanupOK || first.result.Concurrency.IdleVerdict != IdleDeferred {
+				t.Fatalf("census that ran passed the cleanup: %+v %v", first.result, first.err)
+			}
+			_, quarantined := engine.root.Lstat(quarantineRecord)
+			if drift := name == "acl drift"; drift != (quarantined == nil) || drift != errors.Is(first.err, ErrContamination) {
+				t.Fatalf("quarantine %v for %s: %v", quarantined, name, first.err)
+			}
+		})
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -156,6 +157,25 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 	} else {
 		err = e.laneAdmission(parent)
 	}
+	if errors.Is(err, errACLCensusUnavailable) && !errors.Is(err, ErrContamination) {
+		// The census observed nothing, and nothing of the job ran, so it
+		// has nothing of its own to clean up. The account is left to the
+		// idle Recover: the engine drains, and the client holds this
+		// failure (cleanup_ok, idle verdict deferred) until that check
+		// gives the verdict (Client.Run). The reason names the service's
+		// admission, not the job, as the cause.
+		result.CleanupOK = true
+		e.setDrain("registered tree ACL census unavailable at the admission of job " + job.ID)
+		stage := "admission"
+		if !solo {
+			stage = "lane admission"
+		}
+		err = fmt.Errorf("%s: %w", stage, err)
+		result.Reason = PublicReason(err)
+		// It ended now, not when the held completion is delivered.
+		result.FinishedAt = e.options.Now()
+		return result, err
+	}
 	if err != nil {
 		return result, err
 	}
@@ -239,10 +259,18 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 		}
 		quietErr = errors.Join(quietErr, e.accountQuiesce(finalCtx, job.ID))
 		var residueErr error
+		// deferred is why the job's own successful cleanup was left to the
+		// idle Recover to verify (Engine.finishLane).
+		deferred := ""
 		if quietErr == nil {
 			if alone {
 				if inspector, ok := e.options.Runner.(interface{ Admission(context.Context) error }); ok {
 					quietErr = inspector.Admission(finalCtx)
+					if errors.Is(quietErr, errACLCensusUnavailable) && !errors.Is(quietErr, ErrContamination) {
+						// Its own quiesce passed; the census observed nothing.
+						log.Printf("worker job %s cleanup verification deferred to the idle check: %v", job.ID, quietErr)
+						deferred, quietErr = "registered tree ACL census unavailable after job "+job.ID, nil
+					}
 				}
 			} else {
 				residueErr = e.laneResidue(finalCtx, job.ID, &result)
@@ -254,7 +282,7 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 		}
 		returned = e.quarantine(errors.Join(returned, quietErr, cleanupErr, residueErr))
 		result.CleanupOK = quietErr == nil && cleanupErr == nil && residueErr == nil && !errors.Is(returned, ErrContamination)
-		e.finishLane(job.ID, alone, &result)
+		e.finishLane(job.ID, alone, deferred, &result)
 		switch {
 		case parent.Err() == context.Canceled || job.CancelRequested:
 			result.State = model.Cancelled

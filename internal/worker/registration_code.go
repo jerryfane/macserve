@@ -645,6 +645,12 @@ func protectedTreeACL(ctx context.Context, path string, writers registrationWrit
 	return recheckRegistrationPath(ancestry, writers)
 }
 
+// errACLCensusUnavailable is a registered tree ACL census its deadline cut
+// short (ls killed, or not started, at it): it observed nothing, so it is no
+// evidence either way. A census that ran and failed, or whose listing shows
+// a problem, is never this error.
+var errACLCensusUnavailable = errors.New("registered tree ACL census unavailable")
+
 func registrationACLCommand(ctx context.Context, writers registrationWriters, args ...string) error {
 	ctx, cancel := context.WithTimeout(ctx, registrationCommandTimeout)
 	defer cancel()
@@ -655,7 +661,10 @@ func registrationACLCommand(ctx context.Context, writers registrationWriters, ar
 	out, diagnostic := &boundedBuffer{max: 64 << 20}, &boundedBuffer{max: 1 << 20}
 	cmd.Stdout, cmd.Stderr = out, diagnostic
 	if err := cmd.Run(); err != nil || out.err != nil || diagnostic.err != nil || diagnostic.Len() != 0 || out.Len() == 0 {
-		return errors.New("registered tree ACL census unavailable")
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return errACLCensusUnavailable
+		}
+		return errors.New("registered tree ACL census failed")
 	}
 	return validateTreeACL(out.String(), writers)
 }
