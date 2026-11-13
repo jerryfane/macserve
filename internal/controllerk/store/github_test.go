@@ -269,3 +269,63 @@ func TestGitHubPublicationRetryDeadlineSurvivesUpdatesAndReopen(t *testing.T) {
 		t.Fatalf("retry lost new terminal/correlation generation: %+v %v", next, err)
 	}
 }
+
+// An automatic first admission the queue has no space for records its run
+// waiting (no job, no blocked or skipped reason) as publication work and
+// returns ErrFull; while it keeps waiting it is not republished, and once a
+// job ends the next admission starts its first attempt. A comment request or
+// a rerun is refused without recording anything.
+func TestGitHubAdmissionWaitsForQueueSpace(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newStore(t, Options{PerPrincipalLimit: 1})
+	if err := s.InitializeGitHub(ctx); err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.AdmitGitHub(ctx, githubFixture(), testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publish := func(want string) {
+		t.Helper()
+		publication, err := s.NextGitHubPublication(ctx, testNow)
+		if err != nil || publication.Run.Key != want {
+			t.Fatalf("publication %+v %v, want run %s", publication, err, want)
+		}
+		if err = s.FinishGitHubPublication(ctx, publication, 9, time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	publish(first.Key)
+	input := githubFixture()
+	input.Run.Key, input.Run.SHA = strings.Repeat("c", 64), strings.Repeat("c", 40)
+	input.Admission.Request.SHA = input.Run.SHA
+	request := input
+	request.Request = &GitHubRequest{CommentID: 1, RequestID: "actions:1:1", BodySHA256: fmt.Sprintf("%064x", 1)}
+	if _, err = s.AdmitGitHub(ctx, request, testNow); !errors.Is(err, ErrFull) {
+		t.Fatalf("comment request at a full queue: %v", err)
+	}
+	if run, err := s.GitHubRun(ctx, input.Run.Key); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("refused comment request recorded run %+v %v", run, err)
+	}
+	if _, err = s.AdmitGitHub(ctx, input, testNow); !errors.Is(err, ErrFull) {
+		t.Fatalf("admission at a full queue: %v", err)
+	}
+	waiting, err := s.GitHubRun(ctx, input.Run.Key)
+	if err != nil || waiting.JobID != "" || waiting.Blocked != "" || waiting.Skipped != "" {
+		t.Fatalf("waiting run %+v %v", waiting, err)
+	}
+	publish(input.Run.Key)
+	if _, err = s.AdmitGitHub(ctx, input, testNow); !errors.Is(err, ErrFull) {
+		t.Fatalf("second admission at a full queue: %v", err)
+	}
+	if publication, err := s.NextGitHubPublication(ctx, testNow); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("waiting run republished: %+v %v", publication, err)
+	}
+	if _, err = s.Cancel(ctx, first.JobID, "client", model.CancelReason{Source: model.CancelGitHub}, testNow); err != nil {
+		t.Fatal(err)
+	}
+	admitted, err := s.AdmitGitHub(ctx, input, testNow)
+	if err != nil || admitted.JobID == "" || admitted.CheckID != 9 {
+		t.Fatalf("waiting run not admitted after a job ended: %+v %v", admitted, err)
+	}
+}

@@ -68,6 +68,12 @@ func (p *Poller) checkInput(ctx context.Context, run store.GitHubRun) (githubapi
 		input.ExternalID = "denied:" + run.Key
 		if run.Skipped != "" && run.Blocked == "" {
 			input.ExternalID = "skipped:" + run.Key
+		} else if run.Skipped == "" && run.Blocked == "" {
+			// Waiting (store.AdmitGitHub): admitted when the queue has space,
+			// by a later poll in the pull request list's order.
+			input.ExternalID = "waiting:" + run.Key
+			input.Output.Title = "Waiting for queue space"
+			input.Output.Summary = "The controller's queue is at its limit of unfinished jobs (per repository or in total); a later poll starts this run when a job ends. No job has run, so this check is not evidence."
 		}
 	}
 	var job model.Job

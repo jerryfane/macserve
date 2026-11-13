@@ -2,9 +2,12 @@ package githubpull
 
 import (
 	"context"
+	"errors"
+	"log"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jerryfane/macserve/internal/controllerk/store"
 	"github.com/jerryfane/macserve/internal/githubapi"
@@ -359,5 +362,118 @@ func TestMatrixCommentIntakeSkipsMatrixTemplates(t *testing.T) {
 	requests, err := f.s.GitHubRequests(context.Background(), runs["mac-evidence/org-build-v1"].JobID)
 	if err != nil || len(requests) != 1 || requests[0].CommentID != 2 {
 		t.Fatalf("build requests %+v %v", requests, err)
+	}
+}
+
+// cancelOnLog records log output and ends a Run at its first line.
+type cancelOnLog struct {
+	lines  strings.Builder
+	cancel context.CancelFunc
+}
+
+func (w *cancelOnLog) Write(b []byte) (int, error) {
+	w.lines.Write(b)
+	w.cancel()
+	return len(b), nil
+}
+
+// matrixChecks is the check of each of a herdrup head's runs, in admission
+// order.
+var matrixChecks = []string{"mac-evidence/org-build-v1", "mac-evidence/org-ios-sim-uitest-v1/iphone-terminal", "mac-evidence/org-ios-sim-uitest-v1/iphone-app", "mac-evidence/org-ios-sim-uitest-v1/ipad", "mac-evidence/org-ios-sim-script-v1/ipad-script"}
+
+// Each matrix head runs five jobs under the repository's one principal, so
+// two heads fill the store's default ten outstanding jobs and a third head's
+// admissions are refused (queue full). The cycle still admits the heads
+// before it and, while every refusal waits for the next cycle, Run logs each
+// one with its pull request, head and check.
+func TestRunLogsHeadsAFullQueueLeavesUnadmitted(t *testing.T) {
+	f := newMatrixFixture(t, matrixPolicy())
+	for number, c := range []byte("123") {
+		f.pull(matrixRepo, matrixPull(number+1, headSHA(c)), matrixConfig)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	recorded := &cancelOnLog{cancel: cancel}
+	previous := log.Writer()
+	log.SetOutput(recorded)
+	defer log.SetOutput(previous)
+	f.p.Run(ctx)
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("Run logged nothing for the unadmitted head: %v", ctx.Err())
+	}
+	got := recorded.lines.String()
+	for _, sha := range []string{headSHA('1'), headSHA('2')} {
+		if runs := f.runsByCheck(t, sha); len(runs) != 5 || strings.Contains(got, sha) {
+			t.Fatalf("head %s: runs %v, log %q", sha, runs, got)
+		}
+	}
+	for _, check := range matrixChecks {
+		want := "GitHub poll: GitHub repository " + matrixRepo + ": pull=3 head=" + headSHA('3') + " check=" + check + ": " + store.ErrFull.Error() + "\n"
+		if !strings.Contains(got, want) {
+			t.Fatalf("log lacks %q: %q", want, got)
+		}
+	}
+}
+
+// A head admitted while the queue is full gets each run recorded waiting, a
+// queued "Waiting for queue space" check per run and no job. A run that
+// keeps waiting is not republished, and when a job ends the next poll gives
+// its slot to the first waiting run in admission order, whose check becomes
+// its job's.
+func TestMatrixHeadWaitsForQueueSpace(t *testing.T) {
+	ctx := context.Background()
+	f := newMatrixFixture(t, matrixPolicy())
+	for number, c := range []byte("123") {
+		f.pull(matrixRepo, matrixPull(number+1, headSHA(c)), matrixConfig)
+	}
+	pollFull := func() {
+		t.Helper()
+		if err := f.p.Poll(ctx); !errors.Is(err, store.ErrFull) {
+			t.Fatalf("poll: %v", err)
+		}
+	}
+	// The publisher's budget of ten checks a cycle takes two cycles here.
+	pollFull()
+	pollFull()
+	waiting := f.runsByCheck(t, headSHA('3'))
+	checks := f.checksOf(headSHA('3'))
+	if len(waiting) != 5 || len(checks) != 5 {
+		t.Fatalf("waiting head: runs %v checks %v", waiting, checks)
+	}
+	for _, name := range matrixChecks {
+		run, check := waiting[name], checks[name]
+		if run.JobID != "" || run.Blocked != "" || run.Skipped != "" || check.Status != "queued" || check.Conclusion != "" || check.Output.Title != "Waiting for queue space" || check.ExternalID != "waiting:"+run.Key {
+			t.Fatalf("%s: run %+v check %+v", name, run, check)
+		}
+	}
+	f.remote.mu.Lock()
+	published := len(f.remote.checks)
+	f.remote.mu.Unlock()
+	pollFull()
+	f.remote.mu.Lock()
+	republished := len(f.remote.checks)
+	f.remote.mu.Unlock()
+	if republished != published {
+		t.Fatalf("waiting runs republished: %d checks, then %d", published, republished)
+	}
+	ended := f.runsByCheck(t, headSHA('1'))["mac-evidence/org-ios-sim-uitest-v1/ipad"]
+	if _, err := f.s.Cancel(ctx, ended.JobID, "client", model.CancelReason{Source: model.CancelGitHub}, f.options.Now()); err != nil {
+		t.Fatal(err)
+	}
+	pollFull()
+	pollFull()
+	after := f.runsByCheck(t, headSHA('3'))
+	checks = f.checksOf(headSHA('3'))
+	for i, name := range matrixChecks {
+		run, check := after[name], checks[name]
+		if i == 0 {
+			if run.JobID == "" || check.ID != waiting[name].CheckID || check.ExternalID != run.JobID || check.Output.Title != "Mac evidence queued" {
+				t.Fatalf("first waiting run not admitted: run %+v check %+v", run, check)
+			}
+			continue
+		}
+		if run.JobID != "" || check.Output.Title != "Waiting for queue space" {
+			t.Fatalf("%s took no free slot but: run %+v check %+v", name, run, check)
+		}
 	}
 }

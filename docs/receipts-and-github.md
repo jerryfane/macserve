@@ -83,6 +83,16 @@ server or rate-limit failures retry within the bounded preparation deadline. Act
 per poll rather than blocking on that retry loop. Removing GitHub configuration does not turn previously
 enrolled jobs into private-API work.
 
+Every job a repository's pull mode admits counts against one principal, `github:<repository id>`, so the
+controller's limit of 30 unfinished (queued or running) jobs per principal, 100 in total, bounds a repository's
+jobs across all of its heads and runs (six heads of a five-run matrix such as herdrup's). A run admitted while the
+queue is at a limit is recorded waiting: no job, and a `queued` check titled "Waiting for queue space", which is not
+evidence. Each later poll retries it, open pull requests in least-recently-updated order, so a slot freed by an
+ended job goes to the first waiting run in that order, and its check becomes that job's. A comment request or rerun
+refused for queue space records nothing. The controller logs every failure of a poll cycle, one line each
+(`GitHub poll: GitHub repository <owner/name>: pull=<n> head=<sha> check=<name>: queue full` for a waiting run on
+each poll); a failure that ends a repository's poll names the head it stopped at.
+
 Require `mac-evidence/<profile>` (and `mac-evidence/<profile>/<shard>` for each [matrix](#policy-matrices) entry)
 **from the configured App**. Checks target the PR head, never the synthetic
 merge commit. Only the current attempt may update the stable check; publication retry/restart reconciles

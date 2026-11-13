@@ -191,6 +191,9 @@ func githubDirty(ctx context.Context, tx *sql.Tx, key string) error {
 
 // AdmitGitHub coalesces automatic and comment intake using the same queue
 // transaction as Enqueue. A worker can never see an unlinked GitHub job.
+// An automatic first admission (mode ensure, no comment request) that the
+// queue has no space for records the run waiting, without a job, and returns
+// ErrFull; a later admission of the run starts its first attempt.
 func (s *Store) AdmitGitHub(ctx context.Context, input GitHubAdmission, now time.Time) (GitHubRun, error) {
 	r := input.Run
 	if !validOpaque(r.Key, 256) || r.RepositoryID <= 0 || r.PolicyRevision <= 0 || input.PullRequest <= 0 || !validTime(now) || (input.Mode != "ensure" && input.Mode != "rerun") || r.Repository != input.Admission.Request.Repo || r.SHA != input.Admission.Request.SHA || r.Profile != input.Admission.Request.Profile || r.Shard != input.Admission.Request.Shard {
@@ -299,6 +302,9 @@ func (s *Store) AdmitGitHub(ctx context.Context, input GitHubAdmission, now time
 			return GitHubRun{}, err
 		}
 		job, _, err := s.enqueueTx(ctx, tx, fmt.Sprintf("github:%d", r.RepositoryID), attempt, input.Admission, now)
+		if errors.Is(err, ErrFull) && r.JobID == "" && input.Mode == "ensure" && input.Request == nil {
+			return GitHubRun{}, awaitQueueTx(ctx, tx, r, found, input.PullRequest)
+		}
 		if err != nil {
 			return GitHubRun{}, err
 		}
@@ -333,6 +339,32 @@ func (s *Store) AdmitGitHub(ctx context.Context, input GitHubAdmission, now time
 		return GitHubRun{}, err
 	}
 	return r, nil
+}
+
+// awaitQueueTx records r, whose first job the queue has no space for, as
+// waiting: a run of pull without a job, blocked or skipped reason, whose
+// check says it waits for queue space. Only a new run or a change from
+// blocked or skipped is publication work, so a run that keeps waiting is not
+// republished every poll. The queue expiry enqueueTx applied commits too.
+func awaitQueueTx(ctx context.Context, tx *sql.Tx, r GitHubRun, found bool, pull int) error {
+	changed := !found || r.Blocked != "" || r.Skipped != ""
+	if found && changed {
+		if _, err := tx.ExecContext(ctx, "UPDATE github_runs SET blocked='',skipped='' WHERE run_key=?", r.Key); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO github_run_pulls(run_key,pull_request) VALUES(?,?)", r.Key, pull); err != nil {
+		return err
+	}
+	if changed {
+		if err := githubDirty(ctx, tx, r.Key); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return ErrFull
 }
 
 // GitHubRun returns the run of key, ErrNotFound when none was recorded.

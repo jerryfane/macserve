@@ -233,11 +233,17 @@ func (p *Poller) runPolicy(run store.GitHubRun) (githubwire.Policy, bool) {
 	return policy, true
 }
 
+// Run polls until ctx ends. Every failure of a cycle is logged, one line
+// each: the poller retries on the next cycle, so the log is the only record
+// of a head the cycle left unadmitted (a full queue, a failed GitHub read).
 func (p *Poller) Run(ctx context.Context) error {
 	for {
 		err := p.Poll(ctx)
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		for _, failure := range leaves(err) {
+			log.Printf("GitHub poll: %v", failure)
 		}
 		delay := p.options.PollInterval
 		var remote *githubapi.Error
@@ -254,6 +260,42 @@ func (p *Poller) Run(ctx context.Context) error {
 	}
 }
 
+// leaves is err's individual failures, errors.Join trees flattened; nil for
+// nil.
+func leaves(err error) []error {
+	joined, ok := err.(interface{ Unwrap() []error })
+	if !ok {
+		if err == nil {
+			return nil
+		}
+		return []error{err}
+	}
+	var all []error
+	for _, e := range joined.Unwrap() {
+		all = append(all, leaves(e)...)
+	}
+	return all
+}
+
+// inRepository prefixes each of a repository poll's failures with the
+// repository.
+func inRepository(repository string, err error) []error {
+	var failures []error
+	for _, failure := range leaves(err) {
+		failures = append(failures, fmt.Errorf("GitHub repository %s: %w", repository, failure))
+	}
+	return failures
+}
+
+// atHead attributes a failure to one run of pull's head; shard "" with
+// profile "" for the head itself.
+func atHead(pull githubapi.PullRequest, profile, shard string, err error) error {
+	if profile == "" {
+		return fmt.Errorf("pull=%d head=%s: %w", pull.Number, pull.HeadSHA, err)
+	}
+	return fmt.Errorf("pull=%d head=%s check=%s: %w", pull.Number, pull.HeadSHA, githubwire.CheckName(profile, shard), err)
+}
+
 // Poll serializes this handle while SQLite serializes admissions/publications
 // across reopened or independently running handles.
 func (p *Poller) Poll(ctx context.Context) error {
@@ -265,7 +307,7 @@ func (p *Poller) Poll(ctx context.Context) error {
 	observed := make(map[string]bool)
 	for _, policy := range p.policies {
 		if err := p.pollRepository(ctx, policy, observed); err != nil {
-			failures = append(failures, err)
+			failures = append(failures, inRepository(policy.Repository, err)...)
 		}
 	}
 	failures = append(failures, p.pollOwners(ctx, observed)...)
@@ -318,7 +360,7 @@ func (p *Poller) pollOwners(ctx context.Context, observed map[string]bool) []err
 			}
 			seen[effective.RepositoryID] = effective.Repository
 			if err := p.pollOwnerRepository(ctx, effective, observed); err != nil {
-				failures = append(failures, fmt.Errorf("GitHub repository %s: %w", effective.Repository, err))
+				failures = append(failures, inRepository(effective.Repository, err)...)
 				if rateLimited(err) {
 					return failures
 				}
@@ -575,25 +617,25 @@ func (p *Poller) pollOwnerRepository(ctx context.Context, policy githubwire.Poli
 		}
 		allowed := eligible(policy, pull)
 		if err = p.options.Store.ObserveGitHubHead(ctx, policy.RepositoryID, pull.Number, pull.HeadSHA, allowed, now); err != nil {
-			return err
+			return atHead(pull, "", "", err)
 		}
 		if !allowed {
 			continue
 		}
 		profile, err := p.selectProfile(ctx, policy, pull.HeadSHA, observed)
 		if err != nil {
-			return err
+			return atHead(pull, "", "", err)
 		}
 		if profile == "" {
 			continue
 		}
 		input, err := p.admission(policy, pull, profile, "")
 		if err != nil {
-			return err
+			return atHead(pull, profile, "", err)
 		}
 		currentKeys[input.Run.Key] = true
 		if _, err = p.options.Store.AdmitGitHub(ctx, input, now); err != nil {
-			failures = append(failures, err)
+			failures = append(failures, atHead(pull, profile, "", err))
 		}
 	}
 	more, err := p.maintain(ctx, policy, reconcile, currentKeys, now)
@@ -715,7 +757,7 @@ func (p *Poller) pollRepository(ctx context.Context, policy githubwire.Policy, o
 			continue
 		}
 		if err = p.options.Store.ObserveGitHubHead(ctx, policy.RepositoryID, pull.Number, pull.HeadSHA, allowed, now); err != nil {
-			return err
+			return atHead(pull, "", "", err)
 		}
 		if !allowed && eligibleHeads[pull.HeadSHA] {
 			continue
@@ -723,15 +765,15 @@ func (p *Poller) pollRepository(ctx context.Context, policy githubwire.Policy, o
 		for _, run := range policyRuns(policy) {
 			input, err := p.admission(policy, pull, run.Profile, run.Shard)
 			if err != nil {
-				return err
+				return atHead(pull, run.Profile, run.Shard, err)
 			}
 			if run.Shard != "" && allowed {
 				failure, err := p.admitMatrix(ctx, policy, pull, input, observed, currentKeys, now)
 				if err != nil {
-					return err
+					return atHead(pull, run.Profile, run.Shard, err)
 				}
 				if failure != nil {
-					failures = append(failures, failure)
+					failures = append(failures, atHead(pull, run.Profile, run.Shard, failure))
 				}
 				continue
 			}
@@ -742,7 +784,7 @@ func (p *Poller) pollRepository(ctx context.Context, policy githubwire.Policy, o
 				err = p.options.Store.BlockGitHub(ctx, input.Run, "PR head does not satisfy repository admission policy", now)
 			}
 			if err != nil {
-				failures = append(failures, err)
+				failures = append(failures, atHead(pull, run.Profile, run.Shard, err))
 			}
 		}
 	}
