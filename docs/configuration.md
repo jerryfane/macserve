@@ -80,7 +80,8 @@ symlink, checked just before launch) with `PATH` unchanged and exactly these add
 Exit 0 is success. The `MACSERVE_OUTPUT` directory is the job's required artifact: `/artifacts` lists it as
 `output.tar.gz`, downloaded from `/artifacts/{artifact_id}`, within the usual artifact count and size budgets; a
 symlink or special file under it fails the job. Script jobs have no `/results` test evidence. The request's
-`timeout_seconds` is admitted against the template cap (default 3600 seconds, maximum 7200); there are no
+`timeout_seconds` is admitted against the template cap (default 3600 seconds, maximum 7200); a GitHub policy
+matrix job gets the maximum ([policy matrices](receipts-and-github.md#policy-matrices)). There are no
 per-shard timeouts. Preparation has a 30-minute budget. The full
 `.macserve.json` rules are in [install.md](install.md#onboarding-a-repository).
 

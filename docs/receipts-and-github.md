@@ -234,6 +234,14 @@ head cancels every unfinished job of the old head, matrix jobs included), automa
 attempts and the owner rerun API apply per entry. `/mac-evidence` comments cannot name a matrix template: their
 grammar has no shard.
 
+Timeout: a matrix entry's job gets its template's `max_timeout_seconds`, the owner-approved bound (a UI test
+template that omits it: 3600; a script template: the kind cap, 7200), not `default_timeout_seconds`: one shard
+of UI tests or a script runs far longer than a build. Build profiles keep their default; private-API jobs keep
+the timeout they request. The timeout is part of the entry's run: a matrix job admitted with another timeout
+(for example by a controller from before this rule, which used the template default) is superseded like an old
+head's: its job is cancelled (`github`, never rerun automatically) and the entry is admitted afresh with a new
+job and a new check of the same name. A run that was waiting for queue space is replaced the same way.
+
 `matrix_skip_drafts: true` (default false; requires a matrix) holds matrix entries back while the pull request is a
 draft: a draft head admits only the policy's other profiles and publishes no matrix check. Marking it ready for
 review admits the matrix for the current head on the next poll. Converting it back to a draft cancels nothing:
