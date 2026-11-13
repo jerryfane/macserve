@@ -77,7 +77,16 @@ func TestLaunchDaemonsRemainDisabledAndSeparated(t *testing.T) {
 			if role == "controller" {
 				user, group, work = "servicecontrol", "servicecontrol", "/Library/macserve/var/controller"
 			}
-			for key, want := range map[string]string{"Label": "org.macserve." + role, "UserName": user, "GroupName": group, "WorkingDirectory": work, "ProcessType": "Background"} {
+			// The health observer must outrank the jobs it watches, which run
+			// clamped to the background band (taskpolicy -b): at
+			// ProcessType=Background it shared that band and, with several
+			// lanes busy, its probes missed their deadlines until health
+			// expired and every running job was cancelled.
+			processType := "Background"
+			if role == "maintenance" {
+				processType = "Standard"
+			}
+			for key, want := range map[string]string{"Label": "org.macserve." + role, "UserName": user, "GroupName": group, "WorkingDirectory": work, "ProcessType": processType} {
 				if fields[key].XMLName.Local != "string" || fields[key].Text != want {
 					t.Fatalf("%s = %+v, want %s", key, fields[key], want)
 				}
