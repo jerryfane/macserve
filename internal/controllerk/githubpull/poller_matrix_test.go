@@ -477,3 +477,56 @@ func TestMatrixHeadWaitsForQueueSpace(t *testing.T) {
 		}
 	}
 }
+
+// A matrix entry's job gets its template's maximum timeout, the approved
+// bound, while a build keeps its default. The timeout is part of the run, so
+// a matrix job admitted with another one (the template default, as before
+// this rule) is superseded: cancelled by GitHub intake, and the entry admitted
+// afresh with the maximum.
+func TestMatrixJobsGetTheTemplateMaximumTimeout(t *testing.T) {
+	ctx := context.Background()
+	templates := matrixTemplates()
+	for i := range templates {
+		switch templates[i].ID {
+		case uiTemplate:
+			templates[i].DefaultTimeoutSeconds, templates[i].MaxTimeoutSeconds = 2400, 7200
+		case scriptTmpl:
+			templates[i].DefaultTimeoutSeconds, templates[i].MaxTimeoutSeconds = 3600, 7000
+		}
+	}
+	policy := matrixPolicy()
+	f, err := newOrgFixture(t, templates, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.remote.install(matrixRepo, matrixRepoID, martianID, "")
+	pull := matrixPull(1, headSHA('1'))
+	f.pull(matrixRepo, pull, matrixConfig)
+	old, err := f.p.admission(policy, pull, uiTemplate, "ipad")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old.Run.Key, old.Admission.Request.TimeoutSeconds = strings.Repeat("e", 64), 2400
+	stale, err := f.s.AdmitGitHub(ctx, old, f.options.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.poll(t)
+	if job := f.job(t, stale.JobID); job.State != model.Cancelled || job.CancelReason == nil || job.CancelReason.Source != model.CancelGitHub {
+		t.Fatalf("default-timeout matrix job not superseded: %s %+v", job.State, job.CancelReason)
+	}
+	want := map[string]int{nativeBuild + "/": 60, uiTemplate + "/iphone-terminal": 7200, uiTemplate + "/iphone-app": 7200, uiTemplate + "/ipad": 7200, scriptTmpl + "/ipad-script": 7000}
+	for _, entry := range policyRuns(policy) {
+		input, err := f.p.admission(policy, pull, entry.Profile, entry.Shard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		run, err := f.s.GitHubRun(ctx, input.Run.Key)
+		if err != nil || run.JobID == "" || run.JobID == stale.JobID {
+			t.Fatalf("%s/%s: run %+v %v", entry.Profile, entry.Shard, run, err)
+		}
+		if got := f.job(t, run.JobID).Request.TimeoutSeconds; got != want[entry.Profile+"/"+entry.Shard] {
+			t.Fatalf("%s/%s: job timeout %d, want %d", entry.Profile, entry.Shard, got, want[entry.Profile+"/"+entry.Shard])
+		}
+	}
+}

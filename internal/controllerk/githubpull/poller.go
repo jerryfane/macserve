@@ -537,7 +537,9 @@ func matrixTemplate(recipe model.Profile) bool {
 // admission is the run of profileID and shard at pull's head: shard "" for a
 // profile that is not a matrix template, else the shard of one of the
 // policy's matrix entries for it, whose simulator the job runs on. Any other
-// combination is ErrIneligible.
+// combination is ErrIneligible. A matrix run's job gets the template's
+// maximum timeout, the owner-approved bound, not its default: one shard of
+// UI tests or a script runs far longer than a build.
 func (p *Poller) admission(policy githubwire.Policy, pull githubapi.PullRequest, profileID, shard string) (store.GitHubAdmission, error) {
 	profile, ok := p.recipe(policy, profileID)
 	if !ok || !slices.Contains(policy.Profiles, profileID) || matrixTemplate(profile) != (shard != "") {
@@ -552,6 +554,7 @@ func (p *Poller) admission(policy githubwire.Policy, pull githubapi.PullRequest,
 		}
 		entry = policy.Matrix[i]
 		request.Shard, request.Simulator = shard, &entry.Simulator
+		request.TimeoutSeconds = profile.MaxTimeoutSeconds
 	}
 	admission, err := p.options.Profiles.Resolve(request)
 	if err != nil {
@@ -571,8 +574,10 @@ func (p *Poller) admission(policy githubwire.Policy, pull githubapi.PullRequest,
 	}
 	if shard != "" {
 		// A matrix run binds its entry: another shard or simulator is
-		// another run with its own check.
-		fields = append(fields, "matrix", shard, entry.Simulator.Runtime, entry.Simulator.RuntimeBuild, entry.Simulator.DeviceType)
+		// another run with its own check. It binds its job's timeout too, so
+		// a job admitted with another timeout (before matrix runs got the
+		// template's maximum) is superseded and the run admitted afresh.
+		fields = append(fields, "matrix", shard, entry.Simulator.Runtime, entry.Simulator.RuntimeBuild, entry.Simulator.DeviceType, admission.Request.TimeoutSeconds)
 	}
 	data, err := json.Marshal(fields)
 	if err != nil {
