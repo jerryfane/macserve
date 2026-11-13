@@ -93,9 +93,10 @@ PF enforcement may be a separately reviewed future opt-in; it is not implemented
   explicit owner approval and pending lifecycle/semantic evidence instead of fabricated qualification.
 
 The store requires a dedicated private directory (mode `0700`) and private database files. Default limits are
-50 outstanding jobs, 10 per principal, 24-hour queue expiry, 90-day terminal metadata retention, 64 MiB per
-result envelope, 256 MiB of raw logs per job and 1 GiB of retained raw logs across jobs. Terminal log bytes
-expire after seven days or under pool pressure, oldest completion first; active logs are never evicted.
+50 outstanding jobs, 10 per principal (the controller sets 100 and 30), 24-hour queue expiry, 90-day terminal
+metadata retention, 64 MiB per result envelope, 256 MiB of raw logs per job and 1 GiB of retained raw logs across
+jobs. Terminal log bytes expire after seven days or under pool pressure, oldest completion first; active logs are
+never evicted.
 `Logs` returns `ErrLogExpired` after eviction, while result envelopes, sequence/completeness metadata and
 idempotency records remain unchanged. Schema upgrades account for existing log bytes.
 

@@ -25,6 +25,24 @@ import (
 	"github.com/jerryfane/macserve/internal/source"
 )
 
+// Unfinished-job (queued or running) limits of the controller's store. Every
+// job a repository's GitHub pull mode admits counts against that repository's
+// one principal, and a herdrup head admits five (build and four matrix
+// shards), so the store default of 10 per principal stalls a third open pull
+// request. 30 holds six such heads. The total, which bounds all principals
+// together, doubles to 100. Queued jobs hold only a database row: source
+// checkouts, logs and simulators exist only for dispatched jobs, which the
+// lanes bound. The cost of a longer queue is time: the 24-hour queue expiry
+// still applies to each job.
+const (
+	queueLimit          = 100
+	principalQueueLimit = 30
+)
+
+func storeOptions() store.Options {
+	return store.Options{QueueLimit: queueLimit, PerPrincipalLimit: principalQueueLimit}
+}
+
 func runController(path string, stderr io.Writer) int {
 	stderr = daemonlog.Stderr(stderr)
 	if err := hostguard.Controller(path); err != nil {
@@ -79,7 +97,7 @@ func serveController(parent context.Context, config controllerconfig.Config) err
 	if err := hostguard.PrivateDirectory(config.Root); err != nil {
 		return err
 	}
-	db, err := store.Open(filepath.Join(config.Root, "state", "queue.sqlite"), store.Options{})
+	db, err := store.Open(filepath.Join(config.Root, "state", "queue.sqlite"), storeOptions())
 	if err != nil {
 		return err
 	}
