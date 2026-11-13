@@ -47,6 +47,11 @@ type orgGitHub struct {
 	pulls    map[string][]githubapi.PullRequest
 	files    map[string]string // full name + "@" + sha → .macserve.json
 	checks   map[int64]githubapi.Check
+	comments map[string][]githubapi.Comment // full name → one page of PR comments
+	// changed lists a comparison's files by full name + "@" + base + "..." +
+	// head; a comparison not listed fails with 502.
+	changed  map[string][]githubapi.ChangedFile
+	compares int
 	fileGets int
 	listings int
 }
@@ -97,7 +102,7 @@ func (g *orgGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		rest = parts[2]
 	}
 	pullJSON := func(p githubapi.PullRequest) any {
-		return map[string]any{"number": p.Number, "state": p.State, "head": map[string]any{"sha": p.HeadSHA, "repo": map[string]any{"id": p.HeadRepositoryID}}, "user": map[string]any{"id": p.AuthorID}, "base": map[string]any{"ref": p.BaseRef}, "updated_at": g.now.Format(time.RFC3339)}
+		return map[string]any{"number": p.Number, "state": p.State, "draft": p.Draft, "head": map[string]any{"sha": p.HeadSHA, "repo": map[string]any{"id": p.HeadRepositoryID}}, "user": map[string]any{"id": p.AuthorID}, "base": map[string]any{"ref": p.BaseRef, "sha": p.BaseSHA}, "updated_at": g.now.Format(time.RFC3339)}
 	}
 	checkJSON := func(c githubapi.Check) any {
 		return map[string]any{"id": c.ID, "name": c.Name, "head_sha": c.HeadSHA, "external_id": c.ExternalID, "status": c.Status, "conclusion": c.Conclusion, "app": map[string]any{"id": c.AppID}, "output": c.Output}
@@ -121,7 +126,29 @@ func (g *orgGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(http.StatusNotFound)
 	case rest == "issues/comments":
-		encode([]any{})
+		items := make([]any, 0)
+		if r.URL.Query().Get("page") == "1" {
+			for _, c := range g.comments[name] {
+				items = append(items, map[string]any{"id": c.ID, "body": c.Body, "user": map[string]any{"id": c.AuthorID}, "issue_url": g.server.URL + "/repos/" + name + "/issues/" + strconv.Itoa(c.PullRequest), "created_at": c.CreatedAt.Format(time.RFC3339), "updated_at": c.UpdatedAt.Format(time.RFC3339)})
+			}
+		}
+		encode(items)
+	case strings.HasPrefix(rest, "compare/"):
+		g.compares++
+		files, ok := g.changed[name+"@"+strings.TrimPrefix(rest, "compare/")]
+		if !ok {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		items := make([]any, 0, len(files))
+		for _, f := range files {
+			item := map[string]any{"filename": f.Filename, "status": f.Status}
+			if f.PreviousFilename != "" {
+				item["previous_filename"] = f.PreviousFilename
+			}
+			items = append(items, item)
+		}
+		encode(map[string]any{"status": "ahead", "files": items})
 	case rest == "contents/.macserve.json":
 		g.fileGets++
 		content, ok := g.files[name+"@"+r.URL.Query().Get("ref")]
@@ -231,7 +258,13 @@ func ownerPolicy(owner string, id int64) githubwire.Policy {
 
 func newOwnerFixture(t *testing.T, policies ...githubwire.Policy) (*ownerFixture, error) {
 	t.Helper()
-	remote := &orgGitHub{now: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC), repos: make(map[string]githubapi.Repository), listing: make(map[string][]string), pulls: make(map[string][]githubapi.PullRequest), files: make(map[string]string), checks: make(map[int64]githubapi.Check)}
+	return newOrgFixture(t, orgTemplates(), policies...)
+}
+
+// newOrgFixture is an org GitHub and a poller over a registry of templates.
+func newOrgFixture(t *testing.T, templates []model.Template, policies ...githubwire.Policy) (*ownerFixture, error) {
+	t.Helper()
+	remote := &orgGitHub{now: time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC), repos: make(map[string]githubapi.Repository), listing: make(map[string][]string), pulls: make(map[string][]githubapi.PullRequest), files: make(map[string]string), checks: make(map[int64]githubapi.Check), comments: make(map[string][]githubapi.Comment), changed: make(map[string][]githubapi.ChangedFile)}
 	remote.server = httptest.NewServer(http.HandlerFunc(remote.serve))
 	t.Cleanup(remote.server.Close)
 	now := func() time.Time { remote.mu.Lock(); defer remote.mu.Unlock(); return remote.now }
@@ -239,7 +272,7 @@ func newOwnerFixture(t *testing.T, policies ...githubwire.Policy) (*ownerFixture
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry, err := profiles.New(nil, orgTemplates())
+	registry, err := profiles.New(nil, templates)
 	if err != nil {
 		t.Fatal(err)
 	}

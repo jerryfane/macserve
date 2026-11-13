@@ -246,7 +246,8 @@ func checkHead(ctx context.Context, o Options) error {
 }
 
 func matchesCheck(check githubapi.Check, o Options) bool {
-	return check.ID > 0 && check.Name == "mac-evidence/"+o.Profile && check.AppID == o.AppID && check.HeadSHA == o.Expected.SHA
+	// Actions comment intake runs no matrix entry: its check has no shard.
+	return check.ID > 0 && check.Name == githubwire.CheckName(o.Profile, "") && check.AppID == o.AppID && check.HeadSHA == o.Expected.SHA
 }
 
 func matchPacket(check githubapi.Check, expected githubwire.Correlation) (githubwire.Packet, bool, error) {

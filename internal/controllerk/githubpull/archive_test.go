@@ -39,7 +39,7 @@ func TestPolicyCannotSelectArchiveTemplate(t *testing.T) {
 	if _, ok := f.p.recipe(policy, archiveTemplate); ok {
 		t.Fatal("recipe selected an archive template")
 	}
-	if _, err := f.p.admission(policy, f.remote.pull, archiveTemplate); !errors.Is(err, ErrIneligible) {
+	if _, err := f.p.admission(policy, f.remote.pull, archiveTemplate, ""); !errors.Is(err, ErrIneligible) {
 		t.Fatalf("archive admission: %v", err)
 	}
 	if _, ok := f.p.recipe(policy, testTemplate); !ok {

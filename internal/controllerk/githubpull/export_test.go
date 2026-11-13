@@ -42,7 +42,7 @@ func NewRerunFixture(t *testing.T) *RerunFixture {
 // Current is the head's run, whatever its attempt's state.
 func (x *RerunFixture) Current(t *testing.T) store.GitHubRun {
 	t.Helper()
-	runs, err := x.Store.GitHubRunsByHead(context.Background(), 501, x.Repo, x.SHA, RerunProfile)
+	runs, err := x.Store.GitHubRunsByHead(context.Background(), 501, x.Repo, x.SHA, RerunProfile, "")
 	if err != nil || len(runs) != 1 {
 		t.Fatalf("runs = %+v %v", runs, err)
 	}

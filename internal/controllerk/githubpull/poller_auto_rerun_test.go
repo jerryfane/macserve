@@ -50,7 +50,7 @@ func TestOwnerPullModeRerunsServiceCancelledHeadOnSameCheck(t *testing.T) {
 	// Owner API rerun: refused while the attempt is active, then one new
 	// attempt after a terminal one, bounded at two per hour.
 	rerun := func() (store.GitHubRun, bool, error) {
-		return f.p.Rerun(ctx, 0, app, headSHA('1'), nativeBuild, f.options.Now())
+		return f.p.Rerun(ctx, 0, app, headSHA('1'), nativeBuild, "", f.options.Now())
 	}
 	if run, started, err := rerun(); err != nil || started || run.JobID != runs[0].JobID {
 		t.Fatalf("rerun of a queued attempt: %+v %v %v", run, started, err)
@@ -76,13 +76,13 @@ func TestOwnerPullModeRerunsServiceCancelledHeadOnSameCheck(t *testing.T) {
 	f.remote.mu.Lock()
 	f.remote.now = f.remote.now.Add(time.Hour + time.Second)
 	f.remote.mu.Unlock()
-	if _, started, err := f.p.Rerun(ctx, 501, "", headSHA('1'), nativeBuild, f.options.Now()); err != nil || !started {
+	if _, started, err := f.p.Rerun(ctx, 501, "", headSHA('1'), nativeBuild, "", f.options.Now()); err != nil || !started {
 		t.Fatalf("owner rerun by repository ID after the hour: %v %v", started, err)
 	}
 	if _, _, err := rerun(); err != nil {
 		t.Fatalf("rerun of the queued attempt: %v", err)
 	}
-	if _, _, err := f.p.Rerun(ctx, 0, app, headSHA('2'), nativeBuild, f.options.Now()); !errors.Is(err, store.ErrNotFound) {
+	if _, _, err := f.p.Rerun(ctx, 0, app, headSHA('2'), nativeBuild, "", f.options.Now()); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("unknown head: %v", err)
 	}
 	// A head no longer open is not rerun.

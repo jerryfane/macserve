@@ -64,12 +64,18 @@ type Poller struct {
 	mu       sync.Mutex
 	// Guarded by mu (held by Poll): the current name of each repository ID
 	// the owner listings cover (replaced by every complete cycle), and each
-	// owner-form head's parsed .macserve.json (key: repository ID, SHA; nil
-	// when missing or invalid), kept while the head is still observed. The
-	// template is selected from it against the governing policy on every use.
+	// head's parsed .macserve.json (key: repository ID, SHA; nil when missing
+	// or invalid) and matrix_skip_paths decision, kept while the head is still
+	// observed. An owner-form template is selected from the file against the
+	// governing policy on every use.
 	discovered map[int64]string
 	configs    map[string]*model.RepoConfig
+	scopes     map[string]matrixScope
 }
+
+// matrixScope is a head's matrix_skip_paths decision against its base
+// commit: summary is why its matrix is not run, "" to run it.
+type matrixScope struct{ base, summary string }
 
 func New(options Options) (*Poller, error) {
 	if options.Store == nil || options.Profiles == nil || options.Client == nil || options.Client.AppID() <= 0 || options.VerifyReceipt == nil || options.PollInterval < 0 {
@@ -81,7 +87,7 @@ func New(options Options) (*Poller, error) {
 	if options.PollInterval == 0 {
 		options.PollInterval = 45 * time.Second
 	}
-	p := &Poller{options: options, policies: make(map[string]githubwire.Policy), owners: make(map[string]githubwire.Policy), pinned: make(map[int64]bool), recipes: make(map[string]model.Profile), tmpls: make(map[string]model.Template), discovered: make(map[int64]string), configs: make(map[string]*model.RepoConfig)}
+	p := &Poller{options: options, policies: make(map[string]githubwire.Policy), owners: make(map[string]githubwire.Policy), pinned: make(map[int64]bool), recipes: make(map[string]model.Profile), tmpls: make(map[string]model.Template), discovered: make(map[int64]string), configs: make(map[string]*model.RepoConfig), scopes: make(map[string]matrixScope)}
 	for _, profile := range options.Profiles.List() {
 		p.recipes[profile.ID] = profile
 	}
@@ -90,6 +96,9 @@ func New(options Options) (*Poller, error) {
 	}
 	for _, original := range options.Policies {
 		if err := original.CheckForm(); err != nil {
+			return nil, err
+		}
+		if err := original.CheckMatrix(); err != nil {
 			return nil, err
 		}
 		policy := original
@@ -110,6 +119,10 @@ func New(options Options) (*Poller, error) {
 		policy.AuthorIDs = slices.Clone(policy.AuthorIDs)
 		policy.BaseBranches = slices.Clone(policy.BaseBranches)
 		policy.Profiles = slices.Clone(policy.Profiles)
+		policy.Matrix = slices.Clone(policy.Matrix)
+		if s := policy.MatrixSkipPaths; s != nil {
+			policy.MatrixSkipPaths = &githubwire.SkipPaths{Include: slices.Clone(s.Include), Exclude: slices.Clone(s.Exclude)}
+		}
 		if policy.OwnerScoped() {
 			if err := p.ownerPolicy(policy); err != nil {
 				return nil, err
@@ -125,11 +138,22 @@ func New(options Options) (*Poller, error) {
 		}
 		seen := make(map[string]bool)
 		for _, id := range policy.Profiles {
-			_, ok := p.recipe(policy, id)
+			snapshot, ok := p.recipe(policy, id)
 			if !ok || !profilePattern.MatchString(id) || seen[id] {
 				return nil, errors.New("invalid GitHub profile policy")
 			}
 			seen[id] = true
+			// A simulator test or script template runs only as matrix
+			// entries, which name nothing else.
+			if matrixTemplate(snapshot) != slices.ContainsFunc(policy.Matrix, func(entry githubwire.MatrixEntry) bool { return entry.Profile == id }) {
+				return nil, errors.New("invalid GitHub policy matrix: each simulator test or script template profile needs matrix entries, and only those profiles have them")
+			}
+		}
+		for _, entry := range policy.Matrix {
+			snapshot, _ := p.recipe(policy, entry.Profile)
+			if !slices.Contains(snapshot.Template.Simulators, entry.Simulator) {
+				return nil, fmt.Errorf("invalid GitHub policy matrix: template %s pins no simulator %+v", entry.Profile, entry.Simulator)
+			}
 		}
 		p.policies[policy.Repository] = policy
 		p.pinned[policy.RepositoryID] = true
@@ -236,12 +260,15 @@ func (p *Poller) Poll(ctx context.Context) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	var failures []error
+	// Heads whose parsed .macserve.json this cycle used (key: repository ID,
+	// SHA); pollOwners drops the others from the cache.
+	observed := make(map[string]bool)
 	for _, policy := range p.policies {
-		if err := p.pollRepository(ctx, policy); err != nil {
+		if err := p.pollRepository(ctx, policy, observed); err != nil {
 			failures = append(failures, err)
 		}
 	}
-	failures = append(failures, p.pollOwners(ctx)...)
+	failures = append(failures, p.pollOwners(ctx, observed)...)
 	if err := p.publish(ctx); err != nil {
 		failures = append(failures, err)
 	}
@@ -257,17 +284,18 @@ func rateLimited(err error) bool {
 
 // pollOwners lists each owner-form policy owner's installation repositories
 // once per cycle and polls every repository the policy governs. A rate limit
-// ends the cycle. When every listing completed, repositories that left the
-// listings (transferred to an unlisted owner, uninstalled, deleted) lose their
-// current runs and any unfinished job, and template selections of heads not
-// observed in the cycle are dropped.
-func (p *Poller) pollOwners(ctx context.Context) []error {
+// ends the cycle. When every listing completed (or there is no owner-form
+// policy), repositories that left the listings (transferred to an unlisted
+// owner, uninstalled, deleted) lose their current runs and any unfinished
+// job, and parsed .macserve.json files of heads not observed in the cycle are
+// dropped.
+func (p *Poller) pollOwners(ctx context.Context, observed map[string]bool) []error {
 	if len(p.owners) == 0 {
+		p.pruneConfigs(observed)
 		return nil
 	}
 	var failures []error
 	seen := make(map[int64]string)
-	observed := make(map[string]bool)
 	complete := true
 	for _, owner := range slices.Sorted(maps.Keys(p.owners)) {
 		policy := p.owners[owner]
@@ -301,11 +329,7 @@ func (p *Poller) pollOwners(ctx context.Context) []error {
 		maps.Copy(p.discovered, seen)
 		return failures
 	}
-	for key := range p.configs {
-		if !observed[key] {
-			delete(p.configs, key)
-		}
-	}
+	p.pruneConfigs(observed)
 	// Departures are reconciled from durable runs, not from this process's
 	// memory: a restart between a repository's admission and its departure
 	// must still end its jobs.
@@ -323,6 +347,21 @@ func (p *Poller) pollOwners(ctx context.Context) []error {
 	}
 	p.discovered = seen
 	return failures
+}
+
+// pruneConfigs drops the parsed .macserve.json files and matrix_skip_paths
+// decisions of heads not observed.
+func (p *Poller) pruneConfigs(observed map[string]bool) {
+	for key := range p.configs {
+		if !observed[key] {
+			delete(p.configs, key)
+		}
+	}
+	for key := range p.scopes {
+		if !observed[key] {
+			delete(p.scopes, key)
+		}
+	}
 }
 
 // ownerGoverned reports whether stored runs of repository ID id, admitted
@@ -404,20 +443,17 @@ func (p *Poller) recipe(policy githubwire.Policy, id string) (model.Profile, boo
 	return profiles.TemplateSnapshot(template, policy.Repository), true
 }
 
-// selectProfile is the first owner-form policy template whose snapshot the
-// head's .macserve.json derives a recipe for, exactly as the worker will; ""
-// when the file is missing, invalid or admits none. A head's file is
-// immutable within its repository, so the parsed file is cached while the
-// head is observed; the selection itself always uses the governing policy,
-// which a transfer or rename may change.
-func (p *Poller) selectProfile(ctx context.Context, policy githubwire.Policy, sha string, observed map[string]bool) (string, error) {
+// repoConfig is the head's parsed .macserve.json, nil when it is missing or
+// invalid. A head's file is immutable within its repository, so the parsed
+// file is cached while the head is observed.
+func (p *Poller) repoConfig(ctx context.Context, policy githubwire.Policy, sha string, observed map[string]bool) (*model.RepoConfig, error) {
 	key := strconv.FormatInt(policy.RepositoryID, 10) + "/" + sha
 	observed[key] = true
 	config, cached := p.configs[key]
 	if !cached {
 		data, found, err := p.options.Client.RegularFile(ctx, policy.Repository, sha, profiles.RepoConfigFile, profiles.MaxRepoConfigBytes)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		if found {
 			if parsed, err := profiles.ParseRepoConfig(data); err == nil {
@@ -426,8 +462,17 @@ func (p *Poller) selectProfile(ctx context.Context, policy githubwire.Policy, sh
 		}
 		p.configs[key] = config
 	}
-	if config == nil {
-		return "", nil
+	return config, nil
+}
+
+// selectProfile is the first owner-form policy template whose snapshot the
+// head's .macserve.json derives a recipe for, exactly as the worker will; ""
+// when the file is missing, invalid or admits none. The selection always uses
+// the governing policy, which a transfer or rename may change.
+func (p *Poller) selectProfile(ctx context.Context, policy githubwire.Policy, sha string, observed map[string]bool) (string, error) {
+	config, err := p.repoConfig(ctx, policy, sha, observed)
+	if err != nil || config == nil {
+		return "", err
 	}
 	for _, id := range policy.Profiles {
 		snapshot, ok := p.recipe(policy, id)
@@ -441,12 +486,32 @@ func (p *Poller) selectProfile(ctx context.Context, policy githubwire.Policy, sh
 	return "", nil
 }
 
-func (p *Poller) admission(policy githubwire.Policy, pull githubapi.PullRequest, profileID string) (store.GitHubAdmission, error) {
+// matrixTemplate reports a recipe that runs only as policy matrix entries: a
+// simulator test or script template, which needs a shard and a simulator.
+func matrixTemplate(recipe model.Profile) bool {
+	return recipe.Template != nil && recipe.Kind.UsesSimulator()
+}
+
+// admission is the run of profileID and shard at pull's head: shard "" for a
+// profile that is not a matrix template, else the shard of one of the
+// policy's matrix entries for it, whose simulator the job runs on. Any other
+// combination is ErrIneligible.
+func (p *Poller) admission(policy githubwire.Policy, pull githubapi.PullRequest, profileID, shard string) (store.GitHubAdmission, error) {
 	profile, ok := p.recipe(policy, profileID)
-	if !ok || !slices.Contains(policy.Profiles, profileID) {
+	if !ok || !slices.Contains(policy.Profiles, profileID) || matrixTemplate(profile) != (shard != "") {
 		return store.GitHubAdmission{}, ErrIneligible
 	}
-	admission, err := p.options.Profiles.Resolve(model.Request{Repo: policy.Repository, SHA: pull.HeadSHA, Kind: profile.Kind, Profile: profile.ID, Xcode: profile.Xcode, Simulator: profile.Simulator, Flutter: profiles.RequestFlutter(profile), Context: model.RequestContext{PullRequest: pull.Number}})
+	request := model.Request{Repo: policy.Repository, SHA: pull.HeadSHA, Kind: profile.Kind, Profile: profile.ID, Xcode: profile.Xcode, Simulator: profile.Simulator, Flutter: profiles.RequestFlutter(profile), Context: model.RequestContext{PullRequest: pull.Number}}
+	var entry githubwire.MatrixEntry
+	if shard != "" {
+		i := slices.IndexFunc(policy.Matrix, func(e githubwire.MatrixEntry) bool { return e.Profile == profileID && e.Shard == shard })
+		if i < 0 {
+			return store.GitHubAdmission{}, ErrIneligible
+		}
+		entry = policy.Matrix[i]
+		request.Shard, request.Simulator = shard, &entry.Simulator
+	}
+	admission, err := p.options.Profiles.Resolve(request)
 	if err != nil {
 		return store.GitHubAdmission{}, err
 	}
@@ -462,12 +527,17 @@ func (p *Poller) admission(policy githubwire.Policy, pull githubapi.PullRequest,
 		// or rename admits a new run instead of continuing a stale one.
 		fields = append(fields, "owner", policy.Owner, policy.OwnerID, policy.Repository)
 	}
+	if shard != "" {
+		// A matrix run binds its entry: another shard or simulator is
+		// another run with its own check.
+		fields = append(fields, "matrix", shard, entry.Simulator.Runtime, entry.Simulator.RuntimeBuild, entry.Simulator.DeviceType)
+	}
 	data, err := json.Marshal(fields)
 	if err != nil {
 		return store.GitHubAdmission{}, err
 	}
 	digest := sha256.Sum256(data)
-	return store.GitHubAdmission{Run: store.GitHubRun{Key: hex.EncodeToString(digest[:]), RepositoryID: policy.RepositoryID, Repository: policy.Repository, SHA: pull.HeadSHA, Profile: profile.ID, PolicyRevision: policy.PolicyRevision}, Admission: admission, PullRequest: pull.Number, Mode: "ensure"}, nil
+	return store.GitHubAdmission{Run: store.GitHubRun{Key: hex.EncodeToString(digest[:]), RepositoryID: policy.RepositoryID, Repository: policy.Repository, SHA: pull.HeadSHA, Profile: profile.ID, Shard: shard, PolicyRevision: policy.PolicyRevision}, Admission: admission, PullRequest: pull.Number, Mode: "ensure"}, nil
 }
 
 // verifyRepository reads the policy repository by name and returns its
@@ -517,7 +587,7 @@ func (p *Poller) pollOwnerRepository(ctx context.Context, policy githubwire.Poli
 		if profile == "" {
 			continue
 		}
-		input, err := p.admission(policy, pull, profile)
+		input, err := p.admission(policy, pull, profile, "")
 		if err != nil {
 			return err
 		}
@@ -623,7 +693,7 @@ func (p *Poller) maintain(ctx context.Context, policy githubwire.Policy, reconci
 	return failures, nil
 }
 
-func (p *Poller) pollRepository(ctx context.Context, policy githubwire.Policy) error {
+func (p *Poller) pollRepository(ctx context.Context, policy githubwire.Policy, observed map[string]bool) error {
 	if _, err := p.verifyRepository(ctx, policy); err != nil {
 		return err
 	}
@@ -650,10 +720,20 @@ func (p *Poller) pollRepository(ctx context.Context, policy githubwire.Policy) e
 		if !allowed && eligibleHeads[pull.HeadSHA] {
 			continue
 		}
-		for _, profile := range policy.Profiles {
-			input, err := p.admission(policy, pull, profile)
+		for _, run := range policyRuns(policy) {
+			input, err := p.admission(policy, pull, run.Profile, run.Shard)
 			if err != nil {
 				return err
+			}
+			if run.Shard != "" && allowed {
+				failure, err := p.admitMatrix(ctx, policy, pull, input, observed, currentKeys, now)
+				if err != nil {
+					return err
+				}
+				if failure != nil {
+					failures = append(failures, failure)
+				}
+				continue
 			}
 			currentKeys[input.Run.Key] = allowed
 			if allowed {
@@ -735,6 +815,127 @@ func (p *Poller) pollRepository(ctx context.Context, policy githubwire.Policy) e
 	return errors.Join(failures...)
 }
 
+// policyRuns is the runs each head of a repository-form policy gets: one per
+// profile that is not a matrix template (shard ""), in profile order, then
+// one per matrix entry, in matrix order.
+func policyRuns(policy githubwire.Policy) []githubwire.MatrixEntry {
+	runs := make([]githubwire.MatrixEntry, 0, len(policy.Profiles)+len(policy.Matrix))
+	for _, id := range policy.Profiles {
+		if !slices.ContainsFunc(policy.Matrix, func(entry githubwire.MatrixEntry) bool { return entry.Profile == id }) {
+			runs = append(runs, githubwire.MatrixEntry{Profile: id})
+		}
+	}
+	return append(runs, policy.Matrix...)
+}
+
+// admitMatrix admits one matrix entry's run at an eligible head. With
+// matrix_skip_drafts a draft head admits none, but keeps a run it already
+// has current without starting anything. A head whose .macserve.json does not
+// declare the entry's shard for the template's kind, or from which the
+// worker could not derive the entry's recipe, gets the run blocked: an
+// action_required check and no job. A head matrix_skip_paths skips gets the
+// run skipped, a neutral check and no job, unless the run already has a job
+// (admitted before, or by an owner rerun), which it keeps. failure is a store
+// refusal the poll reports and continues past; err ends the repository's
+// poll.
+func (p *Poller) admitMatrix(ctx context.Context, policy githubwire.Policy, pull githubapi.PullRequest, input store.GitHubAdmission, observed map[string]bool, currentKeys map[string]bool, now time.Time) (failure, err error) {
+	key := input.Run.Key
+	if policy.MatrixSkipDrafts && pull.Draft {
+		existing, err := p.options.Store.GitHubRun(ctx, key)
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		currentKeys[key] = existing.Blocked == ""
+		return nil, nil
+	}
+	config, err := p.repoConfig(ctx, policy, pull.HeadSHA, observed)
+	if err != nil {
+		return nil, err
+	}
+	if reason := shardProblem(config, input.Admission.Profile); reason != "" {
+		currentKeys[key] = false
+		return p.options.Store.BlockGitHub(ctx, input.Run, reason, now), nil
+	}
+	currentKeys[key] = true
+	if summary := p.skipSummary(ctx, policy, pull, observed); summary != "" {
+		existing, err := p.options.Store.GitHubRun(ctx, key)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, err
+		}
+		if err != nil || existing.JobID == "" {
+			return p.options.Store.SkipGitHub(ctx, input.Run, pull.Number, summary, now), nil
+		}
+	}
+	_, failure = p.options.Store.AdmitGitHub(ctx, input, now)
+	return failure, nil
+}
+
+// skipSummary is why matrix_skip_paths skips the policy's matrix at pull's
+// head, "" to run it. The decision is GitHub's comparison of the head with
+// its base commit, cached per head and base while the head is observed. Any
+// doubt runs the matrix: no base commit, a failed comparison (logged), and
+// every case scopeSummary refuses.
+func (p *Poller) skipSummary(ctx context.Context, policy githubwire.Policy, pull githubapi.PullRequest, observed map[string]bool) string {
+	if policy.MatrixSkipPaths == nil {
+		return ""
+	}
+	key := strconv.FormatInt(policy.RepositoryID, 10) + "/" + pull.HeadSHA
+	observed[key] = true
+	if cached, ok := p.scopes[key]; ok && cached.base == pull.BaseSHA {
+		return cached.summary
+	}
+	summary := ""
+	files, complete, err := p.options.Client.CompareFiles(ctx, policy.Repository, pull.BaseSHA, pull.HeadSHA)
+	if err != nil {
+		log.Printf("GitHub matrix_skip_paths comparison failed, running the matrix: repository=%s pull=%d head=%s: %v", policy.Repository, pull.Number, pull.HeadSHA, err)
+	} else if complete {
+		summary = scopeSummary(*policy.MatrixSkipPaths, files)
+	}
+	p.scopes[key] = matrixScope{base: pull.BaseSHA, summary: summary}
+	return summary
+}
+
+// scopeSummary is the neutral check summary of a complete comparison whose
+// every file was added or modified and is selected by paths, "" otherwise
+// (no changed file, or any removed, renamed, copied, mode-changed or
+// unselected file).
+func scopeSummary(paths githubwire.SkipPaths, files []githubapi.ChangedFile) string {
+	if len(files) == 0 {
+		return ""
+	}
+	var matched []string
+	for _, file := range files {
+		if file.Status != "added" && file.Status != "modified" || file.PreviousFilename != "" {
+			return ""
+		}
+		glob, ok := paths.Match(file.Filename)
+		if !ok {
+			return ""
+		}
+		if !slices.Contains(matched, glob) {
+			matched = append(matched, glob)
+		}
+	}
+	return fmt.Sprintf("Not run: all %d changed files match the policy's matrix_skip_paths (%s). No job ran, so this check is not test evidence.", len(files), strings.Join(matched, ", "))
+}
+
+// shardProblem is why a matrix entry's admitted snapshot cannot run at a head
+// whose parsed .macserve.json is config (nil: missing or invalid), "" when the
+// worker derives its recipe. profiles.Derive, which the worker repeats, is
+// the one authority on which shards a file declares.
+func shardProblem(config *model.RepoConfig, snapshot model.Profile) string {
+	if config == nil {
+		return fmt.Sprintf("PR head has no valid .macserve.json, so template %s cannot run shard %q", snapshot.ID, snapshot.Shard)
+	}
+	if _, err := profiles.Derive(snapshot, *config); err != nil {
+		return fmt.Sprintf("PR head's .macserve.json does not admit template %s shard %q: %v", snapshot.ID, snapshot.Shard, err)
+	}
+	return ""
+}
+
 func (p *Poller) acceptComment(ctx context.Context, policy githubwire.Policy, comment githubapi.Comment, now time.Time) error {
 	if policy.ActionsBotID == 0 || comment.AuthorID != policy.ActionsBotID || comment.AppID != 0 && (policy.ActionsAppID == 0 || comment.AppID != policy.ActionsAppID) || comment.ID <= 0 || comment.PullRequest <= 0 || comment.CreatedAt.IsZero() || !comment.CreatedAt.Equal(comment.UpdatedAt) {
 		return nil
@@ -753,7 +954,7 @@ func (p *Poller) acceptComment(ctx context.Context, policy githubwire.Policy, co
 	if !eligible(policy, pull) || pull.Number != comment.PullRequest || pull.HeadSHA != request.SHA {
 		return ErrIneligible
 	}
-	input, err := p.admission(policy, pull, request.Profile)
+	input, err := p.admission(policy, pull, request.Profile, "")
 	if err != nil {
 		return err
 	}
@@ -765,16 +966,20 @@ func (p *Poller) acceptComment(ctx context.Context, policy githubwire.Policy, co
 }
 
 // Rerun is the owner API's requested rerun (POST /v1/admin/github/rerun) of
-// one run, named by repository (ID and/or name), head SHA and profile, with
-// the comment mode=rerun rules: the head must still be an eligible open pull
-// request head whose current admission is that run, the run's latest attempt
-// must be terminal, and requested reruns are bounded at two per run in any
-// hour. The new attempt publishes to the run's check name. It returns the
-// run and whether a new attempt started (false: the latest attempt is still
-// queued or active). An unknown run is store.ErrNotFound, a head no longer
-// eligible ErrIneligible, the bound store.ErrRerunLimit.
-func (p *Poller) Rerun(ctx context.Context, repositoryID int64, repository, sha, profile string, now time.Time) (store.GitHubRun, bool, error) {
-	runs, err := p.options.Store.GitHubRunsByHead(ctx, repositoryID, repository, sha, profile)
+// one run, named by repository (ID and/or name), head SHA, profile and, for a
+// policy matrix entry's run, shard, with the comment mode=rerun rules: the
+// head must still be an eligible open pull request head whose current
+// admission is that run, the run's latest attempt must be terminal, and
+// requested reruns are bounded at two per run in any hour. A matrix run of a
+// policy with matrix_skip_drafts gets no new attempt while its pull request
+// is a draft (its current attempt is left alone). A skipped matrix run
+// (matrix_skip_paths) starts its first attempt. The new attempt publishes to
+// the run's check name. It returns the run and whether a new attempt started
+// (false: the latest attempt is still queued or active). An unknown run is
+// store.ErrNotFound, a head no longer eligible (or a draft, as above)
+// ErrIneligible, the bound store.ErrRerunLimit.
+func (p *Poller) Rerun(ctx context.Context, repositoryID int64, repository, sha, profile, shard string, now time.Time) (store.GitHubRun, bool, error) {
+	runs, err := p.options.Store.GitHubRunsByHead(ctx, repositoryID, repository, sha, profile, shard)
 	if err != nil {
 		return store.GitHubRun{}, false, err
 	}
@@ -796,10 +1001,10 @@ func (p *Poller) Rerun(ctx context.Context, repositoryID int64, repository, sha,
 			if err != nil {
 				return store.GitHubRun{}, false, err
 			}
-			if !eligible(policy, pull) || pull.Number != number || pull.HeadSHA != run.SHA {
+			if !eligible(policy, pull) || pull.Number != number || pull.HeadSHA != run.SHA || run.Shard != "" && policy.MatrixSkipDrafts && pull.Draft {
 				continue
 			}
-			input, err := p.admission(policy, pull, run.Profile)
+			input, err := p.admission(policy, pull, run.Profile, run.Shard)
 			if errors.Is(err, ErrIneligible) {
 				continue
 			} else if err != nil {
@@ -876,7 +1081,7 @@ func (p *Poller) checkDispatch(ctx context.Context, job model.Job) error {
 			return err
 		}
 		if eligible(policy, pull) && pull.Number == number && pull.HeadSHA == job.Request.SHA {
-			input, err := p.admission(policy, pull, job.Request.Profile)
+			input, err := p.admission(policy, pull, job.Request.Profile, job.Request.Shard)
 			if err != nil {
 				return err
 			}

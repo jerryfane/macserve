@@ -95,6 +95,9 @@ func (c *Config) validateIntegrations() error {
 			if err := p.CheckForm(); err != nil {
 				return err
 			}
+			if err := p.CheckMatrix(); err != nil {
+				return err
+			}
 			if p.OwnerScoped() {
 				if !githubapi.ValidOwner(p.Owner) || p.OwnerID <= 0 || p.OwnerID > 9007199254740991 || owners[p.Owner] {
 					return errors.New("owner GitHub policies require a unique lowercase owner login and its numeric owner ID")

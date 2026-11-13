@@ -45,7 +45,7 @@ type Options struct {
 	// GitHubRerun is the GitHub poller's requested rerun of one pull-mode
 	// run (githubpull.Poller.Rerun) for POST /v1/admin/github/rerun; nil
 	// refuses it.
-	GitHubRerun func(ctx context.Context, repositoryID int64, repository, sha, profile string, now time.Time) (store.GitHubRun, bool, error)
+	GitHubRerun func(ctx context.Context, repositoryID int64, repository, sha, profile, shard string, now time.Time) (store.GitHubRun, bool, error)
 	Now         func() time.Time
 	// ServiceVersion is the controller's build version, reported as
 	// capabilities' service_version: the release tag for a release build.

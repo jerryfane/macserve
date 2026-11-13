@@ -143,7 +143,7 @@ func TestTemplateDigestPinsRunKeyAndDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	input, err := p.admission(options.Policies[0], f.remote.pull, testTemplate)
+	input, err := p.admission(options.Policies[0], f.remote.pull, testTemplate, "")
 	if err != nil {
 		t.Fatal(err)
 	}

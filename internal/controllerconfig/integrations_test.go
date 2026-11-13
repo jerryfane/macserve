@@ -1,6 +1,7 @@
 package controllerconfig
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -60,5 +61,85 @@ func TestGitHubPolicyForms(t *testing.T) {
 	}
 	if ids := (*GitHubConfig)(nil).OwnerIDs(); len(ids) != 0 {
 		t.Fatalf("nil GitHub owner IDs: %v", ids)
+	}
+}
+
+// A repository policy's matrix names its own profiles with unique valid shards
+// and complete simulators; owner policies have none, and matrix_skip_drafts
+// needs a matrix.
+func TestGitHubPolicyMatrix(t *testing.T) {
+	base := Config{Receipt: ReceiptConfig{KeyID: "test", PrivateKeyFile: "/service/secrets/receipt.key", ServiceID: "test", HostID: "test", Repositories: map[string]int64{"themartianapp/herdrup": 1318951363}, Owners: []string{"themartianapp"}}}
+	const sim = `{"runtime":"com.apple.CoreSimulator.SimRuntime.iOS-27-0","runtime_build":"24A434","device_type":"com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro"}`
+	repository := func(matrix string) string {
+		return `{"repository":"themartianapp/herdrup","repository_id":1318951363,"author_ids":[38183696],"base_branches":["main"],"policy_revision":1,
+ "profiles":["org-ios-sim-build-v1","org-ios-sim-uitest-v1","org-ios-sim-script-v1"]` + matrix + `}`
+	}
+	owner := `{"owner":"themartianapp","owner_id":318875733,"author_ids":[38183696],"default_branch":true,"profiles":["org-ios-sim-build-v1"],"policy_revision":1`
+	validate := func(policy string) error {
+		var p githubwire.Policy
+		if err := json.Unmarshal([]byte(policy), &p); err != nil {
+			t.Fatal(err)
+		}
+		c := base
+		c.GitHub = &GitHubConfig{AppID: 1, Installations: map[string]int64{"themartianapp": 3}, PrivateKeyFile: "/service/secrets/app.pem", Policies: []githubwire.Policy{p}}
+		return c.validateIntegrations()
+	}
+	for name, policy := range map[string]string{
+		"no matrix": repository(""),
+		"matrix":    repository(`,"matrix_skip_drafts":true,"matrix":[{"profile":"org-ios-sim-uitest-v1","shard":"chat","simulator":` + sim + `},{"profile":"org-ios-sim-uitest-v1","shard":"gram","simulator":` + sim + `},{"profile":"org-ios-sim-script-v1","shard":"chat","simulator":` + sim + `}]`),
+		"skip paths": repository(`,"matrix":[{"profile":"org-ios-sim-uitest-v1","shard":"chat","simulator":` + sim + `},{"profile":"org-ios-sim-script-v1","shard":"chat","simulator":` + sim + `}],
+ "matrix_skip_paths":{"include":["docs/**",".github/ISSUE_TEMPLATE/**","LICENSE","**/*.md"],"exclude":["App/**","Vendor/**"]}`),
+		"owner": owner + `}`,
+	} {
+		if err := validate(policy); err != nil {
+			t.Errorf("%s refused: %v", name, err)
+		}
+	}
+	entry := func(profile, shard, simulator string) string {
+		return `{"profile":"` + profile + `","shard":"` + shard + `","simulator":` + simulator + `}`
+	}
+	for name, policy := range map[string]string{
+		"profile not in profiles":    repository(`,"matrix":[` + entry("org-ios-sim-unittest-v1", "chat", sim) + `]`),
+		"duplicate profile, shard":   repository(`,"matrix":[` + entry("org-ios-sim-uitest-v1", "chat", sim) + `,` + entry("org-ios-sim-uitest-v1", "chat", sim) + `]`),
+		"uppercase shard":            repository(`,"matrix":[` + entry("org-ios-sim-uitest-v1", "Chat", sim) + `]`),
+		"empty shard":                repository(`,"matrix":[` + entry("org-ios-sim-uitest-v1", "", sim) + `]`),
+		"long shard":                 repository(`,"matrix":[` + entry("org-ios-sim-uitest-v1", strings.Repeat("a", 33), sim) + `]`),
+		"no device type":             repository(`,"matrix":[` + entry("org-ios-sim-uitest-v1", "chat", `{"runtime":"r","runtime_build":"b"}`) + `]`),
+		"skip drafts without matrix": repository(`,"matrix_skip_drafts":true`),
+		"owner matrix":               owner + `,"matrix":[` + entry("org-ios-sim-build-v1", "chat", sim) + `]}`,
+		"owner skip drafts":          owner + `,"matrix_skip_drafts":true}`,
+		"skip paths without matrix":  repository(`,"matrix_skip_paths":{"include":["docs/**"]}`),
+		"owner skip paths":           owner + `,"matrix_skip_paths":{"include":["docs/**"]}}`,
+	} {
+		if err := validate(policy); err == nil || !strings.Contains(err.Error(), "matrix") {
+			t.Errorf("%s accepted or wrong error: %v", name, err)
+		}
+	}
+	matrix := `,"matrix":[` + entry("org-ios-sim-uitest-v1", "chat", sim) + `,` + entry("org-ios-sim-script-v1", "chat", sim) + `]`
+	tooMany := make([]string, 33)
+	for i := range tooMany {
+		tooMany[i] = `"d` + strings.Repeat("x", i) + `"`
+	}
+	for name, paths := range map[string]string{
+		"no include":        `{"exclude":["App/**"]}`,
+		"empty include":     `{"include":[]}`,
+		"dot-dot segment":   `{"include":["docs/../App/**"]}`,
+		"absolute":          `{"include":["/docs/**"]}`,
+		"empty segment":     `{"include":["docs//x.md"]}`,
+		"partial globstar":  `{"include":["docs/a**"]}`,
+		"three globstars":   `{"include":["**/a/**/b/**"]}`,
+		"bad class":         `{"include":["docs/[a.md"]}`,
+		"repeated include":  `{"include":["docs/**","docs/**"]}`,
+		"invalid exclude":   `{"include":["docs/**"],"exclude":["App/../**"]}`,
+		"too long":          `{"include":["` + strings.Repeat("a", 97) + `"]}`,
+		"control character": `{"include":["docs/\u0001"]}`,
+		"too many include":  `{"include":[` + strings.Join(tooMany, ",") + `]}`,
+	} {
+		if err := validate(repository(matrix + `,"matrix_skip_paths":` + paths)); err == nil || !strings.Contains(err.Error(), "matrix_skip_paths") {
+			t.Errorf("skip paths %s accepted or wrong error: %v", name, err)
+		}
+	}
+	if err := validate(repository(matrix + `,"matrix_skip_paths":{"include":["docs/**"],"exclude":["docs/**"]}`)); err != nil {
+		t.Errorf("one glob in both lists refused: %v", err)
 	}
 }

@@ -63,9 +63,12 @@ func (p *Poller) publish(ctx context.Context) error {
 
 func (p *Poller) checkInput(ctx context.Context, run store.GitHubRun) (githubapi.CheckInput, error) {
 	packet := githubwire.Packet{Schema: 1, JobID: run.JobID, AttemptID: run.AttemptID, Requests: make([]githubwire.Correlation, 0)}
-	input := githubapi.CheckInput{Name: "mac-evidence/" + run.Profile, HeadSHA: run.SHA, ExternalID: run.JobID, Status: "queued", Output: githubapi.CheckOutput{Title: "Mac evidence queued", Summary: "Waiting for controller execution; no signed result yet."}}
+	input := githubapi.CheckInput{Name: githubwire.CheckName(run.Profile, run.Shard), HeadSHA: run.SHA, ExternalID: run.JobID, Status: "queued", Output: githubapi.CheckOutput{Title: "Mac evidence queued", Summary: "Waiting for controller execution; no signed result yet."}}
 	if run.JobID == "" {
 		input.ExternalID = "denied:" + run.Key
+		if run.Skipped != "" && run.Blocked == "" {
+			input.ExternalID = "skipped:" + run.Key
+		}
 	}
 	var job model.Job
 	if run.JobID != "" {
@@ -90,6 +93,13 @@ func (p *Poller) checkInput(ctx context.Context, run store.GitHubRun) (githubapi
 		input.Conclusion = "action_required"
 		input.Output.Title = "Mac evidence requires action"
 		input.Output.Summary = run.Blocked
+	} else if run.JobID == "" && run.Skipped != "" {
+		// matrix_skip_paths: neutral passes branch protection without
+		// claiming evidence.
+		input.Status = "completed"
+		input.Conclusion = "neutral"
+		input.Output.Title = "Not run: docs/version-only change"
+		input.Output.Summary = run.Skipped
 	} else if job.State.Terminal() {
 		input.Status = "completed"
 		input.CompletedAt = job.FinishedAt
@@ -178,7 +188,7 @@ func (p *Poller) publishOne(ctx context.Context, run store.GitHubRun) (int64, er
 	if policy.OwnerScoped() && p.discovered[run.RepositoryID] != run.Repository {
 		return run.CheckID, nil
 	}
-	current, err := p.admission(policy, githubapi.PullRequest{Number: 1, HeadSHA: run.SHA}, run.Profile)
+	current, err := p.admission(policy, githubapi.PullRequest{Number: 1, HeadSHA: run.SHA}, run.Profile, run.Shard)
 	if errors.Is(err, ErrIneligible) {
 		return run.CheckID, nil
 	}
