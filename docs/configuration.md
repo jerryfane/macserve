@@ -102,7 +102,8 @@ job's manifest, and while the script runs the processes of every simulator no ru
 device's `launchd_sim` and its children, started since) are the script job's: they count against its memory budget,
 and are its processes, not unattributed residue. At the end, before its own simulator, every device listed then that
 was not in that inventory, is not another job's recorded device and is not its own becomes the job's: it is shut
-down and deleted with the job's own simulator, and one that survives deletion is contamination (quarantine). A
+down and deleted with the job's own simulator, and again for any device created before the job's processes were
+stopped, once they are; one that survives deletion is contamination (quarantine). A
 worker restart recovers them from the manifest the same way. Only one such job runs at a time, so a new device is
 never ambiguous. The worker cannot see a script act on another job's simulator or on CoreSimulator: such a violation
 shows up only as the other job's failure, and the residue rules of *Concurrent jobs in one job account* in

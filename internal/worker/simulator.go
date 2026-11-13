@@ -154,7 +154,11 @@ func environment(workspace, developer, account string) []string {
 
 // stopWriters stops m's simulators (its own and those its script created)
 // and then the job processes jobID's cleanup may stop (accountQuiesce);
-// jobID "" is recovery, which stops every job process.
+// jobID "" is recovery, which stops every job process. A concurrent script
+// job's recorded start (beginScriptDevices) is released only after a
+// second adoption, once those processes are stopped, has deleted any device
+// one of them created after the first: until then it stays in the manifest
+// for recovery.
 func (e *Engine) stopWriters(ctx context.Context, m *manifest, jobID string) error {
 	ctx, cancel := context.WithTimeout(ctx, e.options.CleanupTimeout)
 	defer cancel()
@@ -176,7 +180,17 @@ func (e *Engine) stopWriters(ctx context.Context, m *manifest, jobID string) err
 	if quietErr != nil {
 		return errors.Join(ErrRecovery, simulatorErr, quietErr)
 	}
-	return simulatorErr
+	if simulatorErr != nil || !m.ScriptDevicesPending {
+		return simulatorErr
+	}
+	if err := e.adoptScriptDevices(ctx, m); err != nil {
+		return err
+	}
+	if err := e.stopScriptDevices(ctx, m); err != nil {
+		return err
+	}
+	m.ScriptDevicesPending, m.ScriptDevicesBefore = false, nil
+	return e.saveManifest(*m)
 }
 
 func (e *Engine) stopDevice(ctx context.Context, m *manifest) error {
@@ -245,13 +259,15 @@ func (e *Engine) beginScriptDevices(ctx context.Context, m *manifest) error {
 	return nil
 }
 
-// adoptScriptDevices ends a recorded script start (beginScriptDevices): every
-// simulator listed now that was not in the inventory the script started
-// from, is not m's own and that no other manifest records becomes one of m's
-// ScriptDevices. Only one concurrent script job runs at a time (the store
-// claims one, enter admits one), and every engine creation is recorded in
-// its manifest before deviceMu, held here, is released: such a device is
-// one the script created. It also applies after a restart (Recover).
+// adoptScriptDevices adopts from a recorded script start
+// (beginScriptDevices): every simulator listed now that was not in the
+// inventory the script started from, is not m's own and that no other
+// manifest records becomes one of m's ScriptDevices. Only one concurrent
+// script job runs at a time (the store claims one, enter admits one), and
+// every engine creation is recorded in its manifest before deviceMu, held
+// here, is released: such a device is one the script created. The start
+// stays recorded (stopWriters releases it). It also applies after a restart
+// (Recover).
 func (e *Engine) adoptScriptDevices(ctx context.Context, m *manifest) error {
 	if !m.ScriptDevicesPending {
 		return nil
@@ -280,7 +296,6 @@ func (e *Engine) adoptScriptDevices(ctx context.Context, m *manifest) error {
 			lanes.AttachDevice(m.JobID, id)
 		}
 	}
-	m.ScriptDevicesPending, m.ScriptDevicesBefore = false, nil
 	return e.saveManifest(*m)
 }
 

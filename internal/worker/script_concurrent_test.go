@@ -277,3 +277,45 @@ func TestInterruptedCreateLeavesScriptDevicesToTheScript(t *testing.T) {
 		t.Fatalf("script's device judged unrecorded: %v", err)
 	}
 }
+
+// A device a script process creates after the cleanup's first inventory,
+// before the job's processes are stopped, is still adopted and deleted: the
+// recorded start is released only after a second inventory once they are
+// stopped.
+func TestScriptDeviceCreatedDuringFinalizationIsDeleted(t *testing.T) {
+	const lateUDID = "EEEEEEEE-0000-0000-0000-000000000005"
+	set := &deviceSet{devices: []string{baselineUDID}}
+	runner := &fakeRunner{hook: set.hook}
+	var mu sync.Mutex
+	finalizing := false
+	runner.quiesce = func(ctx context.Context) error {
+		set.mu.Lock()
+		defer set.mu.Unlock()
+		mu.Lock()
+		defer mu.Unlock()
+		// The first quiesce after the script ran is the cleanup's: the late
+		// creation completes just before it stops the creator.
+		if finalizing && slices.Contains(set.deleted, scriptUDID) && !slices.Contains(set.devices, lateUDID) && !slices.Contains(set.deleted, lateUDID) {
+			set.devices = append(set.devices, lateUDID)
+		}
+		return ctx.Err()
+	}
+	inner := set.hook
+	runner.hook = func(ctx context.Context, c Command, out, stderr io.Writer) (bool, ProcessResult, error) {
+		if c.Executable == "/bin/bash" {
+			mu.Lock()
+			finalizing = true
+			mu.Unlock()
+		}
+		return inner(ctx, c, out, stderr)
+	}
+	engine := engineFixture(t, runner)
+	source, data := checkoutFixture(t, scriptCheckout)
+	result, err := engine.Execute(context.Background(), concurrentScriptJob(t, "job-1"), source, bytes.NewReader(data), nil)
+	if err != nil || result.State != model.Succeeded || !result.CleanupOK {
+		t.Fatalf("script job: %+v %v", result, err)
+	}
+	if got := set.list(); !slices.Equal(got, []string{baselineUDID}) || !slices.Contains(set.deleted, lateUDID) {
+		t.Fatalf("devices %v, deleted %v", got, set.deleted)
+	}
+}

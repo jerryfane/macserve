@@ -354,7 +354,9 @@ process executing from a device directory) of a device no running job created, s
 label. At finalization, again under the creation lock, every device then listed that was not in the recorded
 inventory, is not recorded by another manifest and is not the job's own becomes one of the job's `script_devices`
 (also attached to the tracker); they are shut down, deleted and proven absent with its own simulator, before the lane
-quiesce, and a survivor is contamination. Recovery after a restart does the same from the manifest. Anything else the
+quiesce. After that quiesce has stopped the job's processes, a second inventory adopts and deletes any device one of
+them created in between, and only then is the recorded inventory released; a survivor is contamination, and a
+failure keeps the inventory for recovery. Recovery after a restart does the same from the manifest. Anything else the
 script leaves follows the residue, hold and idle-verdict rules above. The engine cannot detect a script acting on a
 sibling's simulator or on CoreSimulator; the contract in [configuration.md](configuration.md) forbids it.
 

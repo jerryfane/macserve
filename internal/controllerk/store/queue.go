@@ -207,20 +207,17 @@ func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, principal, key string
 	return job, false, nil
 }
 
-// fairNext selects the sequence of the next queued job: the oldest queued job
-// of the repository that has waited longest since its last claim. A
+// fairOrder lists every queued job in the fair order: first the oldest queued
+// job of the repository that has waited longest since its last claim, then
+// the rest of that repository's queued jobs, then the next repository's. A
 // repository's last claim is the newest started_at among its retained jobs
 // (only Claim sets started_at); a repository with none goes first, and ties
-// fall back to submission order. A burst from one repository therefore
-// delays another repository's job by at most one claim per other waiting
-// repository, and each repository stays FIFO. The order relies on the claim
-// clock not stepping backwards; a backwards step only reorders repositories
-// until the clock passes the earlier claims again.
-const fairNext = `SELECT head.sequence FROM (SELECT repo,MIN(sequence) AS sequence FROM jobs WHERE state='queued' GROUP BY repo) AS head ORDER BY (SELECT MAX(started_at) FROM jobs WHERE jobs.repo=head.repo) NULLS FIRST,head.sequence LIMIT 1`
-
-// fairOrder lists every queued job in the fair order: repositories as
-// fairNext orders their heads, each repository's jobs in submission order.
-// Its first row is fairNext's job.
+// fall back to submission order of the repositories' oldest queued jobs. A
+// burst from one repository therefore delays another repository's job by at
+// most one claim per other waiting repository, and each repository stays
+// FIFO. The order relies on the claim clock not stepping backwards; a
+// backwards step only reorders repositories until the clock passes the
+// earlier claims again.
 const fairOrder = `SELECT ` + jobColumns + ` FROM jobs AS queued WHERE state='queued' ORDER BY (SELECT MAX(started_at) FROM jobs WHERE jobs.repo=queued.repo) NULLS FIRST,(SELECT MIN(sequence) FROM jobs WHERE jobs.repo=queued.repo AND state='queued'),sequence`
 
 // Claim holds a database write reservation from eligibility checks through lease
@@ -279,10 +276,8 @@ func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time, la
 	if acknowledged != "" && acknowledged != workerEpoch {
 		return model.Job{}, ErrLease
 	}
-	job, err := scanJob(tx.QueryRowContext(ctx, "SELECT "+jobColumns+" FROM jobs WHERE sequence=("+fairNext+")"))
-	if err == nil && job.Profile.Concurrent() && slices.ContainsFunc(running, func(active model.Job) bool { return active.Profile.Concurrent() }) {
-		job, err = nextBesideConcurrent(ctx, tx)
-	}
+	concurrent := slices.ContainsFunc(running, func(active model.Job) bool { return active.Profile.Concurrent() })
+	job, err := nextFair(ctx, tx, concurrent)
 	if errors.Is(err, ErrNotFound) {
 		if err := tx.Commit(); err != nil {
 			return model.Job{}, err
@@ -326,10 +321,11 @@ func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time, la
 	return job, nil
 }
 
-// nextBesideConcurrent is the first queued job in the fair order that is not
-// a concurrent simulator_script job (model.Profile.Concurrent), for a claim
-// while one such job is active; ErrNotFound when there is none.
-func nextBesideConcurrent(ctx context.Context, tx *sql.Tx) (model.Job, error) {
+// nextFair is the first queued job in the fair order (fairOrder), passing
+// over concurrent simulator_script jobs (model.Profile.Concurrent) when
+// skipConcurrent is set, for a claim while one such job is active;
+// ErrNotFound when there is none.
+func nextFair(ctx context.Context, tx *sql.Tx, skipConcurrent bool) (model.Job, error) {
 	rows, err := tx.QueryContext(ctx, fairOrder)
 	if err != nil {
 		return model.Job{}, err
@@ -340,7 +336,7 @@ func nextBesideConcurrent(ctx context.Context, tx *sql.Tx) (model.Job, error) {
 		if err != nil {
 			return model.Job{}, err
 		}
-		if !job.Profile.Concurrent() {
+		if !skipConcurrent || !job.Profile.Concurrent() {
 			return job, nil
 		}
 	}
