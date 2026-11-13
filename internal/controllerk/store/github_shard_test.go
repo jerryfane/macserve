@@ -58,3 +58,34 @@ func TestGitHubRunShard(t *testing.T) {
 		t.Fatalf("unknown shard: %+v %v", runs, err)
 	}
 }
+
+// A skipped matrix run records its pull request (so an owner rerun can find
+// it), republishes only when its summary changes, and is never recorded over
+// an attempt.
+func TestGitHubSkipRecordsPullRequest(t *testing.T) {
+	ctx := context.Background()
+	s, _ := githubStore(t)
+	input := githubFixture()
+	input.Run.Key, input.Run.Shard = strings.Repeat("d", 64), "ipad"
+	if err := s.SkipGitHub(ctx, input.Run, 0, "docs only", testNow); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("skip without a pull request: %v", err)
+	}
+	for _, pull := range []int{7, 9, 7} {
+		if err := s.SkipGitHub(ctx, input.Run, pull, "docs only", testNow); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runs, err := s.GitHubRunsByHead(ctx, 123, "", input.Run.SHA, input.Run.Profile, "ipad")
+	if err != nil || len(runs) != 1 || runs[0].Skipped != "docs only" || runs[0].JobID != "" || len(runs[0].PullRequests) != 2 || runs[0].PullRequests[0] != 7 || runs[0].PullRequests[1] != 9 {
+		t.Fatalf("skipped run %+v %v", runs, err)
+	}
+	admitted := githubFixture()
+	if _, err := s.AdmitGitHub(ctx, admitted, testNow); err != nil {
+		t.Fatal(err)
+	}
+	over := admitted.Run
+	over.Shard = "ipad"
+	if err := s.SkipGitHub(ctx, over, 7, "docs only", testNow); !errors.Is(err, ErrConflict) {
+		t.Fatalf("skip over an attempt: %v", err)
+	}
+}

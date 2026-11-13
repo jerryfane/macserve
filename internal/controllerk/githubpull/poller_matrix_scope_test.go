@@ -1,12 +1,15 @@
 package githubpull
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/jerryfane/macserve/internal/githubapi"
 	"github.com/jerryfane/macserve/internal/githubwire"
+	"github.com/jerryfane/macserve/internal/model"
 )
 
 // herdrupSkipPaths is herdrup's Tools/ci/ci_scope.py docs rule: docs/,
@@ -135,5 +138,74 @@ func TestMatrixSkipPathsReevaluatesEachHead(t *testing.T) {
 	}
 	if active := f.active(t, matrixRepoID); len(active) != 5 {
 		t.Fatalf("active runs %v", active)
+	}
+}
+
+// A skipped matrix run keeps its pull request, so the owner rerun API
+// revalidates the open head and starts the run's first attempt, which later
+// polls keep.
+func TestMatrixSkippedRunOwnerRerunStartsJob(t *testing.T) {
+	ctx := context.Background()
+	policy := matrixPolicy()
+	policy.MatrixSkipPaths = herdrupSkipPaths()
+	f := newMatrixFixture(t, policy)
+	pull := matrixPull(1, headSHA('1'))
+	pull.BaseSHA = headSHA('b')
+	f.pull(matrixRepo, pull, matrixConfig)
+	f.remote.changed[matrixRepo+"@"+headSHA('b')+"..."+headSHA('1')] = modified("README.md")
+	f.poll(t)
+	name := "mac-evidence/org-ios-sim-uitest-v1/ipad"
+	skipped := f.runsByCheck(t, headSHA('1'))[name]
+	if skipped.JobID != "" || skipped.Skipped == "" {
+		t.Fatalf("skipped run %+v", skipped)
+	}
+	run, started, err := f.p.Rerun(ctx, matrixRepoID, "", headSHA('1'), uiTemplate, "ipad", f.options.Now())
+	if err != nil || !started || run.Key != skipped.Key || run.JobID == "" || run.Skipped != "" {
+		t.Fatalf("rerun of a skipped run: %+v %v %v", run, started, err)
+	}
+	if job := f.job(t, run.JobID); job.State != model.Queued || job.Request.Shard != "ipad" || *job.Request.Simulator != iPad {
+		t.Fatalf("rerun job %+v", job)
+	}
+	f.poll(t)
+	if after := f.runsByCheck(t, headSHA('1'))[name]; after.JobID != run.JobID || after.Skipped != "" {
+		t.Fatalf("poll after rerun: %+v", after)
+	}
+	if check := f.checksOf(headSHA('1'))[name]; check.Status != "queued" || check.ExternalID != run.JobID {
+		t.Fatalf("check after rerun %+v", check)
+	}
+}
+
+// matrix_skip_drafts also gates owner reruns: a draft pull request's matrix
+// run gets no new attempt; once it is ready, the rerun starts one.
+func TestMatrixOwnerRerunRespectsSkipDrafts(t *testing.T) {
+	ctx := context.Background()
+	policy := matrixPolicy()
+	policy.MatrixSkipDrafts = true
+	f := newMatrixFixture(t, policy)
+	f.pull(matrixRepo, matrixPull(1, headSHA('1')), matrixConfig)
+	f.poll(t)
+	first := f.runsByCheck(t, headSHA('1'))["mac-evidence/org-ios-sim-uitest-v1/ipad"]
+	if _, err := f.s.Cancel(ctx, first.JobID, "client", model.CancelReason{Source: model.CancelGitHub}, f.options.Now()); err != nil {
+		t.Fatal(err)
+	}
+	f.setPull(matrixRepo, func(p *githubapi.PullRequest) { p.Draft = true })
+	if run, started, err := f.p.Rerun(ctx, matrixRepoID, "", headSHA('1'), uiTemplate, "ipad", f.options.Now()); !errors.Is(err, ErrIneligible) || started {
+		t.Fatalf("draft rerun: %+v %v %v", run, started, err)
+	}
+	if run := f.runsByCheck(t, headSHA('1'))["mac-evidence/org-ios-sim-uitest-v1/ipad"]; run.JobID != first.JobID {
+		t.Fatalf("draft rerun started %s", run.JobID)
+	}
+	// The build is no matrix entry: its rerun is not gated by drafts.
+	build := f.runsByCheck(t, headSHA('1'))["mac-evidence/"+nativeBuild]
+	if _, err := f.s.Cancel(ctx, build.JobID, "client", model.CancelReason{Source: model.CancelGitHub}, f.options.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, started, err := f.p.Rerun(ctx, matrixRepoID, "", headSHA('1'), nativeBuild, "", f.options.Now()); err != nil || !started {
+		t.Fatalf("draft build rerun: %v %v", started, err)
+	}
+	f.setPull(matrixRepo, func(p *githubapi.PullRequest) { p.Draft = false })
+	run, started, err := f.p.Rerun(ctx, matrixRepoID, "", headSHA('1'), uiTemplate, "ipad", f.options.Now())
+	if err != nil || !started || run.JobID == first.JobID {
+		t.Fatalf("ready rerun: %+v %v %v", run, started, err)
 	}
 }

@@ -244,7 +244,7 @@ func TestMatrixMissingShardRequiresAction(t *testing.T) {
 	f.poll(t)
 	ipad := "mac-evidence/org-ios-sim-uitest-v1/ipad"
 	runs, checks := f.runsByCheck(t, headSHA('1')), f.checksOf(headSHA('1'))
-	if run := runs[ipad]; run.JobID != "" || !strings.Contains(run.Blocked, `ui_test shard "ipad"`) {
+	if run := runs[ipad]; run.JobID != "" || !strings.Contains(run.Blocked, `ui_test.shards has no shard "ipad"`) {
 		t.Fatalf("ipad run %+v", run)
 	}
 	if check := checks[ipad]; check.Status != "completed" || check.Conclusion != "action_required" {

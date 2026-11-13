@@ -525,11 +525,13 @@ func (s *Store) BlockGitHub(ctx context.Context, r GitHubRun, reason string, now
 	return tx.Commit()
 }
 
-// SkipGitHub records that a matrix run is not run (why: summary), published
-// as a neutral check, without admitting code. Only a run without an attempt
-// can be skipped: ErrConflict refuses a run that already has a job.
-func (s *Store) SkipGitHub(ctx context.Context, r GitHubRun, summary string, now time.Time) error {
-	if !validOpaque(r.Key, 256) || r.RepositoryID <= 0 || !controllerconfig.ValidRepository(r.Repository) || !validSHA(r.SHA) || !validOpaque(r.Profile, 256) || !validOpaque(r.Shard, 32) || r.PolicyRevision <= 0 || !validReason(summary) || summary == "" || !validTime(now) {
+// SkipGitHub records that a matrix run of pull request pull is not run (why:
+// summary), published as a neutral check, without admitting code. The run
+// keeps its pull request like an admitted run, so an owner rerun can still
+// start its first attempt. Only a run without an attempt can be skipped:
+// ErrConflict refuses a run that already has a job.
+func (s *Store) SkipGitHub(ctx context.Context, r GitHubRun, pull int, summary string, now time.Time) error {
+	if !validOpaque(r.Key, 256) || r.RepositoryID <= 0 || !controllerconfig.ValidRepository(r.Repository) || !validSHA(r.SHA) || !validOpaque(r.Profile, 256) || !validOpaque(r.Shard, 32) || r.PolicyRevision <= 0 || pull <= 0 || !validReason(summary) || summary == "" || !validTime(now) {
 		return ErrInvalid
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -544,6 +546,7 @@ func (s *Store) SkipGitHub(ctx context.Context, r GitHubRun, summary string, now
 	if publishing {
 		return ErrFull
 	}
+	changed := true
 	old, err := scanGitHubRun(tx.QueryRowContext(ctx, "SELECT "+githubRunColumns+" FROM github_runs WHERE run_key=?", r.Key))
 	if errors.Is(err, ErrNotFound) {
 		_, err = tx.ExecContext(ctx, "INSERT INTO github_runs(run_key,repository_id,repository,sha,profile,shard,policy_revision,skipped) VALUES(?,?,?,?,?,?,?,?)", r.Key, r.RepositoryID, r.Repository, r.SHA, r.Profile, r.Shard, r.PolicyRevision, summary)
@@ -551,16 +554,21 @@ func (s *Store) SkipGitHub(ctx context.Context, r GitHubRun, summary string, now
 		if old.JobID != "" {
 			return ErrConflict
 		}
-		if old.Skipped == summary && old.Blocked == "" {
-			return nil
+		changed = old.Skipped != summary || old.Blocked != ""
+		if changed {
+			_, err = tx.ExecContext(ctx, "UPDATE github_runs SET skipped=?,blocked='' WHERE run_key=?", summary, r.Key)
 		}
-		_, err = tx.ExecContext(ctx, "UPDATE github_runs SET skipped=?,blocked='' WHERE run_key=?", summary, r.Key)
 	}
 	if err != nil {
 		return err
 	}
-	if err = githubDirty(ctx, tx, r.Key); err != nil {
+	if _, err = tx.ExecContext(ctx, "INSERT OR IGNORE INTO github_run_pulls(run_key,pull_request) VALUES(?,?)", r.Key, pull); err != nil {
 		return err
+	}
+	if changed {
+		if err = githubDirty(ctx, tx, r.Key); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }

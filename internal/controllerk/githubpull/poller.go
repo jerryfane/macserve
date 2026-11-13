@@ -492,18 +492,6 @@ func matrixTemplate(recipe model.Profile) bool {
 	return recipe.Template != nil && recipe.Kind.UsesSimulator()
 }
 
-// matrixKey is the .macserve.json section that declares a matrix template's
-// shards.
-func matrixKey(kind model.Kind) string {
-	switch kind {
-	case model.SimulatorUITest:
-		return "ui_test"
-	case model.UnitTest:
-		return "unit_test"
-	}
-	return "script"
-}
-
 // admission is the run of profileID and shard at pull's head: shard "" for a
 // profile that is not a matrix template, else the shard of one of the
 // policy's matrix entries for it, whose simulator the job runs on. Any other
@@ -878,7 +866,7 @@ func (p *Poller) admitMatrix(ctx context.Context, policy githubwire.Policy, pull
 			return nil, err
 		}
 		if err != nil || existing.JobID == "" {
-			return p.options.Store.SkipGitHub(ctx, input.Run, summary, now), nil
+			return p.options.Store.SkipGitHub(ctx, input.Run, pull.Number, summary, now), nil
 		}
 	}
 	_, failure = p.options.Store.AdmitGitHub(ctx, input, now)
@@ -936,26 +924,14 @@ func scopeSummary(paths githubwire.SkipPaths, files []githubapi.ChangedFile) str
 
 // shardProblem is why a matrix entry's admitted snapshot cannot run at a head
 // whose parsed .macserve.json is config (nil: missing or invalid), "" when the
-// worker derives its recipe.
+// worker derives its recipe. profiles.Derive, which the worker repeats, is
+// the one authority on which shards a file declares.
 func shardProblem(config *model.RepoConfig, snapshot model.Profile) string {
-	section, shard := matrixKey(snapshot.Kind), snapshot.Shard
 	if config == nil {
-		return fmt.Sprintf("PR head has no valid .macserve.json, so it declares no %s shard %q", section, shard)
-	}
-	declared := false
-	switch snapshot.Kind {
-	case model.SimulatorUITest:
-		declared = config.UITest != nil && len(config.UITest.Shards[shard]) > 0
-	case model.UnitTest:
-		declared = config.UnitTest != nil && len(config.UnitTest.Shards[shard]) > 0
-	case model.SimulatorScript:
-		declared = config.Script != nil && config.Script.Shards[shard].Run != ""
-	}
-	if !declared {
-		return fmt.Sprintf("PR head's .macserve.json declares no %s shard %q", section, shard)
+		return fmt.Sprintf("PR head has no valid .macserve.json, so template %s cannot run shard %q", snapshot.ID, snapshot.Shard)
 	}
 	if _, err := profiles.Derive(snapshot, *config); err != nil {
-		return fmt.Sprintf("PR head's .macserve.json does not admit %s shard %q for template %s", section, shard, snapshot.ID)
+		return fmt.Sprintf("PR head's .macserve.json does not admit template %s shard %q: %v", snapshot.ID, snapshot.Shard, err)
 	}
 	return ""
 }
@@ -994,11 +970,14 @@ func (p *Poller) acceptComment(ctx context.Context, policy githubwire.Policy, co
 // policy matrix entry's run, shard, with the comment mode=rerun rules: the
 // head must still be an eligible open pull request head whose current
 // admission is that run, the run's latest attempt must be terminal, and
-// requested reruns are bounded at two per run in any hour. The new attempt
-// publishes to the run's check name. It returns the run and whether a new
-// attempt started (false: the latest attempt is still queued or active). An
-// unknown run is store.ErrNotFound, a head no longer eligible ErrIneligible,
-// the bound store.ErrRerunLimit.
+// requested reruns are bounded at two per run in any hour. A matrix run of a
+// policy with matrix_skip_drafts gets no new attempt while its pull request
+// is a draft (its current attempt is left alone). A skipped matrix run
+// (matrix_skip_paths) starts its first attempt. The new attempt publishes to
+// the run's check name. It returns the run and whether a new attempt started
+// (false: the latest attempt is still queued or active). An unknown run is
+// store.ErrNotFound, a head no longer eligible (or a draft, as above)
+// ErrIneligible, the bound store.ErrRerunLimit.
 func (p *Poller) Rerun(ctx context.Context, repositoryID int64, repository, sha, profile, shard string, now time.Time) (store.GitHubRun, bool, error) {
 	runs, err := p.options.Store.GitHubRunsByHead(ctx, repositoryID, repository, sha, profile, shard)
 	if err != nil {
@@ -1022,7 +1001,7 @@ func (p *Poller) Rerun(ctx context.Context, repositoryID int64, repository, sha,
 			if err != nil {
 				return store.GitHubRun{}, false, err
 			}
-			if !eligible(policy, pull) || pull.Number != number || pull.HeadSHA != run.SHA {
+			if !eligible(policy, pull) || pull.Number != number || pull.HeadSHA != run.SHA || run.Shard != "" && policy.MatrixSkipDrafts && pull.Draft {
 				continue
 			}
 			input, err := p.admission(policy, pull, run.Profile, run.Shard)

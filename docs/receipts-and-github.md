@@ -227,7 +227,8 @@ grammar has no shard.
 `matrix_skip_drafts: true` (default false; requires a matrix) holds matrix entries back while the pull request is a
 draft: a draft head admits only the policy's other profiles and publishes no matrix check. Marking it ready for
 review admits the matrix for the current head on the next poll. Converting it back to a draft cancels nothing:
-matrix runs the head already has stay current and finish, and no new matrix attempt starts while it is a draft.
+matrix runs the head already has stay current and finish, and no new matrix attempt starts while it is a draft,
+including through the owner rerun API (409 `not_eligible` for a matrix run of a draft; builds are not gated).
 
 `matrix_skip_paths` (requires a matrix) skips the matrix for a change that only touches files the owner judged
 unable to affect it, such as documentation:
@@ -250,8 +251,9 @@ docs/version-only change", whose summary gives the file count and the include gl
 job; `neutral` satisfies branch protection without claiming evidence. Build profiles always run. Anything doubtful
 runs the matrix: a failed comparison, a list of 300 or more files (GitHub's compare limit, so possibly truncated),
 no changed file, no base commit, or any removed, renamed, copied or mode-changed (`changed`) file. The decision is
-per head: a later push that touches anything else runs the matrix for the new head. A matrix run that already
-has a job (admitted before the skip, or rerun by the owner API) keeps it. Content rules, such as a
+per head: a later push that touches anything else runs the matrix for the new head. A skipped run keeps its pull
+request, so the owner rerun API (with its `shard`) can still start its first attempt; a matrix run that already
+has a job (admitted before the skip, or started by such a rerun) keeps it. Content rules, such as a
 version-only edit of a project file, cannot be expressed; such changes run the matrix.
 
 A repository-form policy replaces the owner-form policy for its repository: the owner policy's build no longer
