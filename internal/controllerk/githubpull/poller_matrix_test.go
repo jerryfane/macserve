@@ -2,9 +2,12 @@ package githubpull
 
 import (
 	"context"
+	"errors"
+	"log"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jerryfane/macserve/internal/controllerk/store"
 	"github.com/jerryfane/macserve/internal/githubapi"
@@ -359,5 +362,54 @@ func TestMatrixCommentIntakeSkipsMatrixTemplates(t *testing.T) {
 	requests, err := f.s.GitHubRequests(context.Background(), runs["mac-evidence/org-build-v1"].JobID)
 	if err != nil || len(requests) != 1 || requests[0].CommentID != 2 {
 		t.Fatalf("build requests %+v %v", requests, err)
+	}
+}
+
+// cancelOnLog records log output and ends a Run at its first line.
+type cancelOnLog struct {
+	lines  strings.Builder
+	cancel context.CancelFunc
+}
+
+func (w *cancelOnLog) Write(b []byte) (int, error) {
+	w.lines.Write(b)
+	w.cancel()
+	return len(b), nil
+}
+
+// Each matrix head runs five jobs under the repository's one principal, so
+// two heads fill its ten outstanding jobs and a third head's admissions are
+// refused (queue full) with no run and no check. The cycle still admits the
+// heads before it and, while every refusal waits for the next cycle, Run logs
+// each one with its pull request, head and check.
+func TestRunLogsHeadsAFullQueueLeavesUnadmitted(t *testing.T) {
+	f := newMatrixFixture(t, matrixPolicy())
+	for number, c := range []byte("123") {
+		f.pull(matrixRepo, matrixPull(number+1, headSHA(c)), matrixConfig)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	recorded := &cancelOnLog{cancel: cancel}
+	previous := log.Writer()
+	log.SetOutput(recorded)
+	defer log.SetOutput(previous)
+	f.p.Run(ctx)
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("Run logged nothing for the unadmitted head: %v", ctx.Err())
+	}
+	got := recorded.lines.String()
+	for _, sha := range []string{headSHA('1'), headSHA('2')} {
+		if runs := f.runsByCheck(t, sha); len(runs) != 5 || strings.Contains(got, sha) {
+			t.Fatalf("head %s: runs %v, log %q", sha, runs, got)
+		}
+	}
+	if runs := f.runsByCheck(t, headSHA('3')); len(runs) != 0 {
+		t.Fatalf("refused head has runs %v", runs)
+	}
+	for _, check := range []string{"mac-evidence/org-build-v1", "mac-evidence/org-ios-sim-uitest-v1/iphone-terminal", "mac-evidence/org-ios-sim-uitest-v1/iphone-app", "mac-evidence/org-ios-sim-uitest-v1/ipad", "mac-evidence/org-ios-sim-script-v1/ipad-script"} {
+		want := "GitHub poll: GitHub repository " + matrixRepo + ": pull=3 head=" + headSHA('3') + " check=" + check + ": " + store.ErrFull.Error() + "\n"
+		if !strings.Contains(got, want) {
+			t.Fatalf("log lacks %q: %q", want, got)
+		}
 	}
 }
