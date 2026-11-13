@@ -341,7 +341,8 @@ admission: contamination quarantines exactly as with one job, a clean account re
 running jobs (no completion fenced anything) keeps the epoch, and a lease the controller had already prepared for the
 next lane is delivered after the idle `Recover` instead of being interrupted by the new epoch.
 Simulator creation is serialized across lanes, and a sibling's recorded device is never an unrecorded device after an
-interrupted create. A broker restart with several manifests recovers all of them at idle (full quiesce, then each
-job's simulator and workspace). Each completion is saved as `pending-<job>.json` until acknowledged (a pre-lane
-`pending.json` is still delivered).
+interrupted create. The controller starts one simulator job at a time: the next once the previous one runs or was
+delivered a minute ago ([configuration](configuration.md#concurrent-jobs-max_concurrent_jobs)). A broker restart with
+several manifests recovers all of them at idle (full quiesce, then each job's simulator and workspace). Each completion
+is saved as `pending-<job>.json` until acknowledged (a pre-lane `pending.json` is still delivered).
 

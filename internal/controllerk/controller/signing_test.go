@@ -103,7 +103,7 @@ func signableJob(t *testing.T, f *runtimeFixture, client *fakeSignClient) model.
 	if err != nil {
 		t.Fatal(err)
 	}
-	claimed, err := f.db.Claim(ctx, "epoch", f.now, 1)
+	claimed, err := f.db.Claim(ctx, "epoch", f.now, 1, false)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -153,12 +153,12 @@ func TestQueuedExpiryAndRetainedIdempotencyBoundary(t *testing.T) {
 	if _, err := s.Pause(ctx, "paused", "drain", "admin", testNow); err != nil {
 		t.Fatal(err)
 	}
-	_, err := s.Claim(ctx, "epoch", testNow.Add(time.Hour-time.Nanosecond), 1)
+	_, err := s.Claim(ctx, "epoch", testNow.Add(time.Hour-time.Nanosecond), 1, false)
 	requireError(t, err, ErrNoJob)
 	if got := getJob(t, s, job.ID); got.State != model.Queued {
 		t.Fatal("expired before TTL boundary")
 	}
-	_, err = s.Claim(ctx, "epoch", testNow.Add(time.Hour), 1)
+	_, err = s.Claim(ctx, "epoch", testNow.Add(time.Hour), 1, false)
 	requireError(t, err, ErrNoJob)
 	expired := getJob(t, s, job.ID)
 	if expired.State != model.Expired || expired.FinishedAt == nil || !expired.FinishedAt.Equal(testNow.Add(time.Hour)) {

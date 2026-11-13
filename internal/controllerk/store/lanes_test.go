@@ -15,7 +15,7 @@ const undoLaneSchema = "DROP TRIGGER jobs_active_lane_insert; DROP TRIGGER jobs_
 
 func claimLanes(t *testing.T, s *Store, epoch string, now time.Time, lanes int) model.Job {
 	t.Helper()
-	job, err := s.Claim(context.Background(), epoch, now, lanes)
+	job, err := s.Claim(context.Background(), epoch, now, lanes, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func TestClaimFillsLowestFreeLaneUpToLanes(t *testing.T) {
 	if got := getJob(t, s, second.ID); got.Lane != 2 {
 		t.Fatalf("stored lane = %d", got.Lane)
 	}
-	_, err := s.Claim(ctx, "epoch", testNow.Add(2*time.Second), 2)
+	_, err := s.Claim(ctx, "epoch", testNow.Add(2*time.Second), 2, false)
 	requireError(t, err, ErrNoJob)
 	active, err := s.ActiveJobs(ctx)
 	if err != nil || len(active) != 2 || active[0].ID != first.ID || active[1].ID != second.ID {
@@ -73,7 +73,7 @@ func TestClaimFillsSixLanes(t *testing.T) {
 			t.Fatalf("claim %d got lane %d", lane, job.Lane)
 		}
 	}
-	_, err := s.Claim(ctx, "epoch", testNow.Add(7*time.Second), 6)
+	_, err := s.Claim(ctx, "epoch", testNow.Add(7*time.Second), 6, false)
 	requireError(t, err, ErrNoJob)
 	active, err := s.ActiveJobs(ctx)
 	if err != nil || len(active) != 6 {
@@ -93,10 +93,10 @@ func TestClaimSingleLaneRefusesSecondJob(t *testing.T) {
 	if job := claimLanes(t, s, "epoch", testNow, 1); job.Lane != 1 {
 		t.Fatalf("lane = %d", job.Lane)
 	}
-	_, err := s.Claim(context.Background(), "epoch", testNow, 1)
+	_, err := s.Claim(context.Background(), "epoch", testNow, 1, false)
 	requireError(t, err, ErrNoJob)
 	for _, lanes := range []int{0, model.MaxConcurrentJobs + 1} {
-		_, err := s.Claim(context.Background(), "epoch", testNow, lanes)
+		_, err := s.Claim(context.Background(), "epoch", testNow, lanes, false)
 		requireError(t, err, ErrInvalid)
 	}
 }
@@ -113,7 +113,7 @@ func TestExclusiveHeadDrainsLanesAndBlocksWhileActive(t *testing.T) {
 	if running.ID != build.ID {
 		t.Fatalf("claimed %s, want the head %s", running.ID, build.ID)
 	}
-	_, err := s.Claim(ctx, "epoch", testNow.Add(4*time.Second), 3)
+	_, err := s.Claim(ctx, "epoch", testNow.Add(4*time.Second), 3, false)
 	requireError(t, err, ErrNoJob)
 	if got := getJob(t, s, later.ID); got.State != model.Queued {
 		t.Fatalf("later job jumped the exclusive head: %s", got.State)
@@ -123,12 +123,66 @@ func TestExclusiveHeadDrainsLanesAndBlocksWhileActive(t *testing.T) {
 	if exclusive.ID != archive.ID || exclusive.Lane != 1 {
 		t.Fatalf("claimed %s lane %d, want the archive in lane 1", exclusive.ID, exclusive.Lane)
 	}
-	_, err = s.Claim(ctx, "epoch", testNow.Add(7*time.Second), 3)
+	_, err = s.Claim(ctx, "epoch", testNow.Add(7*time.Second), 3, false)
 	requireError(t, err, ErrNoJob)
 	finishJob(t, s, exclusive, model.Failed, true, testNow.Add(8*time.Second))
 	if job := claimLanes(t, s, "epoch", testNow.Add(9*time.Second), 3); job.ID != later.ID {
 		t.Fatalf("claimed %s, want %s", job.ID, later.ID)
 	}
+}
+
+// repoAdmission is admissionFixture for repo: a build, or with a simulator a
+// simulator UI test.
+func repoAdmission(repo string, simulator bool) model.Admission {
+	admission := admissionFixture()
+	admission.Request.Repo, admission.Profile.Repo = repo, repo
+	if simulator {
+		pin := &model.Simulator{Runtime: "com.apple.CoreSimulator.SimRuntime.iOS-18-5", RuntimeBuild: "22F77", DeviceType: "com.apple.CoreSimulator.SimDeviceType.iPhone-16"}
+		admission.Request.Kind, admission.Profile.Kind = model.SimulatorUITest, model.SimulatorUITest
+		admission.Request.Simulator, admission.Profile.Simulator = pin, pin
+		admission.Profile.RequiredTests = []string{"ExampleUITests/testLaunch"}
+	}
+	setDigest(&admission)
+	return admission
+}
+
+// While another simulator job is starting (holdSimulators), a simulator job at
+// the fair head waits and nothing behind it is claimed, as behind an exclusive
+// head; a build at the fair head is claimed beside the starting job.
+func TestHeldSimulatorHeadWaitsWithTheJobsBehindIt(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newStore(t, Options{})
+	enqueue := func(key, repo string, simulator bool, at time.Time) model.Job {
+		t.Helper()
+		job, _, err := s.Enqueue(ctx, "principal", key, repoAdmission(repo, simulator), at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return job
+	}
+	first := enqueue("ui-1", "example-org/example-app", true, testNow)
+	second := enqueue("ui-2", "example-org/example-app", true, testNow.Add(time.Second))
+	behind := enqueue("build-app", "example-org/example-app", false, testNow.Add(2*time.Second))
+	other := enqueue("build-library", "example-org/example-library", false, testNow.Add(3*time.Second))
+	claim := func(at time.Duration, hold bool, want model.Job) {
+		t.Helper()
+		if job, err := s.Claim(ctx, "epoch", testNow.Add(at), 6, hold); err != nil || job.ID != want.ID {
+			t.Fatalf("hold=%t claimed %s %v, want %s", hold, job.ID, err, want.ID)
+		}
+	}
+	claim(4*time.Second, false, first)
+	// The library has waited longer since its last claim: its build, the fair
+	// head, starts beside the starting simulator job.
+	claim(5*time.Second, true, other)
+	_, err := s.Claim(ctx, "epoch", testNow.Add(6*time.Second), 6, true)
+	requireError(t, err, ErrNoJob)
+	for _, job := range []model.Job{second, behind} {
+		if got := getJob(t, s, job.ID); got.State != model.Queued {
+			t.Fatalf("%s jumped or ignored the held simulator head: %s", job.ID, got.State)
+		}
+	}
+	claim(7*time.Second, false, second)
+	claim(8*time.Second, true, behind)
 }
 
 // A version 6 database's single active job takes lane 1 and stays active; it
@@ -157,7 +211,7 @@ func TestLaneMigrationKeepsVersion6ActiveJob(t *testing.T) {
 	if job := claimLanes(t, s, "epoch", testNow.Add(time.Second), 2); job.Lane != 2 {
 		t.Fatalf("lane beside migrated job = %d", job.Lane)
 	}
-	_, err := s.Claim(ctx, "epoch", testNow.Add(2*time.Second), 2)
+	_, err := s.Claim(ctx, "epoch", testNow.Add(2*time.Second), 2, false)
 	requireError(t, err, ErrNoJob)
 	finishJob(t, s, migrated, model.Succeeded, true, testNow.Add(3*time.Second))
 	if job := claimLanes(t, s, "epoch", testNow.Add(4*time.Second), 2); job.Lane != 1 {

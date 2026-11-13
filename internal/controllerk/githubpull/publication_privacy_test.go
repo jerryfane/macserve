@@ -30,7 +30,7 @@ func TestPublicationKeepsSmallPrivateManifestOutOfChecks(t *testing.T) {
 			f := newFixture(t)
 			f.poll(t)
 			ctx := context.Background()
-			job, err := f.s.Claim(ctx, "worker-epoch", f.options.Now(), 1)
+			job, err := f.s.Claim(ctx, "worker-epoch", f.options.Now(), 1, false)
 			if err != nil {
 				t.Fatal(err)
 			}

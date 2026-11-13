@@ -222,10 +222,13 @@ const fairNext = `SELECT head.sequence FROM (SELECT repo,MIN(sequence) AS sequen
 // assignment. It claims only while fewer than lanes jobs are active and none of
 // them is an exclusive kind, and assigns the lowest free lane. The fair head is
 // chosen over every queued job: an exclusive head waits until no job is active,
-// and nothing behind it is claimed meanwhile. The database additionally
+// and nothing behind it is claimed meanwhile. holdSimulators is set while
+// another simulator job is still starting (the controller's start stagger): a
+// head that uses a simulator likewise waits, and nothing behind it is claimed
+// meanwhile; any other head is claimed as usual. The database additionally
 // prohibits two active rows on one lane, even if a future caller bypasses the
 // normal dispatch path.
-func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time, lanes int) (model.Job, error) {
+func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time, lanes int, holdSimulators bool) (model.Job, error) {
 	if !validOpaque(workerEpoch, 256) || !validTime(now) || lanes < 1 || lanes > model.MaxConcurrentJobs {
 		return model.Job{}, ErrInvalid
 	}
@@ -279,7 +282,7 @@ func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time, la
 	if err != nil {
 		return model.Job{}, err
 	}
-	if job.Request.Kind.Exclusive() && len(running) > 0 || !memoryAdmits(running, job) {
+	if job.Request.Kind.Exclusive() && len(running) > 0 || holdSimulators && job.Request.Kind.UsesSimulator() || !memoryAdmits(running, job) {
 		if err := tx.Commit(); err != nil {
 			return model.Job{}, err
 		}
