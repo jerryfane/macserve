@@ -176,8 +176,9 @@ resets the count; a finding resets it too and forgets the last valid health, so 
 failure can keep that health. Failures without evidence are a closed list, and anything else is a finding:
 the probe's deadline or a deadline inside it (`context deadline exceeded`, including a protected-input ACL
 inspection killed at its deadline, which reads `cannot inspect protected input ACL: signal: killed: context
-deadline exceeded`), the accepted CoreDevice `devicefs` changing during the census, and a configured coexisting
-service between two launchd runs. Findings include a changed GUI baseline or boot, a nested or crossed mount, a
+deadline exceeded`), the accepted CoreDevice `devicefs` changing during the census, a configured coexisting
+service between two launchd runs, and an inspection subprocess that exited but whose output did not close within
+its wait delay (`exec: WaitDelay expired before I/O complete`). Findings include a changed GUI baseline or boot, a nested or crossed mount, a
 special file or permission error in the census, a protected input that changed or is not root-protected, a
 persistence attestation that is invalid, needs review or changed during its read, a coexisting service that is
 not verifiably running, any qualification or evidence mismatch, and the daemon's own shutdown. At the 10 s cadence
