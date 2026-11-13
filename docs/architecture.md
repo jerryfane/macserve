@@ -156,7 +156,7 @@ observations, cron, OS metadata and the entire root/ancestor ACL stage; six seco
 eight for BTM, and one second for each of six membership checks. Each share is clamped by the enclosing
 deadline. Timeout or unavailable/partial output refuses this admission, never proves an empty census,
 and does not by itself durably revoke the attestation. A root/ancestor ACL stage its two seconds cut short
-observed nothing: it continues with a fresh two seconds, at most three in all, within the 30-second budget,
+observed nothing: it starts again, probing every path anew, with a fresh two seconds, at most three in all, within the 30-second budget,
 and a stage still cut short leaves the verdict to the idle check (see **Cleanup** below). Full persistence
 collection has its own 480-second bound.
 Modern registration inspection requires a complete,

@@ -262,3 +262,49 @@ func TestHotRootACLProbesShareOneAllocation(t *testing.T) {
 		t.Fatalf("root/ancestor census incomplete: calls=%d err=%v", calls, err)
 	}
 }
+
+// A root/ancestor ACL census attempt its deadline cut short leaves no
+// verdict behind: a registered root replaced between that attempt and its
+// retry (owner and mode acceptable, ACL granting the job account writes) is
+// probed again and refused, never passed on the replaced directory's probe.
+func TestHotRootACLRetryReinspectsReplacedRoot(t *testing.T) {
+	root := privateRootFixture(t)
+	bundle := filepath.Join(root, "Fixture.app")
+	if err := os.Mkdir(bundle, 0755); err != nil {
+		t.Fatal(err)
+	}
+	expected := PersistenceManifest{Code: map[string]RegisteredCode{"fixture": {Path: bundle}}}
+	var replacement os.FileInfo
+	calls := 0
+	err := inspectRegistrationRoots(context.Background(), expected, registrationWritersFixture(), func(ctx context.Context, writers registrationWriters, args ...string) error {
+		calls++
+		path := args[len(args)-1]
+		if replacement != nil && path == bundle {
+			if info, err := os.Lstat(bundle); err == nil && os.SameFile(info, replacement) {
+				return writers.checkACL(" 0: user:job allow write")
+			}
+		}
+		if calls != 2 {
+			return nil
+		}
+		// The first attempt probed the root; its ancestor's probe is cut
+		// short by the deadline, and the root is replaced before the retry.
+		if err := os.Rename(bundle, filepath.Join(root, "Original.app")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(bundle, 0755); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Lstat(bundle)
+		if err != nil {
+			t.Fatal(err)
+		}
+		replacement = info
+		expired, cancel := context.WithDeadline(ctx, time.Now())
+		defer cancel()
+		return registrationACLCommand(expired, writers, args...)
+	})
+	if !errors.Is(err, ErrContamination) || replacement == nil {
+		t.Fatalf("replaced root passed on the earlier attempt's probe: calls=%d err=%v", calls, err)
+	}
+}

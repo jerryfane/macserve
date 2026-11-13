@@ -54,13 +54,14 @@ func matchPersistenceCensus(expected PersistenceManifest, build string, current 
 // registered bundles are roots too; unrelated descendants, executable content,
 // signing and recursive ACLs belong exclusively to the full attestation scan.
 // A probe its deadline cut short (ErrACLCensusUnavailable) observed nothing:
-// the census continues with a fresh allocation, at most rootACLAttempts in
-// all and always within the caller's deadline, and probes that completed are
-// not repeated. Any other failure, or positive evidence, ends it at once.
+// the census starts again with a fresh allocation, at most rootACLAttempts
+// in all and always within the caller's deadline. Each attempt takes a fresh
+// ancestry snapshot and probes every path of it: a verdict of an earlier
+// attempt is never reused, as the path may name another directory by then.
+// Any other failure, or positive evidence, ends it at once.
 func inspectRegistrationRoots(ctx context.Context, expected PersistenceManifest, writers registrationWriters, acl func(context.Context, registrationWriters, ...string) error) error {
-	seen := make(map[string]bool, len(expected.Code))
 	for attempt := 1; ; attempt++ {
-		err := inspectRegistrationRootsOnce(ctx, expected, writers, acl, seen)
+		err := inspectRegistrationRootsOnce(ctx, expected, writers, acl)
 		if attempt == rootACLAttempts || !errors.Is(err, ErrACLCensusUnavailable) || ctx.Err() != nil {
 			return err
 		}
@@ -73,13 +74,13 @@ func inspectRegistrationRoots(ctx context.Context, expected PersistenceManifest,
 // failed a job's lane admission.
 const rootACLAttempts = 3
 
-// inspectRegistrationRootsOnce is one attempt; seen holds the paths whose
-// probes completed.
-func inspectRegistrationRootsOnce(ctx context.Context, expected PersistenceManifest, writers registrationWriters, acl func(context.Context, registrationWriters, ...string) error, seen map[string]bool) error {
+// inspectRegistrationRootsOnce is one attempt.
+func inspectRegistrationRootsOnce(ctx context.Context, expected PersistenceManifest, writers registrationWriters, acl func(context.Context, registrationWriters, ...string) error) error {
 	// All root and ancestor ACL probes of an attempt share one allocation,
 	// not 2s per path.
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
+	seen := make(map[string]bool, len(expected.Code))
 	for _, code := range expected.Code {
 		ancestry, err := registrationPath(code.Path, true, writers)
 		if err != nil {
