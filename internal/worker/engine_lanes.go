@@ -31,6 +31,11 @@ import (
 //     unattributed processes: none gives idle verdict "not_required"; any
 //     gives "deferred" and drains the engine, and the client holds the
 //     job's completion until the idle Recover judges them;
+//   - (at any lane count) an admission whose registered tree ACL census was
+//     cut short by its deadline, at a job's start or in its finalization
+//     alone, observed nothing: the job's cleanup stands, its idle verdict is
+//     "deferred", the engine drains, and the client holds its completion
+//     until the idle Recover judges the account;
 //   - while draining no job starts; Recover, which runs only when no job
 //     runs, applies the full quiesce and admission and then admits again.
 //
@@ -353,9 +358,12 @@ func residueList(residue []string) string {
 // and its idle verdict. A cleanup that is not verified drains the engine,
 // and a job that ended beside others leaves the full-account check to the
 // next idle Recover. A verified cleanup of a job alone is that idle check.
-// Unattributed residue beside others defers the verdict to that check,
-// which the client waits for before it completes the job.
-func (e *Engine) finishLane(jobID string, alone bool, result *Result) {
+// Unattributed residue beside others defers the verdict to that check, and
+// so does deferred, why a job's own successful cleanup could not be
+// verified (its admission's ACL census was unavailable); the client waits
+// for that check before it completes the job. deferred drains the engine at
+// any lane count.
+func (e *Engine) finishLane(jobID string, alone bool, deferred string, result *Result) {
 	c := result.Concurrency
 	c.OverlappedJobs = e.overlaps(jobID)
 	if !alone && result.CleanupOK && e.checkQuarantine() != nil {
@@ -363,7 +371,7 @@ func (e *Engine) finishLane(jobID string, alone bool, result *Result) {
 		result.CleanupOK = false
 	}
 	switch {
-	case !result.CleanupOK:
+	case !result.CleanupOK, deferred != "":
 		c.IdleVerdict = IdleDeferred
 	case alone:
 		c.IdleVerdict = IdleClean
@@ -371,6 +379,9 @@ func (e *Engine) finishLane(jobID string, alone bool, result *Result) {
 		c.IdleVerdict = IdleDeferred
 	default:
 		c.IdleVerdict = IdleNotRequired
+	}
+	if deferred != "" {
+		e.setDrain(deferred)
 	}
 	if !e.laneMode() {
 		return
@@ -382,7 +393,7 @@ func (e *Engine) finishLane(jobID string, alone bool, result *Result) {
 			e.drain = "job " + jobID + " cleanup unverified"
 		}
 		e.idlePending = true
-	} else if alone {
+	} else if alone && deferred == "" {
 		e.drain, e.idlePending = "", false
 	} else {
 		e.idlePending = true

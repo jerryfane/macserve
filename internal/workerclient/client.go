@@ -223,8 +223,10 @@ type laneHold struct {
 }
 
 // heldForIdle reports whether result is a completion held for the idle
-// check: the job's own cleanup succeeded, but unattributed processes
-// remained beside other jobs, and they may be the job's own.
+// check: the job's own cleanup succeeded, but the engine could not verify
+// the account (idle verdict deferred): unattributed processes remained
+// beside other jobs, and they may be the job's own, or an admission's
+// registered tree ACL census was cut short by its deadline.
 func heldForIdle(result worker.Result) bool {
 	return result.CleanupOK && result.Concurrency != nil && result.Concurrency.IdleVerdict == worker.IdleDeferred
 }
@@ -238,12 +240,12 @@ func heldForIdle(result worker.Result) bool {
 // A lease whose cleanup was not verified fences its epoch at the controller;
 // the client then drains: it asks for no lease, lets the other lanes finish,
 // and registers a new epoch only after Recover verifies the idle account.
-// A job that ended beside others with unattributed job-account processes
-// left is held: its completion waits for the next idle Recover, the full
-// quiesce and admission, and is delivered then with that verdict (clean, or
-// its cleanup unverified). No lease is asked for while one is held; the
-// held lane leaves running, so Recover runs once the others have finished,
-// also when Run returns.
+// A job whose completion the engine could not verify (heldForIdle) is held:
+// its completion waits for the next idle Recover, the full quiesce and
+// admission, and is delivered then with that verdict (clean, or its cleanup
+// unverified). No lease is asked for while one is held; the held lane
+// leaves running, so Recover runs once the others have finished, also when
+// Run returns.
 // An engine drain (an unattributed job-account process while jobs run) only
 // stops new lanes: nothing was fenced, so the epoch is kept, and a lease the
 // controller already prepared for it is delivered after the idle Recover.
@@ -456,13 +458,15 @@ func (c *Client) Run(ctx context.Context) (returned error) {
 // and SourceTree are the worker's own lease resolution and computed source
 // tree; Seal is the signed build seal over them and the result. A pending
 // file written before seals existed has none and is sealed on delivery.
+// AdmissionRefused is protocol.Completion's.
 type pending struct {
-	Epoch      string                `json:"epoch"`
-	Lease      protocol.Lease        `json:"lease"`
-	Result     worker.Result         `json:"result"`
-	Resolution *buildseal.Resolution `json:"resolution,omitempty"`
-	SourceTree string                `json:"source_tree,omitempty"`
-	Seal       *buildseal.Envelope   `json:"seal,omitempty"`
+	Epoch            string                    `json:"epoch"`
+	Lease            protocol.Lease            `json:"lease"`
+	Result           worker.Result             `json:"result"`
+	Resolution       *buildseal.Resolution     `json:"resolution,omitempty"`
+	SourceTree       string                    `json:"source_tree,omitempty"`
+	Seal             *buildseal.Envelope       `json:"seal,omitempty"`
+	AdmissionRefused protocol.AdmissionRefusal `json:"admission_refused,omitempty"`
 	// file is the name it was loaded from; empty for a new completion.
 	file string
 }
@@ -558,9 +562,9 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 		verdict := make(chan error, 1)
 		c.holds <- laneHold{jobID: lease.Job.ID, verdict: verdict}
 		if err := <-verdict; err != nil {
-			log.Printf("worker job %s idle check after its unattributed residue failed: %v", lease.Job.ID, err)
+			log.Printf("worker job %s deferred idle check failed: %v", lease.Job.ID, err)
 			result.CleanupOK = false
-			reason := "idle check of unattributed job-account processes failed: " + worker.PublicReason(err)
+			reason := "deferred idle check failed: " + worker.PublicReason(err)
 			if result.Reason != "" {
 				reason = result.Reason + "; " + reason
 			}
@@ -610,6 +614,12 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 	saved := pending{Epoch: epoch, Lease: lease, Result: result, Resolution: resolution}
 	if executed {
 		saved.SourceTree = c.engine.VerifiedTree(lease.Job.ID)
+	}
+	// The engine refused the job before it ran because its admission's ACL
+	// census was cut short on a loaded host, and the idle check then passed:
+	// the service, not the job, caused the failure (protocol.Completion).
+	if executed && result.State == model.Failed && result.CleanupOK && errors.Is(err, worker.ErrACLCensusUnavailable) {
+		saved.AdmissionRefused = protocol.AdmissionACLCensusUnavailable
 	}
 	seal, err := c.seal(saved)
 	if err != nil {
@@ -829,7 +839,7 @@ func (c *Client) loadPending(name string) (pending, error) {
 	if err := dec.Decode(new(any)); err != io.EOF {
 		return value, errors.New("trailing completion JSON")
 	}
-	if !safeID(value.Lease.Job.ID) || value.Lease.Token == "" || value.Epoch == "" {
+	if !safeID(value.Lease.Job.ID) || value.Lease.Token == "" || value.Epoch == "" || !value.AdmissionRefused.Valid() {
 		return value, errors.New("invalid pending completion")
 	}
 	value.file = name
@@ -897,7 +907,7 @@ func (c *Client) deliver(ctx context.Context, saved pending) error {
 		}
 		saved.Seal = &seal
 	}
-	status, err := c.json(ctx, http.MethodPost, "/jobs/"+jobID+"/complete", saved.Epoch, saved.Lease.Token, protocol.Completion{Result: saved.Result, Seal: *saved.Seal}, nil)
+	status, err := c.json(ctx, http.MethodPost, "/jobs/"+jobID+"/complete", saved.Epoch, saved.Lease.Token, protocol.Completion{Result: saved.Result, Seal: *saved.Seal, AdmissionRefused: saved.AdmissionRefused}, nil)
 	if err != nil && status != http.StatusGone {
 		return err
 	}

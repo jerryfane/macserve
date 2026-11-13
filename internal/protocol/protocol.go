@@ -43,8 +43,8 @@ type Heartbeat struct {
 }
 
 // Stage reports a lease's stage. Held (with Finalizing) reports that the
-// job's completion waits for the worker's next idle check: unattributed
-// job-account processes remained after its lane cleanup beside other jobs.
+// job's completion waits for the worker's next idle check: the worker could
+// not verify the account (worker.IdleDeferred with cleanup_ok).
 type Stage struct {
 	State model.State `json:"state"`
 	Held  bool        `json:"held,omitempty"`
@@ -57,8 +57,28 @@ type Log struct {
 
 // Completion is the worker's final report: its result and the root
 // worker's signed build seal over that result, which the controller passes
-// to the keyholder unchanged.
+// to the keyholder unchanged. AdmissionRefused is set only when the worker
+// refused the job before it ran for a cause of its own (a failed result
+// with cleanup_ok); the controller then ends the job cancelled by the
+// service (model.CancelWorkerAdmission). A controller from before this field
+// refuses a completion carrying it (unknown fields are refused), so the
+// worker and controller of one release ship together.
 type Completion struct {
-	Result worker.Result      `json:"result"`
-	Seal   buildseal.Envelope `json:"seal"`
+	Result           worker.Result      `json:"result"`
+	Seal             buildseal.Envelope `json:"seal"`
+	AdmissionRefused AdmissionRefusal   `json:"admission_refused,omitempty"`
+}
+
+// AdmissionRefusal is why the worker refused a job's admission before it
+// ran, when the service caused the refusal; empty for any other completion.
+type AdmissionRefusal string
+
+// AdmissionACLCensusUnavailable is an admission whose registered tree ACL
+// census its deadline cut short, on a loaded host, also after its retries
+// (worker.ErrACLCensusUnavailable): it observed nothing about the job.
+const AdmissionACLCensusUnavailable AdmissionRefusal = "acl_census_unavailable"
+
+// Valid reports whether r is empty or a known refusal.
+func (r AdmissionRefusal) Valid() bool {
+	return r == "" || r == AdmissionACLCensusUnavailable
 }

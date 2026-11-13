@@ -120,6 +120,65 @@ func TestCleanupAndDeliveryRetainTerminalEvidence(t *testing.T) {
 	}
 }
 
+// A completion the worker reports as its refusal of the job before it ran
+// for a cause of the service's own (admission_refused, Studio 2026-11-13: an
+// ACL census cut short on a loaded host) ends cancelled with cancel source
+// worker_admission, which pull mode reruns (#119), and keeps the epoch. The
+// same failure unflagged, a flagged one without cleanup_ok, and an unknown
+// refusal are judged as before or refused.
+func TestWorkerAdmissionRefusalEndsCancelledByService(t *testing.T) {
+	const reason = "lane admission: registered tree ACL census unavailable"
+	for name, tc := range map[string]struct {
+		refusal string
+		cleanup bool
+		status  int
+		state   model.State
+	}{
+		"refused":         {"acl_census_unavailable", true, http.StatusNoContent, model.Cancelled},
+		"unflagged":       {"", true, http.StatusNoContent, model.Failed},
+		"cleanup failed":  {"acl_census_unavailable", false, http.StatusNoContent, model.Failed},
+		"unknown refusal": {"disk_full", true, http.StatusBadRequest, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newRuntime(t)
+			c := f.controller
+			lease := f.lease(t, model.Build)
+			result := f.result(t, lease)
+			result.State, result.Reason, result.CleanupOK, result.ExitCode = model.Failed, reason, tc.cleanup, nil
+			completion := map[string]any{"result": result, "seal": buildseal.Envelope{}}
+			if tc.refusal != "" {
+				completion["admission_refused"] = tc.refusal
+			}
+			if status := lifecycleRequest(t, c, lease, "/complete", completion); status != tc.status {
+				t.Fatalf("completion status %d, want %d", status, tc.status)
+			}
+			job, err := f.db.Get(context.Background(), lease.Job.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.state == "" {
+				if job.State.Terminal() || job.CancelRequested {
+					t.Fatalf("refused completion changed the job: %+v", job)
+				}
+				return
+			}
+			if job.State != tc.state || job.CleanupOK != tc.cleanup {
+				t.Fatalf("job %+v, want state %s", job, tc.state)
+			}
+			serviceCancelled := job.CancelReason != nil && job.CancelReason.Source == "worker_admission" && job.CancelReason.Detail == reason
+			if serviceCancelled != (tc.state == model.Cancelled) {
+				t.Fatalf("cancel reason %+v for state %s", job.CancelReason, job.State)
+			}
+			c.mu.Lock()
+			fenced := c.epoch == ""
+			c.mu.Unlock()
+			if fenced == tc.cleanup {
+				t.Fatalf("epoch fenced %v with cleanup_ok %v", fenced, tc.cleanup)
+			}
+		})
+	}
+}
+
 func TestFinalizingHeartbeatsCannotExtendBound(t *testing.T) {
 	f := newRuntime(t)
 	c := f.controller

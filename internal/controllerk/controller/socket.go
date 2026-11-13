@@ -129,6 +129,10 @@ func (c *Controller) handler() http.Handler {
 			respond(w, r, nil, err)
 			return
 		}
+		if err := c.refusedAdmission(r.Context(), job, completion); err != nil {
+			respond(w, r, nil, err)
+			return
+		}
 		respond(w, r, nil, c.complete(r.Context(), job, completion.Result, completion.Seal))
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

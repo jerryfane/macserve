@@ -17,6 +17,7 @@ import (
 	"github.com/jerryfane/macserve/internal/evidence"
 	"github.com/jerryfane/macserve/internal/model"
 	"github.com/jerryfane/macserve/internal/profiles"
+	"github.com/jerryfane/macserve/internal/protocol"
 	"github.com/jerryfane/macserve/internal/worker"
 )
 
@@ -27,6 +28,35 @@ func completionDigest(result worker.Result) (string, error) {
 	}
 	digest := sha256.Sum256(bytes)
 	return hex.EncodeToString(digest[:]), nil
+}
+
+// refusedAdmission records a completion the worker reports as its refusal
+// of the job before it ran, for a cause of the service's own
+// (protocol.Completion.AdmissionRefused), as the controller's cancellation
+// worker_admission before complete judges it: the job ends cancelled, not
+// failed, and pull mode reruns its head (#119). Only a failed result with
+// cleanup_ok qualifies; any other completion is judged as it is, and a
+// replay of a terminal job's completion is left to complete. An unknown
+// refusal is invalid.
+func (c *Controller) refusedAdmission(ctx context.Context, job model.Job, completion protocol.Completion) error {
+	refusal, result := completion.AdmissionRefused, completion.Result
+	if !refusal.Valid() {
+		return store.ErrInvalid
+	}
+	if refusal == "" || result.State != model.Failed || !result.CleanupOK || job.State.Terminal() {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if a := c.execution(job.ID); a == nil || !a.offered {
+		return store.ErrLease
+	}
+	current, err := c.options.Store.Get(ctx, job.ID)
+	if err != nil {
+		return err
+	}
+	_, err = c.cancelJob(ctx, current, "worker refused admission: "+string(refusal), model.CancelReason{Source: model.CancelWorkerAdmission, Detail: result.Reason}, c.options.Now())
+	return err
 }
 
 func (c *Controller) complete(ctx context.Context, job model.Job, result worker.Result, seal buildseal.Envelope) error {

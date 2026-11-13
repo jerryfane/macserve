@@ -71,7 +71,10 @@ const (
 // cancelled or interrupted with a recorded cancel reason whose source is
 //   - host_readiness or gate_error (the readiness gate),
 //   - controller_shutdown (the controller stopped with it active),
-//   - admin_pause (an administrator's cancel_active pause), or
+//   - admin_pause (an administrator's cancel_active pause),
+//   - worker_admission (the worker refused it before it ran for a cause of
+//     its own, such as a registered tree ACL census cut short on a loaded
+//     host), or
 //   - client from a principal other than the job's own (an operator's
 //     POST /v1/jobs/<id>/cancel; a GitHub attempt's principal is
 //     github:<repository id>, never an API principal, so every API cancel of
@@ -87,7 +90,7 @@ func serviceEnded(job model.Job, automatic bool) bool {
 		return false
 	}
 	switch job.CancelReason.Source {
-	case model.CancelHostReadiness, model.CancelGateError, model.CancelShutdown, model.CancelAdminPause:
+	case model.CancelHostReadiness, model.CancelGateError, model.CancelShutdown, model.CancelAdminPause, model.CancelWorkerAdmission:
 		return true
 	case model.CancelClient:
 		return job.CancelReason.Principal != job.Principal && !automatic

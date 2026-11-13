@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"slices"
@@ -19,8 +20,10 @@ import (
 
 // holdWorld is a fake controller and engine sharing one event log. The
 // engine runs each job until its gate closes; job "j_held" ends beside the
-// other with unattributed residue (idle verdict deferred). Recover records
-// whether a job still executed.
+// other with unattributed residue (idle verdict deferred); job "j_refused"
+// is refused at once, before it runs, by an admission ACL census cut short
+// (cleanup_ok, idle verdict deferred). Recover records whether a job still
+// executed.
 type holdWorld struct {
 	t         *testing.T
 	mu        sync.Mutex
@@ -29,6 +32,7 @@ type holdWorld struct {
 	events    []string
 	epochs    []string
 	complete  map[string]worker.Result
+	refused   map[string]protocol.AdmissionRefusal
 	gates     map[string]chan struct{}
 	started   chan string
 	live      int
@@ -45,7 +49,7 @@ type holdWorld struct {
 }
 
 func newHoldWorld(t *testing.T, queue ...string) *holdWorld {
-	w := &holdWorld{t: t, queue: queue, deadlines: map[string]time.Time{}, complete: map[string]worker.Result{}, gates: map[string]chan struct{}{}, started: make(chan string, 8), finalizing: map[string]time.Time{}, heldAcked: map[string]bool{}}
+	w := &holdWorld{t: t, queue: queue, deadlines: map[string]time.Time{}, complete: map[string]worker.Result{}, refused: map[string]protocol.AdmissionRefusal{}, gates: map[string]chan struct{}{}, started: make(chan string, 8), finalizing: map[string]time.Time{}, heldAcked: map[string]bool{}}
 	for _, id := range queue {
 		w.gates[id] = make(chan struct{})
 	}
@@ -126,6 +130,7 @@ func (w *holdWorld) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		var completion protocol.Completion
 		json.NewDecoder(r.Body).Decode(&completion)
 		w.complete[id] = completion.Result
+		w.refused[id] = completion.AdmissionRefused
 		w.events = append(w.events, "complete "+id)
 		rw.WriteHeader(http.StatusNoContent)
 	case strings.HasSuffix(path, "/heartbeat"):
@@ -153,6 +158,13 @@ func (w *holdWorld) executor() *fakeExecutor {
 		},
 		execute: func(ctx context.Context, job model.Job, _ worker.Source, r io.Reader, sink worker.Sink) (worker.Result, error) {
 			io.ReadAll(r)
+			if job.ID == "j_refused" {
+				w.mu.Lock()
+				w.held = true
+				w.mu.Unlock()
+				err := fmt.Errorf("lane admission: %w", worker.ErrACLCensusUnavailable)
+				return worker.Result{State: model.Failed, Reason: err.Error(), CleanupOK: true, StartedAt: time.Now(), FinishedAt: time.Now(), Concurrency: &worker.Concurrency{Lane: 2, MaxLanes: 2, Attribution: worker.AttributionLineage, IdleVerdict: worker.IdleDeferred}}, err
+			}
 			w.mu.Lock()
 			w.live++
 			gate := w.gates[job.ID]
@@ -318,5 +330,48 @@ func TestHeldStageRetriedUntilRecorded(t *testing.T) {
 	defer w.mu.Unlock()
 	if result := w.complete["j_held"]; result.State != model.Succeeded || !result.CleanupOK || result.Concurrency.IdleVerdict != worker.IdleClean {
 		t.Fatalf("held completion: %+v", result)
+	}
+}
+
+// A job the engine refused before it ran because its admission's ACL census
+// was cut short is held for the idle check like any deferred verdict, and
+// is reported as that service-caused refusal (admission_refused) only when
+// the check passed; the sibling's completion carries no refusal, and a
+// failed idle check reports an unverified cleanup instead.
+func TestCensusAdmissionRefusalReportedAfterIdleCheck(t *testing.T) {
+	for name, recoverErr := range map[string]error{"clean": nil, "contaminated": worker.ErrContamination} {
+		t.Run(name, func(t *testing.T) {
+			w := newHoldWorld(t, "j_sib", "j_refused")
+			w.recoverErr = recoverErr
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			done, _ := w.run(ctx)
+			<-w.started
+			w.wait(ctx, "held j_refused")
+			if slices.Contains(w.snapshot(), "complete j_refused") {
+				t.Fatalf("refusal delivered before the idle check: %v", w.snapshot())
+			}
+			close(w.gates["j_sib"])
+			w.wait(ctx, "complete j_refused")
+			cancel()
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			if events := w.snapshot(); !before(events, "complete j_sib", "recover") || !before(events, "recover", "complete j_refused") {
+				t.Fatalf("refusal hold order: %v", events)
+			}
+			w.mu.Lock()
+			defer w.mu.Unlock()
+			result, refused := w.complete["j_refused"], w.refused["j_refused"]
+			if recoverErr == nil && (result.State != model.Failed || !result.CleanupOK || result.Concurrency.IdleVerdict != worker.IdleClean || refused != protocol.AdmissionACLCensusUnavailable) {
+				t.Fatalf("refusal after a clean idle check: %+v refused %q", result, refused)
+			}
+			if recoverErr != nil && (result.CleanupOK || refused != "") {
+				t.Fatalf("refusal after a failed idle check: %+v refused %q", result, refused)
+			}
+			if w.refused["j_sib"] != "" {
+				t.Fatalf("sibling reported as refused: %q", w.refused["j_sib"])
+			}
+		})
 	}
 }

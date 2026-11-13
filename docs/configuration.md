@@ -47,10 +47,14 @@ Optional `signer` connects the controller to the [code signer](#code-signer).
   no collected completion have no execution receipt; GitHub reports non-success, never invented evidence.
 - A job whose cancellation was requested carries `cancel_reason` in `GET /v1/jobs/{id}`, the `GET /v1/jobs` list and
   the cancel response: `source` (`client`, `admin_pause`, `deadline`, `host_readiness`, `gate_error`, `log_limit`,
-  `controller_shutdown` or `github`), `at` (when the request was recorded), `principal` for `client` and
-  `admin_pause`, `blockers` (the readiness gate's, e.g. `isolation_unavailable`, `host_memory_pressure`) for
-  `host_readiness`, and an optional `detail` of at most 512 bytes (the client or pause reason, the gate error, the
-  gate's free and accounted bytes). Only the first request is recorded and it survives the job's finish, whose
+  `controller_shutdown`, `github` or `worker_admission`), `at` (when the request was recorded), `principal` for
+  `client` and `admin_pause`, `blockers` (the readiness gate's, e.g. `isolation_unavailable`,
+  `host_memory_pressure`) for `host_readiness`, and an optional `detail` of at most 512 bytes (the client or pause
+  reason, the gate error, the gate's free and accounted bytes, the worker's refusal reason). The controller records
+  `worker_admission` when the worker reports that it refused the job before it ran for a cause of the service's
+  own (`admission_refused` in its completion; `acl_census_unavailable`: a registered tree ACL census cut short on a
+  loaded host) with a failed result and `cleanup_ok`; the job then ends `cancelled`. Only the first request is
+  recorded and it survives the job's finish, whose
   `reason` says only `cancellation requested`. Receipts never carry it and are byte-identical with or without it;
   jobs never cancelled, or cancelled before this field existed (store schema version 6), have none.
 - `PUT /v1/admin/pause` accepts `{"reason":"benchmark","mode":"drain"}` or `cancel_active`.

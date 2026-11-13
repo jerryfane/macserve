@@ -53,8 +53,31 @@ func matchPersistenceCensus(expected PersistenceManifest, build string, current 
 // Only each accepted registration ROOT and its ancestors are checked. Nested
 // registered bundles are roots too; unrelated descendants, executable content,
 // signing and recursive ACLs belong exclusively to the full attestation scan.
+// A probe its deadline cut short (ErrACLCensusUnavailable) observed nothing:
+// the census starts again with a fresh allocation, at most rootACLAttempts
+// in all and always within the caller's deadline. Each attempt takes a fresh
+// ancestry snapshot and probes every path of it: a verdict of an earlier
+// attempt is never reused, as the path may name another directory by then.
+// Any other failure, or positive evidence, ends it at once.
 func inspectRegistrationRoots(ctx context.Context, expected PersistenceManifest, writers registrationWriters, acl func(context.Context, registrationWriters, ...string) error) error {
-	// All root and ancestor ACL probes share one allocation, not 2s per path.
+	for attempt := 1; ; attempt++ {
+		err := inspectRegistrationRootsOnce(ctx, expected, writers, acl)
+		if attempt == rootACLAttempts || !errors.Is(err, ErrACLCensusUnavailable) || ctx.Err() != nil {
+			return err
+		}
+	}
+}
+
+// rootACLAttempts bounds the hot root/ancestor ACL census: 3 allocations of
+// 2s, clamped by the 30s hot budget. Studio, 2026-11-13: with four lanes
+// building beside the periodic full scan, one 2s allocation expired and
+// failed a job's lane admission.
+const rootACLAttempts = 3
+
+// inspectRegistrationRootsOnce is one attempt.
+func inspectRegistrationRootsOnce(ctx context.Context, expected PersistenceManifest, writers registrationWriters, acl func(context.Context, registrationWriters, ...string) error) error {
+	// All root and ancestor ACL probes of an attempt share one allocation,
+	// not 2s per path.
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	seen := make(map[string]bool, len(expected.Code))
@@ -65,7 +88,7 @@ func inspectRegistrationRoots(ctx context.Context, expected PersistenceManifest,
 		}
 		for _, entry := range ancestry {
 			if err := ctx.Err(); err != nil {
-				return err
+				return aclCensusCut(err)
 			}
 			if !seen[entry.path] {
 				if err := acl(ctx, writers, "-ldeb", entry.path); err != nil {
@@ -78,7 +101,16 @@ func inspectRegistrationRoots(ctx context.Context, expected PersistenceManifest,
 			return err
 		}
 	}
-	return ctx.Err()
+	return aclCensusCut(ctx.Err())
+}
+
+// aclCensusCut is ErrACLCensusUnavailable for a census its deadline ended,
+// else err.
+func aclCensusCut(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return ErrACLCensusUnavailable
+	}
+	return err
 }
 
 func verifyHotPersistence(ctx context.Context, options Options, inspect func(context.Context, Options, PersistenceManifest) error) (result error) {

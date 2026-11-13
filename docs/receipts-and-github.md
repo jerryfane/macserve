@@ -120,7 +120,9 @@ active attempts are joined. Correlations are durable and capped at 128 per attem
 Pull mode also reruns heads the service ended (#119). When an `ensure` admission (every poll of an eligible
 head, owner-form or repository-form, and `mode=ensure` comments) finds the run's latest attempt `cancelled` or
 `interrupted` with a recorded cancel reason of `host_readiness`, `gate_error`, `controller_shutdown`,
-`admin_pause` (an administrator's `cancel_active` pause) or `client` by a principal other than the job's own
+`admin_pause` (an administrator's `cancel_active` pause), `worker_admission` (the worker refused the job before it
+ran for a cause of the service's own, such as a registered tree ACL census cut short on a loaded host) or `client`
+by a principal other than the job's own
 (an operator's `POST /v1/jobs/<id>/cancel`; a GitHub attempt's principal is `github:<repository id>`, so every
 API cancel of one is an operator's), it starts one new attempt in the same logical run, published to the same
 `mac-evidence/<profile>` check. It never reruns an attempt cancelled by GitHub intake (`github`: supersession or
@@ -374,8 +376,9 @@ the full manifest's worker result carries, so the compact receipt stays within i
 `lineage+device/v1`: the lane attribution of docs/architecture.md), `unattributed_residue` and `idle_verdict`
 (`clean`: the job ended with the full job-account check; `not_required`: siblings ran, its own processes and
 simulator were removed and nothing unattributed remained; `deferred`: cleanup unverified). A job whose lane cleanup
-left unattributed processes beside other jobs is completed only after the worker's next idle check: `clean` (with
-`unattributed_residue` above 0) when it passed, else `deferred` with `cleanup_ok` false. `resources` gains
+left unattributed processes beside other jobs, or whose admission's registered-root ACL census was cut short by its
+deadline (docs/architecture.md, Cleanup), is completed only after the worker's next idle check: `clean` (with any
+`unattributed_residue` recorded) when it passed, else `deferred` with `cleanup_ok` false. `resources` gains
 `host_peak_memory_mib` when sampled. A success receipt requires `cleanup_ok` and an idle verdict of `clean` or
 `not_required`. Schema-1 receipts stay valid and carry neither field.
 
