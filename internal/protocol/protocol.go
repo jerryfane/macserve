@@ -74,7 +74,8 @@ type Completion struct {
 type AdmissionRefusal string
 
 // AdmissionACLCensusUnavailable is an admission whose registered tree ACL
-// census its deadline cut short, on a loaded host, also after its retries
+// census its deadline cut short, on a loaded host, also after its retries,
+// or whose protected-input ACL inspection its deadline cut short
 // (worker.ErrACLCensusUnavailable): it observed nothing about the job.
 const AdmissionACLCensusUnavailable AdmissionRefusal = "acl_census_unavailable"
 

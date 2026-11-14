@@ -52,8 +52,9 @@ Optional `signer` connects the controller to the [code signer](#code-signer).
   `host_memory_pressure`) for `host_readiness`, and an optional `detail` of at most 512 bytes (the client or pause
   reason, the gate error, the gate's free and accounted bytes, the worker's refusal reason). The controller records
   `worker_admission` when the worker reports that it refused the job before it ran for a cause of the service's
-  own (`admission_refused` in its completion; `acl_census_unavailable`: a registered tree ACL census cut short on a
-  loaded host) with a failed result and `cleanup_ok`; the job then ends `cancelled`. Only the first request is
+  own (`admission_refused` in its completion; `acl_census_unavailable`: a registered tree ACL census or a
+  protected-input ACL inspection cut short by its deadline on a loaded host) with a failed result and `cleanup_ok`;
+  the job then ends `cancelled`. Only the first request is
   recorded and it survives the job's finish, whose
   `reason` says only `cancellation requested`. Receipts never carry it and are byte-identical with or without it;
   jobs never cancelled, or cancelled before this field existed (store schema version 6), have none.
@@ -445,7 +446,9 @@ idle, but keeps its epoch (nothing was fenced), and stops asking the controller 
 until idle: ...`, once per drain) names each such process by PID, kernel parent, start, executable and arguments, and
 each audited GUI-session process that is gone without a verified relaunch by PID, start, launchd label and executable.
 An audited agent that exited on its own, with nothing unattributed beside it, does not drain: the idle admission accepts
-that state too. A lease the controller prepared for the next lane and could not deliver because the worker stopped
+that state too. Nor does the macOS crash dialog (`Problem Reporter`) or its `SetStoreUpdateService` and
+`SpeechSynthesisServerXPC` XPC services while a running job that began before they started has yet to run its lane
+cleanup, which terminates them (docs/architecture.md, Cleanup). A lease the controller prepared for the next lane and could not deliver because the worker stopped
 asking returns to the queue after one minute without a work request (beside a delivered lease of the same epoch): its
 source is removed, its lane, lease and deadline are released, its reason reads `returned to queue: the worker stopped
 asking for another lane before delivery`, and it keeps its place in the fair order. It waits as `queued`, at no cost to
