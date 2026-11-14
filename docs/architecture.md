@@ -156,8 +156,10 @@ observations, cron, OS metadata and the entire root/ancestor ACL stage; six seco
 eight for BTM, and one second for each of six membership checks. Each share is clamped by the enclosing
 deadline. Timeout or unavailable/partial output refuses this admission, never proves an empty census,
 and does not by itself durably revoke the attestation. A root/ancestor ACL stage its two seconds cut short
-observed nothing: it starts again, probing every path anew, with a fresh two seconds, at most three in all, within the 30-second budget,
-and a stage still cut short leaves the verdict to the idle check (see **Cleanup** below). Full persistence
+observed nothing: it starts again, probing every path anew, with a fresh two seconds, at most three in all, within the 30-second budget.
+A stage still cut short, or a protected-input ACL inspection of the persistence authority cut short by its deadline,
+refuses only the job about to start, and after a job that ended alone leaves the verdict to the idle check (see
+**Cleanup** below). Full persistence
 collection has its own 480-second bound.
 Modern registration inspection requires a complete,
 recognized job-UID `sfltool dumpbtm` census matching the separately accepted protected manifest; missing,
@@ -330,16 +332,44 @@ survivor = contamination and quarantine, as before), never a shared service or a
 second census 1 s later (short-lived build helpers such as SwiftPM's `git` are not counted) drains the broker and
 *holds* the job's completion. Attribution is not complete (a child reparented before it was labelled, or whose
 lineage could not be read, is unattributed), so such a process may be the job's own, and only the idle check can tell.
-An admission whose registered-root ACL census was still cut short by its deadline (a loaded host) observed nothing,
-which is no evidence either way. It holds the completion and drains the broker at any lane count too: when a job ends
-alone, the job keeps its own result and successful cleanup until the idle check; when the job is starting, it is refused
-before it runs, with reason `lane admission: registered tree ACL census unavailable` (`admission: …` for a job starting
-alone) and `cleanup_ok` true, since nothing of it ran. When the idle check passes, that completion carries
-`admission_refused: acl_census_unavailable`, and the controller records the cancellation `worker_admission` before
-judging it: the job ends `cancelled` by the service, so pull mode reruns its head (#119). A controller from before this
+
+*Crash agents* (`internal/worker/crash_agents.go`, #146) are the exception. When a job's process crashes (a crash test,
+a failing UI test), launchd starts the macOS crash dialog `/System/Library/CoreServices/Problem Reporter.app` in the
+job's GUI session, and beside it the XPC services `SetStoreUpdateService` (CascadeSets) and
+`SpeechSynthesisServerXPC` (SpeechSynthesis). The dialog waits for a click that never comes, so before v0.1.56 every
+lane that finished beside others deferred and drained the broker, and the lanes ran as batches. An instance whose
+kernel facts prove all of this is a crash agent: the job UID, parent PID 1 (launchd), a valid platform binary, a
+kernel executable path (`PROC_PIDPATHINFO`) equal to one of those three paths under `/System` and SIP-restricted, and
+a start after a running job began and before that job's lane quiesce began. It is that job's to stop, not
+unattributed: it neither drains nor refuses a lane admission. That job's lane quiesce terminates it with the job's own
+processes (same signals, survivor rule and settle bound; only instances started before that quiesce began, so a
+sibling crashing again cannot keep it busy). A job ending alone stops it with the full quiesce, like any residual
+process. They are terminated rather than tolerated: none has a launchd record that proves Apple's own definition (the
+dialog is an application, not a LaunchAgent; the XPC services belong to a pid domain whose owner, the dialog, is never
+verified), terminating them loses nothing (ReportCrash wrote the crash report before the dialog showed it; the XPC
+services are stateless and launchd starts them again on demand), and nothing joins a tolerated set. A crash agent no
+running job covers (older than every running job, or started after the lane quiesce of every job that began before
+it), a copy outside SIP, one the job forked itself, any other path, and every other unattributed process still drain
+and hold as above.
+
+An admission whose ACL census was still cut short by its deadline (a loaded host) observed nothing, which is no
+evidence either way: the registered-root ACL census after its retries, or `hostguard`'s protected-input ACL
+inspection of the persistence authority (`cannot inspect protected input ACL: signal: killed: context deadline
+exceeded`). A registered-root `ls` that exited but whose output did not close within its wait delay
+(`exec.ErrWaitDelay`) counts as cut short too. When a job ends alone, the job keeps its own result and successful
+cleanup until the idle check, which holds the completion and drains the broker. When the job is starting, only that
+job is refused before it runs (#148), with reason `lane admission: registered tree ACL census unavailable` or `lane
+admission: cannot inspect protected input ACL: …` (`admission: …` for a job starting alone), `cleanup_ok` true and
+idle verdict `not_required`, since nothing of it ran. Nothing is quarantined, the broker does not drain and the
+completion is not held: the running jobs were admitted on their own evidence, and every later admission takes its
+own census before its job starts. The completion carries `admission_refused: acl_census_unavailable`, and the
+controller records the cancellation `worker_admission` before judging it: the job ends `cancelled` by the service,
+so pull mode reruns its head (#119). A controller from before this
 field refuses such a completion (the worker transport refuses unknown fields), so the worker and the controller of one
-release ship together. A census that ran and failed, or that found a writable ACL, fails the cleanup as before.
-The worker reports the hold to the controller (stage `finalizing`, `held`), keeps the lease alive by heartbeat, asks for
+release ship together. A census or inspection that ran and failed (its reason names the cause, such as `registered tree
+ACL census failed: exit status 1`), or that found a writable ACL, fails the cleanup as before, and a writable ACL
+quarantines.
+For a held completion, the worker reports the hold to the controller (stage `finalizing`, `held`), keeps the lease alive by heartbeat, asks for
 no lease, and delivers the completion after the next idle `Recover`: with its own result and idle verdict `clean` when
 that full quiesce and admission pass (the residue count stays recorded), else with `cleanup_ok` false (the job fails,
 and a survivor quarantines the account). A worker that stops while a completion is held still waits for the other

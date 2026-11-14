@@ -80,6 +80,9 @@ type laneJob struct {
 	// adopt is when the job began adopting devices no job created; zero
 	// when it does not.
 	adopt time.Time
+	// quiesced is when the job's latest lane quiesce began (QuiesceJob);
+	// zero before its first. Crash agents started since are not its.
+	quiesced time.Time
 }
 
 // laneLabelConflict marks an instance two jobs claim.
@@ -171,6 +174,40 @@ func (t *laneTracker) active() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return len(t.jobs) != 0
+}
+
+// crashWindow is the span of crash agent starts a running job's lane
+// quiesce still covers: from the job's start until its latest lane quiesce
+// began; until is zero (open) before its first.
+type crashWindow struct{ from, until time.Time }
+
+func (w crashWindow) covers(started time.Time) bool {
+	return !started.Before(w.from) && (w.until.IsZero() || started.Before(w.until))
+}
+
+// quiesce records that jobID's lane quiesce begins at begun and returns the
+// crash agents' window it covers: from the job's start until begun. ok is
+// false when jobID does not run.
+func (t *laneTracker) quiesce(jobID string, begun time.Time) (crashWindow, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	j := t.jobs[jobID]
+	if j == nil {
+		return crashWindow{}, false
+	}
+	j.quiesced = begun
+	return crashWindow{j.started, begun}, true
+}
+
+// crashWindows returns every running job's crashWindow.
+func (t *laneTracker) crashWindows() []crashWindow {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	windows := make([]crashWindow, 0, len(t.jobs))
+	for _, j := range t.jobs {
+		windows = append(windows, crashWindow{j.started, j.quiesced})
+	}
+	return windows
 }
 
 var deviceDirectory = regexp.MustCompile(`/CoreSimulator/Devices/([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})/`)
@@ -447,16 +484,19 @@ type laneRunner interface {
 	// running job created (AttachDevice): those a concurrent script job's
 	// script creates. While several jobs adopt, none does.
 	AdoptDevices(jobID string, from time.Time)
-	// QuiesceJob terminates jobID's labelled processes only: never a
-	// baseline, tolerated, unattributed or another job's process. A survivor
-	// is contamination.
+	// QuiesceJob terminates jobID's labelled processes and the crash agents
+	// (crash_agents.go) started since jobID began and before this quiesce:
+	// never a baseline, tolerated, unattributed or another job's process. A
+	// survivor is contamination.
 	QuiesceJob(ctx context.Context, jobID string) error
 	// Residue describes each job-UID process no job's lineage claims and the
 	// census neither audits nor tolerates (unattributed), without signalling
-	// any: one entry each, none when there is no residue.
+	// any: one entry each, none when there is no residue. A crash agent a
+	// running job's lane quiesce will still terminate is not residue.
 	Residue(ctx context.Context) ([]string, error)
 	// LaneAdmission is Admission while other jobs run: their labelled
-	// processes are not residual, and an unattributed process refuses with
+	// processes and the crash agents their lane quiesces will still
+	// terminate are not residual, and an unattributed process refuses with
 	// ErrDrain instead of contamination.
 	LaneAdmission(ctx context.Context) error
 }
@@ -528,8 +568,11 @@ func (r *nativeRunner) identities(ctx context.Context) ([]processSample, error) 
 // QuiesceJob is the lane quiesce: the quiesce algorithm (processScope.quiesce:
 // SIGTERM in the first grace, SIGKILL after, an instance listed two graces
 // after its first sighting is a survivor, settle after ten graces) restricted
-// to jobID's labelled instances. Tolerated launches are never signalled here:
-// they serve every job.
+// to jobID's labelled instances and the crash agents (crash_agents.go) that
+// started after jobID began and before this quiesce did (its crashWindow,
+// which this quiesce closes): a bounded set, so a sibling that keeps
+// crashing cannot make this job's quiesce keep finding new ones. Tolerated
+// launches are never signalled here: they serve every job.
 func (r *nativeRunner) QuiesceJob(ctx context.Context, jobID string) error {
 	if r.scope == nil || r.scope.signal == nil {
 		return errors.New("protected job process scope is required")
@@ -537,6 +580,7 @@ func (r *nativeRunner) QuiesceJob(ctx context.Context, jobID string) error {
 	tracker := r.laneTracker()
 	s := r.scope
 	begun := time.Now()
+	window, running := tracker.quiesce(jobID, begun)
 	termUntil := begun.Add(s.grace)
 	settleUntil := begun.Add(quiesceSettleGraces * s.grace)
 	firstSeen := map[processInstance]time.Time{}
@@ -551,7 +595,10 @@ func (r *nativeRunner) QuiesceJob(ctx context.Context, jobID string) error {
 			return errors.Join(ErrCleanup, err)
 		}
 		tracker.update(samples)
-		mine, _, _ := tracker.classify(samples, jobID)
+		mine, labelled, _ := tracker.classify(samples, jobID)
+		if running {
+			mine = append(mine, r.crashAgents(samples, labelled, []crashWindow{window})...)
+		}
 		if len(mine) == 0 {
 			if empty {
 				return nil
@@ -595,12 +642,18 @@ func (r *nativeRunner) QuiesceJob(ctx context.Context, jobID string) error {
 	}
 }
 
-// laneCensus is the census of samples without any job's labelled instances
-// and the broker's helpers: the processes no running job accounts for.
+// laneCensus is the census of samples without any job's labelled instances,
+// the crash agents a running job's lane quiesce will still terminate (its
+// crashWindow) and the broker's helpers: the processes no running job
+// accounts for. A crash agent that started after a job's last lane quiesce
+// began is not that job's: when no other job covers it, it is residue.
 func (r *nativeRunner) laneCensus(ctx context.Context, samples []processSample) (processCensus, error) {
 	tracker := r.laneTracker()
 	tracker.update(samples)
 	_, labelled, helpers := tracker.classify(samples, "")
+	for _, p := range r.crashAgents(samples, labelled, tracker.crashWindows()) {
+		helpers[processInstance{p.pid, p.start}] = true
+	}
 	rest := make([]processSample, 0, len(samples))
 	for _, p := range samples {
 		key := processInstance{p.pid, p.start}

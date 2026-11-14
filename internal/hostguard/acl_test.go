@@ -39,7 +39,9 @@ func TestProtectedPathCanceledObservationDoesNotInspect(t *testing.T) {
 
 // An ACL inspection killed at its deadline (Studio, 2026-11-10 08:45:12Z:
 // "cannot inspect protected input ACL: signal: killed", which cancelled a job,
-// #108) is a deadline, not a finding; a command that fails on its own is not.
+// #108) is a deadline, not a finding, and marked as cut short (#148: it
+// quarantined the service at a job's admission); a command that fails on its
+// own is neither.
 func TestACLInspectionKilledAtDeadlineIsADeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -47,11 +49,14 @@ func TestACLInspectionKilledAtDeadlineIsADeadline(t *testing.T) {
 	if err == nil || errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("exec no longer reports a killed command as its exit: %v", err)
 	}
-	if got := aclCommandError(ctx, err); !errors.Is(got, context.DeadlineExceeded) || got.Error() != "cannot inspect protected input ACL: signal: killed: context deadline exceeded" {
+	if got := aclCommandError(ctx, err); !errors.Is(got, context.DeadlineExceeded) || !errors.Is(got, ErrACLInspectionCut) || got.Error() != "cannot inspect protected input ACL: signal: killed: context deadline exceeded" {
 		t.Fatalf("killed at deadline: %v", got)
 	}
+	if got := CheckProtectedPathContext(ctx, "/", true); !errors.Is(got, ErrACLInspectionCut) {
+		t.Fatalf("inspection after its deadline: %v", got)
+	}
 	_, err = exec.CommandContext(context.Background(), "/bin/sh", "-c", "exit 1").Output()
-	if got := aclCommandError(context.Background(), err); got == nil || errors.Is(got, context.DeadlineExceeded) {
+	if got := aclCommandError(context.Background(), err); got == nil || errors.Is(got, context.DeadlineExceeded) || errors.Is(got, ErrACLInspectionCut) {
 		t.Fatalf("failed command: %v", got)
 	}
 	if aclCommandError(context.Background(), nil) != nil {
