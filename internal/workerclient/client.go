@@ -225,8 +225,8 @@ type laneHold struct {
 // heldForIdle reports whether result is a completion held for the idle
 // check: the job's own cleanup succeeded, but the engine could not verify
 // the account (idle verdict deferred): unattributed processes remained
-// beside other jobs, and they may be the job's own, or an admission's
-// registered tree ACL census was cut short by its deadline.
+// beside other jobs, and they may be the job's own, or the ACL census of a
+// job's final admission, alone, was cut short by its deadline.
 func heldForIdle(result worker.Result) bool {
 	return result.CleanupOK && result.Concurrency != nil && result.Concurrency.IdleVerdict == worker.IdleDeferred
 }
@@ -616,8 +616,8 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 		saved.SourceTree = c.engine.VerifiedTree(lease.Job.ID)
 	}
 	// The engine refused the job before it ran because its admission's ACL
-	// census was cut short on a loaded host, and the idle check then passed:
-	// the service, not the job, caused the failure (protocol.Completion).
+	// census was cut short on a loaded host: the service, not the job,
+	// caused the failure (protocol.Completion).
 	if executed && result.State == model.Failed && result.CleanupOK && errors.Is(err, worker.ErrACLCensusUnavailable) {
 		saved.AdmissionRefused = protocol.AdmissionACLCensusUnavailable
 	}

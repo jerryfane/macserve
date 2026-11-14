@@ -646,11 +646,16 @@ func protectedTreeACL(ctx context.Context, path string, writers registrationWrit
 }
 
 // ErrACLCensusUnavailable is a registered tree ACL census its deadline cut
-// short (ls killed, or not started, at it): it observed nothing, so it is no
-// evidence either way. A census that ran and failed, or whose listing shows
-// a problem, is never this error. Engine.Execute returns it (wrapped) with
-// cleanup_ok only for a job it refused before it ran (the worker client
-// reports that as protocol.AdmissionACLCensusUnavailable).
+// short (ls killed, or not started, at it), or whose ls exited but whose
+// output did not close within its WaitDelay (exec.ErrWaitDelay, a timing
+// failure of the read on a loaded host that leaves the listing incomplete):
+// it observed nothing, so it is no evidence either way. A census that ran and
+// failed, or whose listing shows a problem, is never this error. At a job's
+// admission a hostguard protected-input ACL inspection cut short by its
+// deadline (hostguard.ErrACLInspectionCut) counts as this error too
+// (aclCensusUnavailable). Engine.Execute returns it (wrapped) with cleanup_ok
+// only for a job it refused before it ran (the worker client reports that as
+// protocol.AdmissionACLCensusUnavailable).
 var ErrACLCensusUnavailable = errors.New("registered tree ACL census unavailable")
 
 func registrationACLCommand(ctx context.Context, writers registrationWriters, args ...string) error {
@@ -663,10 +668,23 @@ func registrationACLCommand(ctx context.Context, writers registrationWriters, ar
 	out, diagnostic := &boundedBuffer{max: 64 << 20}, &boundedBuffer{max: 1 << 20}
 	cmd.Stdout, cmd.Stderr = out, diagnostic
 	if err := cmd.Run(); err != nil || out.err != nil || diagnostic.err != nil || diagnostic.Len() != 0 || out.Len() == 0 {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, exec.ErrWaitDelay) {
 			return ErrACLCensusUnavailable
 		}
-		return errors.New("registered tree ACL census failed")
+		// The cause, never ls's own diagnostics, makes the failure
+		// diagnosable from the job's reason (Studio 2026-11-14, #148).
+		cause := "empty listing"
+		switch {
+		case err != nil:
+			cause = err.Error()
+		case out.err != nil:
+			cause = out.err.Error()
+		case diagnostic.err != nil:
+			cause = diagnostic.err.Error()
+		case diagnostic.Len() != 0:
+			cause = "ls wrote diagnostics"
+		}
+		return fmt.Errorf("registered tree ACL census failed: %s", cause)
 	}
 	return validateTreeACL(out.String(), writers)
 }

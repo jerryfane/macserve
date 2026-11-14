@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jerryfane/macserve/internal/hostguard"
 	"github.com/jerryfane/macserve/internal/model"
 )
 
@@ -535,33 +536,119 @@ func TestACLCensusUnavailableAtJobEndDefersToIdleCheck(t *testing.T) {
 	}
 }
 
-// A census still cut short at a lane admission (the Studio failure: lane 4
-// beside three jobs) refuses the job before it runs, with the service's
-// admission as its reason, without failing its cleanup: nothing of it ran,
-// so its completion is held for the idle check, and nothing starts until
-// then.
-func TestLaneAdmissionACLCensusUnavailableKeepsCleanup(t *testing.T) {
+// An ACL census still cut short by its deadline at a job's admission
+// observed nothing, and nothing of the job ran: only that job is refused,
+// with the service's admission as its reason and cleanup_ok (idle verdict
+// not_required). Nothing is quarantined, the engine does not drain, and the
+// sibling and the next job run on. Studio v0.1.55, 2026-11-14, six lanes at
+// load 28-37: a protected-input ACL inspection killed at its deadline 15 s
+// into a job ("cannot inspect protected input ACL: signal: killed: context
+// deadline exceeded") ended in cleanup_ok=false and quarantined the service
+// until every lane was idle (#148). The registered tree census cut short
+// (the Studio failure of 2026-11-13: lane 4 beside three jobs) also no
+// longer drains.
+func TestLaneAdmissionACLCensusUnavailableRefusesOnlyTheJob(t *testing.T) {
+	protectedInputCut := func(context.Context, registrationWriters, ...string) error {
+		expired, cancel := context.WithDeadline(context.Background(), time.Now())
+		defer cancel()
+		return hostguard.CheckProtectedPathContext(expired, "/", true)
+	}
+	for name, c := range map[string]struct {
+		cut    int
+		probe  func(context.Context, registrationWriters, ...string) error
+		reason string
+	}{
+		"registered tree census": {cut: -1, reason: "lane admission: registered tree ACL census unavailable"},
+		"protected input ACL":    {probe: protectedInputCut, reason: "lane admission: cannot inspect protected input ACL: context deadline exceeded"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			runner := newCensusFake()
+			engine := laneEngine(t, runner, 2)
+			source, data := sourceFixture(t)
+			gate := runner.gate("job-a")
+			a := runLane(engine, fixtureLaneJob(t, "job-a", model.Build), source, data)
+			<-runner.started
+			runner.set(c.cut, c.probe)
+			result, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-b", model.Build), source, bytes.NewReader(data), nil)
+			if !errors.Is(err, ErrACLCensusUnavailable) || result.State != model.Failed || !result.CleanupOK || result.Reason != c.reason || result.Concurrency.IdleVerdict != IdleNotRequired || result.FinishedAt.IsZero() {
+				t.Fatalf("unavailable census at lane admission: %+v %v", result, err)
+			}
+			if _, err := engine.root.Lstat(quarantineRecord); err == nil {
+				t.Fatal("a census cut short quarantined the worker")
+			}
+			if err := engine.LaneReady(context.Background()); err != nil {
+				t.Fatalf("engine stopped admitting beside the running job: %v", err)
+			}
+			runner.set(0, nil)
+			next := runLane(engine, fixtureLaneJob(t, "job-c", model.Build), source, data)
+			if got := <-runner.started; got != "job-c" {
+				t.Fatalf("started %s", got)
+			}
+			if third := <-next; third.err != nil || third.result.State != model.Succeeded || !third.result.CleanupOK {
+				t.Fatalf("next job beside the sibling: %+v %v", third.result, third.err)
+			}
+			close(gate)
+			if first := <-a; first.err != nil || first.result.State != model.Succeeded || !first.result.CleanupOK || first.result.Concurrency.IdleVerdict != IdleClean {
+				t.Fatalf("sibling: %+v %v", first.result, first.err)
+			}
+		})
+	}
+}
+
+// A job starting alone whose admission's ACL census is cut short is refused
+// the same way ("admission: ..."), and the next job is admitted at once.
+func TestSoloAdmissionACLCensusUnavailableRefusesOnlyTheJob(t *testing.T) {
 	runner := newCensusFake()
 	engine := laneEngine(t, runner, 2)
 	source, data := sourceFixture(t)
-	gate := runner.gate("job-a")
-	a := runLane(engine, fixtureLaneJob(t, "job-a", model.Build), source, data)
-	<-runner.started
 	runner.set(-1, nil)
-	result, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-b", model.Build), source, bytes.NewReader(data), nil)
-	if err == nil || result.State != model.Failed || !result.CleanupOK || result.Reason != "lane admission: registered tree ACL census unavailable" || result.Concurrency.IdleVerdict != IdleDeferred || result.FinishedAt.IsZero() {
-		t.Fatalf("unavailable census at lane admission: %+v %v", result, err)
-	}
-	if err := engine.LaneReady(context.Background()); !errors.Is(err, ErrDrain) {
-		t.Fatalf("engine admits beside the job before the idle check: %v", err)
+	result, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-a", model.Build), source, bytes.NewReader(data), nil)
+	if !errors.Is(err, ErrACLCensusUnavailable) || result.State != model.Failed || !result.CleanupOK || result.Reason != "admission: registered tree ACL census unavailable" || result.Concurrency.IdleVerdict != IdleNotRequired {
+		t.Fatalf("unavailable census at admission: %+v %v", result, err)
 	}
 	runner.set(0, nil)
-	close(gate)
-	if first := <-a; first.err != nil || first.result.State != model.Succeeded || !first.result.CleanupOK || first.result.Concurrency.IdleVerdict != IdleClean {
-		t.Fatalf("sibling: %+v %v", first.result, first.err)
+	if next, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-b", model.Build), source, bytes.NewReader(data), nil); err != nil || next.State != model.Succeeded || !next.CleanupOK {
+		t.Fatalf("next job: %+v %v", next, err)
 	}
-	if err := engine.Recover(context.Background()); err != nil {
-		t.Fatalf("clean idle check: %v", err)
+}
+
+// An admission ACL check that ran and failed is no deadline and keeps its
+// behavior: an ACL that grants the job account writes quarantines, and a
+// census or protected-input inspection that failed on its own leaves the
+// job's cleanup unverified, which fences the epoch. Neither is reported as
+// the service's refusal (#148 changes nothing here).
+func TestLaneAdmissionACLCheckThatRanStillFails(t *testing.T) {
+	for name, probe := range map[string]func(context.Context, registrationWriters, ...string) error{
+		"acl drift": func(_ context.Context, writers registrationWriters, _ ...string) error {
+			return writers.checkACL(" 0: user:job allow write")
+		},
+		"ls failed": func(ctx context.Context, writers registrationWriters, _ ...string) error {
+			return registrationACLCommand(ctx, writers, "-ldeb", "/nonexistent-macserve-fixture")
+		},
+		"protected input inspection failed": func(context.Context, registrationWriters, ...string) error {
+			return fmt.Errorf("cannot inspect protected input ACL: %w", errors.New("exit status 1"))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			runner := newCensusFake()
+			engine := laneEngine(t, runner, 2)
+			source, data := sourceFixture(t)
+			gate := runner.gate("job-a")
+			a := runLane(engine, fixtureLaneJob(t, "job-a", model.Build), source, data)
+			<-runner.started
+			runner.set(0, probe)
+			result, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-b", model.Build), source, bytes.NewReader(data), nil)
+			if err == nil || errors.Is(err, ErrACLCensusUnavailable) || result.CleanupOK {
+				t.Fatalf("admission check that ran passed as a deadline: %+v %v", result, err)
+			}
+			_, quarantined := engine.root.Lstat(quarantineRecord)
+			if drift := name == "acl drift"; drift != (quarantined == nil) || drift != errors.Is(err, ErrContamination) {
+				t.Fatalf("quarantine %v for %s: %v", quarantined, name, err)
+			}
+			runner.set(0, nil)
+			close(gate)
+			<-a
+		})
 	}
 }
 

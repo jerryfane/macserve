@@ -134,6 +134,10 @@ func CheckProtectedPathNoACL(ctx context.Context, path string, directory bool) e
 
 func checkProtectedPathACL(parent context.Context, path string, directory, allowDeny bool) error {
 	if err := parent.Err(); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			// The deadline passed before any inspection started.
+			return aclInspectionCut{fmt.Errorf("cannot inspect protected input ACL: %w", err)}
+		}
 		return err
 	}
 	if err := protectedPath(path, directory); err != nil {
@@ -158,16 +162,35 @@ func checkProtectedPathACL(parent context.Context, path string, directory, allow
 	}
 }
 
+// ErrACLInspectionCut marks a protected-input ACL inspection its deadline cut
+// short: the inspection command was killed at the deadline, or the deadline
+// passed before it started. It observed nothing, so it is no evidence either
+// way. A command that ran and failed, or whose listing shows an ACL, never
+// carries it.
+var ErrACLInspectionCut = errors.New("protected input ACL inspection cut short by its deadline")
+
+// aclInspectionCut is an ACL inspection error that ErrACLInspectionCut marks,
+// with the inspection's own text.
+type aclInspectionCut struct{ error }
+
+func (c aclInspectionCut) Is(target error) bool { return target == ErrACLInspectionCut }
+func (c aclInspectionCut) Unwrap() error        { return c.error }
+
 // aclCommandError is the error of one ACL inspection command run under ctx.
 // exec reports a command killed at ctx's deadline as its exit ("signal:
 // killed"), not the deadline; such a command found nothing, so the error also
 // wraps ctx's error and callers can tell a deadline from a finding (#108).
+// A deadline also carries ErrACLInspectionCut (#148).
 func aclCommandError(ctx context.Context, err error) error {
 	if err == nil {
 		return nil
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return fmt.Errorf("cannot inspect protected input ACL: %w: %w", err, ctxErr)
+		err = fmt.Errorf("cannot inspect protected input ACL: %w: %w", err, ctxErr)
+		if errors.Is(ctxErr, context.DeadlineExceeded) {
+			return aclInspectionCut{err}
+		}
+		return err
 	}
 	return fmt.Errorf("cannot inspect protected input ACL: %w", err)
 }

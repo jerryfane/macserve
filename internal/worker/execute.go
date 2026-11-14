@@ -157,22 +157,24 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 	} else {
 		err = e.laneAdmission(parent)
 	}
-	if errors.Is(err, ErrACLCensusUnavailable) && !errors.Is(err, ErrContamination) {
+	if cut := aclCensusUnavailable(err); cut != nil {
 		// The census observed nothing, and nothing of the job ran, so it
-		// has nothing of its own to clean up. The account is left to the
-		// idle Recover: the engine drains, and the client holds this
-		// failure (cleanup_ok, idle verdict deferred) until that check
-		// gives the verdict (Client.Run). The reason names the service's
-		// admission, not the job, as the cause.
+		// has nothing of its own to clean up and is no evidence about the
+		// account either way: only this job is refused (cleanup_ok, idle
+		// verdict not_required). The engine does not drain and the client
+		// does not hold the completion: the account is still judged by
+		// the evidence that admitted the running jobs, and every later
+		// admission takes its own census before its job starts (#148). The
+		// reason names the service's admission, not the job, as the cause.
 		result.CleanupOK = true
-		e.setDrain("registered tree ACL census unavailable at the admission of job " + job.ID)
+		result.Concurrency.IdleVerdict = IdleNotRequired
 		stage := "admission"
 		if !solo {
 			stage = "lane admission"
 		}
-		err = fmt.Errorf("%s: %w", stage, err)
+		err = fmt.Errorf("%s: %w", stage, cut)
+		log.Printf("worker job %s refused before it ran: %v", job.ID, err)
 		result.Reason = PublicReason(err)
-		// It ended now, not when the held completion is delivered.
 		result.FinishedAt = e.options.Now()
 		return result, err
 	}
@@ -266,10 +268,10 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 			if alone {
 				if inspector, ok := e.options.Runner.(interface{ Admission(context.Context) error }); ok {
 					quietErr = inspector.Admission(finalCtx)
-					if errors.Is(quietErr, ErrACLCensusUnavailable) && !errors.Is(quietErr, ErrContamination) {
+					if aclCensusUnavailable(quietErr) != nil {
 						// Its own quiesce passed; the census observed nothing.
 						log.Printf("worker job %s cleanup verification deferred to the idle check: %v", job.ID, quietErr)
-						deferred, quietErr = "registered tree ACL census unavailable after job "+job.ID, nil
+						deferred, quietErr = "ACL census unavailable after job "+job.ID, nil
 					}
 				}
 			} else {

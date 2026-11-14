@@ -9,6 +9,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/jerryfane/macserve/internal/hostguard"
 )
 
 // inspectRegistrationAdmission is a read-only native replay boundary. The census
@@ -112,6 +114,35 @@ func aclCensusCut(err error) error {
 	}
 	return err
 }
+
+// aclCensusUnavailable returns err as ErrACLCensusUnavailable when it is only
+// an ACL census or inspection its deadline cut short, with no contamination
+// evidence beside it: a registered tree ACL census (ErrACLCensusUnavailable;
+// see registrationACLCommand for the exec.ErrWaitDelay case, the likely cause
+// of "registered tree ACL census failed" 40 s into a job's admission at load
+// 28-37, Studio 2026-11-14 08:15Z) or a hostguard protected-input ACL
+// inspection of the persistence authority (hostguard.ErrACLInspectionCut,
+// 08:31Z: "cannot inspect protected input ACL: signal: killed: context
+// deadline exceeded" 15 s in), which keeps its own text (#148). Anything
+// else, a census that ran and failed or found a problem included, is nil.
+func aclCensusUnavailable(err error) error {
+	switch {
+	case err == nil || errors.Is(err, ErrContamination):
+		return nil
+	case errors.Is(err, ErrACLCensusUnavailable):
+		return err
+	case errors.Is(err, hostguard.ErrACLInspectionCut):
+		return protectedACLCut{err}
+	}
+	return nil
+}
+
+// protectedACLCut is a protected-input ACL inspection its deadline cut short,
+// reported as ErrACLCensusUnavailable with its own text.
+type protectedACLCut struct{ error }
+
+func (c protectedACLCut) Is(target error) bool { return target == ErrACLCensusUnavailable }
+func (c protectedACLCut) Unwrap() error        { return c.error }
 
 func verifyHotPersistence(ctx context.Context, options Options, inspect func(context.Context, Options, PersistenceManifest) error) (result error) {
 	ctx, cancel := context.WithTimeout(ctx, persistenceAdmissionTimeout)

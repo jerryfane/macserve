@@ -80,6 +80,9 @@ type laneJob struct {
 	// adopt is when the job began adopting devices no job created; zero
 	// when it does not.
 	adopt time.Time
+	// quiesced is when the job's latest lane quiesce began (QuiesceJob);
+	// zero before its first. Crash agents started since are not its.
+	quiesced time.Time
 }
 
 // laneLabelConflict marks an instance two jobs claim.
@@ -171,6 +174,40 @@ func (t *laneTracker) active() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return len(t.jobs) != 0
+}
+
+// crashWindow is the span of crash agent starts a running job's lane
+// quiesce still covers: from the job's start until its latest lane quiesce
+// began; until is zero (open) before its first.
+type crashWindow struct{ from, until time.Time }
+
+func (w crashWindow) covers(started time.Time) bool {
+	return !started.Before(w.from) && (w.until.IsZero() || started.Before(w.until))
+}
+
+// quiesce records that jobID's lane quiesce begins at begun and returns the
+// crash agents' window it covers: from the job's start until begun. ok is
+// false when jobID does not run.
+func (t *laneTracker) quiesce(jobID string, begun time.Time) (crashWindow, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	j := t.jobs[jobID]
+	if j == nil {
+		return crashWindow{}, false
+	}
+	j.quiesced = begun
+	return crashWindow{j.started, begun}, true
+}
+
+// crashWindows returns every running job's crashWindow.
+func (t *laneTracker) crashWindows() []crashWindow {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	windows := make([]crashWindow, 0, len(t.jobs))
+	for _, j := range t.jobs {
+		windows = append(windows, crashWindow{j.started, j.quiesced})
+	}
+	return windows
 }
 
 var deviceDirectory = regexp.MustCompile(`/CoreSimulator/Devices/([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})/`)
@@ -447,16 +484,19 @@ type laneRunner interface {
 	// running job created (AttachDevice): those a concurrent script job's
 	// script creates. While several jobs adopt, none does.
 	AdoptDevices(jobID string, from time.Time)
-	// QuiesceJob terminates jobID's labelled processes only: never a
-	// baseline, tolerated, unattributed or another job's process. A survivor
-	// is contamination.
+	// QuiesceJob terminates jobID's labelled processes and the crash agents
+	// (crash_agents.go) started since jobID began and before this quiesce:
+	// never a baseline, tolerated, unattributed or another job's process. A
+	// survivor is contamination.
 	QuiesceJob(ctx context.Context, jobID string) error
 	// Residue describes each job-UID process no job's lineage claims and the
 	// census neither audits nor tolerates (unattributed), without signalling
-	// any: one entry each, none when there is no residue.
+	// any: one entry each, none when there is no residue. A crash agent a
+	// running job's lane quiesce will still terminate is not residue.
 	Residue(ctx context.Context) ([]string, error)
 	// LaneAdmission is Admission while other jobs run: their labelled
-	// processes are not residual, and an unattributed process refuses with
+	// processes and the crash agents their lane quiesces will still
+	// terminate are not residual, and an unattributed process refuses with
 	// ErrDrain instead of contamination.
 	LaneAdmission(ctx context.Context) error
 }
@@ -528,8 +568,11 @@ func (r *nativeRunner) identities(ctx context.Context) ([]processSample, error) 
 // QuiesceJob is the lane quiesce: the quiesce algorithm (processScope.quiesce:
 // SIGTERM in the first grace, SIGKILL after, an instance listed two graces
 // after its first sighting is a survivor, settle after ten graces) restricted
-// to jobID's labelled instances. Tolerated launches are never signalled here:
-// they serve every job.
+// to jobID's labelled instances and the crash agents (crash_agents.go) that
+// started after jobID began and before this quiesce did (its crashWindow,
+// which this quiesce closes): a bounded set, so a sibling that keeps
+// crashing cannot make this job's quiesce keep finding new ones. Tolerated
+// launches are never signalled here: they serve every job.
 func (r *nativeRunner) QuiesceJob(ctx context.Context, jobID string) error {
 	if r.scope == nil || r.scope.signal == nil {
 		return errors.New("protected job process scope is required")
@@ -537,6 +580,7 @@ func (r *nativeRunner) QuiesceJob(ctx context.Context, jobID string) error {
 	tracker := r.laneTracker()
 	s := r.scope
 	begun := time.Now()
+	window, running := tracker.quiesce(jobID, begun)
 	termUntil := begun.Add(s.grace)
 	settleUntil := begun.Add(quiesceSettleGraces * s.grace)
 	firstSeen := map[processInstance]time.Time{}
@@ -551,7 +595,14 @@ func (r *nativeRunner) QuiesceJob(ctx context.Context, jobID string) error {
 			return errors.Join(ErrCleanup, err)
 		}
 		tracker.update(samples)
-		mine, _, _ := tracker.classify(samples, jobID)
+		mine, labelled, _ := tracker.classify(samples, jobID)
+		if running {
+			agents, err := r.crashResidue(ctx, samples, labelled, []crashWindow{window})
+			if err != nil {
+				return errors.Join(ErrCleanup, err)
+			}
+			mine = append(mine, agents...)
+		}
 		if len(mine) == 0 {
 			if empty {
 				return nil
@@ -595,9 +646,9 @@ func (r *nativeRunner) QuiesceJob(ctx context.Context, jobID string) error {
 	}
 }
 
-// laneCensus is the census of samples without any job's labelled instances
-// and the broker's helpers: the processes no running job accounts for.
-func (r *nativeRunner) laneCensus(ctx context.Context, samples []processSample) (processCensus, error) {
+// unattributedCensus is the census of samples without any job's labelled
+// instances and the broker's helpers, with the labelled set.
+func (r *nativeRunner) unattributedCensus(ctx context.Context, samples []processSample) (processCensus, map[processInstance]bool, error) {
 	tracker := r.laneTracker()
 	tracker.update(samples)
 	_, labelled, helpers := tracker.classify(samples, "")
@@ -608,7 +659,49 @@ func (r *nativeRunner) laneCensus(ctx context.Context, samples []processSample) 
 			rest = append(rest, p)
 		}
 	}
-	return r.scope.census(ctx, rest)
+	c, err := r.scope.census(ctx, rest)
+	return c, labelled, err
+}
+
+// crashResidue returns the crash agents (crash_agents.go) that windows cover
+// among the processes the census leaves residual. The census runs first, on
+// every process no job labels, exactly as without crash agents: a verified
+// launchd relaunch of an audited process, a tolerated Apple-defined or
+// developer-tool launch, or a process that vanished before verification is
+// never a crash agent, whatever its executable. The census runs only when a
+// sample holds a candidate.
+func (r *nativeRunner) crashResidue(ctx context.Context, samples []processSample, labelled map[processInstance]bool, windows []crashWindow) ([]processSample, error) {
+	if len(r.crashAgents(samples, labelled, windows)) == 0 {
+		return nil, nil
+	}
+	c, labelled, err := r.unattributedCensus(ctx, samples)
+	if err != nil {
+		return nil, err
+	}
+	return r.crashAgents(c.residual, labelled, windows), nil
+}
+
+// laneCensus is the census of samples without any job's labelled instances
+// and the broker's helpers, less the crash agents a running job's lane
+// quiesce will still terminate (its crashWindow): the processes no running
+// job accounts for. Crash agents are taken out of the census's residual
+// processes only, after it judged them (see crashResidue). A crash agent
+// that started after a job's last lane quiesce began is not that job's: when
+// no other job covers it, it is residue.
+func (r *nativeRunner) laneCensus(ctx context.Context, samples []processSample) (processCensus, error) {
+	c, labelled, err := r.unattributedCensus(ctx, samples)
+	if err != nil {
+		return c, err
+	}
+	agents := r.crashAgents(c.residual, labelled, r.laneTracker().crashWindows())
+	if len(agents) == 0 {
+		return c, nil
+	}
+	c.residual = slices.DeleteFunc(c.residual, func(p processSample) bool { return slices.Contains(agents, p) })
+	// The census judged whether every residual process is a child of a
+	// tolerated launch with the crash agents among them.
+	c.toleratedChildren = r.scope.childrenOf(c.residual, c.tolerated)
+	return c, nil
 }
 
 func (r *nativeRunner) Residue(ctx context.Context) ([]string, error) {
