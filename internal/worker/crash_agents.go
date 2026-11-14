@@ -18,16 +18,21 @@ import (
 // verdict and drained the engine, and every lane waited for the slowest job
 // and the idle Recover (30-40 minutes of idle lanes per crash).
 //
-// A crash agent is an instance whose kernel facts prove all of this
-// (crashAgent): the job UID, PPID 1 (launchd spawned it), a valid platform
-// binary, an executable that is exactly one of crashAgentExecutables (the
-// kernel's PROC_PIDPATHINFO path, string equality) and is SIP-restricted, and
-// a start inside a running job's crashWindow: after the job began and, once
-// its lane quiesce has begun, before the latest one did. Lane attribution
-// treats such an instance as that job's (laneCensus): it is neither residue
-// nor a reason to refuse a lane admission. That job's lane quiesce terminates
-// it (QuiesceJob), with the same signals, survivor rule and settle bound as
-// the job's own processes; a job that ends alone ends with the full quiesce,
+// A crash agent is a process the census leaves residual (crashResidue,
+// laneCensus) whose kernel facts prove all of this (crashAgent): the job
+// UID, PPID 1 (launchd spawned it), a valid platform binary, an executable
+// that is exactly one of crashAgentExecutables (the kernel's
+// PROC_PIDPATHINFO path, string equality) and is SIP-restricted, and a start
+// inside a running job's crashWindow: after the job began and, once its lane
+// quiesce has begun, before the latest one did. The census comes first: an
+// instance of one of these executables that is a verified launchd relaunch
+// of an audited process or a tolerated Apple-defined or developer-tool launch
+// serves every job and is never a crash agent, and without a loaded baseline
+// (its launchd domain environment) there is none. Lane attribution treats a
+// crash agent as that job's (laneCensus): it is neither residue nor a reason
+// to refuse a lane admission. That job's lane quiesce terminates it
+// (QuiesceJob), with the same signals, survivor rule and settle bound as the
+// job's own processes; a job that ends alone ends with the full quiesce,
 // which signals it like any residual process. Each lane quiesce takes only
 // the instances started before it began, so a sibling that keeps crashing
 // cannot keep it going, and an instance no running job's window covers any
@@ -56,11 +61,13 @@ var crashAgentExecutables = map[string]bool{
 	"/System/Library/Frameworks/ApplicationServices.framework/Versions/A/Frameworks/SpeechSynthesis.framework/Versions/A/XPCServices/SpeechSynthesisServerXPC.xpc/Contents/MacOS/SpeechSynthesisServerXPC": true,
 }
 
-// crashAgents returns the crash agents (see above) among samples that no job
-// labels (labelled) and that started inside one of windows. Without kernel
-// facts (no agents seam) there are none.
+// crashAgents returns the crash agents (see above) among samples, which the
+// caller has taken from the census's residual processes or is about to
+// judge with it, that no job labels (labelled) and that started inside one
+// of windows. Without kernel facts (no agents seam) or a loaded baseline
+// there are none.
 func (r *nativeRunner) crashAgents(samples []processSample, labelled map[processInstance]bool, windows []crashWindow) []processSample {
-	if r.scope == nil || r.scope.agents == nil || len(windows) == 0 {
+	if r.scope == nil || r.scope.agents == nil || r.scope.baseline.Launchd == nil || len(windows) == 0 {
 		return nil
 	}
 	var out []processSample

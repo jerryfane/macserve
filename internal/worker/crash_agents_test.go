@@ -5,11 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/jerryfane/macserve/internal/launchctlprint"
 	"github.com/jerryfane/macserve/internal/model"
 )
 
@@ -42,7 +45,7 @@ func newCrashHost() *crashHost {
 	h.live[50] = baseline
 	r := newProcessRunner()
 	r.uid = crashUID
-	r.scope = &processScope{uid: crashUID, baseline: GUIBaseline{Processes: []ProcessIdentity{{PID: 50, Start: baseline.start}}}, agents: h.agents, interval: time.Millisecond, grace: 20 * time.Millisecond,
+	r.scope = &processScope{uid: crashUID, baseline: GUIBaseline{Processes: []ProcessIdentity{{PID: 50, Start: baseline.start}}, Launchd: &LaunchdEnvironment{GUI: map[string]string{}, User: map[string]string{}}}, agents: h.agents, interval: time.Millisecond, grace: 20 * time.Millisecond,
 		sample: func(context.Context) ([]processSample, error) {
 			h.mu.Lock()
 			defer h.mu.Unlock()
@@ -268,5 +271,116 @@ func TestUnknownProcessBesideRunningJobsStillDefersAndDrains(t *testing.T) {
 	close(gateB)
 	if second := <-b; second.err != nil || !second.result.CleanupOK {
 		t.Fatalf("sibling: %+v %v", second.result, second.err)
+	}
+}
+
+// protectedCrashRunner is a native runner over scope's census and the
+// mutable process table rows (every row launchd's child), whose signals end
+// the process. One job runs from 15 s after the epoch, before every
+// fixture's start.
+func protectedCrashRunner(scope *processScope, rows []processSample) (*nativeRunner, func(int) bool, *[]int) {
+	var mu sync.Mutex
+	live := map[int]processSample{}
+	for _, p := range rows {
+		p.parent = 1
+		live[p.pid] = p
+	}
+	var signalled []int
+	scope.sample = func(context.Context) ([]processSample, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make([]processSample, 0, len(live))
+		for _, p := range live {
+			out = append(out, p)
+		}
+		return out, nil
+	}
+	scope.signal = func(_ context.Context, p processSample, _ syscall.Signal) error {
+		mu.Lock()
+		defer mu.Unlock()
+		signalled = append(signalled, p.pid)
+		delete(live, p.pid)
+		return nil
+	}
+	r := newProcessRunner()
+	r.uid = scope.uid
+	r.scope = scope
+	r.lanes = trackerFor(syscall.Getpid(), scope.uid, map[int]processDescription{})
+	r.lanes.begin("a", time.Unix(15, 0))
+	running := func(pid int) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		_, ok := live[pid]
+		return ok
+	}
+	return r, running, &signalled
+}
+
+// A crash agent's executable does not override the census: an instance of an
+// allowlisted XPC service that is a verified launchd relaunch of an audited
+// process, or a tolerated developer-tool launch, serves every job. A lane
+// quiesce never signals it and the lane census (Residue, LaneReady,
+// LaneAdmission) still judges it as before, while the plain crash dialog
+// beside it is the job's to stop (#149 review).
+func TestLaneQuiesceKeepsCensusProtectedCrashAgentExecutables(t *testing.T) {
+	const dialog = 700
+	type world struct {
+		scope     *processScope
+		agents    *fakeAgents
+		rows      []processSample
+		protected int
+		// residual is what the lane census must leave unattributed.
+		residual []int
+	}
+	worlds := map[string]func(t *testing.T) world{
+		"verified relaunch": func(*testing.T) world {
+			// The audited XPC service 101 of corespeechd (100) runs the
+			// allowlisted SpeechSynthesisServerXPC; launchd relaunched both
+			// (300, 301) after a crash. 200 is an escaped job process.
+			s, agents, rows := relaunchWorld()
+			xpc := speechXPCService(100)
+			xpc.Executable = speechSynthesisXPC
+			s.baseline.Processes[0].Service = xpc
+			agents.run(301, "20:1", xpc)
+			s.baseline.Launchd = &LaunchdEnvironment{GUI: map[string]string{}, User: map[string]string{}}
+			return world{s, agents, rows, 301, []int{200}}
+		},
+		"tolerated developer-tool launch": func(t *testing.T) world {
+			// SetStoreUpdateService as an XPCService of the job's user
+			// domain, proven like CoreSimulatorService.
+			s, agents, rows := devtoolWorld(t)
+			const pid = 600
+			bundle := strings.TrimSuffix(setStoreUpdate, "/Contents/MacOS/SetStoreUpdateService")
+			target := "user/" + strconv.Itoa(testJobUID) + "/com.apple.CascadeSets.SetStoreUpdateService"
+			agents.procs[pid] = agentProcess{start: "50:600", uid: testJobUID, ppid: 1, executable: setStoreUpdate, platform: true, program: setStoreUpdate, argv: joinArgs([]string{setStoreUpdate})}
+			agents.services[target] = launchctlprint.Snapshot{Target: target, State: "running", PID: pid, Path: bundle, Type: "XPCService", BundleID: "com.apple.CascadeSets.SetStoreUpdateService", Program: setStoreUpdate}
+			agents.bundles[bundle] = [2]string{"com.apple.CascadeSets.SetStoreUpdateService", "SetStoreUpdateService"}
+			return world{s, agents, append(rows, sample(pid, "50:600")), pid, nil}
+		},
+	}
+	for name, build := range worlds {
+		t.Run(name, func(t *testing.T) {
+			w := build(t)
+			for _, exe := range []string{problemReporter, setStoreUpdate, speechSynthesisXPC} {
+				w.agents.sip[exe] = true
+			}
+			w.agents.procs[dialog] = agentProcess{start: "60:0", uid: testJobUID, ppid: 1, executable: problemReporter, platform: true}
+			rows := append(w.rows, sample(dialog, "60:0"))
+			c, err := w.scope.census(context.Background(), rows)
+			if err != nil || slices.Contains(pids(c.residual), w.protected) || c.unresolved {
+				t.Fatalf("fixture: %d is not census-protected: residual %v unresolved %v (%v)", w.protected, pids(c.residual), c.unresolved, err)
+			}
+			r, running, signalled := protectedCrashRunner(w.scope, rows)
+			lane, err := r.laneCensus(context.Background(), must(w.scope.sample(context.Background())))
+			if err != nil || lane.unresolved || !slices.Equal(pids(lane.residual), w.residual) {
+				t.Fatalf("lane census: residual %v unresolved %v (%v), want residual %v", pids(lane.residual), lane.unresolved, err, w.residual)
+			}
+			if err := r.QuiesceJob(context.Background(), "a"); err != nil {
+				t.Fatal(err)
+			}
+			if !running(w.protected) || running(dialog) {
+				t.Fatalf("lane quiesce signalled %v; protected %d must stay, dialog %d must go", *signalled, w.protected, dialog)
+			}
+		})
 	}
 }

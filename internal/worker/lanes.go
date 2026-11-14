@@ -597,7 +597,11 @@ func (r *nativeRunner) QuiesceJob(ctx context.Context, jobID string) error {
 		tracker.update(samples)
 		mine, labelled, _ := tracker.classify(samples, jobID)
 		if running {
-			mine = append(mine, r.crashAgents(samples, labelled, []crashWindow{window})...)
+			agents, err := r.crashResidue(ctx, samples, labelled, []crashWindow{window})
+			if err != nil {
+				return errors.Join(ErrCleanup, err)
+			}
+			mine = append(mine, agents...)
 		}
 		if len(mine) == 0 {
 			if empty {
@@ -642,18 +646,12 @@ func (r *nativeRunner) QuiesceJob(ctx context.Context, jobID string) error {
 	}
 }
 
-// laneCensus is the census of samples without any job's labelled instances,
-// the crash agents a running job's lane quiesce will still terminate (its
-// crashWindow) and the broker's helpers: the processes no running job
-// accounts for. A crash agent that started after a job's last lane quiesce
-// began is not that job's: when no other job covers it, it is residue.
-func (r *nativeRunner) laneCensus(ctx context.Context, samples []processSample) (processCensus, error) {
+// unattributedCensus is the census of samples without any job's labelled
+// instances and the broker's helpers, with the labelled set.
+func (r *nativeRunner) unattributedCensus(ctx context.Context, samples []processSample) (processCensus, map[processInstance]bool, error) {
 	tracker := r.laneTracker()
 	tracker.update(samples)
 	_, labelled, helpers := tracker.classify(samples, "")
-	for _, p := range r.crashAgents(samples, labelled, tracker.crashWindows()) {
-		helpers[processInstance{p.pid, p.start}] = true
-	}
 	rest := make([]processSample, 0, len(samples))
 	for _, p := range samples {
 		key := processInstance{p.pid, p.start}
@@ -661,7 +659,49 @@ func (r *nativeRunner) laneCensus(ctx context.Context, samples []processSample) 
 			rest = append(rest, p)
 		}
 	}
-	return r.scope.census(ctx, rest)
+	c, err := r.scope.census(ctx, rest)
+	return c, labelled, err
+}
+
+// crashResidue returns the crash agents (crash_agents.go) that windows cover
+// among the processes the census leaves residual. The census runs first, on
+// every process no job labels, exactly as without crash agents: a verified
+// launchd relaunch of an audited process, a tolerated Apple-defined or
+// developer-tool launch, or a process that vanished before verification is
+// never a crash agent, whatever its executable. The census runs only when a
+// sample holds a candidate.
+func (r *nativeRunner) crashResidue(ctx context.Context, samples []processSample, labelled map[processInstance]bool, windows []crashWindow) ([]processSample, error) {
+	if len(r.crashAgents(samples, labelled, windows)) == 0 {
+		return nil, nil
+	}
+	c, labelled, err := r.unattributedCensus(ctx, samples)
+	if err != nil {
+		return nil, err
+	}
+	return r.crashAgents(c.residual, labelled, windows), nil
+}
+
+// laneCensus is the census of samples without any job's labelled instances
+// and the broker's helpers, less the crash agents a running job's lane
+// quiesce will still terminate (its crashWindow): the processes no running
+// job accounts for. Crash agents are taken out of the census's residual
+// processes only, after it judged them (see crashResidue). A crash agent
+// that started after a job's last lane quiesce began is not that job's: when
+// no other job covers it, it is residue.
+func (r *nativeRunner) laneCensus(ctx context.Context, samples []processSample) (processCensus, error) {
+	c, labelled, err := r.unattributedCensus(ctx, samples)
+	if err != nil {
+		return c, err
+	}
+	agents := r.crashAgents(c.residual, labelled, r.laneTracker().crashWindows())
+	if len(agents) == 0 {
+		return c, nil
+	}
+	c.residual = slices.DeleteFunc(c.residual, func(p processSample) bool { return slices.Contains(agents, p) })
+	// The census judged whether every residual process is a child of a
+	// tolerated launch with the crash agents among them.
+	c.toleratedChildren = r.scope.childrenOf(c.residual, c.tolerated)
+	return c, nil
 }
 
 func (r *nativeRunner) Residue(ctx context.Context) ([]string, error) {

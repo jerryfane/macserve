@@ -337,8 +337,10 @@ lineage could not be read, is unattributed), so such a process may be the job's 
 a failing UI test), launchd starts the macOS crash dialog `/System/Library/CoreServices/Problem Reporter.app` in the
 job's GUI session, and beside it the XPC services `SetStoreUpdateService` (CascadeSets) and
 `SpeechSynthesisServerXPC` (SpeechSynthesis). The dialog waits for a click that never comes, so before v0.1.56 every
-lane that finished beside others deferred and drained the broker, and the lanes ran as batches. An instance whose
-kernel facts prove all of this is a crash agent: the job UID, parent PID 1 (launchd), a valid platform binary, a
+lane that finished beside others deferred and drained the broker, and the lanes ran as batches. A process the census
+leaves unattributed (it judges every process no job labels first, exactly as before: a verified relaunch of an
+audited process or a tolerated launch running one of these executables serves every job and is never signalled) is a
+crash agent when its kernel facts prove all of this: the job UID, parent PID 1 (launchd), a valid platform binary, a
 kernel executable path (`PROC_PIDPATHINFO`) equal to one of those three paths under `/System` and SIP-restricted, and
 a start after a running job began and before that job's lane quiesce began. It is that job's to stop, not
 unattributed: it neither drains nor refuses a lane admission. That job's lane quiesce terminates it with the job's own
