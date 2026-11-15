@@ -63,7 +63,7 @@ PF enforcement may be a separately reviewed future opt-in; it is not implemented
   broker log at job start and to budget failures. A slow or failed sample is tolerated until memory has gone
   unobserved for 30 s. This is not a kernel memory cap and excludes the broker and other-UID system daemons.
   After a command exits, its output pipes get 10 s to reach end of file (each output chunk is a controller log
-  request; 250 ms until v0.1.59 failed simulator boots at six lanes, #155), which still bounds a pipe a descendant
+  request; 250 ms until v0.1.60 failed simulator boots at six lanes, #155), which still bounds a pipe a descendant
   that left the process group keeps open. A failed `simctl boot` or `bootstatus` is retried once on a new device,
   15 s after the failed device's teardown, so the retry does not meet the load that failed the first boot at once.
 - `internal/evidence`: bounded xcresult test parsing, required-test execution checks, JUnit, deterministic
@@ -349,9 +349,11 @@ lineage could not be read, is unattributed), so such a process may be the job's 
 a failing UI test), launchd starts the macOS crash dialog `/System/Library/CoreServices/Problem Reporter.app` in the
 job's GUI session, and beside it the XPC services `SetStoreUpdateService` (CascadeSets) and
 `SpeechSynthesisServerXPC` (SpeechSynthesis). The dialog waits for a click that never comes, so before v0.1.56 every
-lane that finished beside others deferred and drained the broker, and the lanes ran as batches. Since v0.1.60 (#155)
-the same rule covers two more kinds of Apple per-user agent that launchd starts beside running jobs: Spotlight's
-`mdworker` (`CoreServices.framework/…/Metadata.framework/Versions/A/Support/mdworker`, indexing files a job wrote) and
+lane that finished beside others deferred and drained the broker, and the lanes ran as batches. Since v0.1.61 (#155)
+the same rule covers three more kinds of Apple per-user agent that launchd starts beside running jobs: Spotlight's
+`mdworker` (`CoreServices.framework/…/Metadata.framework/Versions/A/Support/mdworker`, indexing files a job wrote),
+the Lighthouse SELF ingestor extensions (`/System/Library/ExtensionKit/Extensions/{GMS,IFTelemetry,Biome,
+AppleIntelligenceReporting}SELFIngestor.appex`, on-demand telemetry XPC services) and
 WebKit's `com.apple.WebKit.GPU`, `.WebContent` and `.Networking` XPC services, which a web view in the job's GUI session
 starts and which can outlive it. The kernel names the WebKit services by their path in the sealed OS cryptex
 (`/System/Volumes/Preboot/Cryptexes/OS/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/…`; the

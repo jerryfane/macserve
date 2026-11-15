@@ -394,22 +394,29 @@ const (
 	webKitGPU        = webKitXPC + "com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
 	webKitContent    = webKitXPC + "com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
 	webKitNetworking = webKitXPC + "com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+	selfIngestors    = "/System/Library/ExtensionKit/Extensions/"
+	gmsIngestor      = selfIngestors + "GMSSELFIngestor.appex/Contents/MacOS/GMSSELFIngestor"
+	telemetryIngest  = selfIngestors + "IFTelemetrySELFIngestor.appex/Contents/MacOS/IFTelemetrySELFIngestor"
+	biomeIngestor    = selfIngestors + "BiomeSELFIngestor.appex/Contents/MacOS/BiomeSELFIngestor"
+	reportIngestor   = selfIngestors + "AppleIntelligenceReportingSELFIngestor.appex/Contents/MacOS/AppleIntelligenceReportingSELFIngestor"
 )
 
 // sealAgents marks the #155 agents' executables SIP-restricted.
 func sealAgents(h *crashHost) {
-	for _, exe := range []string{mdworker, webKitGPU, webKitContent, webKitNetworking} {
+	for _, exe := range []string{mdworker, webKitGPU, webKitContent, webKitNetworking, gmsIngestor, telemetryIngest, biomeIngestor, reportIngestor} {
 		h.agents.sip[exe] = true
 	}
 }
 
-// Spotlight's mdworker and WebKit's GPU, WebContent and Networking
-// services, started by launchd while jobs run, are the running jobs' to
+// Spotlight's mdworker, the SELF ingestor extensions and WebKit's GPU,
+// WebContent and Networking services, started by launchd while jobs run,
+// are the running jobs' to
 // stop, like the crash dialog. A look-alike stays unattributed: the GPU
 // service by the /System path launchd names (the kernel reports the
 // cryptex one), a copy in the App cryptex or the job's home, one outside
-// SIP, a non-platform mdworker, one the job forked itself, and an mdworker
-// older than every running job (#155).
+// SIP, a non-platform mdworker, one the job forked itself, an mdworker
+// older than every running job, and a GMSSELFIngestor copy in
+// /Library/ExtensionKit (#155).
 func TestLaneCensusLeavesSpotlightAndWebKitAgentsToRunningJobs(t *testing.T) {
 	h := newCrashHost()
 	sealAgents(h)
@@ -419,6 +426,13 @@ func TestLaneCensusLeavesSpotlightAndWebKitAgentsToRunningJobs(t *testing.T) {
 	h.add(101, 1, now, webKitGPU, true)
 	h.add(102, 1, now, webKitContent, true)
 	h.add(103, 1, now, webKitNetworking, true)
+	h.add(104, 1, now, gmsIngestor, true)
+	h.add(105, 1, now, telemetryIngest, true)
+	h.add(106, 1, now, biomeIngestor, true)
+	h.add(107, 1, now, reportIngestor, true)
+	const libraryGMS = "/Library/ExtensionKit/Extensions/GMSSELFIngestor.appex/Contents/MacOS/GMSSELFIngestor"
+	h.agents.sip[libraryGMS] = true
+	h.add(207, 1, now, libraryGMS, true)
 	const systemGPU = "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
 	appGPU := strings.Replace(webKitGPU, "/Cryptexes/OS/", "/Cryptexes/App/", 1)
 	for _, exe := range []string{systemGPU, appGPU} {
@@ -432,7 +446,7 @@ func TestLaneCensusLeavesSpotlightAndWebKitAgentsToRunningJobs(t *testing.T) {
 	h.add(204, 1, now, mdworker, false)
 	h.add(205, 300, now, mdworker, true)
 	h.add(206, 1, now.Add(-2*time.Minute), mdworker, true)
-	if got, want := h.residual(t), []int{200, 201, 202, 203, 204, 205, 206}; !slices.Equal(got, want) {
+	if got, want := h.residual(t), []int{200, 201, 202, 203, 204, 205, 206, 207}; !slices.Equal(got, want) {
 		t.Fatalf("unattributed %v, want %v", got, want)
 	}
 	h.agents.sip[webKitGPU] = false
@@ -443,8 +457,10 @@ func TestLaneCensusLeavesSpotlightAndWebKitAgentsToRunningJobs(t *testing.T) {
 
 // Studio, v0.1.58, 2026-11-15: Spotlight's mdworker drained the engine at
 // 10:45:41Z, and the WebKit GPU service deferred j_645b8263 at 13:18:15Z.
-// Now the finalizing job stops them, keeps the verdict not_required, and
-// new lanes start (#155).
+// Studio, v0.1.60, 16:40-16:50Z: the four SELF ingestors started at
+// 16:39:00Z deferred j_ce4ce15b, j_c5e942db and j_bc451b92. Now the
+// finalizing job stops them, keeps the verdict not_required, and new lanes
+// start (#155).
 func TestSpotlightAndWebKitAgentsBesideRunningJobsDoNotDeferOrDrain(t *testing.T) {
 	engine, host, first, gateB, b := laneCrash(t, func(h *crashHost, at time.Time) {
 		sealAgents(h)
@@ -452,11 +468,15 @@ func TestSpotlightAndWebKitAgentsBesideRunningJobsDoNotDeferOrDrain(t *testing.T
 		h.add(101, 1, at, webKitGPU, true)
 		h.add(102, 1, at, webKitContent, true)
 		h.add(103, 1, at, webKitNetworking, true)
+		h.add(104, 1, at, gmsIngestor, true)
+		h.add(105, 1, at, telemetryIngest, true)
+		h.add(106, 1, at, biomeIngestor, true)
+		h.add(107, 1, at, reportIngestor, true)
 	})
 	if first.err != nil || first.result.State != model.Succeeded || !first.result.CleanupOK || first.result.Concurrency.IdleVerdict != IdleNotRequired || first.result.Concurrency.UnattributedResidue != 0 {
 		t.Fatalf("Apple agents deferred the job: %+v %v", first.result, first.err)
 	}
-	for _, pid := range []int{100, 101, 102, 103} {
+	for _, pid := range []int{100, 101, 102, 103, 104, 105, 106, 107} {
 		if host.running(pid) {
 			t.Fatalf("agent %d survived the lane cleanup (signalled %v)", pid, host.signalled)
 		}
@@ -511,6 +531,7 @@ func TestLaneAdmissionBesideExitedAuditedAgentLeavesCrashAgentsToTheirJob(t *tes
 	}{
 		{name: "WebKit GPU", exe: webKitGPU},
 		{name: "mdworker", exe: mdworker},
+		{name: "GMSSELFIngestor", exe: gmsIngestor},
 		{name: "unknown", exe: "/System/Library/PrivateFrameworks/IMTransferServices.framework/IMTransferAgent.app/Contents/MacOS/IMTransferAgent", want: errRelaunchUnverified},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

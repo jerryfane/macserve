@@ -459,8 +459,9 @@ until idle: ...`, once per drain) names each such process by PID, kernel parent,
 each audited GUI-session process that is gone without a verified relaunch by PID, start, launchd label and executable.
 An audited agent that exited on its own, with nothing unattributed beside it, does not drain: the idle admission accepts
 that state too. Nor does the macOS crash dialog (`Problem Reporter`) or its `SetStoreUpdateService` and
-`SpeechSynthesisServerXPC` XPC services, Spotlight's `mdworker`, or WebKit's GPU, WebContent and Networking XPC
-services (v0.1.60, #155) while a running job that began before they started has yet to run its lane cleanup, which
+`SpeechSynthesisServerXPC` XPC services, Spotlight's `mdworker`, the Lighthouse SELF ingestor extensions
+(`GMSSELFIngestor` and its three siblings), or WebKit's GPU, WebContent and Networking XPC services (v0.1.61, #155)
+while a running job that began before they started has yet to run its lane cleanup, which
 terminates them (docs/architecture.md, Cleanup). A lease the controller prepared for the next lane and could not deliver because the worker stopped
 asking returns to the queue after one minute without a work request (beside a delivered lease of the same epoch): its
 source is removed, its lane, lease and deadline are released, its reason reads `returned to queue: the worker stopped

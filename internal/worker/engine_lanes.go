@@ -29,8 +29,9 @@ import (
 //   - a job whose finalization begins beside others stops only its own
 //     simulator and labelled processes, and the Apple crash agents
 //     (crash_agents.go: the crash dialog Problem Reporter and its two XPC
-//     services, Spotlight's mdworker and WebKit's GPU, WebContent and
-//     Networking services) that started while it ran (QuiesceJob), and then
+//     services, Spotlight's mdworker, the SELF ingestor extensions and
+//     WebKit's GPU, WebContent and Networking services) that started while
+//     it ran (QuiesceJob), and then
 //     counts unattributed processes: none gives idle verdict
 //     "not_required"; any gives "deferred" and drains the engine, and the
 //     client holds the job's completion until the idle Recover judges them.

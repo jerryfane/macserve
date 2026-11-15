@@ -18,8 +18,8 @@ import (
 // verdict and drained the engine, and every lane waited for the slowest job
 // and the idle Recover (30-40 minutes of idle lanes per crash).
 //
-// Two more kinds of Apple per-user agent start the same way and are handled
-// as crash agents (#155, Studio v0.1.58 worker log):
+// Three more kinds of Apple per-user agent start the same way and are
+// handled as crash agents (#155, Studio v0.1.58/v0.1.60 worker logs):
 //
 //   - Spotlight's mdworker, which mds has launchd start as the job UID to
 //     index files the job wrote (10:45:41Z: pid 79899 drained the engine 22 s
@@ -39,6 +39,13 @@ import (
 //     names is a SIP symlink into it), whose files are SF_RESTRICTED like
 //     /System's (osCryptex), so the same exact-path and SIP facts apply. A
 //     copy in the App cryptex or anywhere else is a look-alike.
+//   - The Lighthouse SELF ingestor extensions (ExtensionKit, on the sealed
+//     system volume): GMSSELFIngestor, IFTelemetrySELFIngestor,
+//     BiomeSELFIngestor and AppleIntelligenceReportingSELFIngestor started
+//     within 270 ms of each other at 16:39:00Z on 2026-11-15 as XPC services
+//     of the job UID and deferred j_ce4ce15b, j_c5e942db and j_bc451b92
+//     (16:40-16:50Z). They are on-demand telemetry ingestors that launchd
+//     starts again on the next request.
 //
 // A crash agent is a process the census leaves residual (crashResidue,
 // laneCensus) whose kernel facts prove all of this (crashAgent): the job
@@ -72,7 +79,8 @@ import (
 // with no process of theirs, and nothing is lost: ReportCrash has written
 // the crash report before the dialog shows it, the XPC services are
 // stateless on-demand services that launchd starts again on the next
-// lookup, and mds starts mdworker again for whatever it has left to index.
+// lookup (the SELF ingestors too), and mds starts mdworker again for
+// whatever it has left to index.
 //
 // The worker does not try to keep Spotlight away from the job's files: a
 // .metadata_never_index file inside a folder is no longer honoured by
@@ -92,11 +100,16 @@ var crashAgentExecutables = map[string]bool{
 	"/System/Library/CoreServices/Problem Reporter.app/Contents/MacOS/Problem Reporter":                                                                                                                    true,
 	"/System/Library/PrivateFrameworks/CascadeSets.framework/Versions/A/XPCServices/SetStoreUpdateService.xpc/Contents/MacOS/SetStoreUpdateService":                                                        true,
 	"/System/Library/Frameworks/ApplicationServices.framework/Versions/A/Frameworks/SpeechSynthesis.framework/Versions/A/XPCServices/SpeechSynthesisServerXPC.xpc/Contents/MacOS/SpeechSynthesisServerXPC": true,
-	// #155: Spotlight's per-user importer and WebKit's OS-cryptex services.
+	// #155: Spotlight's per-user importer, WebKit's OS-cryptex services and
+	// the Lighthouse SELF ingestor extensions.
 	"/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker":                                   true,
 	osCryptex + "System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU":               true,
 	osCryptex + "System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent": true,
 	osCryptex + "System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking": true,
+	"/System/Library/ExtensionKit/Extensions/GMSSELFIngestor.appex/Contents/MacOS/GMSSELFIngestor":                                                             true,
+	"/System/Library/ExtensionKit/Extensions/IFTelemetrySELFIngestor.appex/Contents/MacOS/IFTelemetrySELFIngestor":                                             true,
+	"/System/Library/ExtensionKit/Extensions/BiomeSELFIngestor.appex/Contents/MacOS/BiomeSELFIngestor":                                                         true,
+	"/System/Library/ExtensionKit/Extensions/AppleIntelligenceReportingSELFIngestor.appex/Contents/MacOS/AppleIntelligenceReportingSELFIngestor":               true,
 }
 
 // crashAgents returns the crash agents (see above) among samples, which the

@@ -105,7 +105,7 @@ func newProcessRunner() *nativeRunner {
 // job command writes is a controller log request (workerclient's remote
 // sink, at most request_timeout_seconds, 10 s, each) before the next read,
 // so the drain waits for the requests still in flight when the command
-// exits. Until v0.1.59 it was 250 ms: at six lanes and load 20-35 that ran
+// exits. Until v0.1.60 it was 250 ms: at six lanes and load 20-35 that ran
 // out after a successful `simctl boot` or `bootstatus` (j_a099efdf,
 // j_4c485ddd and j_1f9cbf13, 2026-11-15) and failed the boot (#155), as the
 // 100 ms inspection WaitDelay had failed admissions (#150: now 1 s; a
