@@ -261,6 +261,9 @@ func TestNativeRunnerCancellationEscalatesToKill(t *testing.T) {
 
 func TestNativeRunnerDeadline(t *testing.T) {
 	runner, command := helperRunner(t, "hang")
+	// The deadline must stop the command, not the memory baseline sample
+	// before it starts (a loaded host's ps can take longer than 150 ms).
+	command.MemoryBaseline = &MemoryBaseline{sampled: true}
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 	result, err := runner.Run(ctx, command, io.Discard, io.Discard)
@@ -694,6 +697,9 @@ func TestLaneCommandSkipsAccountBaseline(t *testing.T) {
 func TestNativeRunnerCleanupToleratesExitingGroupEPERM(t *testing.T) {
 	for _, delivered := range []bool{true, false} {
 		runner, command := helperRunner(t, "hang")
+		// The 200 ms deadline must stop the command, not the memory baseline
+		// sample before it starts (a loaded host's ps can take longer).
+		command.MemoryBaseline = &MemoryBaseline{sampled: true}
 		runner.termGrace, runner.killGrace = 200*time.Millisecond, 200*time.Millisecond
 		var target atomic.Int64
 		runner.kill = func(pid int, sig syscall.Signal) error {
@@ -712,7 +718,11 @@ func TestNativeRunnerCleanupToleratesExitingGroupEPERM(t *testing.T) {
 			t.Fatalf("delivered signal's EPERM left cleanup unconfirmed: %+v, %v", result, err)
 		}
 		if !delivered {
-			syscall.Kill(int(target.Load()), syscall.SIGKILL)
+			// Never kill(0): that is this test's own process group, go test
+			// included.
+			if pid := int(target.Load()); pid != 0 {
+				syscall.Kill(pid, syscall.SIGKILL)
+			}
 			if result.CleanupOK || !errors.Is(err, ErrCleanup) {
 				t.Fatalf("surviving member passed cleanup: %+v, %v", result, err)
 			}
