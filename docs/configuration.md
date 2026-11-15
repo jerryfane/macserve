@@ -50,7 +50,11 @@ Optional `signer` connects the controller to the [code signer](#code-signer).
   `controller_shutdown`, `github` or `worker_admission`), `at` (when the request was recorded), `principal` for
   `client` and `admin_pause`, `blockers` (the readiness gate's, e.g. `isolation_unavailable`,
   `host_memory_pressure`) for `host_readiness`, and an optional `detail` of at most 512 bytes (the client or pause
-  reason, the gate error, the gate's free and accounted bytes, the worker's refusal reason). The controller records
+  reason, the gate error, the gate's free and accounted bytes, the worker's refusal reason). A `client` detail ends
+  with who sent the cancel as the controller sees it, `[via remote=<peer> ua="…"]` plus `xff="…"` and
+  `forwarded="…"` when those headers are present; caller-supplied values are sanitized (non-printable runes become
+  `?`, `"` becomes `'`, `\` becomes `/`) and bounded (128 bytes for the User-Agent, 96 for each forwarding header),
+  and a long reason is cut to keep them. The controller records
   `worker_admission` when the worker reports that it refused the job before it ran for a cause of the service's
   own (`admission_refused` in its completion; `acl_census_unavailable`: a registered tree ACL census or a
   protected-input ACL inspection cut short by its deadline on a loaded host) with a failed result and `cleanup_ok`;
@@ -227,7 +231,14 @@ cancellation can be placed against its cause. The controller logs `controller re
 blockers=… [probe_failures=N] active_job=<id>[,<id>…]` at its first readiness evaluation and whenever the outcome
 changes, and `controller job cancellation requested: job=… source=… blockers=… detail=…` for each cancellation it
 requests itself (deadline, readiness, gate error, log limit, shutdown), naming the cause recorded as the job's
-`cancel_reason`; a readiness cancellation for failed probes ends its detail with `probe_failures=N`. Maintenance
+`cancel_reason`; a readiness cancellation for failed probes ends its detail with `probe_failures=N`. For every client
+`POST /v1/jobs/{id}/cancel`, recorded or refused, it logs `controller client cancel: job=… principal="…" remote=…
+ua="…" xff="…" forwarded="…" keyring="…" reason="…" request_id=… result="state=…"` (or `result="error=…"`): the TCP
+peer, the caller's headers sanitized and bounded to 256 bytes each, `keyring` the names (never the values) of any
+`X-Keyring-*` headers, and the request ID the response carries in `X-Request-ID`. Agents sharing a token through the
+keyring are one principal here: the keyring relay and server forward the caller's own headers (User-Agent included;
+newer keyring servers drop `X-Forwarded-For`) but add no role header, and for such calls the controller's peer is the
+keyring server, so the line's time, job path and User-Agent are what match it to a role in the keyring's audit log. Maintenance
 logs `probe failed: <error>` for every failed probe, then `published invalid health checked_at=… last_valid_until=…
 probe_failures=… blockers=… cancels_active_job=…: <cause>` for every invalid record it publishes, including at its
 own start and stop, or `republished last valid health checked_at=… expires_at=… probe_failures=… blockers=…

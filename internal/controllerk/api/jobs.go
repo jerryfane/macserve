@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -148,7 +149,15 @@ func (h *handler) job(w http.ResponseWriter, r *http.Request, p controllerconfig
 			return
 		}
 		previous := job.State
-		job, err = h.Store.Cancel(r.Context(), job.ID, body.Reason, model.CancelReason{Source: model.CancelClient, Principal: p.ID, Detail: body.Reason}, h.Now())
+		id := job.ID
+		via := clientCancelProvenance(r)
+		job, err = h.Store.Cancel(r.Context(), id, body.Reason, model.CancelReason{Source: model.CancelClient, Principal: p.ID, Detail: via.detail(body.Reason)}, h.Now())
+		// Every client cancel, recorded or refused, logs who sent it.
+		result := "state=" + string(job.State)
+		if err != nil {
+			result = "error=" + err.Error()
+		}
+		log.Printf("controller client cancel: job=%s principal=%q remote=%s ua=%q xff=%q forwarded=%q keyring=%q reason=%q request_id=%s result=%q", id, p.ID, via.remote, via.userAgent, via.forwardedFor, via.forwarded, via.keyring, boundUTF8(body.Reason, store.MaxCancelDetailBytes), w.Header().Get("X-Request-ID"), result)
 		if err != nil {
 			writeError(w, err)
 			return

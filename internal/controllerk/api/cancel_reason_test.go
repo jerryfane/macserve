@@ -21,7 +21,8 @@ func TestCancelReasonInJobViewAndList(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("cancel %d: %s", w.Code, w.Body.String())
 	}
-	client := map[string]any{"source": "client", "principal": "coordinator", "at": testTime.Format(time.RFC3339), "detail": "superseded by a new push"}
+	// httptest's peer is 192.0.2.1:1234 and its requests carry no User-Agent.
+	client := map[string]any{"source": "client", "principal": "coordinator", "at": testTime.Format(time.RFC3339), "detail": `superseded by a new push [via remote=192.0.2.1:1234 ua=""]`}
 	if got := decodeView(t, w.Body.Bytes())["cancel_reason"]; !reflect.DeepEqual(got, client) {
 		t.Fatalf("cancel response cause: %v", got)
 	}
