@@ -372,9 +372,18 @@ or quiesce of the job account that ran out of time. When the job is starting, on
 runs, with reason `lane admission: …` (`admission: …` for a job starting alone) naming the inspection, `cleanup_ok`
 true and idle verdict `not_required`, since nothing of it ran. Nothing is quarantined, the broker does not drain and
 the completion is not held: the running jobs were admitted on their own evidence, and every later admission takes its
-own census before its job starts. The completion carries `admission_refused: acl_census_unavailable`, and the
-controller records the cancellation `worker_admission` before judging it: the job ends `cancelled` by the service,
-so pull mode reruns its head (#119). A controller from before this
+own census before its job starts. The completion carries `admission_refused: acl_census_unavailable`. Such a
+refusal is inconclusive (failed, `cleanup_ok`, idle verdict `not_required`, no evidence uploaded), so the controller
+returns the job to the queue instead of ending it (#154): its source is removed, its lane, lease and deadline are
+released, and it keeps its place in the fair order, but claims pass it over for a backoff of 2, 4 and then 8 minutes
+while the jobs behind it are claimed; its `reason` reads `admission retry <n>/3 after <cause>, next at <time>` and the
+controller logs `controller returned refused admission to the queue: job=… retry=<n>/3 next=… cause="…"`. The
+refusal after the third retry, and any refusal outside that class, is recorded as the cancellation
+`worker_admission` before it is judged (after retries its detail reads `after 3 admission retries: <cause>`): the
+job ends `cancelled` by the service, so pull mode reruns its head (#119); a pull-mode attempt waiting out a retry is
+still queued, so pull mode joins it rather than rerunning it. The retry count and backoff live only in the
+controller's memory: a restarted controller forgets them, so a job queued for a retry becomes claimable at once and
+gets three retries again. A controller from before this
 field refuses such a completion (the worker transport refuses unknown fields), so the worker and the controller of one
 release ship together. At a job's finalization, after its earlier barriers stopped and verified its processes, a
 final job-account barrier, its admission alone or its residue count beside others cut short leaves the job's own

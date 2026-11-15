@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"path"
 	"strings"
@@ -32,31 +33,59 @@ func completionDigest(result worker.Result) (string, error) {
 
 // refusedAdmission records a completion the worker reports as its refusal
 // of the job before it ran, for a cause of the service's own
-// (protocol.Completion.AdmissionRefused), as the controller's cancellation
+// (protocol.Completion.AdmissionRefused). An inconclusive refusal
+// (inconclusiveRefusal) returns the job to the queue, held back for a
+// backoff, up to maxAdmissionRetries times (#154): it reports handled, and
+// the completion is answered without being judged. Any other refusal, and the
+// one after the last retry, is recorded as the controller's cancellation
 // worker_admission before complete judges it: the job ends cancelled, not
-// failed, and pull mode reruns its head (#119). Only a failed result with
-// cleanup_ok qualifies; any other completion is judged as it is, and a
-// replay of a terminal job's completion is left to complete. An unknown
-// refusal is invalid.
-func (c *Controller) refusedAdmission(ctx context.Context, job model.Job, completion protocol.Completion) error {
+// failed, and pull mode reruns its head (#119); the detail names the retries
+// that preceded it. Only a failed result with cleanup_ok qualifies; any other
+// completion is judged as it is, and a replay of a terminal job's completion
+// is left to complete. An unknown refusal is invalid.
+func (c *Controller) refusedAdmission(ctx context.Context, job model.Job, completion protocol.Completion) (handled bool, err error) {
 	refusal, result := completion.AdmissionRefused, completion.Result
 	if !refusal.Valid() {
-		return store.ErrInvalid
+		return false, store.ErrInvalid
 	}
 	if refusal == "" || result.State != model.Failed || !result.CleanupOK || job.State.Terminal() {
-		return nil
+		return false, nil
 	}
+	// No evidence upload of the refused lease interleaves with its requeue.
+	c.evidenceMu.Lock()
+	defer c.evidenceMu.Unlock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if a := c.execution(job.ID); a == nil || !a.offered {
-		return store.ErrLease
+	a := c.execution(job.ID)
+	if a == nil || !a.offered {
+		return false, store.ErrLease
 	}
 	current, err := c.options.Store.Get(ctx, job.ID)
 	if err != nil {
-		return err
+		return false, err
 	}
-	_, err = c.cancelJob(ctx, current, "worker refused admission: "+string(refusal), model.CancelReason{Source: model.CancelWorkerAdmission, Detail: result.Reason}, c.options.Now())
-	return err
+	retries := c.admissionRetries[job.ID].count
+	if inconclusiveRefusal(refusal, result) && retries < maxAdmissionRetries && current.State == model.Preparing && !current.CancelRequested {
+		// Evidence the refused lease uploaded would conflict with the next
+		// lease's, under the same names: such a job is not retried.
+		uploads, err := c.uploaded(job.ID)
+		if err != nil {
+			return false, err
+		}
+		if len(uploads) == 0 && c.requeueRefused(ctx, a, current, retries+1, result.Reason) {
+			return true, nil
+		}
+		if current, err = c.options.Store.Get(ctx, job.ID); err != nil {
+			return false, err
+		}
+	}
+	delete(c.admissionRetries, job.ID)
+	detail := result.Reason
+	if retries > 0 {
+		detail = fmt.Sprintf("after %d admission retries: %s", retries, result.Reason)
+	}
+	_, err = c.cancelJob(ctx, current, "worker refused admission: "+string(refusal), model.CancelReason{Source: model.CancelWorkerAdmission, Detail: detail}, c.options.Now())
+	return false, err
 }
 
 func (c *Controller) complete(ctx context.Context, job model.Job, result worker.Result, seal buildseal.Envelope) error {

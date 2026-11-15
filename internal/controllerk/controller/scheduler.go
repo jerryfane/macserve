@@ -294,7 +294,13 @@ func (c *Controller) next(ctx context.Context, epoch string, running []string) (
 	if len(c.active) > 0 && !health.AdmitsAnother(gate, len(c.active), lanes) {
 		return nil, nil
 	}
-	job, err := c.options.Store.Claim(ctx, epoch, c.options.Now(), lanes, starting)
+	// A job back from an inconclusive admission refusal waits out its
+	// backoff; the jobs behind it are claimed meanwhile.
+	held, err := c.heldAdmissions(ctx, c.options.Now())
+	if err != nil {
+		return nil, err
+	}
+	job, err := c.options.Store.Claim(ctx, epoch, c.options.Now(), lanes, starting, held...)
 	if errors.Is(err, store.ErrNoJob) {
 		return nil, nil
 	}

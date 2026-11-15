@@ -110,6 +110,9 @@ type Controller struct {
 	// afterEvictionSnapshot runs in trimPool between candidate selection
 	// and deletion; tests use it to interleave a signing request.
 	afterEvictionSnapshot func()
+	// admissionRetries holds, in memory only, the jobs returned to the
+	// queue after inconclusive admission refusals (admission_retry.go).
+	admissionRetries map[string]admissionRetry
 }
 
 func New(options Options) (*Controller, error) {
@@ -204,7 +207,7 @@ func New(options Options) (*Controller, error) {
 		return fail(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	c := &Controller{options: options, root: root, lock: lock, ctx: ctx, cancel: cancel, requestTimeout: 2 * time.Minute}
+	c := &Controller{options: options, root: root, lock: lock, ctx: ctx, cancel: cancel, requestTimeout: 2 * time.Minute, admissionRetries: map[string]admissionRetry{}}
 	service, serviceErr := options.Store.ServiceState(ctx)
 	gate, gateErr := options.Gate(ctx)
 	if serviceErr == nil && gateErr == nil && !service.Paused && cleanupAllowed(gate) {
