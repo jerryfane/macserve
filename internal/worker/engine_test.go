@@ -186,6 +186,8 @@ func engineFixture(t *testing.T, runner Runner) *Engine {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Fake time: a simulator boot retry's pause returns at once.
+	engine.pause = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
 	t.Cleanup(func() {
 		if err := engine.Close(); err != nil {
 			t.Error(err)
@@ -364,7 +366,6 @@ func TestPinnedObservationsRejectMismatchesBeforeCreatingDevice(t *testing.T) {
 }
 
 func TestRecipeFailuresAlwaysCleanOwnedSimulator(t *testing.T) {
-	quickBootRetry(t)
 	for _, stage := range []string{"generate", "prepare", "run", "boot"} {
 		t.Run(stage, func(t *testing.T) {
 			runner := &fakeRunner{}

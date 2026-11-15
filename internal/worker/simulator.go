@@ -82,12 +82,8 @@ func (x *execution) simulator(ctx context.Context) error {
 		if _, logErr := fmt.Fprintf(x.stderr, "macserve: simulator boot failed (%v); retrying once on a new device after %s\n", err, simulatorBootRetryPause); logErr != nil {
 			return logErr
 		}
-		pause := time.NewTimer(simulatorBootRetryPause)
-		select {
-		case <-ctx.Done():
-			pause.Stop()
-			return errors.Join(err, ctx.Err())
-		case <-pause.C:
+		if pauseErr := x.engine.pause(ctx, simulatorBootRetryPause); pauseErr != nil {
+			return errors.Join(err, pauseErr)
 		}
 	}
 }
@@ -104,7 +100,19 @@ const simulatorBootAttempts = 2
 // pause lets the boots and builds of sibling lanes move on first. The
 // worker has no load gate of its own to wait for, and the controller's
 // simulator start gap (a minute) spaces only job starts.
-var simulatorBootRetryPause = 15 * time.Second
+const simulatorBootRetryPause = 15 * time.Second
+
+// contextPause waits d, or until ctx ends, which it returns.
+func contextPause(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
 
 // createDevice creates the job's own device and records its UDID. The
 // inventory is recorded before creation: an interrupted create must never

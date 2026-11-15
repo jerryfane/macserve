@@ -110,7 +110,6 @@ func helperRunner(t *testing.T, mode string) (*nativeRunner, Command) {
 // accepts exactly that (delete and the absence proof still run) and the job
 // retries on a fresh device. Any other shutdown failure is not retried.
 func TestSimulatorRetryTeardownAcceptsAlreadyShutdownFromNativeRunner(t *testing.T) {
-	quickBootRetry(t)
 	for _, tc := range []struct {
 		mode    string
 		creates int

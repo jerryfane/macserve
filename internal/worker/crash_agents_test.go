@@ -190,6 +190,13 @@ func (f *crashLanes) QuiesceJob(ctx context.Context, job string) error {
 	return f.host.runner.QuiesceJob(ctx, job)
 }
 
+// Quiesce is the full quiesce of a job that holds the whole account (it
+// finalizes alone), over crashHost's process table.
+func (f *crashLanes) Quiesce(ctx context.Context) error {
+	f.laneFake.event("quiesce")
+	return f.host.runner.scope.quiesce(ctx)
+}
+
 func (f *crashLanes) Residue(ctx context.Context) ([]string, error) {
 	c, err := f.host.runner.laneCensus(ctx, f.host.samples())
 	if err != nil {
@@ -410,32 +417,26 @@ func sealAgents(h *crashHost) {
 
 // Spotlight's mdworker, the SELF ingestor extensions and WebKit's GPU,
 // WebContent and Networking services, started by launchd while jobs run,
-// are the running jobs' to
-// stop, like the crash dialog. A look-alike stays unattributed: the GPU
-// service by the /System path launchd names (the kernel reports the
-// cryptex one), a copy in the App cryptex or the job's home, one outside
-// SIP, a non-platform mdworker, one the job forked itself, an mdworker
-// older than every running job, and a GMSSELFIngestor copy in
-// /Library/ExtensionKit (#155).
-func TestLaneCensusLeavesSpotlightAndWebKitAgentsToRunningJobs(t *testing.T) {
+// are not unattributed while any job of their busy period runs. A
+// look-alike stays unattributed: the GPU service by the /System path
+// launchd names (the kernel reports the cryptex one), a copy in the App
+// cryptex or the job's home, one outside SIP, a non-platform mdworker, one
+// the job forked itself, an mdworker older than the busy period, and a
+// GMSSELFIngestor copy in /Library/ExtensionKit. With no job running they
+// are all unattributed (#155).
+func TestLaneCensusLeavesSharedAgentsToTheBusyPeriod(t *testing.T) {
 	h := newCrashHost()
 	sealAgents(h)
 	now := time.Now()
 	h.runner.lanes.begin("a", now.Add(-time.Minute))
-	h.add(100, 1, now, mdworker, true)
-	h.add(101, 1, now, webKitGPU, true)
-	h.add(102, 1, now, webKitContent, true)
-	h.add(103, 1, now, webKitNetworking, true)
-	h.add(104, 1, now, gmsIngestor, true)
-	h.add(105, 1, now, telemetryIngest, true)
-	h.add(106, 1, now, biomeIngestor, true)
-	h.add(107, 1, now, reportIngestor, true)
+	h.runner.lanes.begin("b", now.Add(-30*time.Second))
+	for i, exe := range []string{mdworker, webKitGPU, webKitContent, webKitNetworking, gmsIngestor, telemetryIngest, biomeIngestor, reportIngestor} {
+		h.add(100+i, 1, now.Add(-45*time.Second), exe, true)
+	}
 	const libraryGMS = "/Library/ExtensionKit/Extensions/GMSSELFIngestor.appex/Contents/MacOS/GMSSELFIngestor"
-	h.agents.sip[libraryGMS] = true
-	h.add(207, 1, now, libraryGMS, true)
 	const systemGPU = "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
 	appGPU := strings.Replace(webKitGPU, "/Cryptexes/OS/", "/Cryptexes/App/", 1)
-	for _, exe := range []string{systemGPU, appGPU} {
+	for _, exe := range []string{systemGPU, appGPU, libraryGMS} {
 		h.agents.sip[exe] = true
 	}
 	h.add(200, 1, now, systemGPU, true)
@@ -446,47 +447,82 @@ func TestLaneCensusLeavesSpotlightAndWebKitAgentsToRunningJobs(t *testing.T) {
 	h.add(204, 1, now, mdworker, false)
 	h.add(205, 300, now, mdworker, true)
 	h.add(206, 1, now.Add(-2*time.Minute), mdworker, true)
+	h.add(207, 1, now, libraryGMS, true)
 	if got, want := h.residual(t), []int{200, 201, 202, 203, 204, 205, 206, 207}; !slices.Equal(got, want) {
 		t.Fatalf("unattributed %v, want %v", got, want)
+	}
+	// a ends; b still runs, and the agents, which started before b began,
+	// are still its busy period's.
+	h.runner.lanes.end("a")
+	if got := h.residual(t); slices.ContainsFunc(got, func(pid int) bool { return pid < 200 }) {
+		t.Fatalf("shared agents unattributed while b runs: %v", got)
 	}
 	h.agents.sip[webKitGPU] = false
 	if got := h.residual(t); !slices.Contains(got, 101) {
 		t.Fatalf("a WebKit GPU service outside SIP is not unattributed: %v", got)
+	}
+	h.runner.lanes.end("b")
+	if got := h.residual(t); !slices.Contains(got, 100) || !slices.Contains(got, 104) {
+		t.Fatalf("shared agents left out with no job running: %v", got)
+	}
+}
+
+// A lane quiesce never signals a shared agent: its client may be a sibling
+// that still runs. The crash dialog beside it is the job's to stop (#155
+// review).
+func TestLaneQuiesceLeavesSharedAgents(t *testing.T) {
+	h := newCrashHost()
+	sealAgents(h)
+	now := time.Now()
+	h.runner.lanes.begin("a", now.Add(-time.Minute))
+	h.runner.lanes.begin("b", now.Add(-30*time.Second))
+	h.add(100, 1, now, problemReporter, true)
+	for i, exe := range []string{mdworker, webKitGPU, webKitContent, webKitNetworking, gmsIngestor, telemetryIngest, biomeIngestor, reportIngestor} {
+		h.add(101+i, 1, now, exe, true)
+	}
+	h.runner.lanes.update(h.samples())
+	if err := h.runner.QuiesceJob(context.Background(), "a"); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(h.signalled, []int{100}) {
+		t.Fatalf("lane quiesce signalled %v, want only the crash dialog", h.signalled)
 	}
 }
 
 // Studio, v0.1.58, 2026-11-15: Spotlight's mdworker drained the engine at
 // 10:45:41Z, and the WebKit GPU service deferred j_645b8263 at 13:18:15Z.
 // Studio, v0.1.60, 16:40-16:50Z: the four SELF ingestors started at
-// 16:39:00Z deferred j_ce4ce15b, j_c5e942db and j_bc451b92. Now the
-// finalizing job stops them, keeps the verdict not_required, and new lanes
-// start (#155).
-func TestSpotlightAndWebKitAgentsBesideRunningJobsDoNotDeferOrDrain(t *testing.T) {
+// 16:39:00Z deferred j_ce4ce15b, j_c5e942db and j_bc451b92. A sibling's
+// active web view, indexing and telemetry: job-a finalizes beside job-b
+// without stopping them, keeps the verdict not_required and new lanes
+// start; job-b, finalizing alone, stops them with the full quiesce (#155).
+func TestSharedAgentsSurviveSiblingLaneCleanupUntilIdle(t *testing.T) {
+	shared := []int{100, 101, 102, 103, 104, 105, 106, 107}
 	engine, host, first, gateB, b := laneCrash(t, func(h *crashHost, at time.Time) {
 		sealAgents(h)
-		h.add(100, 1, at, mdworker, true)
-		h.add(101, 1, at, webKitGPU, true)
-		h.add(102, 1, at, webKitContent, true)
-		h.add(103, 1, at, webKitNetworking, true)
-		h.add(104, 1, at, gmsIngestor, true)
-		h.add(105, 1, at, telemetryIngest, true)
-		h.add(106, 1, at, biomeIngestor, true)
-		h.add(107, 1, at, reportIngestor, true)
+		for i, exe := range []string{mdworker, webKitGPU, webKitContent, webKitNetworking, gmsIngestor, telemetryIngest, biomeIngestor, reportIngestor} {
+			h.add(shared[i], 1, at, exe, true)
+		}
 	})
 	if first.err != nil || first.result.State != model.Succeeded || !first.result.CleanupOK || first.result.Concurrency.IdleVerdict != IdleNotRequired || first.result.Concurrency.UnattributedResidue != 0 {
-		t.Fatalf("Apple agents deferred the job: %+v %v", first.result, first.err)
+		t.Fatalf("shared agents deferred the job: %+v %v", first.result, first.err)
 	}
-	for _, pid := range []int{100, 101, 102, 103, 104, 105, 106, 107} {
-		if host.running(pid) {
-			t.Fatalf("agent %d survived the lane cleanup (signalled %v)", pid, host.signalled)
+	for _, pid := range shared {
+		if !host.running(pid) {
+			t.Fatalf("job-a's lane cleanup stopped shared agent %d while job-b runs (signalled %v)", pid, host.signalled)
 		}
 	}
 	if err := engine.LaneReady(context.Background()); err != nil {
-		t.Fatalf("engine stopped admitting after the agents: %v", err)
+		t.Fatalf("engine stopped admitting beside the shared agents: %v", err)
 	}
 	close(gateB)
-	if second := <-b; second.err != nil || !second.result.CleanupOK {
+	if second := <-b; second.err != nil || !second.result.CleanupOK || second.result.Concurrency.IdleVerdict != IdleClean {
 		t.Fatalf("sibling: %+v %v", second.result, second.err)
+	}
+	for _, pid := range shared {
+		if host.running(pid) {
+			t.Fatalf("idle quiesce left shared agent %d (signalled %v)", pid, host.signalled)
+		}
 	}
 }
 
@@ -504,7 +540,7 @@ func TestLookAlikeAgentBesideRunningJobsStillDefersAndDrains(t *testing.T) {
 	if first.err != nil || first.result.State != model.Succeeded || !first.result.CleanupOK || first.result.Concurrency.IdleVerdict != IdleDeferred || first.result.Concurrency.UnattributedResidue != 1 {
 		t.Fatalf("look-alike beside a sibling: %+v %v", first.result, first.err)
 	}
-	if !host.running(200) || host.running(100) {
+	if !host.running(200) || !host.running(100) {
 		t.Fatalf("lane cleanup signalled %v", host.signalled)
 	}
 	if err := engine.LaneReady(context.Background()); !errors.Is(err, ErrDrain) {
@@ -519,11 +555,10 @@ func TestLookAlikeAgentBesideRunningJobsStillDefersAndDrains(t *testing.T) {
 // Studio, v0.1.58, 2026-11-15 13:17:13Z: j_7841d25a's lane admission found
 // an audited GUI agent exited beside an unattributed process, most likely
 // the WebKit GPU service started 12 s earlier, and failed with "could not be
-// verified as its launchd relaunch" (cleanup unverified). A running job's
-// crash agent is not unattributed, so the admission passes; an unknown
-// process beside the exited agent still refuses it, and the lane quiesce
-// still ends the agent (#155).
-func TestLaneAdmissionBesideExitedAuditedAgentLeavesCrashAgentsToTheirJob(t *testing.T) {
+// verified as its launchd relaunch" (cleanup unverified). A shared agent of
+// the busy period is not unattributed, so the admission passes; an unknown
+// process beside the exited agent still refuses it (#155).
+func TestLaneAdmissionBesideExitedAuditedAgentLeavesSharedAgents(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		exe  string
@@ -544,17 +579,10 @@ func TestLaneAdmissionBesideExitedAuditedAgentLeavesCrashAgentsToTheirJob(t *tes
 			delete(h.live, 50)
 			h.mu.Unlock()
 			h.add(100, 1, now, tc.exe, true)
-			s := h.runner.scope
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if err := s.observeQuietWith(ctx, h.runner.laneCensus); !errors.Is(err, tc.want) || (tc.want == nil) != (err == nil) {
+			if err := h.runner.scope.observeQuietWith(ctx, h.runner.laneCensus); !errors.Is(err, tc.want) || (tc.want == nil) != (err == nil) {
 				t.Fatalf("lane admission census: %v, want %v", err, tc.want)
-			}
-			if err := h.runner.QuiesceJob(context.Background(), "a"); err != nil {
-				t.Fatal(err)
-			}
-			if h.running(100) != (tc.want != nil) {
-				t.Fatalf("lane quiesce signalled %v", h.signalled)
 			}
 		})
 	}

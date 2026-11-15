@@ -60,6 +60,9 @@ type laneTracker struct {
 	lineage     func(pid int, start string) (uint64, uint64, error)
 	unique      map[processInstance][2]uint64
 	uniqueLabel map[uint64]string
+	// busy is the start of the first job of the current busy period, the
+	// span in which some job has run without a break; zero while none runs.
+	busy time.Time
 }
 
 type processInstance struct {
@@ -99,6 +102,9 @@ func newLaneTracker(broker, uid int, workspaceRoot string, describe func(int, bo
 func (t *laneTracker) begin(jobID string, started time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if len(t.jobs) == 0 || started.Before(t.busy) {
+		t.busy = started
+	}
 	t.jobs[jobID] = &laneJob{started: started, roots: map[int]bool{}, udids: map[string]bool{}}
 }
 
@@ -110,7 +116,16 @@ func (t *laneTracker) end(jobID string) {
 	delete(t.jobs, jobID)
 	if len(t.jobs) == 0 {
 		clear(t.uniqueLabel)
+		t.busy = time.Time{}
 	}
+}
+
+// busySince returns the start of the current busy period; ok is false
+// while no job runs.
+func (t *laneTracker) busySince() (since time.Time, ok bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.busy, len(t.jobs) != 0
 }
 
 func (t *laneTracker) addRoot(jobID string, pid int) {
@@ -683,23 +698,24 @@ func (r *nativeRunner) crashResidue(ctx context.Context, samples []processSample
 
 // laneCensus is the census of samples without any job's labelled instances
 // and the broker's helpers, less the crash agents a running job's lane
-// quiesce will still terminate (its crashWindow): the processes no running
-// job accounts for. Crash agents are taken out of the census's residual
-// processes only, after it judged them (see crashResidue). A crash agent
-// that started after a job's last lane quiesce began is not that job's: when
-// no other job covers it, it is residue. An audited process gone without a
-// verified relaunch (unresolved) makes only the residual processes left
-// beside it unverifiable: a crash agent the census could not verify as that
-// relaunch is still terminated by its job's lane quiesce, and launchd starts
-// the agent again if it serves the audited one (#155: at 13:17:13Z
-// j_7841d25a's lane admission drained, most likely beside the WebKit GPU
-// process that deferred j_645b8263 a minute later).
+// quiesce will still terminate (its crashWindow) and the shared agents of
+// the current busy period, which the next idle full quiesce terminates
+// (crash_agents.go): the processes no running job accounts for. Both are
+// taken out of the census's residual processes only, after it judged them
+// (see crashResidue). A crash agent that started after a job's last lane
+// quiesce began is not that job's: when no other job covers it, it is
+// residue. An audited process gone without a verified relaunch (unresolved)
+// makes only the residual processes left beside it unverifiable: an agent
+// the census could not verify as that relaunch is still stopped by a
+// quiesce, and launchd starts it again if it serves the audited one (#155:
+// at 13:17:13Z j_7841d25a's lane admission drained, most likely beside the
+// WebKit GPU process that deferred j_645b8263 a minute later).
 func (r *nativeRunner) laneCensus(ctx context.Context, samples []processSample) (processCensus, error) {
 	c, labelled, err := r.unattributedCensus(ctx, samples)
 	if err != nil {
 		return c, err
 	}
-	agents := r.crashAgents(c.residual, labelled, r.laneTracker().crashWindows())
+	agents := append(r.crashAgents(c.residual, labelled, r.laneTracker().crashWindows()), r.sharedAgents(c.residual, labelled)...)
 	if len(agents) == 0 {
 		return c, nil
 	}

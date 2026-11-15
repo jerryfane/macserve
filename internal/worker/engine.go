@@ -72,6 +72,8 @@ type Engine struct {
 	deviceMu sync.Mutex
 	// mounts reads the kernel mount table (mounttable.Read); tests replace it.
 	mounts func() ([]mounttable.Entry, error)
+	// pause waits d or until ctx ends (contextPause); tests replace it.
+	pause func(ctx context.Context, d time.Duration) error
 }
 
 // VerifiedTree returns the Git tree the engine computed from jobID's
@@ -256,7 +258,7 @@ func New(options Options) (*Engine, error) {
 		exports.Close()
 		return fail(err)
 	}
-	return &Engine{options: options, root: root, exports: exports, workspaces: workspaces, lock: lock, recording: map[string]*Result{}, verified: map[string]string{}, running: map[string]*laneEntry{}, changed: make(chan struct{}), mounts: mounttable.Read}, nil
+	return &Engine{options: options, root: root, exports: exports, workspaces: workspaces, lock: lock, recording: map[string]*Result{}, verified: map[string]string{}, running: map[string]*laneEntry{}, changed: make(chan struct{}), mounts: mounttable.Read, pause: contextPause}, nil
 }
 
 var accountName = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,254}$`)
