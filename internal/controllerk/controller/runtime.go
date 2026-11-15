@@ -125,23 +125,7 @@ func New(options Options) (*Controller, error) {
 	if options.Now == nil {
 		options.Now = time.Now
 	}
-	if options.HeartbeatTimeout == 0 {
-		options.HeartbeatTimeout = 30 * time.Second
-	}
-	// These match the worker's finalization (worker.FinalizationTimeout:
-	// its cleanup budget and the final verification window after the
-	// evidence steps, #150) and evidence-delivery (protocol.DeliveryTimeout)
-	// bounds, and its source read budget. HeartbeatTimeout also provides
-	// bounded transport grace.
-	if options.CleanupTimeout == 0 {
-		options.CleanupTimeout = worker.FinalizationTimeout
-	}
-	if options.DeliveryTimeout == 0 {
-		options.DeliveryTimeout = protocol.DeliveryTimeout
-	}
-	if options.SourceTimeout == 0 {
-		options.SourceTimeout = 10 * time.Minute
-	}
+	options.defaultBudgets()
 	absolute, err := filepath.Abs(options.Root)
 	if err != nil {
 		return nil, err
@@ -229,6 +213,43 @@ func New(options Options) (*Controller, error) {
 		_ = c.retrySourceCleanup(ctx)
 	}
 	return c, nil
+}
+
+// defaultBudgets sets the unset lease budgets. CleanupTimeout and
+// DeliveryTimeout are the worker's finalization (worker.FinalizationTimeout:
+// its cleanup budget and, since #150, the final verification window after
+// the evidence steps) and evidence-delivery (protocol.DeliveryTimeout)
+// bounds; SourceTimeout its source read budget. HeartbeatTimeout also
+// provides bounded transport grace.
+func (o *Options) defaultBudgets() {
+	if o.HeartbeatTimeout == 0 {
+		o.HeartbeatTimeout = 30 * time.Second
+	}
+	if o.CleanupTimeout == 0 {
+		o.CleanupTimeout = worker.FinalizationTimeout
+	}
+	if o.DeliveryTimeout == 0 {
+		o.DeliveryTimeout = protocol.DeliveryTimeout
+	}
+	if o.SourceTimeout == 0 {
+		o.SourceTimeout = 10 * time.Minute
+	}
+}
+
+// FinalizingWindow is how long a delivered lease of kind lives once it began
+// finalizing or its cancellation was requested, under options (unset
+// budgets take their defaults): the worker's finalization, its delivery and
+// heartbeat grace, and an ios_archive job's archive evidence window. Neither
+// heartbeats nor repeated stage requests extend it.
+func FinalizingWindow(options Options, kind model.Kind) time.Duration {
+	options.defaultBudgets()
+	window := options.CleanupTimeout + options.DeliveryTimeout + options.HeartbeatTimeout
+	if kind == model.IOSArchive {
+		// The worker builds, seals and exports the archive evidence in
+		// its own window after the job has stopped.
+		window += worker.ArchiveEvidenceTimeout
+	}
+	return window
 }
 
 type peerKey struct{}

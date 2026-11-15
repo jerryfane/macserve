@@ -13,7 +13,6 @@ import (
 	"github.com/jerryfane/macserve/internal/health"
 	"github.com/jerryfane/macserve/internal/model"
 	"github.com/jerryfane/macserve/internal/protocol"
-	"github.com/jerryfane/macserve/internal/worker"
 )
 
 func (c *Controller) register(ctx context.Context, registration protocol.Registration) error {
@@ -511,11 +510,11 @@ func (c *Controller) checkExecution(ctx context.Context, a *execution, now time.
 // worker. Neither heartbeats nor repeated stage requests extend these fixed
 // windows indefinitely. Callers hold c.mu.
 func (c *Controller) alive(a *execution, job model.Job, now time.Time) bool {
-	window := c.options.CleanupTimeout + c.options.DeliveryTimeout + c.options.HeartbeatTimeout
 	if !a.heldAt.IsZero() {
 		if a.idleSince.IsZero() && !slices.ContainsFunc(c.active, func(b *execution) bool { return b != a && b.heldAt.IsZero() }) {
 			a.idleSince = now
 		}
+		window := c.options.CleanupTimeout + c.options.DeliveryTimeout + c.options.HeartbeatTimeout
 		return now.Sub(a.heartbeat) <= c.options.HeartbeatTimeout && (a.idleSince.IsZero() || now.Sub(a.idleSince) <= window)
 	}
 	finishing := a.cancellingSince
@@ -525,12 +524,7 @@ func (c *Controller) alive(a *execution, job model.Job, now time.Time) bool {
 	if finishing.IsZero() {
 		return now.Sub(a.heartbeat) <= c.options.HeartbeatTimeout
 	}
-	if job.Request.Kind == model.IOSArchive {
-		// The worker builds, seals and exports the archive evidence in
-		// its own window after the job has stopped.
-		window += worker.ArchiveEvidenceTimeout
-	}
-	return now.Sub(finishing) <= window
+	return now.Sub(finishing) <= FinalizingWindow(c.options, job.Request.Kind)
 }
 
 // sweep removes only ID-addressed private exports, then prunes their metadata.
