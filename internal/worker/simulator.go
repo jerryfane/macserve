@@ -79,8 +79,11 @@ func (x *execution) simulator(ctx context.Context) error {
 			return errors.Join(err, stopErr)
 		}
 		x.result.Observation.DeviceUDID = ""
-		if _, logErr := fmt.Fprintf(x.stderr, "macserve: simulator boot failed (%v); retrying once on a new device\n", err); logErr != nil {
+		if _, logErr := fmt.Fprintf(x.stderr, "macserve: simulator boot failed (%v); retrying once on a new device after %s\n", err, simulatorBootRetryPause); logErr != nil {
 			return logErr
+		}
+		if pauseErr := x.engine.pause(ctx, simulatorBootRetryPause); pauseErr != nil {
+			return errors.Join(err, pauseErr)
 		}
 	}
 }
@@ -88,6 +91,28 @@ func (x *execution) simulator(ctx context.Context) error {
 // simulatorBootAttempts bounds how many fresh devices a job may create when
 // `simctl boot` or `bootstatus` fails: one retry, for infrastructure flakes.
 const simulatorBootAttempts = 2
+
+// simulatorBootRetryPause is how long the job waits, after the failed
+// device's teardown, before it creates and boots the retry device. A boot
+// that failed under load (#155: at six lanes and load 20-35, three boots
+// failed on 2026-11-15, and j_a099efdf's retry, started at once, failed its
+// data migration 13 s later) meets the same load when retried at once; the
+// pause lets the boots and builds of sibling lanes move on first. The
+// worker has no load gate of its own to wait for, and the controller's
+// simulator start gap (a minute) spaces only job starts.
+const simulatorBootRetryPause = 15 * time.Second
+
+// contextPause waits d, or until ctx ends, which it returns.
+func contextPause(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
 
 // createDevice creates the job's own device and records its UDID. The
 // inventory is recorded before creation: an interrupted create must never

@@ -62,6 +62,10 @@ PF enforcement may be a separately reviewed future opt-in; it is not implemented
   cannot be sampled does not start; `peak_memory_mib` is the charged peak, and the baseline is written to the
   broker log at job start and to budget failures. A slow or failed sample is tolerated until memory has gone
   unobserved for 30 s. This is not a kernel memory cap and excludes the broker and other-UID system daemons.
+  After a command exits, its output pipes get 10 s to reach end of file (each output chunk is a controller log
+  request; 250 ms until v0.1.60 failed simulator boots at six lanes, #155), which still bounds a pipe a descendant
+  that left the process group keeps open. A failed `simctl boot` or `bootstatus` is retried once on a new device,
+  15 s after the failed device's teardown, so the retry does not meet the load that failed the first boot at once.
 - `internal/evidence`: bounded xcresult test parsing, required-test execution checks, JUnit, deterministic
   artifact archives and content-addressed exports, including a script job's required `output.tar.gz`. Missing or incomplete test evidence cannot report success.
   Failed plans, bundles and suites remain explicit `container` diagnostics and JUnit errors even when child
@@ -346,21 +350,42 @@ a failing UI test), launchd starts the macOS crash dialog `/System/Library/CoreS
 job's GUI session, and beside it the XPC services `SetStoreUpdateService` (CascadeSets) and
 `SpeechSynthesisServerXPC` (SpeechSynthesis). The dialog waits for a click that never comes, so before v0.1.56 every
 lane that finished beside others deferred and drained the broker, and the lanes ran as batches. A process the census
-leaves unattributed (it judges every process no job labels first, exactly as before: a verified relaunch of an
-audited process or a tolerated launch running one of these executables serves every job and is never signalled) is a
-crash agent when its kernel facts prove all of this: the job UID, parent PID 1 (launchd), a valid platform binary, a
-kernel executable path (`PROC_PIDPATHINFO`) equal to one of those three paths under `/System` and SIP-restricted, and
-a start after a running job began and before that job's lane quiesce began. It is that job's to stop, not
-unattributed: it neither drains nor refuses a lane admission. That job's lane quiesce terminates it with the job's own
-processes (same signals, survivor rule and settle bound; only instances started before that quiesce began, so a
-sibling crashing again cannot keep it busy). A job ending alone stops it with the full quiesce, like any residual
-process. They are terminated rather than tolerated: none has a launchd record that proves Apple's own definition (the
-dialog is an application, not a LaunchAgent; the XPC services belong to a pid domain whose owner, the dialog, is never
-verified), terminating them loses nothing (ReportCrash wrote the crash report before the dialog showed it; the XPC
-services are stateless and launchd starts them again on demand), and nothing joins a tolerated set. A crash agent no
-running job covers (older than every running job, or started after the lane quiesce of every job that began before
-it), a copy outside SIP, one the job forked itself, any other path, and every other unattributed process still drain
-and hold as above.
+leaves unattributed (it judges every process no job labels first, exactly as before: a verified relaunch of an audited
+process or a tolerated launch running one of these executables serves every job and is never signalled) is a crash
+agent when its kernel facts prove all of this: the job UID, parent PID 1 (launchd), a valid platform binary, a kernel
+executable path (`PROC_PIDPATHINFO`) equal to one of those three paths and SIP-restricted, and a start after a running
+job began and before that job's lane quiesce began. It is that job's to stop, not unattributed: it neither drains nor
+refuses a lane admission. That job's lane quiesce terminates it with the job's own processes (same signals, survivor
+rule and settle bound; only instances started before that quiesce began, so a sibling crashing again cannot keep it
+busy). A job ending alone stops it with the full quiesce, like any residual process. They are terminated rather than
+tolerated: none has a launchd record that proves Apple's own definition (the dialog is an application, not a
+LaunchAgent; the XPC services belong to the dialog's pid domain, whose owner is never verified), terminating them loses
+nothing (ReportCrash wrote the crash report before the dialog showed it; the XPC services are stateless and launchd
+starts them again on demand), and nothing joins a tolerated set.
+
+*Shared agents* (same file, v0.1.61, #155) are Apple per-user agents that launchd starts beside running jobs and that
+may serve any of them: Spotlight's `mdworker` (`CoreServices.framework/…/Metadata.framework/Versions/A/Support/mdworker`,
+indexing files any job wrote), the Lighthouse SELF ingestor extensions (`/System/Library/ExtensionKit/Extensions/{GMS,
+IFTelemetry,Biome,AppleIntelligenceReporting}SELFIngestor.appex`, on-demand telemetry XPC services) and WebKit's
+`com.apple.WebKit.GPU`, `.WebContent` and `.Networking` XPC services, which a web view in a job's GUI session starts.
+The kernel names the WebKit services by their path in the sealed OS cryptex
+(`/System/Volumes/Preboot/Cryptexes/OS/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/…`; the
+`/System` path launchd names is a SIP symlink into it), whose files are SF_RESTRICTED like `/System`'s. A shared agent
+has a crash agent's kernel facts with one of these paths and a start in the current busy period: after the first of
+the jobs that have run without a break since the account was last idle. While any job runs it is not unattributed: it
+neither defers a verdict, drains nor refuses a lane admission, also beside an audited agent that exited without a
+verified relaunch (such a lane admission failed as unverified cleanup at 13:17:13Z on 2026-11-15, most likely beside
+the GPU service). No lane quiesce signals it, since its client may be a sibling still running and nothing attributes
+it to the finalizing job. The next idle point cleans the account of it: the job that finalizes alone ends with the full
+quiesce, and so does the idle `Recover`, which stop it like any residual process. It is not tolerated across idle
+points: `mdworker` runs Spotlight importer plug-ins as the job UID, and a web view's process owns the WebKit services'
+pid domain unverified; all are on-demand services launchd starts again. The worker does not keep Spotlight off the
+job's files: `.metadata_never_index` inside a folder is no longer honoured by current macOS, and Spotlight's privacy
+list is a system setting.
+
+A crash agent no running job covers (older than every running job, or started after the lane quiesce of every job that
+began before it), a shared agent older than the busy period, a copy outside SIP, one the job forked itself, any other
+path (the App cryptex's included), and every other unattributed process still drain and hold as above.
 
 An admission or finalization inspection still cut short by its own deadline (a loaded host) observed nothing, which
 is no evidence either way (#148, #150): the registered-root ACL census after its retries, `hostguard`'s

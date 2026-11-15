@@ -260,6 +260,9 @@ func TestNativeRunnerCancellationEscalatesToKill(t *testing.T) {
 
 func TestNativeRunnerDeadline(t *testing.T) {
 	runner, command := helperRunner(t, "hang")
+	// The deadline must stop the command, not the memory baseline sample
+	// before it starts (a loaded host's ps can take longer than 150 ms).
+	command.MemoryBaseline = &MemoryBaseline{sampled: true}
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 	result, err := runner.Run(ctx, command, io.Discard, io.Discard)
@@ -693,6 +696,9 @@ func TestLaneCommandSkipsAccountBaseline(t *testing.T) {
 func TestNativeRunnerCleanupToleratesExitingGroupEPERM(t *testing.T) {
 	for _, delivered := range []bool{true, false} {
 		runner, command := helperRunner(t, "hang")
+		// The 200 ms deadline must stop the command, not the memory baseline
+		// sample before it starts (a loaded host's ps can take longer).
+		command.MemoryBaseline = &MemoryBaseline{sampled: true}
 		runner.termGrace, runner.killGrace = 200*time.Millisecond, 200*time.Millisecond
 		var target atomic.Int64
 		runner.kill = func(pid int, sig syscall.Signal) error {
@@ -711,10 +717,50 @@ func TestNativeRunnerCleanupToleratesExitingGroupEPERM(t *testing.T) {
 			t.Fatalf("delivered signal's EPERM left cleanup unconfirmed: %+v, %v", result, err)
 		}
 		if !delivered {
-			syscall.Kill(int(target.Load()), syscall.SIGKILL)
+			// Never kill(0): that is this test's own process group, go test
+			// included.
+			if pid := int(target.Load()); pid != 0 {
+				syscall.Kill(pid, syscall.SIGKILL)
+			}
 			if result.CleanupOK || !errors.Is(err, ErrCleanup) {
 				t.Fatalf("surviving member passed cleanup: %+v, %v", result, err)
 			}
 		}
+	}
+}
+
+// slowWriter takes delay to accept each write, as a job log write does while
+// its controller log request is slow.
+type slowWriter struct {
+	delay time.Duration
+	mu    sync.Mutex
+	data  bytes.Buffer
+}
+
+func (w *slowWriter) Write(p []byte) (int, error) {
+	time.Sleep(w.delay)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.data.Write(p)
+}
+
+// Every chunk of a job command's output is a controller log request before
+// the next one is read. Studio, v0.1.58, 2026-11-15, six lanes at load
+// 20-35: a request still in flight when `simctl boot` or `bootstatus`
+// exited outlasted the 250 ms output drain, and the boot failed with
+// "worker output drain deadline exceeded" (j_a099efdf, j_4c485ddd,
+// j_1f9cbf13). The production drain waits for such a write (#155).
+func TestNativeRunnerDrainWaitsForSlowOutputWriter(t *testing.T) {
+	runner, command := helperRunner(t, "success")
+	runner.drainTimeout = newProcessRunner().drainTimeout
+	output := &slowWriter{delay: 1500 * time.Millisecond}
+	result, err := runner.Run(context.Background(), command, output, io.Discard)
+	if err != nil || !result.CleanupOK || result.ExitCode != 0 {
+		t.Fatalf("slow output writer failed the command: %+v, %v", result, err)
+	}
+	output.mu.Lock()
+	defer output.mu.Unlock()
+	if got := output.data.String(); got != "complete\n" {
+		t.Fatalf("output %q", got)
 	}
 }

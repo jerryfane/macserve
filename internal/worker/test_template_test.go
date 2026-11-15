@@ -329,3 +329,48 @@ func TestTestKindPrepareBudget(t *testing.T) {
 		})
 	}
 }
+
+// Studio, v0.1.58, 2026-11-15, six lanes at load 20-35: j_a099efdf's boot
+// failed under load and its retry, started at once on a new device, failed
+// its data migration 13 s later. The job pauses simulatorBootRetryPause
+// (at least 10 s) after the failed device's teardown and before it creates
+// the retry device; a pause the job's context ends fails the job (#155).
+func TestSimulatorBootRetryPausesBeforeTheNewDevice(t *testing.T) {
+	for _, cancelled := range []bool{false, true} {
+		runner := &fakeRunner{}
+		failed := false
+		runner.hook = func(_ context.Context, c Command, _, _ io.Writer) (bool, ProcessResult, error) {
+			if len(c.Args) > 1 && c.Args[0] == "simctl" && c.Args[1] == "boot" && !failed {
+				failed = true
+				return true, ProcessResult{ExitCode: 164, CleanupOK: true}, nil
+			}
+			return false, ProcessResult{}, nil
+		}
+		engine := engineFixture(t, runner)
+		var pauses []time.Duration
+		engine.pause = func(ctx context.Context, d time.Duration) error {
+			if creates, deletes := len(simctl(runner, "create")), len(simctl(runner, "delete")); creates != 1 || deletes != 1 {
+				t.Errorf("paused after %d creates and %d deletes, want after the failed device's teardown", creates, deletes)
+			}
+			pauses = append(pauses, d)
+			if cancelled {
+				return context.Canceled
+			}
+			return ctx.Err()
+		}
+		source, data := sourceFixture(t)
+		result, err := engine.Execute(context.Background(), fixtureJob(t, model.SimulatorUITest), source, bytes.NewReader(data), nil)
+		if len(pauses) != 1 || pauses[0] < 10*time.Second {
+			t.Fatalf("pauses %v, want one of at least 10s", pauses)
+		}
+		if cancelled {
+			if err == nil || result.State != model.Failed || len(simctl(runner, "create")) != 1 {
+				t.Fatalf("cancelled pause: result=%+v err=%v", result, err)
+			}
+			continue
+		}
+		if err != nil || result.State != model.Succeeded || bootAttempts(t, result) != 2 {
+			t.Fatalf("result=%+v err=%v", result, err)
+		}
+	}
+}
