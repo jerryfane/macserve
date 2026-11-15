@@ -687,7 +687,13 @@ func (r *nativeRunner) crashResidue(ctx context.Context, samples []processSample
 // job accounts for. Crash agents are taken out of the census's residual
 // processes only, after it judged them (see crashResidue). A crash agent
 // that started after a job's last lane quiesce began is not that job's: when
-// no other job covers it, it is residue.
+// no other job covers it, it is residue. An audited process gone without a
+// verified relaunch (unresolved) makes only the residual processes left
+// beside it unverifiable: a crash agent the census could not verify as that
+// relaunch is still terminated by its job's lane quiesce, and launchd starts
+// the agent again if it serves the audited one (#155: at 13:17:13Z
+// j_7841d25a's lane admission drained, most likely beside the WebKit GPU
+// process that deferred j_645b8263 a minute later).
 func (r *nativeRunner) laneCensus(ctx context.Context, samples []processSample) (processCensus, error) {
 	c, labelled, err := r.unattributedCensus(ctx, samples)
 	if err != nil {

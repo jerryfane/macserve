@@ -200,10 +200,20 @@ func TestTemplateUITestRequiresEveryShardSelector(t *testing.T) {
 	assertExactCleanup(t, runner, true)
 }
 
+// quickBootRetry shortens the simulator boot retry pause for a test that
+// retries a boot but does not judge the pause.
+func quickBootRetry(t *testing.T) {
+	t.Helper()
+	pause := simulatorBootRetryPause
+	simulatorBootRetryPause = time.Millisecond
+	t.Cleanup(func() { simulatorBootRetryPause = pause })
+}
+
 // When `simctl boot` or `bootstatus` fails, the job discards that device
 // through the ownership teardown and creates and boots exactly one more; a
 // second failure fails the job. Unconfirmed process cleanup is not retried.
 func TestSimulatorBootRetriedOnceThenFails(t *testing.T) {
+	quickBootRetry(t)
 	for _, tc := range []struct {
 		name     string
 		failVerb string
@@ -327,5 +337,42 @@ func TestTestKindPrepareBudget(t *testing.T) {
 				t.Fatalf("prepare budget left %v, want between %v and %v", remaining, tc.min, tc.max)
 			}
 		})
+	}
+}
+
+// Studio, v0.1.58, 2026-11-15, six lanes at load 20-35: j_a099efdf's boot
+// failed under load and its retry, started at once on a new device, failed
+// its data migration 13 s later. The retry device is created only after a
+// pause that follows the failed device's teardown (#155).
+func TestSimulatorBootRetryPausesBeforeTheNewDevice(t *testing.T) {
+	runner := &fakeRunner{}
+	var mu sync.Mutex
+	var failedAt, retryAt time.Time
+	creates := 0
+	runner.hook = func(_ context.Context, c Command, _, _ io.Writer) (bool, ProcessResult, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(c.Args) < 2 || c.Args[0] != "simctl" {
+			return false, ProcessResult{}, nil
+		}
+		switch {
+		case c.Args[1] == "boot" && failedAt.IsZero():
+			failedAt = time.Now()
+			return true, ProcessResult{ExitCode: 164, CleanupOK: true}, nil
+		case c.Args[1] == "create":
+			if creates++; creates == 2 {
+				retryAt = time.Now()
+			}
+		}
+		return false, ProcessResult{}, nil
+	}
+	engine := engineFixture(t, runner)
+	source, data := sourceFixture(t)
+	result, err := engine.Execute(context.Background(), fixtureJob(t, model.SimulatorUITest), source, bytes.NewReader(data), nil)
+	if err != nil || result.State != model.Succeeded || bootAttempts(t, result) != 2 {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if gap := retryAt.Sub(failedAt); gap < 10*time.Second {
+		t.Fatalf("retry device created %s after the failed boot, want a pause of at least 10s", gap)
 	}
 }

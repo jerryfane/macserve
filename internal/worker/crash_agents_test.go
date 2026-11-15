@@ -384,3 +384,157 @@ func TestLaneQuiesceKeepsCensusProtectedCrashAgentExecutables(t *testing.T) {
 		})
 	}
 }
+
+// The Apple per-user agents of #155 (Studio, v0.1.58 worker log,
+// 2026-11-13/15): Spotlight's importer, and WebKit's out-of-process
+// services as the kernel names them, in the sealed OS cryptex.
+const (
+	mdworker         = "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker"
+	webKitXPC        = "/System/Volumes/Preboot/Cryptexes/OS/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/"
+	webKitGPU        = webKitXPC + "com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+	webKitContent    = webKitXPC + "com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+	webKitNetworking = webKitXPC + "com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking"
+)
+
+// sealAgents marks the #155 agents' executables SIP-restricted.
+func sealAgents(h *crashHost) {
+	for _, exe := range []string{mdworker, webKitGPU, webKitContent, webKitNetworking} {
+		h.agents.sip[exe] = true
+	}
+}
+
+// Spotlight's mdworker and WebKit's GPU, WebContent and Networking
+// services, started by launchd while jobs run, are the running jobs' to
+// stop, like the crash dialog. A look-alike stays unattributed: the GPU
+// service by the /System path launchd names (the kernel reports the
+// cryptex one), a copy in the App cryptex or the job's home, one outside
+// SIP, a non-platform mdworker, one the job forked itself, and an mdworker
+// older than every running job (#155).
+func TestLaneCensusLeavesSpotlightAndWebKitAgentsToRunningJobs(t *testing.T) {
+	h := newCrashHost()
+	sealAgents(h)
+	now := time.Now()
+	h.runner.lanes.begin("a", now.Add(-time.Minute))
+	h.add(100, 1, now, mdworker, true)
+	h.add(101, 1, now, webKitGPU, true)
+	h.add(102, 1, now, webKitContent, true)
+	h.add(103, 1, now, webKitNetworking, true)
+	const systemGPU = "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.GPU.xpc/Contents/MacOS/com.apple.WebKit.GPU"
+	appGPU := strings.Replace(webKitGPU, "/Cryptexes/OS/", "/Cryptexes/App/", 1)
+	for _, exe := range []string{systemGPU, appGPU} {
+		h.agents.sip[exe] = true
+	}
+	h.add(200, 1, now, systemGPU, true)
+	h.add(201, 1, now, appGPU, true)
+	h.add(202, 1, now, "/Users/job/mdworker", true)
+	h.add(203, 1, now, webKitGPU, true)
+	h.agents.procs[203] = agentProcess{start: h.live[203].start, uid: crashUID, ppid: 1, executable: webKitGPU + "2", platform: true}
+	h.add(204, 1, now, mdworker, false)
+	h.add(205, 300, now, mdworker, true)
+	h.add(206, 1, now.Add(-2*time.Minute), mdworker, true)
+	if got, want := h.residual(t), []int{200, 201, 202, 203, 204, 205, 206}; !slices.Equal(got, want) {
+		t.Fatalf("unattributed %v, want %v", got, want)
+	}
+	h.agents.sip[webKitGPU] = false
+	if got := h.residual(t); !slices.Contains(got, 101) {
+		t.Fatalf("a WebKit GPU service outside SIP is not unattributed: %v", got)
+	}
+}
+
+// Studio, v0.1.58, 2026-11-15: Spotlight's mdworker drained the engine at
+// 10:45:41Z, and the WebKit GPU service deferred j_645b8263 at 13:18:15Z.
+// Now the finalizing job stops them, keeps the verdict not_required, and
+// new lanes start (#155).
+func TestSpotlightAndWebKitAgentsBesideRunningJobsDoNotDeferOrDrain(t *testing.T) {
+	engine, host, first, gateB, b := laneCrash(t, func(h *crashHost, at time.Time) {
+		sealAgents(h)
+		h.add(100, 1, at, mdworker, true)
+		h.add(101, 1, at, webKitGPU, true)
+		h.add(102, 1, at, webKitContent, true)
+		h.add(103, 1, at, webKitNetworking, true)
+	})
+	if first.err != nil || first.result.State != model.Succeeded || !first.result.CleanupOK || first.result.Concurrency.IdleVerdict != IdleNotRequired || first.result.Concurrency.UnattributedResidue != 0 {
+		t.Fatalf("Apple agents deferred the job: %+v %v", first.result, first.err)
+	}
+	for _, pid := range []int{100, 101, 102, 103} {
+		if host.running(pid) {
+			t.Fatalf("agent %d survived the lane cleanup (signalled %v)", pid, host.signalled)
+		}
+	}
+	if err := engine.LaneReady(context.Background()); err != nil {
+		t.Fatalf("engine stopped admitting after the agents: %v", err)
+	}
+	close(gateB)
+	if second := <-b; second.err != nil || !second.result.CleanupOK {
+		t.Fatalf("sibling: %+v %v", second.result, second.err)
+	}
+}
+
+// A look-alike of the WebKit GPU service (the same bundle in the App
+// cryptex) beside a running job still defers the finalizing job's verdict
+// and drains the engine, and the lane cleanup does not signal it (#155).
+func TestLookAlikeAgentBesideRunningJobsStillDefersAndDrains(t *testing.T) {
+	appGPU := strings.Replace(webKitGPU, "/Cryptexes/OS/", "/Cryptexes/App/", 1)
+	engine, host, first, gateB, b := laneCrash(t, func(h *crashHost, at time.Time) {
+		sealAgents(h)
+		h.agents.sip[appGPU] = true
+		h.add(100, 1, at, mdworker, true)
+		h.add(200, 1, at, appGPU, true)
+	})
+	if first.err != nil || first.result.State != model.Succeeded || !first.result.CleanupOK || first.result.Concurrency.IdleVerdict != IdleDeferred || first.result.Concurrency.UnattributedResidue != 1 {
+		t.Fatalf("look-alike beside a sibling: %+v %v", first.result, first.err)
+	}
+	if !host.running(200) || host.running(100) {
+		t.Fatalf("lane cleanup signalled %v", host.signalled)
+	}
+	if err := engine.LaneReady(context.Background()); !errors.Is(err, ErrDrain) {
+		t.Fatalf("engine admits beside a look-alike: %v", err)
+	}
+	close(gateB)
+	if second := <-b; second.err != nil || !second.result.CleanupOK {
+		t.Fatalf("sibling: %+v %v", second.result, second.err)
+	}
+}
+
+// Studio, v0.1.58, 2026-11-15 13:17:13Z: j_7841d25a's lane admission found
+// an audited GUI agent exited beside an unattributed process, most likely
+// the WebKit GPU service started 12 s earlier, and failed with "could not be
+// verified as its launchd relaunch" (cleanup unverified). A running job's
+// crash agent is not unattributed, so the admission passes; an unknown
+// process beside the exited agent still refuses it, and the lane quiesce
+// still ends the agent (#155).
+func TestLaneAdmissionBesideExitedAuditedAgentLeavesCrashAgentsToTheirJob(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		exe  string
+		want error
+	}{
+		{name: "WebKit GPU", exe: webKitGPU},
+		{name: "mdworker", exe: mdworker},
+		{name: "unknown", exe: "/System/Library/PrivateFrameworks/IMTransferServices.framework/IMTransferAgent.app/Contents/MacOS/IMTransferAgent", want: errRelaunchUnverified},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newCrashHost()
+			sealAgents(h)
+			h.agents.sip[tc.exe] = true
+			now := time.Now()
+			h.runner.lanes.begin("a", now.Add(-time.Minute))
+			h.mu.Lock()
+			delete(h.live, 50)
+			h.mu.Unlock()
+			h.add(100, 1, now, tc.exe, true)
+			s := h.runner.scope
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := s.observeQuietWith(ctx, h.runner.laneCensus); !errors.Is(err, tc.want) || (tc.want == nil) != (err == nil) {
+				t.Fatalf("lane admission census: %v, want %v", err, tc.want)
+			}
+			if err := h.runner.QuiesceJob(context.Background(), "a"); err != nil {
+				t.Fatal(err)
+			}
+			if h.running(100) != (tc.want != nil) {
+				t.Fatalf("lane quiesce signalled %v", h.signalled)
+			}
+		})
+	}
+}

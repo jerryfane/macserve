@@ -29,13 +29,14 @@ import (
 //   - a job whose finalization begins beside others stops only its own
 //     simulator and labelled processes, and the Apple crash agents
 //     (crash_agents.go: the crash dialog Problem Reporter and its two XPC
-//     services) that started while it ran (QuiesceJob), and then counts
-//     unattributed processes: none gives idle verdict "not_required"; any
-//     gives "deferred" and drains the engine, and the client holds the
-//     job's completion until the idle Recover judges them. A crash agent
-//     started while a running job ran, before its lane quiesce, is that
-//     job's to stop, never residue and never a reason to refuse a lane
-//     admission (#146);
+//     services, Spotlight's mdworker and WebKit's GPU, WebContent and
+//     Networking services) that started while it ran (QuiesceJob), and then
+//     counts unattributed processes: none gives idle verdict
+//     "not_required"; any gives "deferred" and drains the engine, and the
+//     client holds the job's completion until the idle Recover judges them.
+//     A crash agent started while a running job ran, before its lane
+//     quiesce, is that job's to stop, never residue and never a reason to
+//     refuse a lane admission (#146, #155);
 //   - an inspection its own deadline cut short observed nothing
 //     (inspectionCut): an admission's ACL census (the registered tree's, or
 //     hostguard's protected-input inspection, #148) or any other of its

@@ -364,6 +364,7 @@ func TestPinnedObservationsRejectMismatchesBeforeCreatingDevice(t *testing.T) {
 }
 
 func TestRecipeFailuresAlwaysCleanOwnedSimulator(t *testing.T) {
+	quickBootRetry(t)
 	for _, stage := range []string{"generate", "prepare", "run", "boot"} {
 		t.Run(stage, func(t *testing.T) {
 			runner := &fakeRunner{}
