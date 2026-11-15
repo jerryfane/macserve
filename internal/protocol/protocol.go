@@ -73,11 +73,18 @@ type Completion struct {
 // ran, when the service caused the refusal; empty for any other completion.
 type AdmissionRefusal string
 
-// AdmissionACLCensusUnavailable is an admission whose registered tree ACL
-// census its deadline cut short, on a loaded host, also after its retries,
-// or whose protected-input ACL inspection its deadline cut short
-// (worker.ErrACLCensusUnavailable): it observed nothing about the job.
+// AdmissionACLCensusUnavailable is an admission one of whose inspections its
+// deadline cut short on a loaded host, also after its retries: the
+// registered tree ACL census, the protected-input ACL inspection, or any
+// other (worker.ErrACLCensusUnavailable; the name predates #150). It
+// observed nothing about the job.
 const AdmissionACLCensusUnavailable AdmissionRefusal = "acl_census_unavailable"
+
+// DeliveryTimeout bounds the worker's delivery of a completion after its
+// finalization (worker.FinalizationTimeout), and the controller's handling
+// of one. The controller's finalizing lease budget covers both, plus its
+// heartbeat grace.
+const DeliveryTimeout = 2 * time.Minute
 
 // Valid reports whether r is empty or a known refusal.
 func (r AdmissionRefusal) Valid() bool {

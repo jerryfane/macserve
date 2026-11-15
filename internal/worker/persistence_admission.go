@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -70,17 +71,34 @@ func inspectRegistrationRoots(ctx context.Context, expected PersistenceManifest,
 	}
 }
 
-// rootACLAttempts bounds the hot root/ancestor ACL census: 3 allocations of
-// 2s, clamped by the 30s hot budget. Studio, 2026-11-13: with four lanes
-// building beside the periodic full scan, one 2s allocation expired and
-// failed a job's lane admission.
-const rootACLAttempts = 3
+// rootACLAttempts bounds the hot root/ancestor ACL census: a cut attempt is
+// retried once, each attempt with hotInspectionShare, always within the
+// caller's deadline. Studio, 2026-11-13: with four lanes building beside
+// the periodic full scan, one 2s allocation expired and failed a job's lane
+// admission; 2026-11-14/15, six lanes at load 20-35: three 2s allocations
+// in a row expired, again and again (#150).
+const rootACLAttempts = 2
+
+// hotInspectionShare is the allocation of each bounded multi-command step
+// of the hot persistence inspection: an attempt of the registered
+// root/ancestor ACL census, and each authority bracket of
+// verifyHotPersistence (the lock, the protected-input ACL inspections and
+// the reads of the persistence authority and its attestation), each one
+// ls per path. At six lanes and load 20-35 (Studio v0.1.56, 2026-11-14/15)
+// both kinds of step expired at their former 2s again and again: seven
+// refusals in 23 minutes, and a bare "context deadline exceeded" from a
+// bracket left a job's cleanup unverified. Single steps of the same host
+// exceeded 5s at times (the worker's 5s memory samples expired 49 times in
+// four days, never twice in a row), so a step of a dozen commands gets 10s,
+// and an inspection still cut short is retried once
+// (hotPersistenceAttempts).
+const hotInspectionShare = 10 * time.Second
 
 // inspectRegistrationRootsOnce is one attempt.
 func inspectRegistrationRootsOnce(ctx context.Context, expected PersistenceManifest, writers registrationWriters, acl func(context.Context, registrationWriters, ...string) error) error {
 	// All root and ancestor ACL probes of an attempt share one allocation,
-	// not 2s per path.
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	// not one per path.
+	ctx, cancel := context.WithTimeout(ctx, hotInspectionShare)
 	defer cancel()
 	seen := make(map[string]bool, len(expected.Code))
 	for _, code := range expected.Code {
@@ -115,34 +133,46 @@ func aclCensusCut(err error) error {
 	return err
 }
 
-// aclCensusUnavailable returns err as ErrACLCensusUnavailable when it is only
-// an ACL census or inspection its deadline cut short, with no contamination
-// evidence beside it: a registered tree ACL census (ErrACLCensusUnavailable;
-// see registrationACLCommand for the exec.ErrWaitDelay case, the likely cause
-// of "registered tree ACL census failed" 40 s into a job's admission at load
-// 28-37, Studio 2026-11-14 08:15Z) or a hostguard protected-input ACL
-// inspection of the persistence authority (hostguard.ErrACLInspectionCut,
-// 08:31Z: "cannot inspect protected input ACL: signal: killed: context
-// deadline exceeded" 15 s in), which keeps its own text (#148). Anything
-// else, a census that ran and failed or found a problem included, is nil.
-func aclCensusUnavailable(err error) error {
+// inspectionCut returns err marked as ErrACLCensusUnavailable, with its own
+// text, when it is only a bounded admission or finalization inspection its
+// deadline cut short, with no evidence beside it: it observed nothing, so it
+// is inconclusive, never clean and never a finding. That is
+//   - a registered tree ACL census cut short (ErrACLCensusUnavailable; see
+//     registrationACLCommand for the exec.ErrWaitDelay case) or a hostguard
+//     protected-input ACL inspection of the persistence authority killed at
+//     its deadline (hostguard.ErrACLInspectionCut, "cannot inspect protected
+//     input ACL: signal: killed: context deadline exceeded"), #148;
+//   - any other inspection that ended at its deadline (#150, Studio v0.1.56,
+//     six lanes at load 20-35): the bare "context deadline exceeded" of a
+//     persistence authority bracket whose 2s ran out between its commands
+//     (17:24:21Z), the end of a final account barrier its finalization
+//     budget no longer covered (00:08:28Z), or "exec: WaitDelay expired
+//     before I/O complete" of a dsmemberutil probe whose output did not
+//     close within 100 ms, with "registration service account memberships
+//     unavailable" (17:33:42Z).
+//
+// Contamination, a drain (an unattributed process), a fenced recovery, and
+// anything else, a census that ran and failed or found a problem included,
+// is nil. The caller decides which deadline counts: at a job's admission
+// only the inspection's own, never the job's.
+func inspectionCut(err error) error {
 	switch {
-	case err == nil || errors.Is(err, ErrContamination):
+	case err == nil || errors.Is(err, ErrContamination) || errors.Is(err, ErrDrain) || errors.Is(err, ErrRecovery):
 		return nil
 	case errors.Is(err, ErrACLCensusUnavailable):
 		return err
-	case errors.Is(err, hostguard.ErrACLInspectionCut):
-		return protectedACLCut{err}
+	case errors.Is(err, hostguard.ErrACLInspectionCut) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, exec.ErrWaitDelay):
+		return inspectionCutError{err}
 	}
 	return nil
 }
 
-// protectedACLCut is a protected-input ACL inspection its deadline cut short,
-// reported as ErrACLCensusUnavailable with its own text.
-type protectedACLCut struct{ error }
+// inspectionCutError is an inspection its deadline cut short, reported as
+// ErrACLCensusUnavailable with its own text.
+type inspectionCutError struct{ error }
 
-func (c protectedACLCut) Is(target error) bool { return target == ErrACLCensusUnavailable }
-func (c protectedACLCut) Unwrap() error        { return c.error }
+func (c inspectionCutError) Is(target error) bool { return target == ErrACLCensusUnavailable }
+func (c inspectionCutError) Unwrap() error        { return c.error }
 
 func verifyHotPersistence(ctx context.Context, options Options, inspect func(context.Context, Options, PersistenceManifest) error) (result error) {
 	ctx, cancel := context.WithTimeout(ctx, persistenceAdmissionTimeout)
@@ -164,9 +194,11 @@ func verifyHotPersistence(ctx context.Context, options Options, inspect func(con
 	}
 	var expected PersistenceManifest
 	var accepted []byte
-	// Each authority bracket includes protected-path ACL inspection as well as
-	// locking and reading. Together these reserve 4s of the 30s hot budget.
-	beforeCtx, cancelBefore := context.WithTimeout(ctx, 2*time.Second)
+	// Each authority bracket includes protected-path ACL inspection (one ls
+	// per ancestor of three paths) as well as locking and reading: each gets
+	// hotInspectionShare of the hot budget, of which only the wait for the
+	// lock itself is bounded by persistenceAttestationLockTimeout.
+	beforeCtx, cancelBefore := context.WithTimeout(ctx, hotInspectionShare)
 	err := withAttestationLockContext(beforeCtx, options, func(_ *os.Root) error {
 		record, _, err := readAttestationContext(beforeCtx, options)
 		if err != nil {
@@ -196,7 +228,7 @@ func verifyHotPersistence(ctx context.Context, options Options, inspect func(con
 	if err := inspect(ctx, options, expected); err != nil {
 		return err
 	}
-	afterCtx, cancelAfter := context.WithTimeout(ctx, 2*time.Second)
+	afterCtx, cancelAfter := context.WithTimeout(ctx, hotInspectionShare)
 	defer cancelAfter()
 	return withAttestationLockContext(afterCtx, options, func(_ *os.Root) error {
 		record, _, err := readAttestationContext(afterCtx, options)

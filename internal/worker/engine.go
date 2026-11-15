@@ -161,11 +161,11 @@ func New(options Options) (*Engine, error) {
 	if options.Root == "" || options.ExportRoot == "" || options.WorkspaceRoot == "" {
 		return nil, errors.New("control, export and workspace roots are required")
 	}
-	if options.CleanupTimeout < 0 || options.CleanupTimeout > 2*time.Minute || options.MaxWorkspaceBytes < 0 || options.MaxArtifactBytes < 0 || options.Lanes < 0 || options.Lanes > model.MaxConcurrentJobs {
+	if options.CleanupTimeout < 0 || options.CleanupTimeout > DefaultCleanupTimeout || options.MaxWorkspaceBytes < 0 || options.MaxArtifactBytes < 0 || options.Lanes < 0 || options.Lanes > model.MaxConcurrentJobs {
 		return nil, errors.New("invalid worker limits")
 	}
 	if options.CleanupTimeout == 0 {
-		options.CleanupTimeout = 2 * time.Minute
+		options.CleanupTimeout = DefaultCleanupTimeout
 	}
 	if options.MaxWorkspaceBytes == 0 {
 		options.MaxWorkspaceBytes = 30 << 30

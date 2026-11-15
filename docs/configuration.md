@@ -56,8 +56,8 @@ Optional `signer` connects the controller to the [code signer](#code-signer).
   `?`, `"` becomes `'`, `\` becomes `/`) and bounded (128 bytes for the User-Agent, 96 for each forwarding header),
   and a long reason is cut to keep them. The controller records
   `worker_admission` when the worker reports that it refused the job before it ran for a cause of the service's
-  own (`admission_refused` in its completion; `acl_census_unavailable`: a registered tree ACL census or a
-  protected-input ACL inspection cut short by its deadline on a loaded host) with a failed result and `cleanup_ok`;
+  own (`admission_refused` in its completion; `acl_census_unavailable`: an admission inspection, such as an ACL
+  census or a membership check, cut short by its deadline on a loaded host) with a failed result and `cleanup_ok`;
   the job then ends `cancelled`. Only the first request is
   recorded and it survives the job's finish, whose
   `reason` says only `cancellation requested`. Receipts never carry it and are byte-identical with or without it;
@@ -298,7 +298,8 @@ running job (Studio, 2026-11-13). A probe forks some 60 short inspection command
 At `Standard` the observer's CPU stays bounded by `GOMAXPROCS=2` plus those short-lived children.
 
 Offered/running workers retain the ordinary 30-second heartbeat-loss fence. Cancellation, deadline or finalizing
-starts a fixed cleanup/delivery grace (two minutes each, plus heartbeat tolerance); repeated heartbeats cannot
+starts a fixed cleanup/delivery grace (the worker's finalization bound of 210 seconds, two minutes of delivery,
+plus heartbeat tolerance: 360 seconds); repeated heartbeats cannot
 extend it. Source streaming instead receives the ten-minute preparation budget plus heartbeat tolerance.
 Controller source-cleanup debt is durable and independent of worker cleanup: registration cannot erase it,
 and only successful protected source removal clears it. Retention may relieve disk-only pressure, but never

@@ -63,3 +63,40 @@ func TestACLInspectionKilledAtDeadlineIsADeadline(t *testing.T) {
 		t.Fatal("successful command reported an error")
 	}
 }
+
+// An ACL listing its own five seconds cut short observed nothing and runs
+// once more within the caller's deadline; one cut short twice is
+// ErrACLInspectionCut, and a listing that shows an ACL is never retried
+// (Studio v0.1.56, six lanes at load 20-35, #150).
+func TestACLListingCutByItsOwnDeadlineRunsOnceMore(t *testing.T) {
+	timeout, command := aclCommandTimeout, aclCommand
+	t.Cleanup(func() { aclCommandTimeout, aclCommand = timeout, command })
+	aclCommandTimeout = 20 * time.Millisecond
+	listing := func(path, acl string) []byte {
+		return []byte("drwxr-xr-x  20 root  wheel  640 Oct 11 00:00 " + path + "\n" + acl)
+	}
+	for name, c := range map[string]struct {
+		cut   int
+		acl   string
+		calls int
+		want  func(error) bool
+	}{
+		"cut once":         {cut: 1, calls: 2, want: func(err error) bool { return err == nil }},
+		"cut twice":        {cut: 2, calls: 2, want: func(err error) bool { return errors.Is(err, ErrACLInspectionCut) }},
+		"ACL is a finding": {acl: " 0: user:job allow write\n", calls: 1, want: func(err error) bool { return err != nil && !errors.Is(err, ErrACLInspectionCut) }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			calls := 0
+			aclCommand = func(ctx context.Context, path string) ([]byte, error) {
+				if calls++; calls <= c.cut {
+					<-ctx.Done()
+					return nil, errors.New("signal: killed")
+				}
+				return listing(path, c.acl), nil
+			}
+			if err := CheckProtectedPathContext(context.Background(), "/", true); !c.want(err) || calls != c.calls {
+				t.Fatalf("calls=%d err=%v", calls, err)
+			}
+		})
+	}
+}

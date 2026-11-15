@@ -211,18 +211,18 @@ func TestHotAdmissionFixedBudgetAndExpiry(t *testing.T) {
 }
 
 func TestInspectionCommandUsesShortShareAndRefusesExpiry(t *testing.T) {
-	// Use the existing command API and an actual child process: old code gives
-	// metadata probes 5s, allowing this 3s command to finish instead of refusing.
+	// Use the existing command API and an actual child process: its 5s share
+	// (2s until v0.1.56, #150) refuses this 8s command's partial output.
 	options, expected := attestationFixture(t)
 	attestFixture(t, options, expected, false)
 	var out string
 	err := verifyHotPersistence(context.Background(), options, func(ctx context.Context, _ Options, _ PersistenceManifest) error {
 		var err error
-		out, _, err = inspectCommand(ctx, nil, "/bin/sh", "-c", "printf partial; exec sleep 3")
+		out, _, err = inspectCommand(ctx, nil, "/bin/sh", "-c", "printf partial; exec sleep 8")
 		return err
 	})
 	if !errors.Is(err, context.DeadlineExceeded) || out != "partial" {
-		t.Fatalf("command did not refuse partial output at its 2s share: out=%q err=%v", out, err)
+		t.Fatalf("command did not refuse partial output at its 5s share: out=%q err=%v", out, err)
 	}
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
@@ -248,8 +248,8 @@ func TestHotRootACLProbesShareOneAllocation(t *testing.T) {
 	err := inspectRegistrationRoots(context.Background(), expected, registrationWritersFixture(), func(ctx context.Context, _ registrationWriters, _ ...string) error {
 		calls++
 		deadline, ok := ctx.Deadline()
-		if !ok || deadline.Before(start.Add(2*time.Second)) || deadline.After(time.Now().Add(2*time.Second)) {
-			t.Fatalf("root ACL census lacks its fixed 2s allocation: %v present=%t", deadline, ok)
+		if !ok || deadline.Before(start.Add(10*time.Second)) || deadline.After(time.Now().Add(10*time.Second)) {
+			t.Fatalf("root ACL census lacks its fixed 10s allocation (2s until v0.1.56, #150): %v present=%t", deadline, ok)
 		}
 		if firstDeadline.IsZero() {
 			firstDeadline = deadline

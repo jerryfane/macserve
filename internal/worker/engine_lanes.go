@@ -36,14 +36,21 @@ import (
 //     started while a running job ran, before its lane quiesce, is that
 //     job's to stop, never residue and never a reason to refuse a lane
 //     admission (#146);
-//   - an admission whose ACL census (the registered tree's, or hostguard's
-//     protected-input inspection) was cut short by its deadline observed
-//     nothing: at a job's start, nothing of the job ran, so only that job is
-//     refused (cleanup_ok, idle verdict "not_required"), the engine does not
-//     drain and the next admission takes its own census (#148); in a job's
-//     finalization alone, the job's cleanup stands, its idle verdict is
-//     "deferred", the engine drains, and the client holds its completion
-//     until the idle Recover judges the account;
+//   - an inspection its own deadline cut short observed nothing
+//     (inspectionCut): an admission's ACL census (the registered tree's, or
+//     hostguard's protected-input inspection, #148) or any other of its
+//     inspections, a WaitDelay or membership lookup included (#150). At a
+//     job's start, nothing of the job ran, so only that job is refused
+//     (cleanup_ok, idle verdict "not_required"), the engine does not drain
+//     and the next admission takes its own census. In a job's finalization,
+//     after the barriers before it stopped and verified the job's
+//     processes, a final barrier, admission alone or residue census beside
+//     others cut short leaves the job's cleanup standing, its idle verdict
+//     "deferred", the engine draining, and the client holding its
+//     completion until the idle Recover judges the account (a final barrier
+//     cut short also leaves the workspace to that Recover); only a finding
+//     (contamination, an unattributed process) or a failure that ran keeps
+//     its own verdict;
 //   - while draining no job starts; Recover, which runs only when no job
 //     runs, applies the full quiesce and admission and then admits again.
 //
@@ -338,19 +345,24 @@ func (e *Engine) siblingManifests(jobID string, names []string) bool {
 // unattributed), so they may be the job's own: the job records them (idle
 // verdict "deferred", cleanup_ok kept) and the engine drains. The worker
 // client holds such a job's completion until the idle Recover's full
-// quiesce and admission give the verdict (Client.Run). A count that fails
-// leaves the job's cleanup unverified.
-func (e *Engine) laneResidue(ctx context.Context, jobID string, result *Result) error {
+// quiesce and admission give the verdict (Client.Run). A count its deadline
+// cut short observed nothing and defers the same way (deferred, #150); a
+// count that failed otherwise leaves the job's cleanup unverified.
+func (e *Engine) laneResidue(ctx context.Context, jobID string, result *Result) (deferred string, err error) {
 	residue, err := e.laneRunner().Residue(ctx)
+	if inspectionCut(err) != nil {
+		log.Printf("worker job %s lane cleanup verification deferred to the idle check: %v", jobID, err)
+		return "unattributed process census cut short after job " + jobID, nil
+	}
 	if err != nil {
-		return errors.Join(ErrCleanup, err)
+		return "", errors.Join(ErrCleanup, err)
 	}
 	result.Concurrency.UnattributedResidue = len(residue)
 	if len(residue) != 0 {
 		log.Printf("worker job %s lane cleanup deferred to the idle quiesce: %d unattributed job-account process(es): %s", jobID, len(residue), residueList(residue))
 		e.setDrain(fmt.Sprintf("%d unattributed job-account process(es) after job %s", len(residue), jobID))
 	}
-	return nil
+	return "", nil
 }
 
 // residueList joins at most contaminationEntries residue entries.
@@ -368,9 +380,10 @@ func residueList(residue []string) string {
 // next idle Recover. A verified cleanup of a job alone is that idle check.
 // Unattributed residue beside others defers the verdict to that check, and
 // so does deferred, why a job's own successful cleanup could not be
-// verified (the ACL census of its final admission, alone, was unavailable);
-// the client waits for that check before it completes the job. deferred
-// drains the engine at any lane count.
+// verified (its final barrier, its final admission alone or its residue
+// census beside others was cut short by its deadline); the client waits for
+// that check before it completes the job. deferred drains the engine at any
+// lane count.
 func (e *Engine) finishLane(jobID string, alone bool, deferred string, result *Result) {
 	c := result.Concurrency
 	c.OverlappedJobs = e.overlaps(jobID)

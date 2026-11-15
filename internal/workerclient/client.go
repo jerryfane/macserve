@@ -225,8 +225,8 @@ type laneHold struct {
 // heldForIdle reports whether result is a completion held for the idle
 // check: the job's own cleanup succeeded, but the engine could not verify
 // the account (idle verdict deferred): unattributed processes remained
-// beside other jobs, and they may be the job's own, or the ACL census of a
-// job's final admission, alone, was cut short by its deadline.
+// beside other jobs, and they may be the job's own, or a final barrier or
+// inspection after the job's verified cleanup was cut short by its deadline.
 func heldForIdle(result worker.Result) bool {
 	return result.CleanupOK && result.Concurrency != nil && result.Concurrency.IdleVerdict == worker.IdleDeferred
 }
@@ -615,8 +615,8 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 	if executed {
 		saved.SourceTree = c.engine.VerifiedTree(lease.Job.ID)
 	}
-	// The engine refused the job before it ran because its admission's ACL
-	// census was cut short on a loaded host: the service, not the job,
+	// The engine refused the job before it ran because an inspection of its
+	// admission was cut short on a loaded host: the service, not the job,
 	// caused the failure (protocol.Completion).
 	if executed && result.State == model.Failed && result.CleanupOK && errors.Is(err, worker.ErrACLCensusUnavailable) {
 		saved.AdmissionRefused = protocol.AdmissionACLCensusUnavailable
@@ -630,8 +630,9 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 		return false, err
 	}
 	// Finalization gets a separate bounded window after an execution deadline or
-	// shutdown signal, so cancellation does not suppress cleanup evidence.
-	finalCtx, finalCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	// shutdown signal, so cancellation does not suppress cleanup evidence. The
+	// controller's finalizing lease covers it (protocol.DeliveryTimeout).
+	finalCtx, finalCancel := context.WithTimeout(context.Background(), protocol.DeliveryTimeout)
 	defer finalCancel()
 	if err := c.deliver(finalCtx, saved); err != nil {
 		return false, err

@@ -144,12 +144,7 @@ func checkProtectedPathACL(parent context.Context, path string, directory, allow
 		return err
 	}
 	for current := path; ; current = filepath.Dir(current) {
-		ctx, cancel := context.WithTimeout(parent, 5*time.Second)
-		cmd := exec.CommandContext(ctx, "/bin/ls", "-lde", current)
-		cmd.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LANG=C", "LC_ALL=C", "HOME=/private/var/root"}
-		output, err := cmd.Output()
-		err = aclCommandError(ctx, err)
-		cancel()
+		output, err := aclListing(parent, current)
 		if err != nil {
 			return err
 		}
@@ -160,6 +155,38 @@ func checkProtectedPathACL(parent context.Context, path string, directory, allow
 			return nil
 		}
 	}
+}
+
+// aclCommandTimeout bounds one ACL listing command; aclListing makes at most
+// aclCommandAttempts, all within the caller's deadline.
+var aclCommandTimeout = 5 * time.Second
+
+// aclCommandAttempts: a listing its own aclCommandTimeout cut short observed
+// nothing and runs once more, if the caller's deadline allows. At six lanes
+// and load 20-35 (Studio v0.1.56, 2026-11-14/15, #150) single small commands
+// overran 5s at times, but never twice in a row.
+const aclCommandAttempts = 2
+
+// aclListing lists path's ACL (ls -lde), retrying a listing cut short by its
+// own deadline (see aclCommandAttempts). A listing that ran and failed, or
+// one the caller's deadline cut short, is returned at once.
+func aclListing(parent context.Context, path string) ([]byte, error) {
+	for attempt := 1; ; attempt++ {
+		ctx, cancel := context.WithTimeout(parent, aclCommandTimeout)
+		output, err := aclCommand(ctx, path)
+		err = aclCommandError(ctx, err)
+		cancel()
+		if err == nil || attempt == aclCommandAttempts || !errors.Is(err, ErrACLInspectionCut) || parent.Err() != nil {
+			return output, err
+		}
+	}
+}
+
+// aclCommand runs the ACL listing of path under ctx.
+var aclCommand = func(ctx context.Context, path string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "/bin/ls", "-lde", path)
+	cmd.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LANG=C", "LC_ALL=C", "HOME=/private/var/root"}
+	return cmd.Output()
 }
 
 // ErrACLInspectionCut marks a protected-input ACL inspection its deadline cut

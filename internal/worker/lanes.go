@@ -816,7 +816,7 @@ func settledResidue(ctx context.Context, count func() (map[processInstance]proce
 var residueSettle = time.Second
 
 func (r *nativeRunner) LaneAdmission(parent context.Context) error {
-	ctx, cancel := context.WithTimeout(parent, persistenceAdmissionTimeout)
+	ctx, cancel := context.WithTimeout(parent, hotPersistenceAttempts*persistenceAdmissionTimeout)
 	defer cancel()
 	if r.scope == nil || r.persistence == nil {
 		return errors.New("native persistence inspection unavailable")
@@ -830,7 +830,7 @@ func (r *nativeRunner) LaneAdmission(parent context.Context) error {
 	if err := r.loadBaseline(); err != nil {
 		return err
 	}
-	if err := r.persistence(ctx); err != nil {
+	if err := r.inspectPersistence(ctx); err != nil {
 		return err
 	}
 	cancel()

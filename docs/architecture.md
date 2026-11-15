@@ -151,15 +151,21 @@ observation, not a live heartbeat or a second quarantine authority; it may be st
 requires no administrator clear. Editing/removing it cannot bypass recovery or clear quarantine.
 The fixed probes have deadlines and output bounds. Full inspection allows 30 seconds for native
 SessionLoginItems/GUI-domain startup and host-wide BTM enumeration, and five seconds for metadata/cron.
-Hot admission instead shares one fixed 30-second budget: two seconds each for its before/after authority
-observations, cron, OS metadata and the entire root/ancestor ACL stage; six seconds for login items,
-eight for BTM, and one second for each of six membership checks. Each share is clamped by the enclosing
-deadline. Timeout or unavailable/partial output refuses this admission, never proves an empty census,
-and does not by itself durably revoke the attestation. A root/ancestor ACL stage its two seconds cut short
-observed nothing: it starts again, probing every path anew, with a fresh two seconds, at most three in all, within the 30-second budget.
-A stage still cut short, or a protected-input ACL inspection of the persistence authority cut short by its deadline,
-refuses only the job about to start, and after a job that ended alone leaves the verdict to the idle check (see
-**Cleanup** below). Full persistence
+Hot admission instead runs under one fixed 30-second budget per attempt: ten seconds each for its before/after
+authority observations (the lock, whose wait alone is bounded by one second, the protected-input ACL inspections
+and the reads) and for each attempt of the root/ancestor ACL stage; five each for cron, OS metadata and each of six
+membership checks; six for login items and eight for BTM. Each share is clamped by the enclosing deadline. An
+inspection command's output may take one second to close after it exits (its wait delay). Timeout or
+unavailable/partial output refuses this admission, never proves an empty census, and does not by itself durably
+revoke the attestation. A root/ancestor ACL stage its ten seconds cut short observed nothing: it starts again,
+probing every path anew, with a fresh ten seconds, at most twice in all. An attempt the deadline of any of its
+inspections ended observed nothing either and runs once more with a fresh 30 seconds, so an admission spends at most
+60 seconds on it; a finding or a failure that ran ends it at once. Each `ls` of `hostguard`'s protected-input ACL
+inspection has five seconds and runs once more when they cut it short. These sizes come from six lanes at load 20-35
+(Studio v0.1.56, #150), where the former two-second shares (one second per membership check, a 100 ms wait delay)
+expired seven times in 23 minutes and single small commands overran five seconds at times, never twice in a row.
+An attempt still cut short refuses only the job about to start, and after a job's verified cleanup leaves the
+verdict to the idle check (see **Cleanup** below). Full persistence
 collection has its own 480-second bound.
 Modern registration inspection requires a complete,
 recognized job-UID `sfltool dumpbtm` census matching the separately accepted protected manifest; missing,
@@ -172,7 +178,9 @@ macserve no longer deletes them automatically.** Scoped remediation requires a s
 
 Recipe/simulator writers are stopped before pinned `xcresulttool` extraction; another UID barrier precedes
 parsing and sealing. Raw logs and sealed exports are outside job-writable storage. Unproven quiescence blocks
-success, sealing and the next lease. All finalization stages share one two-minute cooperative cleanup budget.
+success, sealing and the next lease. The writer barriers and evidence stages share one two-minute cooperative
+cleanup budget; the final barrier, verification and workspace cleanup then get at least 90 seconds of their own
+(see **Cleanup** below).
 Confined permission and Darwin user-immutable/append flag repair permits cleanup of read-only output without
 following symlinks or modifying external hardlink targets. System flags and ambiguous hardlinks are not repaired.
 
@@ -354,23 +362,33 @@ running job covers (older than every running job, or started after the lane quie
 it), a copy outside SIP, one the job forked itself, any other path, and every other unattributed process still drain
 and hold as above.
 
-An admission whose ACL census was still cut short by its deadline (a loaded host) observed nothing, which is no
-evidence either way: the registered-root ACL census after its retries, or `hostguard`'s protected-input ACL
-inspection of the persistence authority (`cannot inspect protected input ACL: signal: killed: context deadline
-exceeded`). A registered-root `ls` that exited but whose output did not close within its wait delay
-(`exec.ErrWaitDelay`) counts as cut short too. When a job ends alone, the job keeps its own result and successful
-cleanup until the idle check, which holds the completion and drains the broker. When the job is starting, only that
-job is refused before it runs (#148), with reason `lane admission: registered tree ACL census unavailable` or `lane
-admission: cannot inspect protected input ACL: …` (`admission: …` for a job starting alone), `cleanup_ok` true and
-idle verdict `not_required`, since nothing of it ran. Nothing is quarantined, the broker does not drain and the
-completion is not held: the running jobs were admitted on their own evidence, and every later admission takes its
+An admission or finalization inspection still cut short by its own deadline (a loaded host) observed nothing, which
+is no evidence either way (#148, #150): the registered-root ACL census after its retries, `hostguard`'s
+protected-input ACL inspection of the persistence authority (`cannot inspect protected input ACL: signal: killed:
+context deadline exceeded`), an authority bracket whose time ran out between its commands (a bare `context deadline
+exceeded`), a command whose output did not close within its wait delay (`exec: WaitDelay expired before I/O
+complete`, for example a membership check with `registration service account memberships unavailable`), or a census
+or quiesce of the job account that ran out of time. When the job is starting, only that job is refused before it
+runs, with reason `lane admission: …` (`admission: …` for a job starting alone) naming the inspection, `cleanup_ok`
+true and idle verdict `not_required`, since nothing of it ran. Nothing is quarantined, the broker does not drain and
+the completion is not held: the running jobs were admitted on their own evidence, and every later admission takes its
 own census before its job starts. The completion carries `admission_refused: acl_census_unavailable`, and the
 controller records the cancellation `worker_admission` before judging it: the job ends `cancelled` by the service,
 so pull mode reruns its head (#119). A controller from before this
 field refuses such a completion (the worker transport refuses unknown fields), so the worker and the controller of one
-release ship together. A census or inspection that ran and failed (its reason names the cause, such as `registered tree
-ACL census failed: exit status 1`), or that found a writable ACL, fails the cleanup as before, and a writable ACL
-quarantines.
+release ship together. At a job's finalization, after its earlier barriers stopped and verified its processes, a
+final job-account barrier, its admission alone or its residue count beside others cut short leaves the job's own
+result and successful cleanup standing until the idle check, which holds the completion and drains the broker; a
+final barrier cut short also leaves the workspace to that check's recovery. The final barrier, that inspection
+(at most 45 seconds of it) and the workspace cleanup always get at least 90 seconds after the evidence steps, however
+long those took (a passing UI test whose evidence used the whole 120-second cleanup budget left them none, #150), so
+a finalization takes at most 210 seconds (`worker.FinalizationTimeout`) besides an archive job's own evidence window.
+The controller derives its finalizing lease from it: that finalization plus the two-minute completion delivery
+(`protocol.DeliveryTimeout`) plus heartbeat grace, 360 seconds by default (270 before), so a long finalization
+followed by a slow upload no longer expires the lease mid-delivery and fences the epoch. A census or inspection that
+ran and failed (its reason names the cause, such as `registered tree ACL census failed: exit status 1`), a barrier
+before it that failed, or one that found a writable ACL or an unknown process, fails the cleanup or defers as before,
+and a writable ACL or a survivor quarantines.
 For a held completion, the worker reports the hold to the controller (stage `finalizing`, `held`), keeps the lease alive by heartbeat, asks for
 no lease, and delivers the completion after the next idle `Recover`: with its own result and idle verdict `clean` when
 that full quiesce and admission pass (the residue count stays recorded), else with `cleanup_ok` false (the job fails,
