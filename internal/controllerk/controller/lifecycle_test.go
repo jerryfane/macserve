@@ -123,10 +123,8 @@ func TestCleanupAndDeliveryRetainTerminalEvidence(t *testing.T) {
 // A completion the worker reports as its refusal of the job before it ran
 // for a cause of the service's own (admission_refused, Studio 2026-11-13: an
 // ACL census cut short on a loaded host) ends cancelled with cancel source
-// worker_admission, which pull mode reruns (#119), and keeps the epoch. Its
-// result carries evidence and no idle verdict, so it is not the inconclusive
-// refusal that returns to the queue (admission_retry_test.go). The same
-// failure unflagged, a flagged one without cleanup_ok, and an unknown
+// worker_admission, which pull mode reruns (#119), and keeps the epoch. The
+// same failure unflagged, a flagged one without cleanup_ok, and an unknown
 // refusal are judged as before or refused.
 func TestWorkerAdmissionRefusalEndsCancelledByService(t *testing.T) {
 	const reason = "lane admission: registered tree ACL census unavailable"

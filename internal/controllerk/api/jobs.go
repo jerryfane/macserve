@@ -108,11 +108,6 @@ func jobView(job model.Job) map[string]any {
 	if job.Lane > 0 {
 		view["lane"] = job.Lane
 	}
-	// Why a queued job returned to the queue: an undelivered lease, or an
-	// admission retry with its count, cause and the end of its backoff.
-	if job.State == model.Queued && job.Reason != "" {
-		view["reason"] = job.Reason
-	}
 	// Why cancellation was requested; the receipt never carries it.
 	if job.CancelReason != nil {
 		view["cancel_reason"] = job.CancelReason

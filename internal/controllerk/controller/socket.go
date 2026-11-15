@@ -129,8 +129,7 @@ func (c *Controller) handler() http.Handler {
 			respond(w, r, nil, err)
 			return
 		}
-		// A refusal returned to the queue is answered without judging it.
-		if handled, err := c.refusedAdmission(r.Context(), job, completion); handled || err != nil {
+		if err := c.refusedAdmission(r.Context(), job, completion); err != nil {
 			respond(w, r, nil, err)
 			return
 		}
