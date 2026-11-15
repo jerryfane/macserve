@@ -232,12 +232,11 @@ const fairOrder = `SELECT ` + jobColumns + ` FROM jobs AS queued WHERE state='qu
 // behind it, which are claimed in the fair order. holdSimulators is set while
 // another simulator job is still starting (the controller's start stagger): a
 // head that uses a simulator then waits like an exclusive head, and nothing
-// behind it is claimed meanwhile; any other head is claimed as usual. held
-// lists queued jobs the controller holds back (an admission retry's backoff):
-// they are passed over as if they were not queued. The database additionally
+// behind it is claimed meanwhile; any other head is claimed as usual. The
+// database additionally
 // prohibits two active rows on one lane, even if a future caller bypasses the
 // normal dispatch path.
-func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time, lanes int, holdSimulators bool, held ...string) (model.Job, error) {
+func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time, lanes int, holdSimulators bool) (model.Job, error) {
 	if !validOpaque(workerEpoch, 256) || !validTime(now) || lanes < 1 || lanes > model.MaxConcurrentJobs {
 		return model.Job{}, ErrInvalid
 	}
@@ -282,7 +281,7 @@ func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time, la
 		return model.Job{}, ErrLease
 	}
 	concurrent := slices.ContainsFunc(running, func(active model.Job) bool { return active.Profile.Concurrent() })
-	job, err := nextFair(ctx, tx, concurrent, held)
+	job, err := nextFair(ctx, tx, concurrent)
 	if errors.Is(err, ErrNotFound) {
 		if err := tx.Commit(); err != nil {
 			return model.Job{}, err
@@ -327,10 +326,10 @@ func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time, la
 }
 
 // nextFair is the first queued job in the fair order (fairOrder), passing
-// over the jobs in held, and over concurrent simulator_script jobs
-// (model.Profile.Concurrent) when skipConcurrent is set, for a claim while
-// one such job is active; ErrNotFound when there is none.
-func nextFair(ctx context.Context, tx *sql.Tx, skipConcurrent bool, held []string) (model.Job, error) {
+// over concurrent simulator_script jobs (model.Profile.Concurrent) when
+// skipConcurrent is set, for a claim while one such job is active;
+// ErrNotFound when there is none.
+func nextFair(ctx context.Context, tx *sql.Tx, skipConcurrent bool) (model.Job, error) {
 	rows, err := tx.QueryContext(ctx, fairOrder)
 	if err != nil {
 		return model.Job{}, err
@@ -340,9 +339,6 @@ func nextFair(ctx context.Context, tx *sql.Tx, skipConcurrent bool, held []strin
 		job, err := scanJob(rows)
 		if err != nil {
 			return model.Job{}, err
-		}
-		if slices.Contains(held, job.ID) {
-			continue
 		}
 		if !skipConcurrent || !job.Profile.Concurrent() {
 			return job, nil
@@ -387,12 +383,11 @@ func (s *Store) Transition(ctx context.Context, id, lease string, from, to model
 	return tx.Commit()
 }
 
-// Requeue returns a preparing job to the queue: it releases its lane, lease,
-// epoch, start and deadline, and keeps its sequence, so the fair order claims
-// it again (with a new deadline) as it would have before. Only the controller
-// calls it, after removing the job's source, for a lease no worker received,
-// or for one the worker refused inconclusively before anything of the job ran
-// (an admission retry, #154).
+// Requeue returns a preparing job whose lease was never delivered to the
+// queue: it releases its lane, lease, epoch, start and deadline, and keeps its
+// sequence, so the fair order claims it again (with a new deadline) as it
+// would have before. Only the controller calls it, for a lease no worker
+// received, after removing the job's source.
 func (s *Store) Requeue(ctx context.Context, id, lease, reason string, now time.Time) error {
 	if !validReason(reason) || !validTime(now) {
 		return ErrInvalid

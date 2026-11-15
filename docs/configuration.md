@@ -58,12 +58,7 @@ Optional `signer` connects the controller to the [code signer](#code-signer).
   `worker_admission` when the worker reports that it refused the job before it ran for a cause of the service's
   own (`admission_refused` in its completion; `acl_census_unavailable`: an admission inspection, such as an ACL
   census or a membership check, cut short by its deadline on a loaded host) with a failed result and `cleanup_ok`;
-  the job then ends `cancelled`. An inconclusive refusal (`acl_census_unavailable` with idle verdict `not_required`
-  and no evidence) first returns the job to the queue, up to three times with a backoff of 2, 4 and 8 minutes
-  (docs/architecture.md); only the refusal after the third retry is recorded, with detail
-  `after 3 admission retries: <cause>`. A queued job carries the `reason` it returned to the queue with in
-  `GET /v1/jobs/{id}` and the `GET /v1/jobs` list, e.g. `admission retry 1/3 after lane admission: context deadline
-  exceeded, next at 2026-11-15T14:18:05Z`. Only the first request is
+  the job then ends `cancelled`. Only the first request is
   recorded and it survives the job's finish, whose
   `reason` says only `cancellation requested`. Receipts never carry it and are byte-identical with or without it;
   jobs never cancelled, or cancelled before this field existed (store schema version 6), have none.
