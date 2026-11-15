@@ -14,7 +14,9 @@ import (
 
 	"github.com/jerryfane/macserve/internal/model"
 	"github.com/jerryfane/macserve/internal/peercred"
+	"github.com/jerryfane/macserve/internal/protocol"
 	"github.com/jerryfane/macserve/internal/source"
+	"github.com/jerryfane/macserve/internal/worker"
 	"golang.org/x/sys/unix"
 )
 
@@ -126,13 +128,16 @@ func New(options Options) (*Controller, error) {
 	if options.HeartbeatTimeout == 0 {
 		options.HeartbeatTimeout = 30 * time.Second
 	}
-	// These match the worker's independent cleanup, evidence-delivery and source
-	// read budgets. HeartbeatTimeout also provides bounded transport grace.
+	// These match the worker's finalization (worker.FinalizationTimeout:
+	// its cleanup budget and the final verification window after the
+	// evidence steps, #150) and evidence-delivery (protocol.DeliveryTimeout)
+	// bounds, and its source read budget. HeartbeatTimeout also provides
+	// bounded transport grace.
 	if options.CleanupTimeout == 0 {
-		options.CleanupTimeout = 2 * time.Minute
+		options.CleanupTimeout = worker.FinalizationTimeout
 	}
 	if options.DeliveryTimeout == 0 {
-		options.DeliveryTimeout = 2 * time.Minute
+		options.DeliveryTimeout = protocol.DeliveryTimeout
 	}
 	if options.SourceTimeout == 0 {
 		options.SourceTimeout = 10 * time.Minute

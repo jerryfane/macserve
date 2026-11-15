@@ -121,10 +121,20 @@ func (b *boundedBuffer) ReadFrom(r io.Reader) (int64, error) {
 // ("context deadline exceeded / worker process cleanup failed / context
 // deadline exceeded") and the job's cleanup was reported unverified (#150).
 // A finalization takes at most CleanupTimeout plus this window (and an
-// ios_archive job's uncharged archive evidence): 210s by default, within the
-// controller's finalizing window of cleanup, delivery and heartbeat budgets
-// (270s by default), leaving a minute for the delivery.
+// ios_archive job's uncharged archive evidence): FinalizationTimeout.
 const finalVerificationWindow = 90 * time.Second
+
+// DefaultCleanupTimeout is Options.CleanupTimeout when unset, and its
+// maximum.
+const DefaultCleanupTimeout = 2 * time.Minute
+
+// FinalizationTimeout bounds a job's finalization, from its end until
+// Execute returns: the cleanup budget, at most DefaultCleanupTimeout, shared
+// by the writer barriers and the evidence steps, then finalVerificationWindow
+// at most for the last steps (210s). An ios_archive job's archive evidence
+// runs in its own ArchiveEvidenceTimeout besides. The controller's
+// finalizing lease budget is derived from it (#150 review r1).
+const FinalizationTimeout = DefaultCleanupTimeout + finalVerificationWindow
 
 // finalInspectionTimeout bounds the account's verification in a job's
 // finalization (see finalVerificationWindow), so that an inspection cut short

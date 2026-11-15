@@ -80,6 +80,12 @@ type AdmissionRefusal string
 // observed nothing about the job.
 const AdmissionACLCensusUnavailable AdmissionRefusal = "acl_census_unavailable"
 
+// DeliveryTimeout bounds the worker's delivery of a completion after its
+// finalization (worker.FinalizationTimeout), and the controller's handling
+// of one. The controller's finalizing lease budget covers both, plus its
+// heartbeat grace.
+const DeliveryTimeout = 2 * time.Minute
+
 // Valid reports whether r is empty or a known refusal.
 func (r AdmissionRefusal) Valid() bool {
 	return r == "" || r == AdmissionACLCensusUnavailable

@@ -630,8 +630,9 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 		return false, err
 	}
 	// Finalization gets a separate bounded window after an execution deadline or
-	// shutdown signal, so cancellation does not suppress cleanup evidence.
-	finalCtx, finalCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	// shutdown signal, so cancellation does not suppress cleanup evidence. The
+	// controller's finalizing lease covers it (protocol.DeliveryTimeout).
+	finalCtx, finalCancel := context.WithTimeout(context.Background(), protocol.DeliveryTimeout)
 	defer finalCancel()
 	if err := c.deliver(finalCtx, saved); err != nil {
 		return false, err

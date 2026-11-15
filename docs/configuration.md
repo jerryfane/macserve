@@ -287,7 +287,8 @@ running job (Studio, 2026-11-13). A probe forks some 60 short inspection command
 At `Standard` the observer's CPU stays bounded by `GOMAXPROCS=2` plus those short-lived children.
 
 Offered/running workers retain the ordinary 30-second heartbeat-loss fence. Cancellation, deadline or finalizing
-starts a fixed cleanup/delivery grace (two minutes each, plus heartbeat tolerance); repeated heartbeats cannot
+starts a fixed cleanup/delivery grace (the worker's finalization bound of 210 seconds, two minutes of delivery,
+plus heartbeat tolerance: 360 seconds); repeated heartbeats cannot
 extend it. Source streaming instead receives the ten-minute preparation budget plus heartbeat tolerance.
 Controller source-cleanup debt is durable and independent of worker cleanup: registration cannot erase it,
 and only successful protected source removal clears it. Retention may relieve disk-only pressure, but never

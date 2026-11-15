@@ -178,7 +178,9 @@ macserve no longer deletes them automatically.** Scoped remediation requires a s
 
 Recipe/simulator writers are stopped before pinned `xcresulttool` extraction; another UID barrier precedes
 parsing and sealing. Raw logs and sealed exports are outside job-writable storage. Unproven quiescence blocks
-success, sealing and the next lease. All finalization stages share one two-minute cooperative cleanup budget.
+success, sealing and the next lease. The writer barriers and evidence stages share one two-minute cooperative
+cleanup budget; the final barrier, verification and workspace cleanup then get at least 90 seconds of their own
+(see **Cleanup** below).
 Confined permission and Darwin user-immutable/append flag repair permits cleanup of read-only output without
 following symlinks or modifying external hardlink targets. System flags and ambiguous hardlinks are not repaired.
 
@@ -380,7 +382,10 @@ result and successful cleanup standing until the idle check, which holds the com
 final barrier cut short also leaves the workspace to that check's recovery. The final barrier, that inspection
 (at most 45 seconds of it) and the workspace cleanup always get at least 90 seconds after the evidence steps, however
 long those took (a passing UI test whose evidence used the whole 120-second cleanup budget left them none, #150), so
-a finalization takes at most 210 seconds besides an archive job's own evidence window. A census or inspection that
+a finalization takes at most 210 seconds (`worker.FinalizationTimeout`) besides an archive job's own evidence window.
+The controller derives its finalizing lease from it: that finalization plus the two-minute completion delivery
+(`protocol.DeliveryTimeout`) plus heartbeat grace, 360 seconds by default (270 before), so a long finalization
+followed by a slow upload no longer expires the lease mid-delivery and fences the epoch. A census or inspection that
 ran and failed (its reason names the cause, such as `registered tree ACL census failed: exit status 1`), a barrier
 before it that failed, or one that found a writable ACL or an unknown process, fails the cleanup or defers as before,
 and a writable ACL or a survivor quarantines.
