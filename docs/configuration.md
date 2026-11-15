@@ -52,8 +52,8 @@ Optional `signer` connects the controller to the [code signer](#code-signer).
   `host_memory_pressure`) for `host_readiness`, and an optional `detail` of at most 512 bytes (the client or pause
   reason, the gate error, the gate's free and accounted bytes, the worker's refusal reason). The controller records
   `worker_admission` when the worker reports that it refused the job before it ran for a cause of the service's
-  own (`admission_refused` in its completion; `acl_census_unavailable`: a registered tree ACL census or a
-  protected-input ACL inspection cut short by its deadline on a loaded host) with a failed result and `cleanup_ok`;
+  own (`admission_refused` in its completion; `acl_census_unavailable`: an admission inspection, such as an ACL
+  census or a membership check, cut short by its deadline on a loaded host) with a failed result and `cleanup_ok`;
   the job then ends `cancelled`. Only the first request is
   recorded and it survives the job's finish, whose
   `reason` says only `cancellation requested`. Receipts never carry it and are byte-identical with or without it;

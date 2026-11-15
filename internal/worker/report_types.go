@@ -100,9 +100,11 @@ const (
 // job-account quiesce and admission (no other job was live); IdleNotRequired
 // means siblings were live, the job's own processes and simulator were
 // removed and no unattributed process remained, or that admission refused
-// the job before anything of it ran because its ACL census was cut short;
-// IdleDeferred means an unattributed process remained, so the job's cleanup
-// is unverified until the worker is idle.
+// the job before anything of it ran because one of its inspections was cut
+// short by its deadline; IdleDeferred means an unattributed process
+// remained, or a final barrier or inspection after the job's verified
+// cleanup was cut short by its deadline, so the job's cleanup is unverified
+// until the worker is idle.
 const (
 	IdleClean       = "clean"
 	IdleNotRequired = "not_required"

@@ -650,12 +650,13 @@ func protectedTreeACL(ctx context.Context, path string, writers registrationWrit
 // output did not close within its WaitDelay (exec.ErrWaitDelay, a timing
 // failure of the read on a loaded host that leaves the listing incomplete):
 // it observed nothing, so it is no evidence either way. A census that ran and
-// failed, or whose listing shows a problem, is never this error. At a job's
-// admission a hostguard protected-input ACL inspection cut short by its
-// deadline (hostguard.ErrACLInspectionCut) counts as this error too
-// (aclCensusUnavailable). Engine.Execute returns it (wrapped) with cleanup_ok
-// only for a job it refused before it ran (the worker client reports that as
-// protocol.AdmissionACLCensusUnavailable).
+// failed, or whose listing shows a problem, is never this error. Any other
+// admission or finalization inspection its deadline cut short (a hostguard
+// protected-input ACL inspection, hostguard.ErrACLInspectionCut; a bare
+// context deadline; a WaitDelay expiry) counts as this error too
+// (inspectionCut, #148, #150). Engine.Execute returns it (wrapped) with
+// cleanup_ok only for a job it refused before it ran (the worker client
+// reports that as protocol.AdmissionACLCensusUnavailable).
 var ErrACLCensusUnavailable = errors.New("registered tree ACL census unavailable")
 
 func registrationACLCommand(ctx context.Context, writers registrationWriters, args ...string) error {
@@ -664,7 +665,7 @@ func registrationACLCommand(ctx context.Context, writers registrationWriters, ar
 	cmd := exec.CommandContext(ctx, "/bin/ls", args...)
 	cmd.Dir = "/"
 	cmd.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL=C"}
-	cmd.WaitDelay = 100 * time.Millisecond
+	cmd.WaitDelay = inspectWaitDelay
 	out, diagnostic := &boundedBuffer{max: 64 << 20}, &boundedBuffer{max: 1 << 20}
 	cmd.Stdout, cmd.Stderr = out, diagnostic
 	if err := cmd.Run(); err != nil || out.err != nil || diagnostic.err != nil || diagnostic.Len() != 0 || out.Len() == 0 {

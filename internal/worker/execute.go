@@ -112,6 +112,27 @@ func (b *boundedBuffer) ReadFrom(r io.Reader) (int64, error) {
 	return io.Copy(struct{ io.Writer }{b}, r)
 }
 
+// finalVerificationWindow is the least a job's finalization leaves its last
+// steps after the evidence steps: the final job-account barrier, the
+// account's verification (admission alone, the residue census beside other
+// jobs) and the workspace cleanup. Studio v0.1.56, 2026-11-15 00:08:28Z, six
+// lanes: a passing UI test's evidence steps used the whole 120s cleanup
+// budget, the final barrier then failed at once on the expired deadline
+// ("context deadline exceeded / worker process cleanup failed / context
+// deadline exceeded") and the job's cleanup was reported unverified (#150).
+// A finalization takes at most CleanupTimeout plus this window (and an
+// ios_archive job's uncharged archive evidence): 210s by default, within the
+// controller's finalizing window of cleanup, delivery and heartbeat budgets
+// (270s by default), leaving a minute for the delivery.
+const finalVerificationWindow = 90 * time.Second
+
+// finalInspectionTimeout bounds the account's verification in a job's
+// finalization (see finalVerificationWindow), so that an inspection cut short
+// (deferred to the idle check) leaves the workspace cleanup time to run. It
+// exceeds toleratedChildWait, so the admission of a job that ends alone can
+// still wait out a tolerated launch's child.
+const finalInspectionTimeout = 45 * time.Second
+
 func (e *Engine) Execute(parent context.Context, job model.Job, source Source, archive io.Reader, sink Sink) (result Result, returned error) {
 	result = Result{State: model.Failed, Source: source, StartedAt: e.options.Now()}
 	solo, err := e.enter(parent, job)
@@ -157,14 +178,17 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 	} else {
 		err = e.laneAdmission(parent)
 	}
-	if cut := aclCensusUnavailable(err); cut != nil {
-		// The census observed nothing, and nothing of the job ran, so it
-		// has nothing of its own to clean up and is no evidence about the
-		// account either way: only this job is refused (cleanup_ok, idle
-		// verdict not_required). The engine does not drain and the client
-		// does not hold the completion: the account is still judged by
-		// the evidence that admitted the running jobs, and every later
-		// admission takes its own census before its job starts (#148). The
+	if cut := inspectionCut(err); cut != nil && parent.Err() == nil {
+		// The inspection ran out of its own time (the job's deadline and
+		// cancellation are excluded) and observed nothing, and nothing of
+		// the job ran, so it has nothing of its own to clean up and is no
+		// evidence about the account either way: only this job is refused
+		// (cleanup_ok, idle verdict not_required). The engine does not
+		// drain and the client does not hold the completion: the account is
+		// still judged by the evidence that admitted the running jobs, and
+		// every later admission takes its own census before its job starts
+		// (#148: ACL census and protected-input ACL inspection; #150: any
+		// inspection's deadline, WaitDelay or membership lookup). The
 		// reason names the service's admission, not the job, as the cause.
 		result.CleanupOK = true
 		result.Concurrency.IdleVerdict = IdleNotRequired
@@ -259,27 +283,52 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 		if x.evidenceRoot != nil {
 			returned = errors.Join(returned, x.evidenceRoot.Close())
 		}
-		quietErr = errors.Join(quietErr, e.accountQuiesce(finalCtx, job.ID))
+		// The final barrier, the account's verification and the workspace
+		// cleanup get at least finalVerificationWindow, however long the
+		// evidence steps took before them.
+		if deadline, _ := finalCtx.Deadline(); time.Until(deadline) < finalVerificationWindow {
+			uncharge(finalVerificationWindow - time.Until(deadline))
+		}
+		barrierErr := e.accountQuiesce(finalCtx, job.ID)
 		var residueErr error
 		// deferred is why the job's own successful cleanup was left to the
 		// idle Recover to verify (Engine.finishLane).
 		deferred := ""
-		if quietErr == nil {
+		// held leaves the workspace and the manifest to the idle Recover
+		// (recoverOwned), which removes them after its full quiesce.
+		held := false
+		if quietErr == nil && !errors.Is(returned, ErrCleanup) && !errors.Is(returned, ErrRecovery) && inspectionCut(barrierErr) != nil {
+			// Every barrier before it (stopWriters, and those after
+			// evidence extraction and before collection) stopped and
+			// verified the job's processes; this one ran out of time. The
+			// job's cleanup stands, and the idle Recover's full quiesce
+			// judges whatever this barrier did not, before anything removes
+			// the workspace (#150).
+			log.Printf("worker job %s final barrier deferred to the idle check: %v", job.ID, barrierErr)
+			deferred, held, barrierErr = "final job-account barrier cut short after job "+job.ID, true, nil
+		}
+		quietErr = errors.Join(quietErr, barrierErr)
+		if quietErr == nil && !held {
+			// The inspection takes at most finalInspectionTimeout of the
+			// window; the cleanup keeps the rest.
+			inspectCtx, inspectCancel := context.WithTimeout(finalCtx, finalInspectionTimeout)
 			if alone {
 				if inspector, ok := e.options.Runner.(interface{ Admission(context.Context) error }); ok {
-					quietErr = inspector.Admission(finalCtx)
-					if aclCensusUnavailable(quietErr) != nil {
-						// Its own quiesce passed; the census observed nothing.
+					quietErr = inspector.Admission(inspectCtx)
+					if inspectionCut(quietErr) != nil {
+						// Its own quiesce passed; the inspection observed
+						// nothing before its deadline (#148, #150).
 						log.Printf("worker job %s cleanup verification deferred to the idle check: %v", job.ID, quietErr)
-						deferred, quietErr = "ACL census unavailable after job "+job.ID, nil
+						deferred, quietErr = "admission inspection cut short after job "+job.ID, nil
 					}
 				}
 			} else {
-				residueErr = e.laneResidue(finalCtx, job.ID, &result)
+				deferred, residueErr = e.laneResidue(inspectCtx, job.ID, &result)
 			}
+			inspectCancel()
 		}
 		var cleanupErr error
-		if quietErr == nil {
+		if quietErr == nil && !held {
 			cleanupErr = e.cleanup(finalCtx, &x.manifest)
 		}
 		returned = e.quarantine(errors.Join(returned, quietErr, cleanupErr, residueErr))

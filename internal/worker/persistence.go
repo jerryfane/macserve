@@ -46,12 +46,36 @@ func (r *nativeRunner) loadBaseline() error {
 	return nil
 }
 
+// persistenceAdmissionTimeout bounds one attempt of the hot persistence
+// inspection; an admission makes at most hotPersistenceAttempts.
 const persistenceAdmissionTimeout = 30 * time.Second
+
+// hotPersistenceAttempts bounds the hot persistence inspection of one
+// admission: an attempt its deadline cut short (inspectionCut) observed
+// nothing and is retried once, with a fresh persistenceAdmissionTimeout, so
+// one admission spends at most 60s on it. At six lanes and load 20-35 (Studio
+// v0.1.56, 2026-11-14/15) single attempts were cut short seven times in 23
+// minutes, each costing a job a requeue and a full rerun (#150). Anything
+// else, a finding included, ends it at once.
+const hotPersistenceAttempts = 2
+
+// inspectPersistence is the hot persistence inspection of one admission
+// (see hotPersistenceAttempts), within parent's deadline.
+func (r *nativeRunner) inspectPersistence(parent context.Context) error {
+	for attempt := 1; ; attempt++ {
+		ctx, cancel := context.WithTimeout(parent, persistenceAdmissionTimeout)
+		err := r.persistence(ctx)
+		cancel()
+		if attempt == hotPersistenceAttempts || inspectionCut(err) == nil || parent.Err() != nil {
+			return err
+		}
+	}
+}
 
 // Admission observes without terminating or adopting unexpected processes.
 // Delayed same-UID persistence after this snapshot remains a native trust limit.
 func (r *nativeRunner) Admission(parent context.Context) error {
-	ctx, cancel := context.WithTimeout(parent, persistenceAdmissionTimeout)
+	ctx, cancel := context.WithTimeout(parent, hotPersistenceAttempts*persistenceAdmissionTimeout)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return err
@@ -70,7 +94,7 @@ func (r *nativeRunner) Admission(parent context.Context) error {
 	if err := r.loadBaseline(); err != nil {
 		return err
 	}
-	if err := r.persistence(ctx); err != nil {
+	if err := r.inspectPersistence(ctx); err != nil {
 		return err
 	}
 	// The process census has its own budget: it may wait toleratedChildWait
@@ -238,15 +262,15 @@ type persistenceAdmissionContextKey struct{}
 // Only these fixed, read-only commands are used. They do not use the job Runner,
 // which permits recipes; probes have fixed environments, output bounds and deadlines.
 func inspectCommand(ctx context.Context, credential *syscall.Credential, executable string, args ...string) (string, string, error) {
-	// Allocate short fixed shares of the single 30s admission budget: cron and
-	// metadata 2s each, six membership probes 1s each, login items 6s and BTM 8s.
-	// The caller's remaining deadline always wins; no probe renews admission.
-	// Partial output on expiry is unavailable inspection, never a clean census.
+	// Allocate fixed shares of each 30s hot admission attempt: cron and
+	// metadata 5s each, six membership probes 5s each, login items 6s and
+	// BTM 8s. Until v0.1.56 cron and metadata had 2s and each membership
+	// probe 1s; at six lanes and load 20-35 fork/exec of one small command
+	// takes seconds at times (#150). The caller's remaining deadline always
+	// wins; no probe renews admission. Partial output on expiry is
+	// unavailable inspection, never a clean census.
 	hot, _ := ctx.Value(persistenceAdmissionContextKey{}).(bool)
 	timeout := 5 * time.Second
-	if hot {
-		timeout = 2 * time.Second
-	}
 	switch {
 	case executable == "/usr/bin/sfltool" && len(args) == 1 && args[0] == "dumpbtm":
 		timeout = 30 * time.Second
@@ -256,7 +280,7 @@ func inspectCommand(ctx context.Context, credential *syscall.Credential, executa
 	case executable == "/usr/bin/dsmemberutil":
 		timeout = 30 * time.Second
 		if hot {
-			timeout = time.Second
+			timeout = 5 * time.Second
 		}
 	case executable == "/bin/launchctl" && len(args) == 6 && args[0] == "asuser" && args[3] == "_job-login-items":
 		timeout = 30 * time.Second
@@ -273,12 +297,20 @@ func inspectCommand(ctx context.Context, credential *syscall.Credential, executa
 	cmd.Dir = "/"
 	cmd.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL=C"}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: credential}
-	cmd.WaitDelay = 100 * time.Millisecond
+	cmd.WaitDelay = inspectWaitDelay
 	stdout, stderr := &boundedBuffer{max: 1 << 20}, &boundedBuffer{max: 1 << 20}
 	cmd.Stdout, cmd.Stderr = stdout, stderr
 	err := cmd.Run()
 	return stdout.String(), stderr.String(), errors.Join(err, stdout.err, stderr.err, ctx.Err())
 }
+
+// inspectWaitDelay is how long an inspection command's output may take to
+// close after the command exits or is killed. At 100 ms (until v0.1.56) a
+// dsmemberutil probe that answered at six lanes and load 20-35 still ended in
+// "exec: WaitDelay expired before I/O complete" (Studio 2026-11-14 17:33Z,
+// #150): the broker's reader was not scheduled in time. Such an expiry is
+// inconclusive (inspectionCut), never output.
+const inspectWaitDelay = time.Second
 
 func nativePersistenceInspector(options Options) func(context.Context) error {
 	return func(ctx context.Context) error {

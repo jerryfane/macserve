@@ -12,6 +12,9 @@ import (
 	"github.com/jerryfane/macserve/internal/model"
 )
 
+// The writer barriers before the evidence steps and the evidence steps share
+// one cleanup budget; only the final barrier, the verification and the
+// workspace cleanup get their own finalVerificationWindow after it (#150).
 func TestFinalizationSharesOneBudgetAcrossWriterBarriers(t *testing.T) {
 	var ran atomic.Bool
 	runner := &fakeRunner{hook: func(_ context.Context, command Command, _, _ io.Writer) (bool, ProcessResult, error) {
@@ -37,10 +40,10 @@ func TestFinalizationSharesOneBudgetAcrossWriterBarriers(t *testing.T) {
 	job := fixtureJob(t, model.Build)
 	source, data := sourceFixture(t)
 	result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil)
-	if !ran.Load() || !errors.Is(err, context.DeadlineExceeded) || result.State != model.TimedOut || result.CleanupOK {
+	if !ran.Load() || !errors.Is(err, context.DeadlineExceeded) || result.State != model.TimedOut {
 		t.Fatalf("separate stages extended finalization budget: result=%+v err=%v ran=%v", result, err, ran.Load())
 	}
-	if _, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil); !errors.Is(err, ErrRecovery) {
-		t.Fatalf("uncertain cleanup did not fence subsequent execution: %v", err)
+	if !result.CleanupOK {
+		t.Fatalf("final barrier had no window of its own: result=%+v err=%v", result, err)
 	}
 }

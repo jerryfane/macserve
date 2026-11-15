@@ -130,10 +130,13 @@ func withAttestationLockContext(ctx context.Context, options Options, operation 
 	return withAttestationFileLock(ctx, options, persistenceAttestationFile+".lock", persistenceAttestationLockTimeout, operation)
 }
 
+// withAttestationFileLock runs operation holding the named lock. wait
+// bounds only the wait for the lock: the protected-input ACL inspection of
+// the authority's directory runs under ctx. At six lanes and load 20-35
+// that inspection alone, one ls per ancestor, outlasted the 1s lock wait
+// that bounded it until v0.1.56 (#150).
 func withAttestationFileLock(ctx context.Context, options Options, name string, wait time.Duration, operation func(*os.Root) error) error {
-	waitCtx, cancel := context.WithTimeout(ctx, wait)
-	defer cancel()
-	return withAttestationRoot(waitCtx, options, func(root *os.Root) error {
+	return withAttestationRoot(ctx, options, func(root *os.Root) error {
 		lock, err := root.OpenFile(name, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0600)
 		if err != nil {
 			return err
@@ -147,9 +150,12 @@ func withAttestationFileLock(ctx context.Context, options Options, name string, 
 		if !ok || st.Uid != 0 || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || st.Nlink != 1 {
 			return errors.New("unprotected persistence attestation lock")
 		}
+		waitCtx, cancel := context.WithTimeout(ctx, wait)
+		defer cancel()
 		var retry *time.Ticker
 		for {
-			if err := waitCtx.Err(); err != nil {
+			// A free lock is taken without waiting, whatever is left of wait.
+			if err := ctx.Err(); err != nil {
 				return err
 			}
 			err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
@@ -170,7 +176,7 @@ func withAttestationFileLock(ctx context.Context, options Options, name string, 
 			}
 		}
 		defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-		if err := waitCtx.Err(); err != nil {
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		return operation(root)
