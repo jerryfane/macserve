@@ -64,6 +64,11 @@ func (c *Controller) refusedAdmission(ctx context.Context, job model.Job, comple
 	if err != nil {
 		return false, err
 	}
+	// A delayed refusal of an earlier lease never acts on the job's
+	// replacement lease.
+	if !sameLease(job, current, a) {
+		return false, store.ErrLease
+	}
 	retries := c.admissionRetries[job.ID].count
 	if inconclusiveRefusal(refusal, result) && retries < maxAdmissionRetries && current.State == model.Preparing && !current.CancelRequested {
 		// Evidence the refused lease uploaded would conflict with the next
@@ -78,6 +83,9 @@ func (c *Controller) refusedAdmission(ctx context.Context, job model.Job, comple
 		if current, err = c.options.Store.Get(ctx, job.ID); err != nil {
 			return false, err
 		}
+		if !sameLease(job, current, nil) {
+			return false, store.ErrLease
+		}
 	}
 	delete(c.admissionRetries, job.ID)
 	detail := result.Reason
@@ -86,6 +94,19 @@ func (c *Controller) refusedAdmission(ctx context.Context, job model.Job, comple
 	}
 	_, err = c.cancelJob(ctx, current, "worker refused admission: "+string(refusal), model.CancelReason{Source: model.CancelWorkerAdmission, Detail: detail}, c.options.Now())
 	return false, err
+}
+
+// sameLease reports whether current, the job's fresh record, and a, its
+// active execution (nil when not consulted), still hold the lease (worker
+// epoch and lease token) that job, the request's authenticated snapshot,
+// was authenticated with. A requeued job is leased again under its ID
+// (requeueUndelivered, requeueRefused), so a delayed request of the earlier
+// lease must not reach the replacement. Callers hold c.mu when a is given.
+func sameLease(job, current model.Job, a *execution) bool {
+	if job.LeaseToken == "" || current.WorkerEpoch != job.WorkerEpoch || current.LeaseToken != job.LeaseToken {
+		return false
+	}
+	return a == nil || a.job.WorkerEpoch == job.WorkerEpoch && a.job.LeaseToken == job.LeaseToken
 }
 
 func (c *Controller) complete(ctx context.Context, job model.Job, result worker.Result, seal buildseal.Envelope) error {
@@ -100,9 +121,15 @@ func (c *Controller) complete(ctx context.Context, job model.Job, result worker.
 	}
 	c.evidenceMu.Lock()
 	defer c.evidenceMu.Unlock()
+	authenticated := job
 	job, err = c.options.Store.Get(ctx, job.ID)
 	if err != nil {
 		return err
+	}
+	// A delayed completion of an earlier lease, or its replay, never acts
+	// on the job's replacement lease (a requeued job is leased again).
+	if !sameLease(authenticated, job, nil) {
+		return store.ErrLease
 	}
 	if job.State.Terminal() {
 		if len(job.Result) == 0 {
@@ -119,7 +146,7 @@ func (c *Controller) complete(ctx context.Context, job model.Job, result worker.
 	}
 	c.mu.Lock()
 	a := c.execution(job.ID)
-	if a == nil || !a.offered {
+	if a == nil || !a.offered || !sameLease(job, job, a) {
 		c.mu.Unlock()
 		return store.ErrLease
 	}

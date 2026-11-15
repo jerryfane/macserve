@@ -2,9 +2,13 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -166,5 +170,95 @@ func TestPullModeAdmissionRetryIsNotRerun(t *testing.T) {
 	run, err := f.db.AdmitGitHub(ctx, input, f.now.Add(elapsed+time.Second))
 	if err != nil || run.JobID == first.JobID {
 		t.Fatalf("cancelled attempt not rerun: %+v %v", run, err)
+	}
+}
+
+// signalReader closes read on its first Read: the handler authenticated
+// the request and now waits for its body.
+type signalReader struct {
+	io.Reader
+	once sync.Once
+	read chan struct{}
+}
+
+func (r *signalReader) Read(p []byte) (int, error) {
+	r.once.Do(func() { close(r.read) })
+	return r.Reader.Read(p)
+}
+
+// A completion of a lease authenticated before its job returned to the
+// queue and was leased again (a retried delivery of the refusal, or any
+// other delayed completion) is refused as a stale lease and never reaches
+// the replacement lease (#156 review): the replacement keeps running,
+// uncancelled, on its own lease.
+func TestStaleCompletionCannotReachReplacementLease(t *testing.T) {
+	for _, refused := range []bool{true, false} {
+		t.Run(fmt.Sprintf("refused=%v", refused), func(t *testing.T) {
+			f := newRuntime(t)
+			c := f.controller
+			job := f.enqueue(t, "job", model.Build)
+			first := claimLease(t, f)
+			if first == nil {
+				t.Fatal("no lease")
+			}
+			now := c.options.Now()
+			zero := 0
+			result := worker.Result{State: model.Succeeded, CleanupOK: true, ExitCode: &zero, Source: first.Source, StartedAt: now, FinishedAt: now}
+			completion := map[string]any{"result": result, "seal": buildseal.Envelope{}}
+			if refused {
+				result = worker.Result{State: model.Failed, Reason: inconclusiveReason, CleanupOK: true, Source: first.Source, StartedAt: now, FinishedAt: now, Concurrency: &worker.Concurrency{Lane: 1, MaxLanes: 1, IdleVerdict: worker.IdleNotRequired}}
+				completion = map[string]any{"result": result, "seal": buildseal.Envelope{}, "admission_refused": protocol.AdmissionACLCensusUnavailable}
+			}
+			data, err := json.Marshal(completion)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The stale request authenticates the first lease, then waits
+			// for its body while the job is requeued and leased again.
+			pr, pw := io.Pipe()
+			body := &signalReader{Reader: pr, read: make(chan struct{})}
+			r := httptest.NewRequest(http.MethodPost, protocol.Prefix+"/jobs/"+first.Job.ID+"/complete", body)
+			r = r.WithContext(context.WithValue(r.Context(), peerKey{}, true))
+			r.Header.Set(protocol.EpochHeader, first.Job.WorkerEpoch)
+			r.Header.Set(protocol.LeaseHeader, first.Token)
+			stale := httptest.NewRecorder()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				c.handler().ServeHTTP(stale, r)
+			}()
+			select {
+			case <-body.read:
+			case <-done:
+				t.Fatalf("stale request ended before its body: %d", stale.Code)
+			}
+			refuseAdmission(t, f, *first, worker.IdleNotRequired)
+			f.offset.Store(int64(firstBackoff))
+			second := claimLease(t, f)
+			if second == nil || second.Job.ID != job.ID || second.Token == first.Token {
+				t.Fatalf("replacement lease %+v", second)
+			}
+			if status := lifecycleRequest(t, c, *second, "/stage", protocol.Stage{State: model.Running}); status != http.StatusNoContent {
+				t.Fatalf("replacement running: %d", status)
+			}
+			go func() {
+				pw.Write(data)
+				pw.Close()
+			}()
+			<-done
+			if stale.Code != http.StatusGone {
+				t.Fatalf("stale completion status %d, want %d", stale.Code, http.StatusGone)
+			}
+			current := getJob(t, f, job.ID)
+			if current.State != model.Running || current.CancelRequested || current.CancelReason != nil || current.LeaseToken != second.Token {
+				t.Fatalf("stale completion reached the replacement: %+v", current)
+			}
+			c.mu.Lock()
+			a := c.execution(job.ID)
+			c.mu.Unlock()
+			if a == nil || a.job.LeaseToken != second.Token {
+				t.Fatalf("replacement execution %+v", a)
+			}
+		})
 	}
 }
