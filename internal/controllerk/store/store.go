@@ -11,9 +11,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -338,38 +340,86 @@ func (s *Store) Lookup(ctx context.Context, principal, key string) (model.Job, e
 	return scanJob(s.db.QueryRowContext(ctx, "SELECT "+jobColumns+" FROM jobs WHERE principal=? AND idempotency_key=?", principal, key))
 }
 
-// List is ascending insertion order. Cursors are durable sequence positions, not
-// offsets, so deleting older jobs cannot skip the next result. Repository access
-// is always an explicit allowlist, including when continuing a cursor.
-func (s *Store) List(ctx context.Context, repos []string, cursor string, limit int) ([]model.Job, string, error) {
+// ListFilter narrows and orders List. States, when set, keeps only jobs in
+// those states. Order is OrderNewest or OrderOldest; empty takes a cursor's
+// own order, and newest without a cursor.
+type ListFilter struct {
+	States []model.State
+	Order  string
+}
+
+const (
+	OrderNewest = "newest"
+	OrderOldest = "oldest"
+)
+
+// List pages jobs in submission order, newest first unless filter says
+// otherwise. Cursors are durable sequence positions, not offsets, so deleting
+// jobs cannot skip the next result. A cursor carries its order: an oldest-first
+// cursor is the last position itself (the only form before List had an order),
+// a newest-first cursor its negation. A continued page therefore keeps its
+// order, and an explicitly different order is invalid. Repository access is
+// always an explicit allowlist, including when continuing a cursor.
+func (s *Store) List(ctx context.Context, repos []string, filter ListFilter, cursor string, limit int) ([]model.Job, string, error) {
 	if limit == 0 {
 		limit = 50
 	}
-	if limit < 1 || limit > 1000 || len(repos) > 1000 {
+	if limit < 1 || limit > 1000 || len(repos) > 1000 || filter.Order != "" && filter.Order != OrderNewest && filter.Order != OrderOldest {
 		return nil, "", ErrInvalid
 	}
-	var after int64
+	var states []model.State
+	for _, state := range filter.States {
+		if state != model.Queued && !active(state) && !state.Terminal() {
+			return nil, "", ErrInvalid
+		}
+		if !slices.Contains(states, state) {
+			states = append(states, state)
+		}
+	}
+	newest := filter.Order != OrderOldest
+	var position int64
 	if cursor != "" {
 		decoded, err := base64.RawURLEncoding.DecodeString(cursor)
 		if err != nil {
 			return nil, "", ErrInvalid
 		}
-		after, err = strconv.ParseInt(string(decoded), 10, 64)
-		if err != nil || after < 1 {
+		position, err = strconv.ParseInt(string(decoded), 10, 64)
+		if err != nil || position == 0 || position == math.MinInt64 || filter.Order != "" && (position < 0) != newest {
 			return nil, "", ErrInvalid
 		}
+		newest = position < 0
+		position = max(position, -position)
 	}
 	if len(repos) == 0 {
 		return []model.Job{}, "", nil
 	}
 	jobs := make([]model.Job, 0, limit)
-	args := make([]any, 0, len(repos)+2)
-	args = append(args, after)
+	args := make([]any, 0, len(repos)+len(states)+2)
 	for _, repo := range repos {
 		args = append(args, repo)
 	}
+	query := "SELECT sequence," + jobColumns + " FROM jobs WHERE repo IN (" + placeholders(len(repos)) + ")"
+	if len(states) > 0 {
+		query += " AND state IN (" + placeholders(len(states)) + ")"
+		for _, state := range states {
+			args = append(args, state)
+		}
+	}
+	switch {
+	case cursor != "" && newest:
+		query += " AND sequence<?"
+		args = append(args, position)
+	case cursor != "":
+		query += " AND sequence>?"
+		args = append(args, position)
+	}
+	if newest {
+		query += " ORDER BY sequence DESC LIMIT ?"
+	} else {
+		query += " ORDER BY sequence LIMIT ?"
+	}
 	args = append(args, limit+1)
-	rows, err := s.db.QueryContext(ctx, "SELECT sequence,"+jobColumns+" FROM jobs WHERE sequence>? AND repo IN ("+strings.TrimSuffix(strings.Repeat("?,", len(repos)), ",")+") ORDER BY sequence LIMIT ?", args...)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, "", err
 	}
@@ -377,6 +427,9 @@ func (s *Store) List(ctx context.Context, repos []string, cursor string, limit i
 	var last int64
 	for rows.Next() {
 		if len(jobs) == limit {
+			if newest {
+				last = -last
+			}
 			return jobs, base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(last, 10))), nil
 		}
 		var sequence int64
@@ -388,6 +441,10 @@ func (s *Store) List(ctx context.Context, repos []string, cursor string, limit i
 		last = sequence
 	}
 	return jobs, "", rows.Err()
+}
+
+func placeholders(n int) string {
+	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
 }
 
 func randomToken(prefix string) (string, error) {

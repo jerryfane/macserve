@@ -37,6 +37,16 @@ type Status struct {
 	// MaxConcurrentJobs is the controller's configured lanes.
 	MaxConcurrentJobs int              `json:"max_concurrent_jobs"`
 	Gate              health.GateState `json:"gate"`
+	// Lanes is how many lanes claims fill now: MaxConcurrentJobs capped by
+	// the registered worker's. StartingSimulators lists the simulator jobs
+	// still inside their start window (startingSimulator) by their claim
+	// record: one still preparing holds the next simulator start.
+	// CompletionHeld is set while a completion waits for the worker's idle
+	// check, which holds every start. The API derives a queued job's wait
+	// from them; none is serialized.
+	Lanes              int      `json:"-"`
+	StartingSimulators []string `json:"-"`
+	CompletionHeld     bool     `json:"-"`
 }
 type Options struct {
 	Root, Socket string

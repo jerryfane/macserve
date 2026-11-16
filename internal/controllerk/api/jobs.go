@@ -67,8 +67,46 @@ func intQuery(r *http.Request, key string, fallback, max int) (int, error) {
 	}
 	return n, nil
 }
+
+// listStates are the state= aliases of GET /v1/jobs.
+var listStates = map[string][]model.State{
+	"active":   {model.Preparing, model.Running, model.Finalizing, model.Cancelling},
+	"terminal": {model.Succeeded, model.Failed, model.TimedOut, model.Cancelled, model.Interrupted, model.Expired},
+}
+
+// listFilter parses GET /v1/jobs' state (a comma list of job states and
+// aliases; store.List refuses any other state) and order (newest or oldest).
+func listFilter(r *http.Request) (store.ListFilter, error) {
+	var filter store.ListFilter
+	query := r.URL.Query()
+	if values, exists := query["state"]; exists {
+		if len(values) != 1 {
+			return filter, store.ErrInvalid
+		}
+		for _, name := range strings.Split(values[0], ",") {
+			if states, alias := listStates[name]; alias {
+				filter.States = append(filter.States, states...)
+			} else {
+				filter.States = append(filter.States, model.State(name))
+			}
+		}
+	}
+	if values, exists := query["order"]; exists {
+		if len(values) != 1 || values[0] != store.OrderNewest && values[0] != store.OrderOldest {
+			return filter, store.ErrInvalid
+		}
+		filter.Order = values[0]
+	}
+	return filter, nil
+}
+
 func (h *handler) list(w http.ResponseWriter, r *http.Request, p controllerconfig.Principal) {
 	limit, err := intQuery(r, "limit", 50, 1000)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	filter, err := listFilter(r)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -81,17 +119,20 @@ func (h *handler) list(w http.ResponseWriter, r *http.Request, p controllerconfi
 		}
 		repos = []string{strings.ToLower(repo)}
 	}
-	jobs, next, err := h.Store.List(r.Context(), repos, r.URL.Query().Get("cursor"), limit)
+	jobs, next, err := h.Store.List(r.Context(), repos, filter, r.URL.Query().Get("cursor"), limit)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	blocked := h.blocked(r)
+	var queue *queueWait
 	items := make([]map[string]any, 0, len(jobs))
 	for _, job := range jobs {
 		view := jobView(job)
 		if job.State == model.Queued {
-			view["blocked_by"] = blocked
+			if queue == nil {
+				queue = h.queueWait(r.Context())
+			}
+			queue.render(view, job)
 		}
 		items = append(items, view)
 	}
@@ -253,7 +294,13 @@ func (h *handler) capabilities(w http.ResponseWriter, r *http.Request, p control
 			templates = append(templates, item)
 		}
 	}
-	// Do not expose active job IDs, trusted command recipes or filesystem paths.
+	// Do not expose active job IDs, trusted command recipes or filesystem
+	// paths; the queue is reported only as service-wide counts.
+	queue, err := h.Store.QueueView(r.Context())
+	if err != nil {
+		writeError(w, errUnavailable)
+		return
+	}
 	blocked := append([]string{}, status.Gate.Blockers...)
 	if status.Service.Paused {
 		blocked = append(blocked, "manual_pause")
@@ -261,7 +308,7 @@ func (h *handler) capabilities(w http.ResponseWriter, r *http.Request, p control
 	if status.Service.Quarantined {
 		blocked = append(blocked, "quarantined")
 	}
-	body := map[string]any{"api_version": "v1", "service_version": h.ServiceVersion, "repositories": p.Repositories, "profiles": items, "worker_ready": status.WorkerReady, "gui_ready": status.WorkerReady && status.Gate.Ready, "quiescent": status.Quiescent, "blocked_by": blocked, "paused": status.Service.Paused, "max_concurrent_jobs": status.MaxConcurrentJobs}
+	body := map[string]any{"api_version": "v1", "service_version": h.ServiceVersion, "repositories": p.Repositories, "profiles": items, "worker_ready": status.WorkerReady, "gui_ready": status.WorkerReady && status.Gate.Ready, "quiescent": status.Quiescent, "blocked_by": blocked, "paused": status.Service.Paused, "max_concurrent_jobs": status.MaxConcurrentJobs, "lanes_busy": len(queue.Active), "queued": len(queue.Queued)}
 	if templates != nil {
 		body["templates"] = templates
 	}
@@ -272,28 +319,10 @@ func (h *handler) capabilities(w http.ResponseWriter, r *http.Request, p control
 	writeJSON(w, 200, body)
 }
 
-func (h *handler) blocked(r *http.Request) []string {
-	status, err := h.Status(r.Context())
-	if err != nil {
-		return []string{"service_unavailable"}
-	}
-	blocked := append([]string{}, status.Gate.Blockers...)
-	if status.Service.Paused {
-		blocked = append(blocked, "manual_pause")
-	}
-	if status.Service.Quarantined {
-		blocked = append(blocked, "quarantined")
-	}
-	if !status.WorkerReady {
-		blocked = append(blocked, "worker_unavailable")
-	}
-	return blocked
-}
-
 func (h *handler) renderJob(w http.ResponseWriter, r *http.Request, status int, job model.Job) {
 	view := jobView(job)
 	if job.State == model.Queued {
-		view["blocked_by"] = h.blocked(r)
+		h.queueWait(r.Context()).render(view, job)
 	}
 	// A signing sub-status beside, never instead of, the job state.
 	if job.Request.Kind == model.IOSArchive {

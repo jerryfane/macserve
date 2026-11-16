@@ -369,12 +369,13 @@ func TestListUsesDurableRepositoryScopedCursor(t *testing.T) {
 	second := enqueueJob(t, s, "principal", "two", testNow)
 	third := enqueueJob(t, s, "principal", "three", testNow)
 	for _, repos := range [][]string{nil, {}} {
-		jobs, cursor, err := s.List(ctx, repos, "", 1)
+		jobs, cursor, err := s.List(ctx, repos, ListFilter{}, "", 1)
 		if err != nil || len(jobs) != 0 || cursor != "" {
 			t.Fatal("empty authorization allowed listing")
 		}
 	}
-	jobs, cursor, err := s.List(ctx, []string{"example-org/example-app"}, "", 1)
+	oldest := ListFilter{Order: OrderOldest}
+	jobs, cursor, err := s.List(ctx, []string{"example-org/example-app"}, oldest, "", 1)
 	if err != nil || len(jobs) != 1 || jobs[0].ID != first.ID || cursor == "" {
 		t.Fatalf("first page: %+v %q %v", jobs, cursor, err)
 	}
@@ -388,19 +389,20 @@ func TestListUsesDurableRepositoryScopedCursor(t *testing.T) {
 		t.Fatal(err)
 	}
 	s = openStore(t, path, Options{Retention: time.Hour})
-	jobs, cursor, err = s.List(ctx, []string{"example-org/example-app"}, cursor, 1)
+	// The cursor carries its order.
+	jobs, cursor, err = s.List(ctx, []string{"example-org/example-app"}, ListFilter{}, cursor, 1)
 	if err != nil || len(jobs) != 1 || jobs[0].ID != second.ID || cursor == "" {
 		t.Fatalf("cursor shifted after prune/reopen: %+v %q %v", jobs, cursor, err)
 	}
-	jobs, cursor, err = s.List(ctx, []string{"example-org/example-app"}, cursor, 1)
+	jobs, cursor, err = s.List(ctx, []string{"example-org/example-app"}, oldest, cursor, 1)
 	if err != nil || len(jobs) != 1 || jobs[0].ID != third.ID || cursor != "" {
 		t.Fatalf("last page: %+v %q %v", jobs, cursor, err)
 	}
-	jobs, _, err = s.List(ctx, []string{"example-org/example-app') OR 1=1 --"}, "", 100)
+	jobs, _, err = s.List(ctx, []string{"example-org/example-app') OR 1=1 --"}, ListFilter{}, "", 100)
 	if err != nil || len(jobs) != 0 {
 		t.Fatal("repository filter was not bound as data")
 	}
-	_, _, err = s.List(ctx, []string{"example-org/example-app"}, "not-a-cursor", 1)
+	_, _, err = s.List(ctx, []string{"example-org/example-app"}, ListFilter{}, "not-a-cursor", 1)
 	requireError(t, err, ErrInvalid)
 }
 

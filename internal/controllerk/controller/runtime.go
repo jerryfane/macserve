@@ -392,9 +392,16 @@ func (c *Controller) Status(ctx context.Context) (Status, error) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	status := Status{Service: service, Gate: gate, MaxConcurrentJobs: c.options.Lanes, WorkerReady: c.epoch != "" && !c.closed && !service.Quarantined && c.options.Now().Sub(c.lastSeen) <= c.options.HeartbeatTimeout, Quiescent: c.epoch != "" && c.workerIdle && !c.maintaining && len(c.active) == 0 && !service.Quarantined}
+	now := c.options.Now()
+	status := Status{Service: service, Gate: gate, MaxConcurrentJobs: c.options.Lanes, Lanes: c.lanes(), WorkerReady: c.epoch != "" && !c.closed && !service.Quarantined && now.Sub(c.lastSeen) <= c.options.HeartbeatTimeout, Quiescent: c.epoch != "" && c.workerIdle && !c.maintaining && len(c.active) == 0 && !service.Quarantined}
 	for _, a := range c.active {
 		status.ActiveJobs = append(status.ActiveJobs, a.job.ID)
+		// a.job is the claim's record, preparing; the caller checks the
+		// job's current state.
+		if startingSimulator(a, a.job, now) {
+			status.StartingSimulators = append(status.StartingSimulators, a.job.ID)
+		}
+		status.CompletionHeld = status.CompletionHeld || !a.heldAt.IsZero()
 	}
 	return status, nil
 }
