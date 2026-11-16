@@ -197,10 +197,10 @@ const heartbeatStoreWait = 500 * time.Millisecond
 // as before, when the store answers within heartbeatStoreWait. When it does
 // not, the lease is checked against the execution's claim record (its lease
 // token, epoch and deadline never change while it is active), and the
-// cancellation is the one last observed in the store (cancelSeen, refreshed
-// every monitor tick, by every heartbeat, and by the controller's own
-// cancellations), so a cancel requested before the store went slow is still
-// delivered.
+// cancellation is the one last observed (cancelSeen: the store publishes
+// every cancellation request it commits through OnCancel, and every monitor
+// tick and heartbeat refresh it), so a cancel committed before the store
+// went slow is still delivered.
 func (c *Controller) heartbeat(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), heartbeatStoreWait)
 	job, err := c.requestJob(r.WithContext(ctx), false)
@@ -296,8 +296,9 @@ func (c *Controller) stage(w http.ResponseWriter, r *http.Request) {
 }
 
 // logs appends the worker's output. Like stage, it waits on the store
-// without c.mu (AppendLog checks the lease and the job's state itself); only
-// a log limit's cancellation takes it.
+// without c.mu: AppendLog checks the lease and the job's state itself, and a
+// log-limit rejection requests the job's cancellation in its own transaction,
+// so no completion can record success between the two.
 func (c *Controller) logs(w http.ResponseWriter, r *http.Request) {
 	var value protocol.Log
 	if err := decodeJSON(r.Body, 128<<10, &value); err != nil {
@@ -320,9 +321,7 @@ func (c *Controller) logs(w http.ResponseWriter, r *http.Request) {
 		}
 		_, err = c.options.Store.AppendLog(r.Context(), job.ID, job.LeaseToken, value.Stream, string(value.Data), c.options.Now())
 		if errors.Is(err, store.ErrLogLimit) {
-			c.mu.Lock()
-			_, _ = c.cancelJob(r.Context(), job, "log evidence limit exceeded", model.CancelReason{Source: model.CancelLogLimit}, c.options.Now())
-			c.mu.Unlock()
+			log.Printf("controller job log evidence limit exceeded: job=%s source=%s; cancellation requested", job.ID, model.CancelLogLimit)
 		}
 		return err
 	}()

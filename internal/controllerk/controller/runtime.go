@@ -34,9 +34,10 @@ type execution struct {
 	heartbeat       time.Time
 	cancellingSince time.Time
 	finalizingSince time.Time
-	// cancelSeen records that the job's cancellation was requested, as last
-	// observed in the store, so a heartbeat that cannot read the store still
-	// delivers it; guarded by c.beatMu alone.
+	// cancelSeen records that the job's cancellation was requested, as the
+	// store published it at commit (cancelRequested) or as last read, so a
+	// heartbeat that cannot read the store still delivers it; guarded by
+	// c.beatMu alone.
 	cancelSeen bool
 	cancel     context.CancelFunc
 	// fencing marks a lease never delivered that is being ended: it is
@@ -86,15 +87,22 @@ func (c *Controller) release(a *execution) {
 }
 
 // noteCancel records that job, a store record, has its cancellation
-// requested, on the active execution of its lease, so heartbeats deliver the
-// cancellation even while the store is slow. Callers may hold c.mu.
+// requested (cancelRequested). Callers may hold c.mu.
 func (c *Controller) noteCancel(job model.Job) {
-	if !job.CancelRequested {
-		return
+	if job.CancelRequested {
+		c.cancelRequested(job.ID, job.LeaseToken)
 	}
+}
+
+// cancelRequested is the store's OnCancel observer: it marks the active
+// execution of the job's lease cancelled, so heartbeats deliver every
+// committed cancellation (a client's, an administrator's pause, the
+// controller's own, a log limit) even while the store is too slow to read.
+// Callers may hold c.mu, never c.beatMu.
+func (c *Controller) cancelRequested(id, lease string) {
 	c.beatMu.Lock()
 	defer c.beatMu.Unlock()
-	if a := c.execution(job.ID); a != nil && a.job.LeaseToken == job.LeaseToken {
+	if a := c.execution(id); a != nil && a.job.LeaseToken == lease {
 		a.cancelSeen = true
 	}
 }
@@ -242,6 +250,7 @@ func New(options Options) (*Controller, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &Controller{options: options, root: root, lock: lock, ctx: ctx, cancel: cancel, requestTimeout: 2 * time.Minute}
+	options.Store.OnCancel(c.cancelRequested)
 	service, serviceErr := options.Store.ServiceState(ctx)
 	gate, gateErr := options.Gate(ctx)
 	if serviceErr == nil && gateErr == nil && !service.Paused && cleanupAllowed(gate) {

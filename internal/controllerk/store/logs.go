@@ -16,6 +16,10 @@ const MaxLogPageBytes = 1 << 20
 // AppendLog preserves raw bytes without sanitizing terminal controls. Renderers
 // must escape untrusted output. A rejected oversized record or full log persists
 // the completeness flag separately, so a full byte cap cannot hide truncation.
+// The same transaction requests the job's cancellation (CancelLogLimit): a
+// completion can never record success over logs it read as complete while the
+// rejection was committing, since Finish refuses success once cancellation is
+// requested.
 func (s *Store) AppendLog(ctx context.Context, id, lease, stream, text string, now time.Time) (int64, error) {
 	if stream != "stdout" && stream != "stderr" && stream != "system" || text == "" || !validTime(now) {
 		return 0, ErrInvalid
@@ -52,9 +56,17 @@ func (s *Store) AppendLog(ctx context.Context, id, lease, stream, text string, n
 		if _, err := tx.ExecContext(ctx, "UPDATE jobs SET logs_truncated=1 WHERE id=?", id); err != nil {
 			return 0, err
 		}
+		job, err := getTx(ctx, tx, id)
+		if err != nil {
+			return 0, err
+		}
+		if err := cancelTx(ctx, tx, job, "log evidence limit exceeded", model.CancelReason{Source: model.CancelLogLimit}, now); err != nil {
+			return 0, err
+		}
 		if err := tx.Commit(); err != nil {
 			return 0, err
 		}
+		s.published(job)
 		return 0, ErrLogLimit
 	}
 	sequence++

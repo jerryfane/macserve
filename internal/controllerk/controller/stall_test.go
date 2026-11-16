@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -12,8 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jerryfane/macserve/internal/buildseal"
+	"github.com/jerryfane/macserve/internal/controllerk/store"
 	"github.com/jerryfane/macserve/internal/model"
 	"github.com/jerryfane/macserve/internal/protocol"
+	"github.com/jerryfane/macserve/internal/worker"
 	"modernc.org/sqlite"
 )
 
@@ -141,5 +145,75 @@ func TestHeartbeatAnswersWhileStoreHeld(t *testing.T) {
 	}
 	if code := lifecycleRequest(t, f.controller, live, "/heartbeat", struct{}{}); code != http.StatusOK {
 		t.Fatalf("live heartbeat after hold %d", code)
+	}
+}
+
+// A cancellation committed just before the store goes slow, with no monitor
+// tick in between, is still delivered by the heartbeat: the store publishes
+// every cancellation it commits, a client's or an administrator's pause
+// (#167).
+func TestHeartbeatDeliversCancelCommittedBeforeStall(t *testing.T) {
+	for _, source := range []string{"client", "pause"} {
+		t.Run(source, func(t *testing.T) {
+			f := newLanes(t, 1)
+			f.enqueue(t, "job", model.Build)
+			f.register(t, "epoch-a", 1)
+			lease := f.start(t, "epoch-a")
+			var err error
+			if source == "client" {
+				_, err = f.db.Cancel(context.Background(), lease.Job.ID, "client cancel", model.CancelReason{Source: model.CancelClient, Principal: "owner"}, f.now)
+			} else {
+				_, err = f.db.Pause(context.Background(), "maintenance", "cancel_active", "admin", f.now)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			holdStore(t, f, lease)
+			for range 3 {
+				if beat := promptHeartbeat(t, f.controller, lease); !beat.Cancel {
+					t.Fatalf("committed %s cancellation not delivered during the stall: %+v", source, beat)
+				}
+			}
+		})
+	}
+}
+
+// A log-limit rejection that commits while a completion is past its log
+// check (the /logs handler not yet back) cannot let the completion record
+// success with complete logs: the rejection requests cancellation in its own
+// transaction, so the job ends cancelled for the log limit.
+func TestLogLimitRejectionDuringCompletionPreventsSuccess(t *testing.T) {
+	f := newRuntime(t)
+	lease := f.lease(t, model.Build)
+	rejected := false
+	f.controller.options.Seal = func(ctx context.Context, job model.Job, value worker.Result, _ Sealing) (json.RawMessage, error) {
+		if !rejected {
+			rejected = true
+			_, err := f.db.AppendLog(ctx, job.ID, lease.Token, "stdout", strings.Repeat("x", store.MaxLogRecordBytes+1), f.now)
+			if !errors.Is(err, store.ErrLogLimit) {
+				t.Errorf("oversized log record: %v", err)
+			}
+		}
+		return json.Marshal(struct {
+			State model.State `json:"state"`
+		}{value.State})
+	}
+	if err := f.controller.complete(context.Background(), lease.Job, f.result(t, lease), buildseal.Envelope{}); err != nil {
+		t.Fatalf("completion: %v", err)
+	}
+	job, err := f.db.Get(context.Background(), lease.Job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var completion Completion
+	if err := json.Unmarshal(job.Result, &completion); err != nil {
+		t.Fatal(err)
+	}
+	truncated, err := f.db.LogsTruncated(context.Background(), job.ID)
+	if err != nil || !truncated {
+		t.Fatalf("logs truncated %v %v", truncated, err)
+	}
+	if job.State != model.Cancelled || completion.Result.State != model.Cancelled || job.CancelReason == nil || job.CancelReason.Source != model.CancelLogLimit {
+		t.Fatalf("completion over truncated logs: state=%s result=%s logs_truncated=%v cancel=%+v", job.State, completion.Result.State, completion.Result.LogsTruncated, job.CancelReason)
 	}
 }

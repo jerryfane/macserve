@@ -26,7 +26,7 @@ func (c *Controller) cancelJob(ctx context.Context, job model.Job, reason string
 		log.Printf("controller job cancellation failed: job=%s source=%s blockers=%s: %v", job.ID, cause.Source, blockerList(cause.Blockers), err)
 		return cancelled, err
 	}
-	c.noteCancel(cancelled)
+	// The store published the request to heartbeats (OnCancel).
 	if recorded := cancelled.CancelReason; recorded != nil {
 		log.Printf("controller job cancellation requested: job=%s source=%s blockers=%s detail=%q", job.ID, recorded.Source, blockerList(recorded.Blockers), recorded.Detail)
 	}

@@ -380,7 +380,13 @@ func (s *Store) Transition(ctx context.Context, id, lease string, from, to model
 	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if to == model.Cancelling {
+		s.published(job)
+	}
+	return nil
 }
 
 // Requeue returns a preparing job whose lease was never delivered to the
@@ -460,6 +466,9 @@ func (s *Store) Cancel(ctx context.Context, id, reason string, cause model.Cance
 	}
 	if err := tx.Commit(); err != nil {
 		return model.Job{}, err
+	}
+	if job.CancelRequested {
+		s.published(job)
 	}
 	return job, nil
 }
