@@ -220,8 +220,9 @@ func TestGitHubJobPublicationsPrecedeForkChurnWithoutBypassingRetry(t *testing.T
 
 // HealGitHubPublications marks at most limit runs a pass, only runs of a pull
 // request with a current eligible head or an unfinished job, no check and no
-// pending publication: never a blocked run, a run with a check, a pending
-// or retrying one, or a finished run of a head no longer current.
+// pending publication that publishable accepts: never a blocked run, a run
+// with a check, a pending or retrying one, a finished run of a head no longer
+// current, or a refused run, which does not count against the limit.
 func TestGitHubHealIsBoundedToRunsWithoutChecks(t *testing.T) {
 	ctx := context.Background()
 	s, _ := newStore(t, Options{PerPrincipalLimit: 20})
@@ -290,11 +291,13 @@ func TestGitHubHealIsBoundedToRunsWithoutChecks(t *testing.T) {
 	if err = s.FinishGitHubPublication(ctx, publication, 0, testNow.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	first, err := s.HealGitHubPublications(ctx, 10)
+	// Run 5 is one the publisher refuses.
+	publishable := func(run GitHubRun) bool { return run.Key != runs[4].Key }
+	first, err := s.HealGitHubPublications(ctx, 10, publishable)
 	if err != nil || len(first) != 10 {
 		t.Fatalf("first pass healed %d: %v", len(first), err)
 	}
-	second, err := s.HealGitHubPublications(ctx, 10)
+	second, err := s.HealGitHubPublications(ctx, 10, publishable)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +306,7 @@ func TestGitHubHealIsBoundedToRunsWithoutChecks(t *testing.T) {
 		healed[key] = true
 	}
 	want := map[string]bool{runs[2].Key: true}
-	for _, run := range runs[4:] {
+	for _, run := range runs[5:] {
 		want[run.Key] = true
 	}
 	if len(healed) != len(want) || len(first)+len(second) != len(want) {
@@ -314,7 +317,7 @@ func TestGitHubHealIsBoundedToRunsWithoutChecks(t *testing.T) {
 			t.Fatalf("healed %v, want %v", healed, want)
 		}
 	}
-	if third, err := s.HealGitHubPublications(ctx, 10); err != nil || len(third) != 0 {
+	if third, err := s.HealGitHubPublications(ctx, 10, publishable); err != nil || len(third) != 0 {
 		t.Fatalf("pending runs healed again: %v %v", third, err)
 	}
 }
