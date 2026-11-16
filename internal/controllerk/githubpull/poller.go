@@ -311,6 +311,9 @@ func (p *Poller) Poll(ctx context.Context) error {
 		}
 	}
 	failures = append(failures, p.pollOwners(ctx, observed)...)
+	if err := p.heal(ctx); err != nil {
+		failures = append(failures, err)
+	}
 	if err := p.publish(ctx); err != nil {
 		failures = append(failures, err)
 	}
@@ -702,7 +705,7 @@ func (p *Poller) maintain(ctx context.Context, policy githubwire.Policy, reconci
 		return nil, err
 	}
 	if reconcile {
-		if err = p.options.Store.ReconcileGitHubPublications(ctx, policy.RepositoryID); err != nil {
+		if err = p.options.Store.ReconcileGitHubPublications(ctx, policy.RepositoryID, now); err != nil {
 			failures = append(failures, err)
 		}
 	}

@@ -38,7 +38,7 @@ func TestGitHubCurrentReconciliationRetiresHistoryWithoutLosingProvenance(t *tes
 	if err = s.MaintainGitHub(ctx, 123, map[string]bool{current.Key: true}, testNow); err != nil {
 		t.Fatal(err)
 	}
-	if err = s.ReconcileGitHubPublications(ctx, 123); err != nil {
+	if err = s.ReconcileGitHubPublications(ctx, 123, testNow); err != nil {
 		t.Fatal(err)
 	}
 	repair, err := s.NextGitHubPublication(ctx, testNow)
@@ -62,7 +62,7 @@ func TestGitHubCurrentReconciliationRetiresHistoryWithoutLosingProvenance(t *tes
 	if err != nil || len(requests) != 1 || requests[0].RequestID != "actions:1:1" {
 		t.Fatalf("obsolete head lost immutable correlation: %+v %v", requests, err)
 	}
-	if err = s.ReconcileGitHubPublications(ctx, 123); err != nil {
+	if err = s.ReconcileGitHubPublications(ctx, 123, testNow); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = s.NextGitHubPublication(ctx, testNow.Add(25*time.Hour)); !errors.Is(err, ErrNotFound) {
@@ -173,7 +173,7 @@ func TestGitHubCurrentForksAreNotPeriodicallyRepublished(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 3 {
-		if err := s.ReconcileGitHubPublications(ctx, 123); err != nil {
+		if err := s.ReconcileGitHubPublications(ctx, 123, testNow); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := s.NextGitHubPublication(ctx, testNow.Add(time.Hour)); !errors.Is(err, ErrNotFound) {
@@ -215,5 +215,106 @@ func TestGitHubJobPublicationsPrecedeForkChurnWithoutBypassingRetry(t *testing.T
 	due, err := s.NextGitHubPublication(ctx, retry)
 	if err != nil || due.Run.JobID != run.JobID {
 		t.Fatalf("due admitted evidence remained behind fork churn: %+v %v", due, err)
+	}
+}
+
+// HealGitHubPublications marks at most limit runs a pass, only runs of a pull
+// request with a current eligible head or an unfinished job, no check and no
+// pending publication: never a blocked run, a run with a check, a pending
+// or retrying one, or a finished run of a head no longer current.
+func TestGitHubHealIsBoundedToRunsWithoutChecks(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newStore(t, Options{PerPrincipalLimit: 20})
+	if err := s.InitializeGitHub(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var runs []GitHubRun
+	for i := 1; i <= 15; i++ {
+		input := githubFixture()
+		input.Run.Key = fmt.Sprintf("%064x", i)
+		run, err := s.AdmitGitHub(ctx, input, testNow)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runs = append(runs, run)
+	}
+	blocked := githubFixture().Run
+	blocked.Key = fmt.Sprintf("%064x", 99)
+	if err := s.BlockGitHub(ctx, blocked, "fork", testNow); err != nil {
+		t.Fatal(err)
+	}
+	// Every publication ends without a check, except run 1's.
+	for {
+		publication, err := s.NextGitHubPublication(ctx, testNow)
+		if errors.Is(err, ErrNotFound) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		check := int64(0)
+		if publication.Run.Key == runs[0].Key {
+			check = 1
+		}
+		if err = s.FinishGitHubPublication(ctx, publication, check, time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Run 2 ended and its head is no longer current; run 3 is current.
+	if _, err := s.Cancel(ctx, runs[1].JobID, "superseded", model.CancelReason{Source: model.CancelGitHub}, testNow); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Cancel(ctx, runs[2].JobID, "superseded", model.CancelReason{Source: model.CancelGitHub}, testNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MaintainGitHub(ctx, 123, map[string]bool{runs[2].Key: true}, testNow); err != nil {
+		t.Fatal(err)
+	}
+	for _, run := range runs[1:3] {
+		publication, err := s.NextGitHubPublication(ctx, testNow)
+		if err != nil {
+			t.Fatalf("cancel of %s not published: %v", run.Key, err)
+		}
+		if err = s.FinishGitHubPublication(ctx, publication, 0, time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Run 4's publication retries.
+	if _, err := s.Cancel(ctx, runs[3].JobID, "superseded", model.CancelReason{Source: model.CancelGitHub}, testNow); err != nil {
+		t.Fatal(err)
+	}
+	publication, err := s.NextGitHubPublication(ctx, testNow)
+	if err != nil || publication.Run.Key != runs[3].Key {
+		t.Fatalf("cancel of run 4 not published: %+v %v", publication, err)
+	}
+	if err = s.FinishGitHubPublication(ctx, publication, 0, testNow.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.HealGitHubPublications(ctx, 10)
+	if err != nil || len(first) != 10 {
+		t.Fatalf("first pass healed %d: %v", len(first), err)
+	}
+	second, err := s.HealGitHubPublications(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	healed := map[string]bool{}
+	for _, key := range append(first, second...) {
+		healed[key] = true
+	}
+	want := map[string]bool{runs[2].Key: true}
+	for _, run := range runs[4:] {
+		want[run.Key] = true
+	}
+	if len(healed) != len(want) || len(first)+len(second) != len(want) {
+		t.Fatalf("healed %v, want %v", healed, want)
+	}
+	for key := range want {
+		if !healed[key] {
+			t.Fatalf("healed %v, want %v", healed, want)
+		}
+	}
+	if third, err := s.HealGitHubPublications(ctx, 10); err != nil || len(third) != 0 {
+		t.Fatalf("pending runs healed again: %v %v", third, err)
 	}
 }
