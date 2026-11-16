@@ -61,7 +61,8 @@ type Store struct {
 
 // OnCancel registers fn, told the id and lease of every active job whose
 // cancellation request this handle commits (Cancel, Pause cancel_active, a
-// log-limit AppendLog, a Transition to cancelling), after the commit. The
+// log-limit AppendLog, a Transition to cancelling, a BlockGitHub of its run),
+// after the commit. The
 // controller delivers a cancellation through it even while the store is too
 // slow to read (#167). One observer is kept; a later call replaces it. fn
 // runs on the committing goroutine and must not call the Store.

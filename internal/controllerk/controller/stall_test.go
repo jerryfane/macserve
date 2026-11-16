@@ -150,23 +150,43 @@ func TestHeartbeatAnswersWhileStoreHeld(t *testing.T) {
 
 // A cancellation committed just before the store goes slow, with no monitor
 // tick in between, is still delivered by the heartbeat: the store publishes
-// every cancellation it commits, a client's or an administrator's pause
-// (#167).
+// every cancellation it commits, a client's, an administrator's pause or a
+// blocked GitHub run's (#167).
 func TestHeartbeatDeliversCancelCommittedBeforeStall(t *testing.T) {
-	for _, source := range []string{"client", "pause"} {
+	for _, source := range []string{"client", "pause", "github"} {
 		t.Run(source, func(t *testing.T) {
+			ctx := context.Background()
 			f := newLanes(t, 1)
-			f.enqueue(t, "job", model.Build)
+			var run store.GitHubRun
+			if source == "github" {
+				if err := f.db.InitializeGitHub(ctx); err != nil {
+					t.Fatal(err)
+				}
+				admission := runtimeAdmission(model.Build)
+				admission.Request.Context.PullRequest = 7
+				run = store.GitHubRun{Key: strings.Repeat("b", 64), RepositoryID: 123, Repository: admission.Request.Repo, SHA: admission.Request.SHA, Profile: admission.Request.Profile, PolicyRevision: 1}
+				if _, err := f.db.AdmitGitHub(ctx, store.GitHubAdmission{Run: run, Admission: admission, PullRequest: 7, Mode: "ensure"}, f.now); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				f.enqueue(t, "job", model.Build)
+			}
 			f.register(t, "epoch-a", 1)
 			lease := f.start(t, "epoch-a")
 			var err error
-			if source == "client" {
-				_, err = f.db.Cancel(context.Background(), lease.Job.ID, "client cancel", model.CancelReason{Source: model.CancelClient, Principal: "owner"}, f.now)
-			} else {
-				_, err = f.db.Pause(context.Background(), "maintenance", "cancel_active", "admin", f.now)
+			switch source {
+			case "client":
+				_, err = f.db.Cancel(ctx, lease.Job.ID, "client cancel", model.CancelReason{Source: model.CancelClient, Principal: "owner"}, f.now)
+			case "pause":
+				_, err = f.db.Pause(ctx, "maintenance", "cancel_active", "admin", f.now)
+			case "github":
+				err = f.db.BlockGitHub(ctx, run, "GitHub head superseded", f.now)
 			}
 			if err != nil {
 				t.Fatal(err)
+			}
+			if job, err := f.db.Get(ctx, lease.Job.ID); err != nil || !job.CancelRequested {
+				t.Fatalf("%s cancellation not committed: %v", source, err)
 			}
 			holdStore(t, f, lease)
 			for range 3 {

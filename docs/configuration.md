@@ -335,8 +335,9 @@ extend it. Source streaming instead receives the ten-minute preparation budget p
 The worker cancels a job on its first failed heartbeat, so the controller answers heartbeats even while slow
 store work holds its single database connection (#167): a heartbeat waits at most 500 ms for the job's record,
 then answers from the lease's in-memory claim (its token, epoch and deadline) and the cancellation the store
-published when it committed it (a client's cancel, an administrator's `cancel_active` pause, a log limit or the
-controller's own), so a cancel committed before the store went slow is still delivered. A worker request slower
+published when it committed it (a client's cancel, an administrator's `cancel_active` pause, a GitHub run
+blocked or superseded, a log limit or the controller's own), so a cancel committed before the store went slow is
+still delivered. A worker request slower
 than 5 s is logged with its route. A log-limit rejection requests the job's cancellation in the same transaction,
 so a concurrent completion cannot record success over truncated logs.
 The worker still cancels on its first failed `/logs` or `/stage` request, which wait for the store; those no

@@ -518,7 +518,8 @@ func (s *Store) GitHubRequests(ctx context.Context, jobID string) ([]GitHubReque
 }
 
 // BlockGitHub records a non-success requirement without ever admitting code.
-// Existing active work is cancelled atomically with the publication request.
+// Existing active work is cancelled atomically with the publication request,
+// and the cancellation is published to the OnCancel observer.
 func (s *Store) BlockGitHub(ctx context.Context, r GitHubRun, reason string, now time.Time) error {
 	if !validOpaque(r.Key, 256) || r.RepositoryID <= 0 || !controllerconfig.ValidRepository(r.Repository) || !validSHA(r.SHA) || !validOpaque(r.Profile, 256) || r.Shard != "" && !validOpaque(r.Shard, 32) || r.PolicyRevision <= 0 || !validReason(reason) || reason == "" || !validTime(now) {
 		return ErrInvalid
@@ -535,6 +536,7 @@ func (s *Store) BlockGitHub(ctx context.Context, r GitHubRun, reason string, now
 	if publishing {
 		return ErrFull
 	}
+	var cancelled model.Job
 	old, err := scanGitHubRun(tx.QueryRowContext(ctx, "SELECT "+githubRunColumns+" FROM github_runs WHERE run_key=?", r.Key))
 	if errors.Is(err, ErrNotFound) {
 		_, err = tx.ExecContext(ctx, "INSERT INTO github_runs(run_key,repository_id,repository,sha,profile,shard,policy_revision,blocked) VALUES(?,?,?,?,?,?,?,?)", r.Key, r.RepositoryID, r.Repository, r.SHA, r.Profile, r.Shard, r.PolicyRevision, reason)
@@ -544,10 +546,9 @@ func (s *Store) BlockGitHub(ctx context.Context, r GitHubRun, reason string, now
 		}
 		_, err = tx.ExecContext(ctx, "UPDATE github_runs SET blocked=?,skipped='' WHERE run_key=?", reason, r.Key)
 		if err == nil && old.JobID != "" {
-			var job model.Job
-			job, err = getTx(ctx, tx, old.JobID)
+			cancelled, err = getTx(ctx, tx, old.JobID)
 			if err == nil {
-				err = cancelTx(ctx, tx, job, reason, model.CancelReason{Source: model.CancelGitHub, Detail: reason}, now)
+				err = cancelTx(ctx, tx, cancelled, reason, model.CancelReason{Source: model.CancelGitHub, Detail: reason}, now)
 			}
 		}
 	}
@@ -557,7 +558,13 @@ func (s *Store) BlockGitHub(ctx context.Context, r GitHubRun, reason string, now
 	if err = githubDirty(ctx, tx, r.Key); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	if cancelled.ID != "" {
+		s.published(cancelled)
+	}
+	return nil
 }
 
 // SkipGitHub records that a matrix run of pull request pull is not run (why:
