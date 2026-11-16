@@ -16,14 +16,20 @@ import (
 	"github.com/jerryfane/macserve/internal/receipt"
 )
 
-// healBudget bounds the runs one poll heals (HealGitHubPublications): a
-// publication pass's budget, each a check list and a create on GitHub.
-const healBudget = 10
+// publicationBudget bounds both the publications one pass makes and the runs
+// one poll heals (HealGitHubPublications): each a check list and a create or
+// update on GitHub.
+const publicationBudget = 10
 
 // heal makes publication work of runs that should have a check but never got
-// one, logging each run it marks.
+// one, logging each run it marks. A run the publisher would refuse (refusal)
+// is never healed: it would spend the budget, and its fresh-priority
+// publication slot, every poll without ever getting a check.
 func (p *Poller) heal(ctx context.Context) error {
-	keys, err := p.options.Store.HealGitHubPublications(ctx, healBudget)
+	keys, err := p.options.Store.HealGitHubPublications(ctx, publicationBudget, func(run store.GitHubRun) bool {
+		reason, err := p.refusal(run)
+		return err == nil && reason == ""
+	})
 	for _, key := range keys {
 		log.Printf("GitHub publication healed: run=%s has no check; publishing it", key)
 	}
@@ -34,7 +40,7 @@ func (p *Poller) publish(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 	var failures []error
-	for range 10 {
+	for range publicationBudget {
 		publication, err := p.options.Store.NextGitHubPublication(ctx, p.options.Now().UTC())
 		if errors.Is(err, store.ErrNotFound) {
 			break
@@ -202,34 +208,44 @@ func skipped(run store.GitHubRun, reason string) {
 	log.Printf("GitHub publication skipped: repository=%s head=%s check=%s run=%s job=%s check_id=%d: %s", run.Repository, run.SHA, githubwire.CheckName(run.Profile, run.Shard), run.Key, run.JobID, run.CheckID, reason)
 }
 
-func (p *Poller) publishOne(ctx context.Context, run store.GitHubRun) (int64, error) {
+// refusal is why the publisher never publishes run's check under the
+// configured policies, "" when it does. Every reason is permanent for this
+// process's configuration and the poll's owner listings.
+func (p *Poller) refusal(run store.GitHubRun) (string, error) {
 	// A retired recipe/policy must never recreate an older same-name check
 	// after the current requirement has been enrolled. Its receipt stays local.
 	policy, ok := p.runPolicy(run)
 	if !ok {
-		skipped(run, "no configured policy governs the run's repository")
-		return run.CheckID, nil
+		return "no configured policy governs the run's repository", nil
 	}
 	if policy.PolicyRevision != run.PolicyRevision {
-		skipped(run, fmt.Sprintf("policy revision %d is not the run's %d", policy.PolicyRevision, run.PolicyRevision))
-		return run.CheckID, nil
+		return fmt.Sprintf("policy revision %d is not the run's %d", policy.PolicyRevision, run.PolicyRevision), nil
 	}
 	// Nor is an owner-form run published under a name its repository no
 	// longer has (renamed, transferred or departed since the last listing).
 	if policy.OwnerScoped() && p.discovered[run.RepositoryID] != run.Repository {
-		skipped(run, "the owner listing no longer has the repository under this name")
-		return run.CheckID, nil
+		return "the owner listing no longer has the repository under this name", nil
 	}
 	current, err := p.admission(policy, githubapi.PullRequest{Number: 1, HeadSHA: run.SHA}, run.Profile, run.Shard)
 	if errors.Is(err, ErrIneligible) {
-		skipped(run, "the policy no longer admits the run's profile and shard")
-		return run.CheckID, nil
+		return "the policy no longer admits the run's profile and shard", nil
 	}
+	if err != nil {
+		return "", err
+	}
+	if current.Run.Key != run.Key {
+		return "the policy now admits run " + current.Run.Key + " instead (pins, recipe or timeout changed)", nil
+	}
+	return "", nil
+}
+
+func (p *Poller) publishOne(ctx context.Context, run store.GitHubRun) (int64, error) {
+	reason, err := p.refusal(run)
 	if err != nil {
 		return 0, err
 	}
-	if current.Run.Key != run.Key {
-		skipped(run, "the policy now admits run "+current.Run.Key+" instead (pins, recipe or timeout changed)")
+	if reason != "" {
+		skipped(run, reason)
 		return run.CheckID, nil
 	}
 	input, err := p.checkInput(ctx, run)

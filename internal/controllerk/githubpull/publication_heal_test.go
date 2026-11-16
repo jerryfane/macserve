@@ -187,6 +187,75 @@ func TestRerunOfRunWithoutCheckCreatesCheck(t *testing.T) {
 	}
 }
 
+// #168 review F1: a repository whose policy was removed is no longer polled,
+// so its last current-run snapshot stays eligible. Healing its runs gave the
+// publisher work it refuses (no configured policy) without recording a
+// check, so the next poll healed them again: more than ten such runs took the
+// heal budget and every publication slot each poll, and a configured run
+// without a check never got one. The heal skips refused runs, so the
+// configured run's check is created within two polls and no refused run is
+// published.
+func TestHealSkipsRunsOfRemovedPolicies(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	input, err := f.p.admission(f.p.policies[testRepo], f.remote.pull, testProfile, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.s.AdmitGitHub(ctx, input, f.options.Now()); err != nil {
+		t.Fatal(err)
+	}
+	// Twelve runs of a removed repository, sorting before the configured run:
+	// ten with jobs, two waiting for queue space.
+	removed := make(map[string]bool)
+	for i := 1; i <= 12; i++ {
+		gone := input
+		gone.Run.Key, gone.Run.RepositoryID, gone.Run.Repository = fmt.Sprintf("%064x", i), 777, "acme/removed"
+		gone.Admission.Request.Repo, gone.Admission.Profile.Repo = gone.Run.Repository, gone.Run.Repository
+		if gone.Admission.ProfileDigest, err = gone.Admission.Profile.SnapshotDigest(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.s.AdmitGitHub(ctx, gone, f.options.Now()); err != nil && !errors.Is(err, store.ErrFull) {
+			t.Fatal(err)
+		}
+		removed[gone.Run.Key] = true
+	}
+	if err = f.s.MaintainGitHub(ctx, 777, removed, f.options.Now()); err != nil {
+		t.Fatal(err)
+	}
+	// Every run's publication was lost: no check, nothing pending.
+	for {
+		publication, err := f.s.NextGitHubPublication(ctx, f.options.Now())
+		if errors.Is(err, store.ErrNotFound) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = f.s.FinishGitHubPublication(ctx, publication, 0, time.Time{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The pull list is not due in full, so no periodic repair runs.
+	if err = f.s.SaveGitHubCursor(ctx, 123, store.GitHubCursor{FullAt: f.options.Now(), Pulls: []byte("[]")}); err != nil {
+		t.Fatal(err)
+	}
+	var logged strings.Builder
+	previous := log.Writer()
+	log.SetOutput(&logged)
+	defer log.SetOutput(previous)
+	for range 2 {
+		f.advance(time.Minute)
+		f.poll(t)
+	}
+	if run := f.run(t); run.CheckID == 0 {
+		t.Fatalf("configured run starved by removed-policy runs: %+v, log %q", run, logged.String())
+	}
+	if strings.Contains(logged.String(), "acme/removed") {
+		t.Fatalf("removed-policy runs healed: %q", logged.String())
+	}
+}
+
 // A run left with a terminal job, no check and no pending publication (as
 // a lost or starved publication left herdrup's runs) is healed by the next
 // poll without a full list or a rerun: its check reports the stored result.

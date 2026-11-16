@@ -764,33 +764,58 @@ func (s *Store) ReconcileGitHubPublications(ctx context.Context, repositoryID in
 // HealGitHubPublications makes publication work, due at once, of at most limit
 // runs that should have a check but never got one and have no pending
 // publication: a run of a pull request, neither blocked nor with a check ID,
-// that is current and eligible or has an unfinished job. That covers a waiting
-// or skipped run, an active attempt and a terminal attempt of a current head,
-// whose check then reports its stored result. It returns the runs marked.
-func (s *Store) HealGitHubPublications(ctx context.Context, limit int) ([]string, error) {
-	if limit <= 0 {
+// that is current and eligible or has an unfinished job, and that publishable
+// accepts. That covers a waiting or skipped run, an active attempt and a
+// terminal attempt of a current head, whose check then reports its stored
+// result. publishable excludes runs the publisher permanently refuses (a
+// repository whose policy was removed keeps its last current-run snapshot):
+// healed, they would take the budget every pass and never get a check. It
+// runs inside the store's transaction and must not use the store. It
+// returns the runs marked, in run_key order.
+func (s *Store) HealGitHubPublications(ctx context.Context, limit int, publishable func(GitHubRun) bool) ([]string, error) {
+	if limit <= 0 || publishable == nil {
 		return nil, ErrInvalid
 	}
-	rows, err := s.db.QueryContext(ctx, `INSERT INTO github_outbox(run_key)
- SELECT run_key FROM github_runs r WHERE check_id=0 AND blocked=''
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT `+githubRunColumns+` FROM github_runs r WHERE check_id=0 AND blocked=''
  AND EXISTS(SELECT 1 FROM github_run_pulls p WHERE p.run_key=r.run_key)
  AND NOT EXISTS(SELECT 1 FROM github_outbox o WHERE o.run_key=r.run_key)
  AND (run_key IN (SELECT run_key FROM github_current_runs WHERE eligible=1)
  OR current_job IN (SELECT id FROM jobs WHERE state NOT IN (`+terminalStates+`)))
- ORDER BY run_key LIMIT ? RETURNING run_key`, limit)
+ ORDER BY run_key`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var keys []string
+	var candidates []GitHubRun
 	for rows.Next() {
-		var key string
-		if err = rows.Scan(&key); err != nil {
+		run, err := scanGitHubRun(rows)
+		if err != nil {
+			rows.Close()
 			return nil, err
 		}
-		keys = append(keys, key)
+		candidates = append(candidates, run)
 	}
-	return keys, rows.Err()
+	if err = errors.Join(rows.Err(), rows.Close()); err != nil {
+		return nil, err
+	}
+	var keys []string
+	for _, run := range candidates {
+		if len(keys) == limit {
+			break
+		}
+		if !publishable(run) {
+			continue
+		}
+		if err = githubDirty(ctx, tx, run.Key); err != nil {
+			return nil, err
+		}
+		keys = append(keys, run.Key)
+	}
+	return keys, tx.Commit()
 }
 
 // MaintainGitHub replaces the current-head snapshot (key to eligibility) and retires obsolete work.
