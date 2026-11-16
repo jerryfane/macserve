@@ -418,7 +418,7 @@ func (s *Store) List(ctx context.Context, repos []string, filter ListFilter, cur
 			args = append(args, repo)
 		}
 	}
-	query := "SELECT sequence," + jobColumns + " FROM jobs WHERE (" + strings.Join(grants, " OR ") + ")"
+	query := "SELECT sequence," + jobColumns + " FROM jobs WHERE " + balancedOr(grants)
 	if len(states) > 0 {
 		query += " AND state IN (" + placeholders(len(states)) + ")"
 		for _, state := range states {
@@ -465,6 +465,18 @@ func (s *Store) List(ctx context.Context, repos []string, filter ListFilter, cur
 
 func placeholders(n int) string {
 	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
+}
+
+// balancedOr joins terms with OR as a balanced tree, keeping their order (and
+// so their bound arguments' order). A flat chain of up to 1000 grants would
+// exceed SQLite's expression depth limit of 1000; the tree is about ten deep.
+// SQLite still splits the nested ORs into one OR term for its planner.
+func balancedOr(terms []string) string {
+	if len(terms) == 1 {
+		return "(" + terms[0] + ")"
+	}
+	half := len(terms) / 2
+	return "(" + balancedOr(terms[:half]) + " OR " + balancedOr(terms[half:]) + ")"
 }
 
 func randomToken(prefix string) (string, error) {

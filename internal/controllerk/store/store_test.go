@@ -467,6 +467,27 @@ func TestListHonoursOwnerWildcardGrants(t *testing.T) {
 	}
 }
 
+// A principal may hold up to 1000 entries, all "owner/*" grants or a mix with
+// exact repositories; listing stays within SQLite's expression depth limit.
+func TestListAcceptsThousandOwnerWildcardGrants(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newStore(t, Options{})
+	job := enqueueJob(t, s, "principal", "app", testNow)
+	grants := make([]string, 0, 1000)
+	for i := range 999 {
+		grants = append(grants, fmt.Sprintf("owner-%d/*", i))
+	}
+	for _, last := range []string{"example-org/*", "example-org/example-app"} {
+		repos := append(slices.Clone(grants), last)
+		for _, order := range []string{OrderOldest, OrderNewest} {
+			jobs, _, err := s.List(ctx, repos, ListFilter{Order: order}, "", 10)
+			if err != nil || len(jobs) != 1 || jobs[0].ID != job.ID {
+				t.Fatalf("%s %s: %+v %v", last, order, jobs, err)
+			}
+		}
+	}
+}
+
 func TestBoundaryRejectsMalformedAdmission(t *testing.T) {
 	cases := map[string]func(*model.Admission){
 		"sha":                     func(a *model.Admission) { a.Request.SHA = "branch-name" },
