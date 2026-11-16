@@ -61,7 +61,7 @@ Optional `signer` connects the controller to the [code signer](#code-signer).
   scheduler's order: `service unavailable` (the controller status could not be read), `service quarantined`,
   `service paused`, `worker unavailable` (no live worker asking for work), `worker idle check` (a completion waits for
   the worker's idle check, which holds every start), `host not ready` (see `blocked_by`), `all lanes busy`,
-  `an exclusive job is running`, `disk budget` (no disk reservation for one more lane), `a concurrent script job is
+  `disk budget` (no disk reservation for one more lane), `an exclusive job is running`, `a concurrent script job is
   running` (for a concurrent `simulator_script` job, which waits without holding the jobs behind it), `an exclusive
   job is next`, `simulator start stagger` (the next job uses a simulator while another simulator job is starting),
   `memory budget` (the next job would exceed the 192 GiB concurrent cap), `next in line` (this job is claimed on the
