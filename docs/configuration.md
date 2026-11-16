@@ -40,7 +40,36 @@ Optional `signer` connects the controller to the [code signer](#code-signer).
   keep submission order.
 - `GET /v1/capabilities` and `/v1/jobs` expose authorized profiles and jobs without controller recipes or paths.
   Capabilities' `service_version` is the controller binary's build version: the release tag for a release build
-  (as `macserve-controller version --json` reports it).
+  (as `macserve-controller version --json` reports it). Capabilities' `lanes_busy` (jobs holding a lane) and
+  `queued` (queued jobs) count every repository's jobs, beside `max_concurrent_jobs`; they name none.
+- `GET /v1/jobs` lists the principal's repositories' jobs (`repo=` narrows to one), **newest first** by default
+  (`order=newest`; `order=oldest` is submission order, the only order before #161). `state=` is a comma list of
+  job states (`queued`, `preparing`, `running`, `finalizing`, `cancelling`, `succeeded`, `failed`, `timed_out`,
+  `cancelled`, `interrupted`, `expired`) and the aliases `active` (`preparing`, `running`, `finalizing`,
+  `cancelling`) and `terminal` (the six final states), e.g. `GET /v1/jobs?state=queued,active`. `limit` is 1..1000
+  (default 50); `next_cursor`, when set, continues the same query: pass it as `cursor=` with the same `state=` and
+  `repo=`. A cursor keeps its order (`order=` may be omitted on later pages); it is a durable position, so jobs
+  added or pruned meanwhile never shift it. An unknown or empty state, an unknown order, a repeated `state=` or
+  `order=`, or a cursor with the other order is `400 invalid_request`.
+- A `queued` job's view (`GET /v1/jobs/{id}` and the list) carries `blocked_by` (the service and host blockers) and
+  `waiting`, why the scheduler has not claimed it yet:
+  `{"reason": "all lanes busy", "lanes_busy": 6, "lanes": 6, "position_in_repository": 2, "queued_ahead_overall": 5}`.
+  `lanes_busy` counts jobs holding a lane, `lanes` the lanes claims fill (`max_concurrent_jobs`, capped by the
+  worker's), `position_in_repository` is the job's place among its repository's queued jobs in the fair order
+  (1 is that repository's next), and `queued_ahead_overall` counts the queued jobs of every repository that the
+  fair order claims first. Neither names another job. `reason` is the first of these that holds, checked in the
+  scheduler's order: `service unavailable` (the controller status could not be read), `service quarantined`,
+  `service paused`, `worker unavailable` (no live worker asking for work), `worker idle check` (a completion waits for
+  the worker's idle check, which holds every start), `host not ready` (see `blocked_by`), `all lanes busy`,
+  `an exclusive job is running`, `disk budget` (no disk reservation for one more lane), `a concurrent script job is
+  running` (for a concurrent `simulator_script` job, which waits without holding the jobs behind it), `an exclusive
+  job is next`, `simulator start stagger` (the next job uses a simulator while another simulator job is starting),
+  `memory budget` (the next job would exceed the 192 GiB concurrent cap), `next in line` (this job is claimed on the
+  worker's next request), or `jobs ahead are starting` (a lane is free and the job ahead of it is claimed first).
+  The last five describe the fair order's head, which holds the jobs behind it too. `waiting` is advisory and
+  approximate: it is read from the queue, service state, readiness gate and controller state without claiming, a
+  claim may land a moment later, and the fair order of jobs behind the head shifts each time a repository's job
+  is claimed. A job no longer queued has none.
 - `/v1/jobs/{id}` provides status, `/logs`, `/logs/stream`, `/results`, `/results/junit`, `/artifacts`,
   `/artifacts/{artifact_id}`, `/receipt`, `/receipt/manifest?sha256=DIGEST`, and `POST /cancel`.
   Missing signed receipts return `409`, not success. Non-executed cancellation/expiry or interrupted jobs with
@@ -425,7 +454,9 @@ one runs, the next waits without holding up the jobs behind it, which are claime
 first is claimed only when the disk reservation above holds for one more job, and
 only while the summed `memory_limit_mib` of the active jobs and the next one stays within 192 GiB (a job alone is never
 refused by this cap; six default 32 GiB budgets fit, and the `host_memory_pressure` blocker remains the runtime guard).
-`GET /v1/capabilities` reports `max_concurrent_jobs`; `GET /v1/admin/state` reports `active_jobs`.
+`GET /v1/capabilities` reports `max_concurrent_jobs` and the service-wide `lanes_busy` and `queued` counts; `GET
+/v1/admin/state` reports `active_jobs`; a queued job's `waiting` names the condition above that holds it (see the
+job API at the top of this page).
 
 Simulator jobs (`unit_test`, `simulator_ui_test`, `simulator_script`) start one at a time. A simulator job is starting
 from its claim until it reports `running` (after its source extraction, toolchain observation, simulator boot and

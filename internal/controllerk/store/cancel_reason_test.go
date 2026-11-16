@@ -37,7 +37,7 @@ func TestCancelRecordsFirstCauseOnly(t *testing.T) {
 	if got := getJob(t, s, job.ID); got.Reason != "cancellation requested" || !reflect.DeepEqual(got.CancelReason, want) {
 		t.Fatalf("finish lost the cause: %q %+v", got.Reason, got.CancelReason)
 	}
-	listed, _, err := s.List(ctx, []string{job.Request.Repo}, "", 10)
+	listed, _, err := s.List(ctx, []string{job.Request.Repo}, ListFilter{}, "", 10)
 	if err != nil || len(listed) != 1 || !reflect.DeepEqual(listed[0].CancelReason, want) {
 		t.Fatalf("listed cause: %+v %v", listed, err)
 	}
