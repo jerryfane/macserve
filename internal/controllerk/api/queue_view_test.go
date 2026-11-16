@@ -310,3 +310,40 @@ func TestWaitingReportsDiskBeforeActiveExclusiveJob(t *testing.T) {
 		}
 	}
 }
+
+// A principal granted "owner/*" lists that owner's jobs without repo=, as
+// it reads them one by one, and no other owner's.
+func TestListShowsJobsOfWildcardGrantedRepositories(t *testing.T) {
+	heads := &fakeHeads{head: githubapi.BranchHead{RepositoryID: 77, Branch: "main", SHA: strings.Repeat("c", 40)}}
+	f, archive := archiveSetup(t, heads, "jobs:submit", "jobs:read")
+	// The owner's exact repository, through setup's own profile registry.
+	admission, err := setup(t).options.Profiles.Resolve(f.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign, _, err := f.db.Enqueue(context.Background(), f.owner.ID, "foreign", admission, testTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, key := range []string{"first", "second"} {
+		build := model.Request{Repo: archive.Repo, SHA: archive.SHA, Kind: model.Build, Profile: "org-build-v1", Xcode: archive.Xcode}
+		if code, body := submitArchive(t, f, key, build); code != 202 {
+			t.Fatalf("build: %d %s", code, body)
+		}
+		job, err := f.db.Lookup(context.Background(), "releaser", key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, job.ID)
+	}
+	if got := getList(t, f.handler, archiveToken, "?order=oldest").ids(); !slices.Equal(got, ids) {
+		t.Fatalf("wildcard list: %v, want %v", got, ids)
+	}
+	if got := getList(t, f.handler, archiveToken, "?repo=themartianapp/app&state=queued").ids(); !slices.Equal(got, []string{ids[1], ids[0]}) {
+		t.Fatalf("wildcard list of one repository: %v", got)
+	}
+	if got := getList(t, f.handler, testToken, "").ids(); !slices.Equal(got, []string{foreign.ID}) {
+		t.Fatalf("exact list: %v", got)
+	}
+}
