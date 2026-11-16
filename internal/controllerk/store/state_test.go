@@ -249,7 +249,7 @@ func TestRecoveryInterruptsEveryActiveStageAndRetainsEvidence(t *testing.T) {
 				t.Fatal("repeated recovery cleared quarantine")
 			}
 			requireError(t, s.AcknowledgeQuiescent(ctx, "lost-epoch"), ErrLease)
-			if err := s.Prune(ctx, when.Add(time.Hour)); err != nil {
+			if _, err := s.Prune(ctx, when.Add(time.Hour)); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := s.Get(ctx, job.ID); err != ErrNotFound {

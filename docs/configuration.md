@@ -332,6 +332,16 @@ Offered/running workers retain the ordinary 30-second heartbeat-loss fence. Canc
 starts a fixed cleanup/delivery grace (the worker's finalization bound of 210 seconds, two minutes of delivery,
 plus heartbeat tolerance: 360 seconds); repeated heartbeats cannot
 extend it. Source streaming instead receives the ten-minute preparation budget plus heartbeat tolerance.
+The worker cancels a job on its first failed heartbeat, so the controller answers heartbeats even while slow
+store work holds its single database connection (#167): a heartbeat waits at most 500 ms for the job's record,
+then answers from the lease's in-memory claim (its token, epoch and deadline) and the cancellation the store
+published when it committed it (a client's cancel, an administrator's `cancel_active` pause, a GitHub run
+blocked or superseded, a log limit or the controller's own), so a cancel committed before the store went slow is
+still delivered. A worker request slower
+than 5 s is logged with its route. A log-limit rejection requests the job's cancellation in the same transaction,
+so a concurrent completion cannot record success over truncated logs.
+The worker still cancels on its first failed `/logs` or `/stage` request, which wait for the store; those no
+longer hold the controller lock while they wait, but tolerating a slow store there needs a worker change.
 Controller source-cleanup debt is durable and independent of worker cleanup: registration cannot erase it,
 and only successful protected source removal clears it. Retention may relieve disk-only pressure, but never
 runs through manual/owner pause or unqualified security readiness.

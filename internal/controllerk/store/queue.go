@@ -181,7 +181,7 @@ func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, principal, key string
 	if err != nil {
 		return model.Job{}, false, err
 	}
-	if err := s.expire(ctx, tx, now); err != nil {
+	if _, err := s.expire(ctx, tx, now); err != nil {
 		return model.Job{}, false, err
 	}
 	var total, own int
@@ -248,7 +248,7 @@ func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time, la
 		return model.Job{}, err
 	}
 	defer tx.Rollback()
-	if err := s.expire(ctx, tx, now); err != nil {
+	if _, err := s.expire(ctx, tx, now); err != nil {
 		return model.Job{}, err
 	}
 	var blocked bool
@@ -380,7 +380,13 @@ func (s *Store) Transition(ctx context.Context, id, lease string, from, to model
 	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if to == model.Cancelling {
+		s.published(job)
+	}
+	return nil
 }
 
 // Requeue returns a preparing job whose lease was never delivered to the
@@ -461,6 +467,9 @@ func (s *Store) Cancel(ctx context.Context, id, reason string, cause model.Cance
 	if err := tx.Commit(); err != nil {
 		return model.Job{}, err
 	}
+	if job.CancelRequested {
+		s.published(job)
+	}
 	return job, nil
 }
 
@@ -505,36 +514,102 @@ func (s *Store) Finish(ctx context.Context, id, lease string, state model.State,
 	return tx.Commit()
 }
 
-func (s *Store) expire(ctx context.Context, tx *sql.Tx, now time.Time) error {
+// expire ends every queued job past the queue TTL and returns how many.
+func (s *Store) expire(ctx context.Context, tx *sql.Tx, now time.Time) (int64, error) {
 	cutoff := now.Add(-s.options.QueueTTL)
 	if !validTime(cutoff) {
-		return fmt.Errorf("%w: expiry time outside supported range", ErrInvalid)
+		return 0, fmt.Errorf("%w: expiry time outside supported range", ErrInvalid)
 	}
-	_, err := tx.ExecContext(ctx, "UPDATE jobs SET state='expired',reason='queue TTL elapsed',updated_at=?,finished_at=? WHERE state='queued' AND created_at<=?", now.UnixNano(), now.UnixNano(), cutoff.UnixNano())
-	return err
+	result, err := tx.ExecContext(ctx, "UPDATE jobs SET state='expired',reason='queue TTL elapsed',updated_at=?,finished_at=? WHERE state='queued' AND created_at<=?", now.UnixNano(), now.UnixNano(), cutoff.UnixNano())
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// PruneCounts is what one Prune changed.
+type PruneCounts struct {
+	// Expired counts queued jobs past the queue TTL; LogJobs the terminal
+	// jobs whose logs passed log retention; LogRows the log records
+	// deleted; Jobs the terminal jobs past retention.
+	Expired, LogJobs, LogRows, Jobs int64
+	// Batches counts the write transactions.
+	Batches int
 }
 
 // Prune retains terminal metadata and idempotency for Retention after terminal
-// completion. It does not delete artifact bytes, which the caller owns.
-func (s *Store) Prune(ctx context.Context, now time.Time) error {
-	if !validTime(now) || !validTime(now.Add(-s.options.Retention)) || !validTime(now.Add(-s.options.LogRetention)) {
-		return ErrInvalid
+// completion, and log records for LogRetention. It does not delete artifact
+// bytes, which the caller owns. Every step runs in bounded batches, each its
+// own short write transaction (pruneBatch), so the single store connection
+// is released between them and no request waits behind an unbounded delete
+// (#167). A Prune interrupted between batches leaves nothing inconsistent: a
+// job's logs are tombstoned before any record is deleted, and the next Prune
+// resumes.
+func (s *Store) Prune(ctx context.Context, now time.Time) (PruneCounts, error) {
+	var counts PruneCounts
+	retained, logged := now.Add(-s.options.Retention), now.Add(-s.options.LogRetention)
+	if !validTime(now) || !validTime(retained) || !validTime(logged) {
+		return counts, ErrInvalid
 	}
+	n, err := s.pruneBatch(ctx, &counts, func(tx *sql.Tx) (int64, error) { return s.expire(ctx, tx, now) })
+	counts.Expired = n
+	if err != nil {
+		return counts, err
+	}
+	// A job past retention loses its logs with it; tombstoning them first
+	// bounds the deletion of its records like any other.
+	if retained.After(logged) {
+		logged = retained
+	}
+	for {
+		n, err := s.pruneBatch(ctx, &counts, func(tx *sql.Tx) (int64, error) { return expireLogs(ctx, tx, logged) })
+		counts.LogJobs += n
+		if err != nil {
+			return counts, err
+		}
+		if n < pruneBatchJobs {
+			break
+		}
+	}
+	for {
+		n, err := s.pruneBatch(ctx, &counts, func(tx *sql.Tx) (int64, error) { return deleteExpiredLogs(ctx, tx) })
+		counts.LogRows += n
+		if err != nil {
+			return counts, err
+		}
+		if n == 0 {
+			break
+		}
+	}
+	for {
+		n, err := s.pruneBatch(ctx, &counts, func(tx *sql.Tx) (int64, error) { return deleteRetiredJobs(ctx, tx, retained) })
+		counts.Jobs += n
+		if err != nil {
+			return counts, err
+		}
+		if n == 0 {
+			return counts, nil
+		}
+	}
+}
+
+// pruneBatch runs one bounded prune step in its own write transaction and
+// returns how many rows it changed.
+func (s *Store) pruneBatch(ctx context.Context, counts *PruneCounts, step func(*sql.Tx) (int64, error)) (int64, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer tx.Rollback()
-	if err := s.expire(ctx, tx, now); err != nil {
-		return err
+	n, err := step(tx)
+	if err != nil {
+		return 0, err
 	}
-	if err := s.pruneLogs(ctx, tx, now); err != nil {
-		return err
+	if err := tx.Commit(); err != nil {
+		return 0, err
 	}
-	if _, err := tx.ExecContext(ctx, "DELETE FROM jobs WHERE state IN ("+terminalStates+") AND finished_at<=?", now.Add(-s.options.Retention).UnixNano()); err != nil {
-		return err
-	}
-	return tx.Commit()
+	counts.Batches++
+	return n, nil
 }
 
 // ConcurrentMemoryCapMiB bounds the summed memory budgets (memory_limit_mib)

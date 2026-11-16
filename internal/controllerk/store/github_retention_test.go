@@ -69,7 +69,7 @@ func TestGitHubCurrentReconciliationRetiresHistoryWithoutLosingProvenance(t *tes
 		t.Fatalf("historical terminal check was dirtied again: %v", err)
 	}
 	prunedAt := testNow.Add(s.options.Retention + time.Hour)
-	if err = s.Prune(ctx, prunedAt); err != nil {
+	if _, err = s.Prune(ctx, prunedAt); err != nil {
 		t.Fatal(err)
 	}
 	if err = s.MaintainGitHub(ctx, 123, nil, prunedAt); err != nil {

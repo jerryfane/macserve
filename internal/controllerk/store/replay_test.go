@@ -31,7 +31,7 @@ func TestReplayNormalizesSnapshotAndNeverRecreatesPrunedJobs(t *testing.T) {
 	if _, err := s.Cancel(ctx, job.ID, "finished", model.CancelReason{Source: model.CancelClient, Principal: "owner"}, testNow); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Prune(ctx, testNow.Add(time.Hour)); err != nil {
+	if _, err := s.Prune(ctx, testNow.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	_, err = s.Replay(ctx, "principal", "retained", request)

@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -54,6 +55,25 @@ type Options struct {
 type Store struct {
 	db      *sql.DB
 	options Options
+	// cancelled is the OnCancel observer, if any.
+	cancelled atomic.Pointer[func(id, lease string)]
+}
+
+// OnCancel registers fn, told the id and lease of every active job whose
+// cancellation request this handle commits (Cancel, Pause cancel_active, a
+// log-limit AppendLog, a Transition to cancelling, a BlockGitHub of its run),
+// after the commit. The
+// controller delivers a cancellation through it even while the store is too
+// slow to read (#167). One observer is kept; a later call replaces it. fn
+// runs on the committing goroutine and must not call the Store.
+func (s *Store) OnCancel(fn func(id, lease string)) { s.cancelled.Store(&fn) }
+
+// published tells the OnCancel observer that job, a record read in the
+// committed transaction, has its cancellation requested.
+func (s *Store) published(job model.Job) {
+	if fn := s.cancelled.Load(); fn != nil && active(job.State) && job.LeaseToken != "" {
+		(*fn)(job.ID, job.LeaseToken)
+	}
 }
 
 const activeStates = "'preparing','running','cancelling','finalizing'"

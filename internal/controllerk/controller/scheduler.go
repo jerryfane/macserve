@@ -33,7 +33,7 @@ func (c *Controller) register(ctx context.Context, registration protocol.Registr
 	c.epoch = registration.Epoch
 	c.workerLanes = max(registration.Lanes, 1)
 	c.workerIdle = len(c.active) == 0
-	c.lastSeen = c.options.Now()
+	c.seen(c.options.Now())
 	return nil
 }
 
@@ -233,8 +233,8 @@ func (c *Controller) next(ctx context.Context, epoch string, running []string) (
 	if epoch == "" || c.epoch != epoch {
 		return nil, store.ErrLease
 	}
-	c.lastSeen = c.options.Now()
-	c.lastNext = c.lastSeen
+	c.lastNext = c.options.Now()
+	c.seen(c.lastNext)
 	if len(c.active) == 0 {
 		c.workerIdle = true
 	}
@@ -258,6 +258,7 @@ func (c *Controller) next(ctx context.Context, epoch string, running []string) (
 		if err != nil {
 			return nil, err
 		}
+		c.noteCancel(job)
 		if now := c.options.Now(); job.Deadline != nil && !a.judgedAt(now).Before(*job.Deadline) {
 			if _, err := c.cancelJob(ctx, job, "job deadline exceeded", model.CancelReason{Source: model.CancelDeadline}, now); err != nil {
 				return nil, err
@@ -275,9 +276,11 @@ func (c *Controller) next(ctx context.Context, epoch string, running []string) (
 	}
 	if offer != nil {
 		if !offer.offered {
+			c.beatMu.Lock()
 			offer.offered = true
 			offer.offeredAt = c.options.Now()
 			offer.heartbeat = offer.offeredAt
+			c.beatMu.Unlock()
 		}
 		return lease, nil
 	}
@@ -304,7 +307,9 @@ func (c *Controller) next(ctx context.Context, epoch string, running []string) (
 	duration := min(c.options.SourceTimeout, job.Deadline.Sub(c.options.Now()))
 	prepCtx, cancel := context.WithTimeout(c.ctx, duration)
 	a := &execution{job: job, cancel: cancel}
+	c.beatMu.Lock()
 	c.active = append(c.active, a)
+	c.beatMu.Unlock()
 	c.prep.Add(1)
 	go c.prepare(prepCtx, a)
 	return nil, nil
@@ -349,9 +354,11 @@ func (c *Controller) prepare(ctx context.Context, a *execution) {
 	if err == nil {
 		err = ctx.Err()
 	}
-	c.mu.Lock()
+	// A cancellation recorded after this read is ended by checkExecution
+	// (an undelivered lease) and refused by next.
 	job, getErr := c.options.Store.Get(context.Background(), a.job.ID)
 	err = errors.Join(err, getErr)
+	c.mu.Lock()
 	if err == nil && !job.CancelRequested && !c.closed {
 		a.source = descriptor
 		a.ready = true
@@ -383,6 +390,9 @@ func (c *Controller) prepare(ctx context.Context, a *execution) {
 	}
 }
 
+// slowMaintenance is how long a sweep or prune may take before it is logged.
+const slowMaintenance = 2 * time.Second
+
 func (c *Controller) monitor() {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -395,7 +405,9 @@ func (c *Controller) monitor() {
 		case <-ticker.C:
 			c.checkActive(c.ctx)
 		case <-sweep.C:
-			_ = c.sweep(c.ctx)
+			if err := c.sweep(c.ctx); err != nil && c.ctx.Err() == nil {
+				log.Printf("controller sweep failed: %v", err)
+			}
 		}
 	}
 }
@@ -407,6 +419,9 @@ func (c *Controller) monitor() {
 // epoch from registering until its deadline.
 const fencedBeforeDelivery = "worker epoch fenced before lease delivery"
 
+// checkActive reads the active jobs without c.mu, so a slow store holds
+// neither the worker's requests nor its heartbeats behind it; only their
+// cancellations take c.mu.
 func (c *Controller) checkActive(ctx context.Context) {
 	gate, gateErr := c.options.Gate(ctx)
 	c.mu.Lock()
@@ -417,15 +432,24 @@ func (c *Controller) checkActive(ctx context.Context) {
 	c.noteGate(gate, gateErr)
 	executions := slices.Clone(c.active)
 	now := c.options.Now()
-	// A job past its deadline records the deadline as its cause before any
-	// readiness cancellation can.
-	for _, a := range executions {
+	c.mu.Unlock()
+	jobs := make([]model.Job, len(executions))
+	for i, a := range executions {
 		job, err := c.options.Store.Get(ctx, a.job.ID)
 		if err != nil {
-			c.mu.Unlock()
 			return
 		}
-		if job.Deadline != nil && !a.judgedAt(now).Before(*job.Deadline) {
+		jobs[i] = job
+	}
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return
+	}
+	// A job past its deadline records the deadline as its cause before any
+	// readiness cancellation can.
+	for i, a := range executions {
+		if job := jobs[i]; c.holds(a) && job.Deadline != nil && !a.judgedAt(now).Before(*job.Deadline) {
 			if _, err := c.cancelJob(ctx, job, "job deadline exceeded", model.CancelReason{Source: model.CancelDeadline}, now); err != nil {
 				c.mu.Unlock()
 				return
@@ -446,15 +470,16 @@ func (c *Controller) checkActive(ctx context.Context) {
 
 // checkExecution enforces one execution's cancellation, delivery and
 // heartbeat windows; a lost heartbeat fails only that job and fences the
-// epoch, while sibling lanes continue on their own leases.
+// epoch, while sibling lanes continue on their own leases. Its store read
+// runs without c.mu.
 func (c *Controller) checkExecution(ctx context.Context, a *execution, now time.Time) {
-	c.mu.Lock()
-	if c.closed || !c.holds(a) {
-		c.mu.Unlock()
-		return
-	}
 	job, err := c.options.Store.Get(ctx, a.job.ID)
 	if err != nil {
+		return
+	}
+	c.noteCancel(job)
+	c.mu.Lock()
+	if c.closed || !c.holds(a) {
 		c.mu.Unlock()
 		return
 	}
@@ -510,26 +535,38 @@ func (c *Controller) checkExecution(ctx context.Context, a *execution, now time.
 // worker. Neither heartbeats nor repeated stage requests extend these fixed
 // windows indefinitely. Callers hold c.mu.
 func (c *Controller) alive(a *execution, job model.Job, now time.Time) bool {
+	c.beatMu.Lock()
+	beat := a.heartbeat
+	c.beatMu.Unlock()
 	if !a.heldAt.IsZero() {
 		if a.idleSince.IsZero() && !slices.ContainsFunc(c.active, func(b *execution) bool { return b != a && b.heldAt.IsZero() }) {
 			a.idleSince = now
 		}
 		window := c.options.CleanupTimeout + c.options.DeliveryTimeout + c.options.HeartbeatTimeout
-		return now.Sub(a.heartbeat) <= c.options.HeartbeatTimeout && (a.idleSince.IsZero() || now.Sub(a.idleSince) <= window)
+		return now.Sub(beat) <= c.options.HeartbeatTimeout && (a.idleSince.IsZero() || now.Sub(a.idleSince) <= window)
 	}
 	finishing := a.cancellingSince
 	if !a.finalizingSince.IsZero() && (finishing.IsZero() || a.finalizingSince.Before(finishing)) {
 		finishing = a.finalizingSince
 	}
 	if finishing.IsZero() {
-		return now.Sub(a.heartbeat) <= c.options.HeartbeatTimeout
+		return now.Sub(beat) <= c.options.HeartbeatTimeout
 	}
 	return now.Sub(finishing) <= FinalizingWindow(c.options, job.Request.Kind)
 }
 
 // sweep removes only ID-addressed private exports, then prunes their metadata.
 // Artifact expiry remains enforced by getters even between sweep intervals.
+// A sweep or prune slower than slowMaintenance is logged with its counts.
 func (c *Controller) sweep(ctx context.Context) error {
+	started := time.Now()
+	var scanned, removed int
+	var counts store.PruneCounts
+	defer func() {
+		if elapsed := time.Since(started); elapsed > slowMaintenance {
+			log.Printf("controller sweep slow: duration=%s artifacts_scanned=%d artifacts_removed=%d pruned_jobs=%d pruned_log_rows=%d", elapsed.Round(time.Millisecond), scanned, removed, counts.Jobs, counts.LogRows)
+		}
+	}()
 	c.evidenceMu.Lock()
 	defer c.evidenceMu.Unlock()
 	c.mu.Lock()
@@ -561,11 +598,13 @@ func (c *Controller) sweep(ctx context.Context) error {
 			if !safeID(id) {
 				continue
 			}
+			scanned++
 			job, err := c.options.Store.Get(ctx, id)
 			if errors.Is(err, store.ErrNotFound) || err == nil && job.State.Terminal() && job.FinishedAt != nil && !now.Before(job.FinishedAt.Add(7*24*time.Hour)) {
 				if err := c.root.RemoveAll("artifacts/" + id); err != nil {
 					return err
 				}
+				removed++
 			} else if err != nil {
 				return err
 			}
@@ -580,7 +619,12 @@ func (c *Controller) sweep(ctx context.Context) error {
 	if err := c.trimPool(ctx, 0, maxArtifactPoolBytes); err != nil {
 		return err
 	}
-	if err := c.options.Store.Prune(ctx, now); err != nil {
+	pruneStarted := time.Now()
+	counts, err = c.options.Store.Prune(ctx, now)
+	if elapsed := time.Since(pruneStarted); elapsed > slowMaintenance {
+		log.Printf("controller prune slow: duration=%s expired_jobs=%d log_jobs=%d log_rows=%d jobs=%d batches=%d", elapsed.Round(time.Millisecond), counts.Expired, counts.LogJobs, counts.LogRows, counts.Jobs, counts.Batches)
+	}
+	if err != nil {
 		return errors.Join(cleanupErr, err)
 	}
 	if c.options.PruneReceipts != nil {

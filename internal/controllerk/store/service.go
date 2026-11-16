@@ -36,8 +36,9 @@ func (s *Store) Pause(ctx context.Context, reason, mode, principal string, now t
 	if err != nil {
 		return model.ServiceState{}, err
 	}
+	var running []model.Job
 	if mode == "cancel_active" {
-		running, err := activeJobs(ctx, tx)
+		running, err = activeJobs(ctx, tx)
 		if err != nil {
 			return model.ServiceState{}, err
 		}
@@ -53,6 +54,9 @@ func (s *Store) Pause(ctx context.Context, reason, mode, principal string, now t
 	}
 	if err := tx.Commit(); err != nil {
 		return model.ServiceState{}, err
+	}
+	for _, job := range running {
+		s.published(job)
 	}
 	return state, nil
 }

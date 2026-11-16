@@ -141,9 +141,22 @@ func (c *Controller) handler() http.Handler {
 			http.Error(w, "Forbidden", http.StatusForbidden)
 			return
 		}
+		started := time.Now()
 		mux.ServeHTTP(w, r)
+		if elapsed := time.Since(started); elapsed > slowWorkerRequest {
+			job := r.PathValue("job")
+			if !safeID(job) {
+				job = "-"
+			}
+			log.Printf("controller worker request slow: method=%s route=%q job=%s duration=%s", r.Method, r.Pattern, job, elapsed.Round(time.Millisecond))
+		}
 	})
 }
+
+// slowWorkerRequest is how long a worker request may take before it is
+// logged: the worker's requests time out after at most 10 s, and it cancels
+// a job on its first failed heartbeat (#167).
+const slowWorkerRequest = 5 * time.Second
 
 func (c *Controller) requestJob(r *http.Request, replay bool) (model.Job, error) {
 	id := r.PathValue("job")
@@ -154,9 +167,8 @@ func (c *Controller) requestJob(r *http.Request, replay bool) (model.Job, error)
 	if err != nil {
 		return job, err
 	}
-	epoch, lease := r.Header.Get(protocol.EpochHeader), r.Header.Get(protocol.LeaseHeader)
-	if epoch == "" || epoch != job.WorkerEpoch || lease == "" || subtle.ConstantTimeCompare([]byte(lease), []byte(job.LeaseToken)) != 1 {
-		return job, store.ErrLease
+	if err := leaseMatches(r, job); err != nil {
+		return job, err
 	}
 	if job.State.Terminal() && (!replay || len(job.Result) == 0) {
 		return job, store.ErrLease
@@ -164,25 +176,81 @@ func (c *Controller) requestJob(r *http.Request, replay bool) (model.Job, error)
 	return job, nil
 }
 
+// leaseMatches checks the request's worker epoch and lease against job's.
+func leaseMatches(r *http.Request, job model.Job) error {
+	epoch, lease := r.Header.Get(protocol.EpochHeader), r.Header.Get(protocol.LeaseHeader)
+	if epoch == "" || epoch != job.WorkerEpoch || lease == "" || subtle.ConstantTimeCompare([]byte(lease), []byte(job.LeaseToken)) != 1 {
+		return store.ErrLease
+	}
+	return nil
+}
+
+// heartbeatStoreWait bounds how long a heartbeat waits for the store. The
+// store has one connection: slow store work (a prune, a long write) would
+// otherwise hold every heartbeat, and the worker cancels a job on its first
+// failed heartbeat (#167).
+const heartbeatStoreWait = 500 * time.Millisecond
+
+// heartbeat renews a delivered lease and tells the worker whether to cancel.
+// It never takes c.mu, which other paths hold across store calls; its
+// in-memory state is guarded by c.beatMu. The job's current record decides,
+// as before, when the store answers within heartbeatStoreWait. When it does
+// not, the lease is checked against the execution's claim record (its lease
+// token, epoch and deadline never change while it is active), and the
+// cancellation is the one last observed (cancelSeen: the store publishes
+// every cancellation request it commits through OnCancel, and every monitor
+// tick and heartbeat refresh it), so a cancel committed before the store
+// went slow is still delivered.
 func (c *Controller) heartbeat(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), heartbeatStoreWait)
+	job, err := c.requestJob(r.WithContext(ctx), false)
+	// Only the store's own wait falls back; the worker's abandoned request
+	// and every answer the store gave are handled as before.
+	fresh := true
+	if err != nil && ctx.Err() != nil && r.Context().Err() == nil && !errors.Is(err, store.ErrLease) && !errors.Is(err, store.ErrNotFound) {
+		fresh, err = false, nil
+	}
+	cancel()
 	value, err := func() (protocol.Heartbeat, error) {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		job, err := c.requestJob(r, false)
 		if err != nil {
 			return protocol.Heartbeat{}, err
 		}
-		a := c.execution(job.ID)
-		if a == nil || !a.offered || job.Deadline == nil {
+		c.beatMu.Lock()
+		defer c.beatMu.Unlock()
+		a := c.delivered(r)
+		if a == nil {
 			return protocol.Heartbeat{}, store.ErrLease
 		}
+		if !fresh {
+			job = a.job
+		}
+		if job.Deadline == nil {
+			return protocol.Heartbeat{}, store.ErrLease
+		}
+		a.cancelSeen = a.cancelSeen || job.CancelRequested
 		a.heartbeat = c.options.Now()
 		c.lastSeen = a.heartbeat
-		return protocol.Heartbeat{Cancel: c.closed || job.CancelRequested || !a.judgedAt(c.options.Now()).Before(*job.Deadline), Deadline: *job.Deadline}, nil
+		return protocol.Heartbeat{Cancel: c.closed || a.cancelSeen || !a.judgedAt(c.options.Now()).Before(*job.Deadline), Deadline: *job.Deadline}, nil
 	}()
 	respond(w, r, value, err)
 }
 
+// delivered returns the delivered execution of the request's job and lease,
+// or nil. Its claim record's lease token and epoch never change while it is
+// active, so a store read made without c.mu cannot be paired with another
+// lease of the job. Callers hold c.mu or c.beatMu.
+func (c *Controller) delivered(r *http.Request) *execution {
+	a := c.execution(r.PathValue("job"))
+	if a == nil || !a.offered || leaseMatches(r, a.job) != nil {
+		return nil
+	}
+	return a
+}
+
+// stage records the worker's stage. Its store read and transition run
+// without c.mu (the transition is conditional on the state read and the
+// lease), so a slow store does not hold other jobs' requests behind c.mu;
+// only the in-memory windows take it.
 func (c *Controller) stage(w http.ResponseWriter, r *http.Request) {
 	var value protocol.Stage
 	if err := decodeJSON(r.Body, 4096, &value); err != nil {
@@ -194,35 +262,43 @@ func (c *Controller) stage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := func() error {
-		c.mu.Lock()
-		defer c.mu.Unlock()
 		job, err := c.requestJob(r, false)
 		if err != nil {
 			return err
 		}
-		a := c.execution(job.ID)
-		if a == nil || !a.offered {
+		c.mu.Lock()
+		a := c.delivered(r)
+		if a == nil {
+			c.mu.Unlock()
 			return store.ErrLease
 		}
+		now := c.options.Now()
 		if value.State == model.Finalizing && a.finalizingSince.IsZero() {
-			a.finalizingSince = c.options.Now()
+			a.finalizingSince = now
 		}
 		if value.Held && a.heldAt.IsZero() {
 			// Held once: the completion waits for the worker's idle check.
-			a.heldAt = c.options.Now()
+			c.beatMu.Lock()
+			a.heldAt = now
 			a.heartbeat = a.heldAt
+			c.beatMu.Unlock()
 		}
+		c.mu.Unlock()
 		if job.State == value.State {
 			return nil
 		}
 		if job.CancelRequested && value.State == model.Running {
 			return store.ErrTransition
 		}
-		return c.options.Store.Transition(r.Context(), job.ID, job.LeaseToken, job.State, value.State, "", c.options.Now())
+		return c.options.Store.Transition(r.Context(), job.ID, job.LeaseToken, job.State, value.State, "", now)
 	}()
 	respond(w, r, nil, err)
 }
 
+// logs appends the worker's output. Like stage, it waits on the store
+// without c.mu: AppendLog checks the lease and the job's state itself, and a
+// log-limit rejection requests the job's cancellation in its own transaction,
+// so no completion can record success between the two.
 func (c *Controller) logs(w http.ResponseWriter, r *http.Request) {
 	var value protocol.Log
 	if err := decodeJSON(r.Body, 128<<10, &value); err != nil {
@@ -230,13 +306,14 @@ func (c *Controller) logs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := func() error {
-		c.mu.Lock()
-		defer c.mu.Unlock()
 		job, err := c.requestJob(r, false)
 		if err != nil {
 			return err
 		}
-		if a := c.execution(job.ID); a == nil || !a.offered {
+		c.beatMu.Lock()
+		a := c.delivered(r)
+		c.beatMu.Unlock()
+		if a == nil {
 			return store.ErrLease
 		}
 		if value.Stream != "stdout" && value.Stream != "stderr" {
@@ -244,7 +321,7 @@ func (c *Controller) logs(w http.ResponseWriter, r *http.Request) {
 		}
 		_, err = c.options.Store.AppendLog(r.Context(), job.ID, job.LeaseToken, value.Stream, string(value.Data), c.options.Now())
 		if errors.Is(err, store.ErrLogLimit) {
-			_, _ = c.cancelJob(r.Context(), job, "log evidence limit exceeded", model.CancelReason{Source: model.CancelLogLimit}, c.options.Now())
+			log.Printf("controller job log evidence limit exceeded: job=%s source=%s; cancellation requested", job.ID, model.CancelLogLimit)
 		}
 		return err
 	}()

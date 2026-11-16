@@ -417,7 +417,7 @@ func TestExpiredLogPagesAndStreamsReturnGoneWithoutLosingJob(t *testing.T) {
 	if err := f.db.Finish(ctx, job.ID, job.LeaseToken, model.Succeeded, json.RawMessage(`{"sealed":true}`), true, "", testTime); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.db.Prune(ctx, testTime.Add(7*24*time.Hour)); err != nil {
+	if _, err := f.db.Prune(ctx, testTime.Add(7*24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	for _, suffix := range []string{"/logs", "/logs/stream"} {
