@@ -141,13 +141,13 @@ func TestLogExpiryKeepsResultAndIdempotency(t *testing.T) {
 	finished := testNow.Add(time.Minute)
 	finishJob(t, s, job, model.Succeeded, true, finished)
 	before := getJob(t, s, job.ID)
-	if err := s.Prune(ctx, finished.Add(time.Hour-time.Nanosecond)); err != nil {
+	if _, err := s.Prune(ctx, finished.Add(time.Hour-time.Nanosecond)); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, _, err := s.Logs(ctx, job.ID, 0, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Prune(ctx, finished.Add(time.Hour)); err != nil {
+	if _, err := s.Prune(ctx, finished.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	_, _, _, err := s.Logs(ctx, job.ID, 0, 0)

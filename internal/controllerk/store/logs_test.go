@@ -164,14 +164,14 @@ func TestQueuedExpiryAndRetainedIdempotencyBoundary(t *testing.T) {
 	if expired.State != model.Expired || expired.FinishedAt == nil || !expired.FinishedAt.Equal(testNow.Add(time.Hour)) {
 		t.Fatalf("paused expiry did not persist: %+v", expired)
 	}
-	if err := s.Prune(ctx, testNow.Add(3*time.Hour-time.Nanosecond)); err != nil {
+	if _, err := s.Prune(ctx, testNow.Add(3*time.Hour-time.Nanosecond)); err != nil {
 		t.Fatal(err)
 	}
 	replay, ok, err := s.Enqueue(ctx, "principal", "key", admissionFixture(), testNow.Add(3*time.Hour-time.Nanosecond))
 	if err != nil || !ok || replay.ID != job.ID || replay.State != model.Expired {
 		t.Fatal("idempotency lost before retention boundary")
 	}
-	if err := s.Prune(ctx, testNow.Add(3*time.Hour)); err != nil {
+	if _, err := s.Prune(ctx, testNow.Add(3*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	_, err = s.Get(ctx, job.ID)
@@ -190,7 +190,7 @@ func TestExpiryDoesNotInterruptActiveAndRetentionStartsAtFinish(t *testing.T) {
 	first := enqueueJob(t, s, "principal", "active", testNow)
 	second := enqueueJob(t, s, "principal", "queued", testNow)
 	active := claimJob(t, s, "epoch", testNow)
-	if err := s.Prune(ctx, testNow.Add(2*time.Hour)); err != nil {
+	if _, err := s.Prune(ctx, testNow.Add(2*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if got := getJob(t, s, first.ID); got.State != model.Preparing {
@@ -204,13 +204,13 @@ func TestExpiryDoesNotInterruptActiveAndRetentionStartsAtFinish(t *testing.T) {
 		t.Fatal(err)
 	}
 	finishJob(t, s, active, model.Succeeded, true, testNow.Add(2*time.Hour))
-	if err := s.Prune(ctx, testNow.Add(3*time.Hour-time.Nanosecond)); err != nil {
+	if _, err := s.Prune(ctx, testNow.Add(3*time.Hour-time.Nanosecond)); err != nil {
 		t.Fatal(err)
 	}
 	if got := getJob(t, s, first.ID); got.State != model.Succeeded {
 		t.Fatal("retention started at admission instead of completion")
 	}
-	if err := s.Prune(ctx, testNow.Add(3*time.Hour)); err != nil {
+	if _, err := s.Prune(ctx, testNow.Add(3*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	_, err := s.Get(ctx, first.ID)

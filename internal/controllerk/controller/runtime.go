@@ -20,15 +20,25 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// execution is one claimed lease. Its job is the claim's record and never
+// changes: its lease token, worker epoch and deadline are the lease's. Fields
+// a heartbeat reads are guarded as Controller.beatMu says.
 type execution struct {
-	job             model.Job
-	source          source.Descriptor
-	ready           bool
-	offered         bool
+	job    model.Job
+	source source.Descriptor
+	ready  bool
+	// offered is written holding c.mu and c.beatMu.
+	offered bool
+	// heartbeat is when the worker last showed it holds the lease; guarded
+	// by c.beatMu alone.
 	heartbeat       time.Time
 	cancellingSince time.Time
 	finalizingSince time.Time
-	cancel          context.CancelFunc
+	// cancelSeen records that the job's cancellation was requested, as last
+	// observed in the store, so a heartbeat that cannot read the store still
+	// delivers it; guarded by c.beatMu alone.
+	cancelSeen bool
+	cancel     context.CancelFunc
 	// fencing marks a lease never delivered that is being ended: it is
 	// never offered, even while c.mu is released for its source removal.
 	fencing bool
@@ -37,8 +47,9 @@ type execution struct {
 	// offeredAt is when the lease was first delivered to the worker.
 	offeredAt time.Time
 	// heldAt is when the worker held the completion for its idle check
-	// (protocol.Stage Held); idleSince is when no other unheld execution
-	// was active any more, so the idle check could run.
+	// (protocol.Stage Held), written holding c.mu and c.beatMu; idleSince
+	// is when no other unheld execution was active any more, so the idle
+	// check could run.
 	heldAt, idleSince time.Time
 }
 
@@ -51,7 +62,8 @@ func (a *execution) judgedAt(now time.Time) time.Time {
 	return now
 }
 
-// execution returns the active execution of job id, or nil. Callers hold c.mu.
+// execution returns the active execution of job id, or nil. Callers hold c.mu
+// or c.beatMu.
 func (c *Controller) execution(id string) *execution {
 	for _, a := range c.active {
 		if a.job.ID == id {
@@ -61,14 +73,30 @@ func (c *Controller) execution(id string) *execution {
 	return nil
 }
 
-// holds reports whether a is still active. Callers hold c.mu.
+// holds reports whether a is still active. Callers hold c.mu or c.beatMu.
 func (c *Controller) holds(a *execution) bool {
 	return slices.Contains(c.active, a)
 }
 
 // release removes a from the active set. Callers hold c.mu.
 func (c *Controller) release(a *execution) {
+	c.beatMu.Lock()
 	c.active = slices.DeleteFunc(c.active, func(b *execution) bool { return b == a })
+	c.beatMu.Unlock()
+}
+
+// noteCancel records that job, a store record, has its cancellation
+// requested, on the active execution of its lease, so heartbeats deliver the
+// cancellation even while the store is slow. Callers may hold c.mu.
+func (c *Controller) noteCancel(job model.Job) {
+	if !job.CancelRequested {
+		return
+	}
+	c.beatMu.Lock()
+	defer c.beatMu.Unlock()
+	if a := c.execution(job.ID); a != nil && a.job.LeaseToken == job.LeaseToken {
+		a.cancelSeen = true
+	}
 }
 
 // lanes is how many jobs may run at once: the controller's configured lanes,
@@ -81,6 +109,15 @@ type Controller struct {
 	options    Options
 	mu         sync.Mutex
 	evidenceMu sync.Mutex
+	// beatMu lets a worker heartbeat answer without c.mu, which other paths
+	// hold across store calls: with one store connection, slow store work
+	// (a prune, a long write) would otherwise stall every heartbeat behind
+	// c.mu and the worker would cancel its jobs (#167). It is taken after
+	// c.mu, never before. The active set, each execution's offered and
+	// heldAt, and closed are written holding both and read holding either;
+	// lastSeen and each execution's heartbeat and cancelSeen are guarded by
+	// beatMu alone.
+	beatMu     sync.Mutex
 	poolBytes  int64 // protected by evidenceMu
 	poolKnown  bool
 	root       *os.Root
@@ -324,7 +361,7 @@ func (c *Controller) Run(ctx context.Context) error {
 	}
 	// Stop admission immediately, while existing heartbeat requests see cancel.
 	c.mu.Lock()
-	c.closed = true
+	c.setClosed()
 	for _, a := range c.active {
 		job, cancelErr := c.options.Store.Get(context.Background(), a.job.ID)
 		if cancelErr == nil {
@@ -347,7 +384,7 @@ func (c *Controller) Run(ctx context.Context) error {
 func (c *Controller) Close() error {
 	c.closeOnce.Do(func() {
 		c.mu.Lock()
-		c.closed = true
+		c.setClosed()
 		c.cancel()
 		server := c.server
 		for _, a := range c.active {
@@ -362,7 +399,9 @@ func (c *Controller) Close() error {
 		c.evidenceMu.Lock()
 		c.mu.Lock()
 		executions := c.active
+		c.beatMu.Lock()
 		c.active = nil
+		c.beatMu.Unlock()
 		c.mu.Unlock()
 		for _, a := range executions {
 			cleanupErr := c.removeSource(a.job.ID)
@@ -380,6 +419,21 @@ func (c *Controller) Close() error {
 	return c.closeErr
 }
 
+// setClosed stops admission; heartbeats answer cancel from now on. Callers
+// hold c.mu.
+func (c *Controller) setClosed() {
+	c.beatMu.Lock()
+	c.closed = true
+	c.beatMu.Unlock()
+}
+
+// seen records that the worker showed it is alive. Callers may hold c.mu.
+func (c *Controller) seen(now time.Time) {
+	c.beatMu.Lock()
+	c.lastSeen = now
+	c.beatMu.Unlock()
+}
+
 func (c *Controller) Status(ctx context.Context) (Status, error) {
 	service, err := c.options.Store.ServiceState(ctx)
 	if err != nil {
@@ -393,7 +447,10 @@ func (c *Controller) Status(ctx context.Context) (Status, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.options.Now()
-	status := Status{Service: service, Gate: gate, MaxConcurrentJobs: c.options.Lanes, Lanes: c.lanes(), WorkerReady: c.epoch != "" && !c.closed && !service.Quarantined && now.Sub(c.lastSeen) <= c.options.HeartbeatTimeout, Quiescent: c.epoch != "" && c.workerIdle && !c.maintaining && len(c.active) == 0 && !service.Quarantined}
+	c.beatMu.Lock()
+	lastSeen := c.lastSeen
+	c.beatMu.Unlock()
+	status := Status{Service: service, Gate: gate, MaxConcurrentJobs: c.options.Lanes, Lanes: c.lanes(), WorkerReady: c.epoch != "" && !c.closed && !service.Quarantined && now.Sub(lastSeen) <= c.options.HeartbeatTimeout, Quiescent: c.epoch != "" && c.workerIdle && !c.maintaining && len(c.active) == 0 && !service.Quarantined}
 	for _, a := range c.active {
 		status.ActiveJobs = append(status.ActiveJobs, a.job.ID)
 		// a.job is the claim's record, preparing; the caller checks the

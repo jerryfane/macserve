@@ -383,7 +383,7 @@ func TestListUsesDurableRepositoryScopedCursor(t *testing.T) {
 	if _, err := s.Cancel(ctx, first.ID, "done", model.CancelReason{Source: model.CancelClient, Principal: "owner"}, testNow); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Prune(ctx, testNow.Add(time.Hour)); err != nil {
+	if _, err := s.Prune(ctx, testNow.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {

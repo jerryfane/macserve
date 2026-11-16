@@ -18,6 +18,7 @@ import (
 // already cancelled or terminal is returned unchanged. Callers hold c.mu.
 func (c *Controller) cancelJob(ctx context.Context, job model.Job, reason string, cause model.CancelReason, now time.Time) (model.Job, error) {
 	if job.CancelRequested || job.State.Terminal() {
+		c.noteCancel(job)
 		return job, nil
 	}
 	cancelled, err := c.options.Store.Cancel(ctx, job.ID, reason, cause, now)
@@ -25,6 +26,7 @@ func (c *Controller) cancelJob(ctx context.Context, job model.Job, reason string
 		log.Printf("controller job cancellation failed: job=%s source=%s blockers=%s: %v", job.ID, cause.Source, blockerList(cause.Blockers), err)
 		return cancelled, err
 	}
+	c.noteCancel(cancelled)
 	if recorded := cancelled.CancelReason; recorded != nil {
 		log.Printf("controller job cancellation requested: job=%s source=%s blockers=%s detail=%q", job.ID, recorded.Source, blockerList(recorded.Blockers), recorded.Detail)
 	}

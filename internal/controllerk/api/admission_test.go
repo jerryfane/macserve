@@ -68,7 +68,7 @@ func TestReplayCannotBecomeNewAdmissionWhenRetentionRuns(t *testing.T) {
 		if _, err := f.db.Cancel(ctx, job.ID, "retired", model.CancelReason{Source: model.CancelClient, Principal: "owner"}, testTime); err != nil {
 			t.Fatal(err)
 		}
-		if err := f.db.Prune(ctx, testTime.Add(91*24*time.Hour)); err != nil {
+		if _, err := f.db.Prune(ctx, testTime.Add(91*24*time.Hour)); err != nil {
 			t.Fatal(err)
 		}
 		return testTime.Add(91 * 24 * time.Hour)
@@ -91,7 +91,7 @@ func TestReplayCannotBecomeNewAdmissionWhenRetentionRuns(t *testing.T) {
 	if _, err := f.db.Cancel(ctx, job.ID, "retired", model.CancelReason{Source: model.CancelClient, Principal: "owner"}, testTime); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.db.Prune(ctx, testTime.Add(91*24*time.Hour)); err != nil {
+	if _, err := f.db.Prune(ctx, testTime.Add(91*24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	w = perform(h, http.MethodPost, "/v1/jobs", testToken, "retention", string(body))

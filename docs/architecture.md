@@ -103,6 +103,11 @@ jobs. Terminal log bytes expire after seven days or under pool pressure, oldest 
 never evicted.
 `Logs` returns `ErrLogExpired` after eviction, while result envelopes, sequence/completeness metadata and
 idempotency records remain unchanged. Schema upgrades account for existing log bytes.
+The controller's minute sweep prunes in bounded batches, each its own short write transaction (at most 200 jobs,
+or 2,000 log records, or 4 MiB, per batch), so the store's single connection is free between batches: a job's logs
+are tombstoned before their records are deleted, the log-byte accounting follows every deleted record, and an
+interrupted prune resumes on the next sweep. A sweep or prune slower than 2 s is logged with its counts, and a
+sweep's errors are logged (#167).
 
 Worker defaults are a 30 GiB workspace and 5 GiB artifact budget. Workspace usage is checked
 at stages and every five seconds; it can overshoot between samples. Since v0.1.16 the workspace
