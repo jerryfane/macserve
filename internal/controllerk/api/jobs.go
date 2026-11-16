@@ -296,7 +296,7 @@ func (h *handler) capabilities(w http.ResponseWriter, r *http.Request, p control
 	}
 	// Do not expose active job IDs, trusted command recipes or filesystem
 	// paths; the queue is reported only as service-wide counts.
-	queue, err := h.Store.QueueView(r.Context())
+	active, queued, err := h.Store.QueueCounts(r.Context())
 	if err != nil {
 		writeError(w, errUnavailable)
 		return
@@ -308,7 +308,7 @@ func (h *handler) capabilities(w http.ResponseWriter, r *http.Request, p control
 	if status.Service.Quarantined {
 		blocked = append(blocked, "quarantined")
 	}
-	body := map[string]any{"api_version": "v1", "service_version": h.ServiceVersion, "repositories": p.Repositories, "profiles": items, "worker_ready": status.WorkerReady, "gui_ready": status.WorkerReady && status.Gate.Ready, "quiescent": status.Quiescent, "blocked_by": blocked, "paused": status.Service.Paused, "max_concurrent_jobs": status.MaxConcurrentJobs, "lanes_busy": len(queue.Active), "queued": len(queue.Queued)}
+	body := map[string]any{"api_version": "v1", "service_version": h.ServiceVersion, "repositories": p.Repositories, "profiles": items, "worker_ready": status.WorkerReady, "gui_ready": status.WorkerReady && status.Gate.Ready, "quiescent": status.Quiescent, "blocked_by": blocked, "paused": status.Service.Paused, "max_concurrent_jobs": status.MaxConcurrentJobs, "lanes_busy": active, "queued": queued}
 	if templates != nil {
 		body["templates"] = templates
 	}

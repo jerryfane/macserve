@@ -98,7 +98,12 @@ func (q *queueWait) waiting(job model.Job) map[string]any {
 	return map[string]any{"reason": q.reason(index), "lanes_busy": len(q.view.Active), "lanes": q.lanes(), "position_in_repository": position, "queued_ahead_overall": index}
 }
 
-// reason mirrors the scheduler for the queued job at index of the fair order.
+// reason mirrors dispatch for the queued job at index of the fair order:
+// Controller.next checks the service, a held completion, the gate, the lanes
+// and the disk reservation for one more lane before it asks Store.Claim,
+// which then checks for an active exclusive job and the fair head. The cases
+// follow that order, so the reported reason is the first check that holds
+// the job.
 func (q *queueWait) reason(index int) string {
 	status, active := q.status, q.view.Active
 	switch {
@@ -116,10 +121,10 @@ func (q *queueWait) reason(index int) string {
 		return waitHost
 	case len(active) >= q.lanes():
 		return waitLanes
-	case slices.ContainsFunc(active, model.Job.Exclusive):
-		return waitExclusiveRunning
 	case len(active) > 0 && !health.AdmitsAnother(status.Gate, len(active), q.lanes()):
 		return waitDisk
+	case slices.ContainsFunc(active, model.Job.Exclusive):
+		return waitExclusiveRunning
 	}
 	// While a concurrent script job runs, Claim passes over the others,
 	// which do not hold the jobs behind them.

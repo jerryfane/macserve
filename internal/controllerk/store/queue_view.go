@@ -47,6 +47,14 @@ func (s *Store) QueueView(ctx context.Context) (QueueView, error) {
 	return QueueView{Queued: queued, Active: active}, nil
 }
 
+// QueueCounts counts the active and the queued jobs of every repository in
+// one aggregate over the state index, decoding no job: the cheap form of
+// QueueView for frequently polled service counts.
+func (s *Store) QueueCounts(ctx context.Context) (active, queued int, err error) {
+	err = s.db.QueryRowContext(ctx, "SELECT COALESCE(SUM(state<>'queued'),0),COALESCE(SUM(state='queued'),0) FROM jobs WHERE state IN ('queued',"+activeStates+")").Scan(&active, &queued)
+	return active, queued, err
+}
+
 // MemoryAdmits reports whether Claim's concurrent memory cap
 // (ConcurrentMemoryCapMiB) admits job beside v's active jobs.
 func (v QueueView) MemoryAdmits(job model.Job) bool {

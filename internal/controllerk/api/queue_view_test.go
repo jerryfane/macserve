@@ -11,6 +11,7 @@ import (
 
 	"github.com/jerryfane/macserve/internal/controllerconfig"
 	"github.com/jerryfane/macserve/internal/controllerk/controller"
+	"github.com/jerryfane/macserve/internal/githubapi"
 	"github.com/jerryfane/macserve/internal/health"
 	"github.com/jerryfane/macserve/internal/model"
 	"github.com/jerryfane/macserve/internal/profiles"
@@ -267,4 +268,45 @@ func mapsEqual(a, b map[string]any) bool {
 		}
 	}
 	return true
+}
+
+// Dispatch checks the disk reservation for one more lane (Controller.next)
+// before it asks Store.Claim, which checks for an active exclusive job; a
+// queued job reports whichever holds it first.
+func TestWaitingReportsDiskBeforeActiveExclusiveJob(t *testing.T) {
+	heads := &fakeHeads{head: githubapi.BranchHead{RepositoryID: 77, Branch: "main", SHA: strings.Repeat("c", 40)}}
+	f, archive := archiveSetup(t, heads, "jobs:submit", "jobs:read", "release:archive")
+	var free int64
+	f.options.Status = func(ctx context.Context) (controller.Status, error) {
+		s, err := f.db.ServiceState(ctx)
+		return controller.Status{Service: s, WorkerReady: true, MaxConcurrentJobs: 2, Gate: health.GateState{Ready: true, Blockers: []string{}, FreeBytes: free}}, err
+	}
+	h, err := New(f.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.handler = h
+	if code, body := submitArchive(t, f, "archive", archive); code != 202 {
+		t.Fatalf("archive: %d %s", code, body)
+	}
+	if claimed, err := f.db.Claim(context.Background(), "epoch", testTime, 2, false); err != nil || claimed.Request.Kind != model.IOSArchive {
+		t.Fatalf("claim: %+v %v", claimed, err)
+	}
+	build := model.Request{Repo: archive.Repo, SHA: archive.SHA, Kind: model.Build, Profile: "org-build-v1", Xcode: archive.Xcode}
+	if code, body := submitArchive(t, f, "build", build); code != 202 {
+		t.Fatalf("build: %d %s", code, body)
+	}
+	queued, err := f.db.Lookup(context.Background(), "releaser", "build")
+	if err != nil || queued.State != model.Queued {
+		t.Fatalf("queued build: %+v %v", queued, err)
+	}
+	// A second lane needs the 120 GiB floor and two 30 GiB reservations.
+	for gib, want := range map[int64]string{170: "disk budget", 1 << 10: "an exclusive job is running"} {
+		free = gib << 30
+		w := perform(h, "GET", "/v1/jobs/"+queued.ID, archiveToken, "", "")
+		waiting, _ := decodeView(t, w.Body.Bytes())["waiting"].(map[string]any)
+		if w.Code != 200 || waiting["reason"] != want || waiting["lanes_busy"] != float64(1) || waiting["lanes"] != float64(2) {
+			t.Fatalf("%d GiB free: %d %v, want %q", gib, w.Code, waiting, want)
+		}
+	}
 }
