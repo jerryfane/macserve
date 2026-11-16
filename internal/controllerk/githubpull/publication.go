@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/jerryfane/macserve/internal/controllerk/store"
@@ -14,6 +15,20 @@ import (
 	"github.com/jerryfane/macserve/internal/model"
 	"github.com/jerryfane/macserve/internal/receipt"
 )
+
+// healBudget bounds the runs one poll heals (HealGitHubPublications): a
+// publication pass's budget, each a check list and a create on GitHub.
+const healBudget = 10
+
+// heal makes publication work of runs that should have a check but never got
+// one, logging each run it marks.
+func (p *Poller) heal(ctx context.Context) error {
+	keys, err := p.options.Store.HealGitHubPublications(ctx, healBudget)
+	for _, key := range keys {
+		log.Printf("GitHub publication healed: run=%s has no check; publishing it", key)
+	}
+	return err
+}
 
 func (p *Poller) publish(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
@@ -182,26 +197,39 @@ func (p *Poller) checkInput(ctx context.Context, run store.GitHubRun) (githubapi
 	return input, nil
 }
 
+// skipped logs why publishOne neither created nor updated run's check.
+func skipped(run store.GitHubRun, reason string) {
+	log.Printf("GitHub publication skipped: repository=%s head=%s check=%s run=%s job=%s check_id=%d: %s", run.Repository, run.SHA, githubwire.CheckName(run.Profile, run.Shard), run.Key, run.JobID, run.CheckID, reason)
+}
+
 func (p *Poller) publishOne(ctx context.Context, run store.GitHubRun) (int64, error) {
 	// A retired recipe/policy must never recreate an older same-name check
 	// after the current requirement has been enrolled. Its receipt stays local.
 	policy, ok := p.runPolicy(run)
-	if !ok || policy.PolicyRevision != run.PolicyRevision {
+	if !ok {
+		skipped(run, "no configured policy governs the run's repository")
+		return run.CheckID, nil
+	}
+	if policy.PolicyRevision != run.PolicyRevision {
+		skipped(run, fmt.Sprintf("policy revision %d is not the run's %d", policy.PolicyRevision, run.PolicyRevision))
 		return run.CheckID, nil
 	}
 	// Nor is an owner-form run published under a name its repository no
 	// longer has (renamed, transferred or departed since the last listing).
 	if policy.OwnerScoped() && p.discovered[run.RepositoryID] != run.Repository {
+		skipped(run, "the owner listing no longer has the repository under this name")
 		return run.CheckID, nil
 	}
 	current, err := p.admission(policy, githubapi.PullRequest{Number: 1, HeadSHA: run.SHA}, run.Profile, run.Shard)
 	if errors.Is(err, ErrIneligible) {
+		skipped(run, "the policy no longer admits the run's profile and shard")
 		return run.CheckID, nil
 	}
 	if err != nil {
 		return 0, err
 	}
 	if current.Run.Key != run.Key {
+		skipped(run, "the policy now admits run "+current.Run.Key+" instead (pins, recipe or timeout changed)")
 		return run.CheckID, nil
 	}
 	input, err := p.checkInput(ctx, run)

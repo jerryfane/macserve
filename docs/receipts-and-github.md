@@ -101,10 +101,29 @@ rejection cannot publish success; policy rejection uses `action_required`, not p
 This does not implement merge-queue `merge_group` evidence.
 
 Periodic repair considers only current eligible heads, including their terminal results, not historical or
-currently ineligible fork heads. Each publication pass handles at most ten entries under one minute of network
-deadline, prioritizing job-bound evidence. Jobless rejection checks are best-effort once; a missing required
-check remains nonpassing. Obsolete blocked rows retire when no publisher lease is held. Obsolete terminal
-publication retries drain for at most 24 hours; job-linked provenance/correlations remain until jobs are pruned.
+currently ineligible fork heads: every full pull request list (every 15 minutes) makes each current eligible run's
+check publication work again. Each publication pass handles at most ten entries under one minute of network
+deadline. Fresh work goes first: a new run (including a run waiting for queue space), a new attempt (a poll's
+admission, an owner rerun) and a job that changed state since its run's pending work was due. Repairs and
+retries follow, oldest first, and among equals a run that never got a check precedes one that has. Jobless
+rejection checks go last and are best-effort once; a missing required check remains nonpassing. Earlier controllers
+took repairs and fresh work in run-key order alone, so in a repository with more current runs than
+passes could publish between full lists the same repairs won every pass, and runs whose keys sorted late never
+got a check: not while waiting, not for a later attempt, not when it ended (#159). Obsolete blocked rows retire
+when no publisher lease is held. Obsolete terminal publication retries drain for at most 24 hours;
+job-linked provenance/correlations remain until jobs are pruned.
+
+Each poll also heals up to ten runs that should have a check but have none and no pending publication: a run of a
+pull request, not blocked, with no recorded check, that is current and eligible or has an unfinished job. Its
+check is created for its current state, a terminal job's from its stored result and signed receipt, so runs left
+without a check by an earlier controller publish after an upgrade without a rerun. Each healed run is logged
+(`GitHub publication healed: run=<key> has no check; publishing it`) and costs one check list and one create; a
+run with a check, or whose publication is pending or retrying, is never healed, so the pass costs nothing once
+every such run has its check. A publication the controller skips without creating or updating a check (no
+configured policy for the repository, another policy revision, a repository name the owner listing no longer
+has, a profile or shard the policy no longer admits, or a run the policy now admits under another key) logs one
+line `GitHub publication skipped: repository=<owner/name> head=<sha> check=<name> run=<key> job=<id>
+check_id=<id>: <reason>`.
 
 Machine comments have exactly this grammar:
 

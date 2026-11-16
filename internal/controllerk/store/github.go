@@ -669,6 +669,15 @@ func (s *Store) ObserveGitHubHead(ctx context.Context, repoID int64, pr int, sha
 
 // NextGitHubPublication reserves one current logical check. Network calls must
 // finish within one minute; the longer lease tolerates a lost response/restart.
+//
+// Among due work: best-effort policy rejections (a blocked run without a job)
+// last, so they never starve requirements; then fresh work first (a new run,
+// a heal, or a run whose current job was admitted or changed state since its
+// work was due: jobs.updated_at moves only with state), then periodic repairs
+// (ReconcileGitHubPublications, due at their time) and retries, oldest first;
+// then runs that never got a check first; then the oldest job transition. A
+// run_key order alone let the same repairs win every cycle and starve the
+// rest: waiting runs, new attempts and finished ones never got a check (#159).
 func (s *Store) NextGitHubPublication(ctx context.Context, now time.Time) (GitHubPublication, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -677,11 +686,10 @@ func (s *Store) NextGitHubPublication(ctx context.Context, now time.Time) (GitHu
 	defer tx.Rollback()
 	var p GitHubPublication
 	var key string
-	// Best-effort policy rejections must never starve admitted-job evidence.
 	err = tx.QueryRowContext(ctx, `SELECT o.run_key,o.generation,o.failures
- FROM github_outbox o JOIN github_runs r ON r.run_key=o.run_key
+ FROM github_outbox o JOIN github_runs r ON r.run_key=o.run_key LEFT JOIN jobs j ON j.id=r.current_job
  WHERE o.next_at<=? AND o.lease_until<=?
- ORDER BY r.current_job='',o.next_at,o.run_key LIMIT 1`, now.UnixNano(), now.UnixNano()).Scan(&key, &p.Generation, &p.Failures)
+ ORDER BY r.current_job='' AND r.blocked<>'',CASE WHEN j.updated_at>o.next_at THEN 0 ELSE o.next_at END,r.check_id<>0,COALESCE(j.updated_at,0),o.run_key LIMIT 1`, now.UnixNano(), now.UnixNano()).Scan(&key, &p.Generation, &p.Failures)
 	if errors.Is(err, sql.ErrNoRows) {
 		return p, ErrNotFound
 	}
@@ -743,12 +751,46 @@ func (s *Store) FinishGitHubPublication(ctx context.Context, p GitHubPublication
 // ReconcileGitHubPublications repairs only current eligible requirements.
 // Ineligible heads fail closed even without a check; their initial rejection is
 // not periodically republished. Retained attempts/correlations are audit history.
-func (s *Store) ReconcileGitHubPublications(ctx context.Context, repositoryID int64) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO github_outbox(run_key)
- SELECT run_key FROM github_runs WHERE repository_id=?
+// A repair not already pending is due at now, behind fresh work and earlier
+// repairs (NextGitHubPublication).
+func (s *Store) ReconcileGitHubPublications(ctx context.Context, repositoryID int64, now time.Time) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO github_outbox(run_key,next_at)
+ SELECT run_key,? FROM github_runs WHERE repository_id=?
  AND run_key IN (SELECT run_key FROM github_current_runs WHERE repository_id=? AND eligible=1)
- ON CONFLICT(run_key) DO UPDATE SET generation=generation+1`, repositoryID, repositoryID)
+ ON CONFLICT(run_key) DO UPDATE SET generation=generation+1`, now.UnixNano(), repositoryID, repositoryID)
 	return err
+}
+
+// HealGitHubPublications makes publication work, due at once, of at most limit
+// runs that should have a check but never got one and have no pending
+// publication: a run of a pull request, neither blocked nor with a check ID,
+// that is current and eligible or has an unfinished job. That covers a waiting
+// or skipped run, an active attempt and a terminal attempt of a current head,
+// whose check then reports its stored result. It returns the runs marked.
+func (s *Store) HealGitHubPublications(ctx context.Context, limit int) ([]string, error) {
+	if limit <= 0 {
+		return nil, ErrInvalid
+	}
+	rows, err := s.db.QueryContext(ctx, `INSERT INTO github_outbox(run_key)
+ SELECT run_key FROM github_runs r WHERE check_id=0 AND blocked=''
+ AND EXISTS(SELECT 1 FROM github_run_pulls p WHERE p.run_key=r.run_key)
+ AND NOT EXISTS(SELECT 1 FROM github_outbox o WHERE o.run_key=r.run_key)
+ AND (run_key IN (SELECT run_key FROM github_current_runs WHERE eligible=1)
+ OR current_job IN (SELECT id FROM jobs WHERE state NOT IN (`+terminalStates+`)))
+ ORDER BY run_key LIMIT ? RETURNING run_key`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var keys []string
+	for rows.Next() {
+		var key string
+		if err = rows.Scan(&key); err != nil {
+			return nil, err
+		}
+		keys = append(keys, key)
+	}
+	return keys, rows.Err()
 }
 
 // MaintainGitHub replaces the current-head snapshot (key to eligibility) and retires obsolete work.
