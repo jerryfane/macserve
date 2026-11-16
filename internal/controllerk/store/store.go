@@ -22,6 +22,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/jerryfane/macserve/internal/controllerconfig"
 	"github.com/jerryfane/macserve/internal/model"
 	"modernc.org/sqlite"
 )
@@ -359,7 +360,11 @@ const (
 // cursor is the last position itself (the only form before List had an order),
 // a newest-first cursor its negation. A continued page therefore keeps its
 // order, and an explicitly different order is invalid. Repository access is
-// always an explicit allowlist, including when continuing a cursor.
+// always an explicit allowlist, including when continuing a cursor: repos are
+// a principal's entries, each an exact repository or an "owner/*" account
+// grant matching every repository of that owner, as
+// controllerconfig.Principal.AllowsRepository decides. Both, like stored job
+// repositories, are lowercase.
 func (s *Store) List(ctx context.Context, repos []string, filter ListFilter, cursor string, limit int) ([]model.Job, string, error) {
 	if limit == 0 {
 		limit = 50
@@ -394,11 +399,26 @@ func (s *Store) List(ctx context.Context, repos []string, filter ListFilter, cur
 		return []model.Job{}, "", nil
 	}
 	jobs := make([]model.Job, 0, limit)
-	args := make([]any, 0, len(repos)+len(states)+2)
+	args := make([]any, 0, 2*len(repos)+len(states)+2)
+	var exact, grants []string
 	for _, repo := range repos {
-		args = append(args, repo)
+		if controllerconfig.ValidOwnerWildcard(repo) {
+			// The range of every "owner/…" string: '0' follows '/'. It
+			// keeps the (repo,sequence) index usable.
+			owner := strings.TrimSuffix(repo, "*")
+			grants = append(grants, "repo>=? AND repo<?")
+			args = append(args, owner, strings.TrimSuffix(owner, "/")+"0")
+			continue
+		}
+		exact = append(exact, repo)
 	}
-	query := "SELECT sequence," + jobColumns + " FROM jobs WHERE repo IN (" + placeholders(len(repos)) + ")"
+	if len(exact) > 0 {
+		grants = append(grants, "repo IN ("+placeholders(len(exact))+")")
+		for _, repo := range exact {
+			args = append(args, repo)
+		}
+	}
+	query := "SELECT sequence," + jobColumns + " FROM jobs WHERE " + balancedOr(grants)
 	if len(states) > 0 {
 		query += " AND state IN (" + placeholders(len(states)) + ")"
 		for _, state := range states {
@@ -445,6 +465,18 @@ func (s *Store) List(ctx context.Context, repos []string, filter ListFilter, cur
 
 func placeholders(n int) string {
 	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
+}
+
+// balancedOr joins terms with OR as a balanced tree, keeping their order (and
+// so their bound arguments' order). A flat chain of up to 1000 grants would
+// exceed SQLite's expression depth limit of 1000; the tree is about ten deep.
+// SQLite still splits the nested ORs into one OR term for its planner.
+func balancedOr(terms []string) string {
+	if len(terms) == 1 {
+		return "(" + terms[0] + ")"
+	}
+	half := len(terms) / 2
+	return "(" + balancedOr(terms[:half]) + " OR " + balancedOr(terms[half:]) + ")"
 }
 
 func randomToken(prefix string) (string, error) {

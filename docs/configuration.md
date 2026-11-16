@@ -42,7 +42,9 @@ Optional `signer` connects the controller to the [code signer](#code-signer).
   Capabilities' `service_version` is the controller binary's build version: the release tag for a release build
   (as `macserve-controller version --json` reports it). Capabilities' `lanes_busy` (jobs holding a lane) and
   `queued` (queued jobs) count every repository's jobs, beside `max_concurrent_jobs`; they name none.
-- `GET /v1/jobs` lists the principal's repositories' jobs (`repo=` narrows to one), **newest first** by default
+- `GET /v1/jobs` lists the jobs of every repository the principal may read: its exact repositories and every
+  repository of an owner it holds an `owner/*` grant for (before #164 an `owner/*` grant listed none without
+  `repo=`). `repo=` narrows to one. Jobs are **newest first** by default
   (`order=newest`; `order=oldest` is submission order, the only order before #161). `state=` is a comma list of
   job states (`queued`, `preparing`, `running`, `finalizing`, `cancelling`, `succeeded`, `failed`, `timed_out`,
   `cancelled`, `interrupted`, `expired`) and the aliases `active` (`preparing`, `running`, `finalizing`,

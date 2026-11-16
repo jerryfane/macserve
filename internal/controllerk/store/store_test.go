@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -404,6 +405,87 @@ func TestListUsesDurableRepositoryScopedCursor(t *testing.T) {
 	}
 	_, _, err = s.List(ctx, []string{"example-org/example-app"}, ListFilter{}, "not-a-cursor", 1)
 	requireError(t, err, ErrInvalid)
+}
+
+// An "owner/*" grant lists every repository of that owner, and only those,
+// in both orders and across cursors, beside exact entries.
+func TestListHonoursOwnerWildcardGrants(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newStore(t, Options{})
+	enqueue := func(repo, key string) string {
+		t.Helper()
+		admission := admissionFixture()
+		admission.Request.Repo, admission.Profile.Repo = repo, repo
+		setDigest(&admission)
+		job, _, err := s.Enqueue(ctx, "principal", key, admission, testNow)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return job.ID
+	}
+	app := enqueue("example-org/example-app", "app")
+	prefixed := enqueue("example-org-two/app", "prefixed")
+	library := enqueue("example-org/example-library", "library")
+	longer := enqueue("example-orga/app", "longer")
+	other := enqueue("other-org/tool", "other")
+	tools := enqueue("example-org/tools", "tools")
+
+	cases := []struct {
+		repos []string
+		want  []string
+	}{
+		{[]string{"example-org/*"}, []string{app, library, tools}},
+		{[]string{"example-org/*", "other-org/tool"}, []string{app, library, other, tools}},
+		{[]string{"example-orga/app", "example-org/*"}, []string{app, library, longer, tools}},
+		{[]string{"example-org-two/*"}, []string{prefixed}},
+		{[]string{"example/*"}, nil},
+	}
+	for _, c := range cases {
+		for _, order := range []string{OrderOldest, OrderNewest} {
+			want := slices.Clone(c.want)
+			if order == OrderNewest {
+				slices.Reverse(want)
+			}
+			var got []string
+			cursor := ""
+			for {
+				jobs, next, err := s.List(ctx, c.repos, ListFilter{Order: order}, cursor, 1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, job := range jobs {
+					got = append(got, job.ID)
+				}
+				if cursor = next; cursor == "" {
+					break
+				}
+			}
+			if !slices.Equal(got, want) {
+				t.Errorf("%v %s: %v, want %v", c.repos, order, got, want)
+			}
+		}
+	}
+}
+
+// A principal may hold up to 1000 entries, all "owner/*" grants or a mix with
+// exact repositories; listing stays within SQLite's expression depth limit.
+func TestListAcceptsThousandOwnerWildcardGrants(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newStore(t, Options{})
+	job := enqueueJob(t, s, "principal", "app", testNow)
+	grants := make([]string, 0, 1000)
+	for i := range 999 {
+		grants = append(grants, fmt.Sprintf("owner-%d/*", i))
+	}
+	for _, last := range []string{"example-org/*", "example-org/example-app"} {
+		repos := append(slices.Clone(grants), last)
+		for _, order := range []string{OrderOldest, OrderNewest} {
+			jobs, _, err := s.List(ctx, repos, ListFilter{Order: order}, "", 10)
+			if err != nil || len(jobs) != 1 || jobs[0].ID != job.ID {
+				t.Fatalf("%s %s: %+v %v", last, order, jobs, err)
+			}
+		}
+	}
 }
 
 func TestBoundaryRejectsMalformedAdmission(t *testing.T) {
