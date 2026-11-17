@@ -66,10 +66,12 @@ type Engine struct {
 	drain       string
 	idlePending bool
 	readyAt     time.Time
-	// bootsFrom is when the latest simulator boot burst of any lane began,
-	// or the start a parallel-testing test run has reserved after it
-	// (spaceSimulatorBoots).
+	// bootsFrom is when the latest simulator boot or parallel-testing test
+	// run start of any lane happened (spaceSimulatorBoots).
 	bootsFrom time.Time
+	// cloneWatches are the running parallel-testing jobs' clone watches
+	// (watchTestClones), by job ID.
+	cloneWatches map[string]*cloneWatch
 	// deviceMu serializes simulator creation and the verification of an
 	// interrupted creation across lanes, so at most one creation is ever
 	// unrecorded.

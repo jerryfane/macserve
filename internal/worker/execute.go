@@ -498,20 +498,27 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 			return result, err
 		}
 	}
-	stopWatch := func() {}
+	stopWatch := func() error { return nil }
 	if job.Profile.ParallelTestingWorkers() > 0 {
 		// The clones xcodebuild makes of the job's simulator are this job's
-		// (see beginTestClones); stopWriters deletes those it leaves.
+		// (see beginTestClones and watchTestClones); stopWriters deletes
+		// those it leaves.
 		if err := e.spaceSimulatorBoots(ctx); err != nil {
 			return result, err
 		}
 		if err := e.beginTestClones(ctx, &x.manifest); err != nil {
 			return result, err
 		}
-		stopWatch = e.watchTestClones(ctx, x.manifest)
+		// The watch is x.manifest's only writer until stopWatch returns.
+		stopWatch = e.watchTestClones(ctx, &x.manifest)
 	}
 	returned = x.recipe(ctx, x.job.Profile.Run, x.runEnvironment()...)
-	stopWatch()
+	if err := stopWatch(); err != nil {
+		// A discovery listing whose cleanup failed or that found
+		// contamination fails the job like one of its own commands
+		// (execution.invoke), with the same quarantine authority.
+		returned = errors.Join(returned, e.quarantine(err))
+	}
 	return result, returned
 }
 

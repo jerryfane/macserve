@@ -181,25 +181,34 @@ func (e *Engine) noteSimulatorBoot() {
 }
 
 // spaceSimulatorBoots holds a parallel-testing test run, in lane mode, until
-// simulatorBootGap after the latest boot burst any lane began or reserved,
-// and reserves that start for its own clones. One lane boots nothing beside
-// the job and does not wait.
+// simulatorBootGap has passed since the latest simulator boot or
+// parallel-testing run start of any lane, and records its own start as one.
+// bootsFrom only ever holds a boot or a start that happened, never a
+// reservation, and the gap is checked again after every wait: a boot during
+// the wait restarts it. A run therefore waits as long as other lanes keep
+// booting within the gap, within its job's deadline. One lane boots nothing
+// beside the job and does not wait.
 func (e *Engine) spaceSimulatorBoots(ctx context.Context) error {
 	if !e.laneMode() {
 		return nil
 	}
-	e.mu.Lock()
-	now := e.options.Now()
-	start := now
-	if !e.bootsFrom.IsZero() {
-		start = later(now, e.bootsFrom.Add(simulatorBootGap))
+	for {
+		e.mu.Lock()
+		now := e.options.Now()
+		var wait time.Duration
+		if !e.bootsFrom.IsZero() {
+			wait = e.bootsFrom.Add(simulatorBootGap).Sub(now)
+		}
+		if wait <= 0 {
+			e.bootsFrom = now
+			e.mu.Unlock()
+			return nil
+		}
+		e.mu.Unlock()
+		if err := e.pause(ctx, wait); err != nil {
+			return err
+		}
 	}
-	e.bootsFrom = start
-	e.mu.Unlock()
-	if wait := start.Sub(now); wait > 0 {
-		return e.pause(ctx, wait)
-	}
-	return nil
 }
 
 func later(a, b time.Time) time.Time {
@@ -481,8 +490,8 @@ func (e *Engine) testClones(ctx context.Context, m *manifest, record bool) ([]st
 }
 
 // adoptTestClones makes every clone of m's simulator listed now (testClones)
-// one of m's TestClones, and in lane mode the job's for the lane attribution.
-// The start stays recorded (stopWriters releases it).
+// one of m's TestClones (ownTestClones). The start stays recorded
+// (stopWriters releases it).
 func (e *Engine) adoptTestClones(ctx context.Context, m *manifest) error {
 	if !m.TestClonesPending {
 		return nil
@@ -491,53 +500,142 @@ func (e *Engine) adoptTestClones(ctx context.Context, m *manifest) error {
 	if err != nil {
 		return err
 	}
+	e.ownTestClones(m, clones)
+	return e.saveManifest(*m)
+}
+
+// ownTestClones adds each of clones not yet m's to m's TestClones, and in
+// lane mode gives it to the job for the lane attribution. It reports whether
+// m changed. Ownership, once recorded, is by UDID: the clone is deleted and
+// proved absent whatever it is named later.
+func (e *Engine) ownTestClones(m *manifest, clones []string) (changed bool) {
 	for _, id := range clones {
 		if slices.ContainsFunc(m.TestClones, func(own string) bool { return strings.EqualFold(own, id) }) {
 			continue
 		}
-		m.TestClones = append(m.TestClones, id)
+		m.TestClones, changed = append(m.TestClones, id), true
 		if lanes := e.laneRunner(); lanes != nil && e.laneMode() {
 			lanes.AttachDevice(m.JobID, id)
 		}
 	}
-	return e.saveManifest(*m)
+	return changed
 }
 
-// watchTestClones gives the lane attribution, every testCloneWatchInterval
-// while a parallel-testing job's test run runs, each clone of its simulator
-// xcodebuild made (testClones): the clones' processes are then the job's (its
-// memory budget and lane quiesce), not unattributed residue beside a
-// sibling's cleanup. Its listings run beside the job's own commands, so they
-// are not recorded in its result; a failed one is skipped, and the job's
-// cleanup adopts the clones into its manifest regardless (adoptTestClones).
-// Outside lane mode every job-UID process is the one job's, and it does
-// nothing. stop ends the watch and waits for it.
-func (e *Engine) watchTestClones(ctx context.Context, m manifest) (stop func()) {
-	lanes := e.laneRunner()
-	if lanes == nil || !e.laneMode() {
-		return func() {}
-	}
+// cloneWatch is a running watchTestClones: refresh asks it for a discovery
+// pass now (refreshTestClones), and done closes when it ends.
+type cloneWatch struct {
+	refresh chan chan struct{}
+	done    chan struct{}
+}
+
+// errListingCleanup marks a simulator listing whose process cleanup was not
+// confirmed.
+var errListingCleanup = errors.New("simulator listing: process cleanup was not confirmed")
+
+// safetyFailure reports whether err, from a clone discovery listing, must
+// fail the job: its processes' cleanup failed or was not confirmed, or it
+// found contamination. Any other listing failure is retried by the next pass.
+func safetyFailure(err error) bool {
+	return errors.Is(err, ErrCleanup) || errors.Is(err, ErrContamination) || errors.Is(err, ErrRecovery) || errors.Is(err, errListingCleanup)
+}
+
+// watchTestClones runs while a parallel-testing job's test run runs. Every
+// testCloneWatchInterval, and whenever a lane census is about to judge the
+// job account (refreshTestClones), it lists the clones xcodebuild made of
+// the job's simulator (testClones) and makes each one the job's at once
+// (ownTestClones), saving m: a restart recovers and deletes exactly those
+// UDIDs, and in lane mode the clones' processes are the job's (its memory
+// budget and lane quiesce), not unattributed residue. It is m's only writer
+// until stop returns. Its listings run beside the job's own commands, so
+// they are not recorded in its result. A listing that failed only is
+// retried; one whose process cleanup failed or found contamination
+// (safetyFailure), and a failed manifest save, are kept and returned by
+// stop, which ends the watch and waits for it; a later successful pass never
+// clears them.
+func (e *Engine) watchTestClones(ctx context.Context, m *manifest) (stop func() error) {
 	ctx, cancel := context.WithCancel(ctx)
-	done := make(chan struct{})
+	w := &cloneWatch{refresh: make(chan chan struct{}), done: make(chan struct{})}
+	e.mu.Lock()
+	if e.cloneWatches == nil {
+		e.cloneWatches = map[string]*cloneWatch{}
+	}
+	e.cloneWatches[m.JobID] = w
+	e.mu.Unlock()
+	tick := make(chan struct{})
 	go func() {
-		defer close(done)
-		attached := map[string]bool{}
 		for e.pause(ctx, testCloneWatchInterval) == nil {
-			clones, err := e.testClones(ctx, &m, false)
-			if err != nil {
-				continue
-			}
-			for _, id := range clones {
-				if !attached[id] {
-					attached[id] = true
-					lanes.AttachDevice(m.JobID, id)
-				}
+			select {
+			case tick <- struct{}{}:
+			case <-ctx.Done():
+				return
 			}
 		}
 	}()
-	return func() {
+	var failure error
+	pass := func() {
+		clones, err := e.testClones(ctx, m, false)
+		if err != nil {
+			if safetyFailure(err) {
+				failure = errors.Join(failure, err)
+			}
+			return
+		}
+		if e.ownTestClones(m, clones) {
+			if err := e.saveManifest(*m); err != nil {
+				failure = errors.Join(failure, err)
+			}
+		}
+	}
+	go func() {
+		defer close(w.done)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick:
+				pass()
+			case reply := <-w.refresh:
+				pass()
+				close(reply)
+			}
+		}
+	}()
+	return func() error {
+		e.mu.Lock()
+		delete(e.cloneWatches, m.JobID)
+		e.mu.Unlock()
 		cancel()
-		<-done
+		<-w.done
+		return failure
+	}
+}
+
+// refreshTestClones has every running parallel-testing job's watch
+// (watchTestClones) make the clones listed now its job's before it returns:
+// a lane census that follows sees their processes labelled, however recently
+// they booted. It waits for each watch's pass, or for ctx.
+func (e *Engine) refreshTestClones(ctx context.Context) {
+	e.mu.Lock()
+	watches := make([]*cloneWatch, 0, len(e.cloneWatches))
+	for _, w := range e.cloneWatches {
+		watches = append(watches, w)
+	}
+	e.mu.Unlock()
+	for _, w := range watches {
+		reply := make(chan struct{})
+		select {
+		case w.refresh <- reply:
+		case <-w.done:
+			continue
+		case <-ctx.Done():
+			return
+		}
+		select {
+		case <-reply:
+		case <-w.done:
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 
@@ -677,6 +775,9 @@ func (e *Engine) listDevices(ctx context.Context, m *manifest, set string, recor
 	}
 	result, err := run(ctx, Command{Executable: "/usr/bin/xcrun", Args: simctlArgs(set, "list", "devices", "--json"), Dir: "/", Env: environment(filepath.Join(e.options.WorkspaceRoot, m.JobID), m.DeveloperDir, e.options.JobUser), JobID: m.JobID}, output, stderr)
 	if err != nil || result.ExitCode != 0 || result.Signal != "" || !result.CleanupOK || output.err != nil || stderr.err != nil {
+		if !result.CleanupOK {
+			err = errors.Join(err, errListingCleanup)
+		}
 		return nil, errors.Join(err, output.err, stderr.err, errors.New("cannot verify recorded simulator inventory"))
 	}
 	var listing struct {

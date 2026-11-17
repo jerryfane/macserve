@@ -461,14 +461,20 @@ sibling's simulator or on CoreSimulator; the contract in [configuration.md](conf
 simulator into XCTest's device set (`simctl --set testing`, `~/Library/Developer/XCTestDevices`), names each clone
 `Clone <n> of macserve-<job>`, boots them and deletes them when the run ends. That set is not the default set the
 engine lists, so before the test run the engine records the testing set's inventory in the manifest
-(`test_clones_pending`, `test_clones_before`). While the run runs, in lane mode, it lists the set every 5 s and
-attaches every clone of its own simulator (added since, and named for its own device) to the tracker; their
-`launchd_sim` (its arguments name `.../XCTestDevices/<UDID>/`) and children are then the job's, charged to its memory
-budget and stopped by its lane quiesce, not unattributed residue beside a sibling. At finalization, before the lane
-quiesce, every such clone still listed becomes one of the job's `test_clones` and is shut down, deleted and proven
-absent with the job's own simulator; a second pass after the quiesce, and recovery after a restart, do the same from
-the manifest, and a survivor is contamination. Name and inventory together decide: a clone of another job's simulator
-(another job ID) or one listed before the run is never the job's. A parallel-testing run boots its clones at once, after
-the build, which the controller's start stagger does not cover; in lane mode the engine therefore starts the run at
-least 30 s after any other lane's simulator boot or parallel-testing run start.
+(`test_clones_pending`, `test_clones_before`). While the run runs, it lists the set every 5 s, and again just before
+any lane census judges the account (a sibling's residue count, a lane admission or readiness check), and makes every
+clone of its own simulator (added since, and named for its own device) one of the job's `test_clones` at once, saving
+the manifest: from then on the clone is the job's by UDID, whatever it is named later, and a restart recovers it. In
+lane mode it is also attached to the tracker; its `launchd_sim` (its arguments name `.../XCTestDevices/<UDID>/`) and
+children are then the job's, charged to its memory budget and stopped by its lane quiesce, not unattributed residue
+beside a sibling. A discovery listing that merely fails is retried; one whose process cleanup failed or found
+contamination, or a failed manifest save, fails the job when the run ends, with the same quarantine authority as the
+job's own commands, and a later successful listing never clears it. At finalization, before the lane quiesce, every
+such clone still listed is adopted too, and all of the job's `test_clones` are shut down, deleted and proven absent
+with the job's own simulator; a second pass after the quiesce, and recovery after a restart, do the same from the
+manifest, and a survivor is contamination. Name and inventory together decide what is discovered: a clone of another
+job's simulator (another job ID) or one listed before the run is never the job's. A parallel-testing run boots its
+clones at once, after the build, which the controller's start stagger does not cover; in lane mode the engine
+therefore starts the run only once 30 s have passed since the latest simulator boot or parallel-testing run start of
+any lane, checking again after every wait, so a boot during the wait restarts it.
 

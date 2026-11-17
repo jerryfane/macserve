@@ -280,6 +280,7 @@ func (e *Engine) LaneReady(ctx context.Context) error {
 	if !ok {
 		return ErrBusy
 	}
+	e.refreshTestClones(ctx)
 	residue, err := lanes.Residue(ctx)
 	if err != nil {
 		return err
@@ -354,6 +355,7 @@ func (e *Engine) siblingManifests(jobID string, names []string) bool {
 // cut short observed nothing and defers the same way (deferred, #150); a
 // count that failed otherwise leaves the job's cleanup unverified.
 func (e *Engine) laneResidue(ctx context.Context, jobID string, result *Result) (deferred string, err error) {
+	e.refreshTestClones(ctx)
 	residue, err := e.laneRunner().Residue(ctx)
 	if inspectionCut(err) != nil {
 		log.Printf("worker job %s lane cleanup verification deferred to the idle check: %v", jobID, err)

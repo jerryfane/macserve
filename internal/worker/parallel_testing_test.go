@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -196,15 +197,7 @@ func TestParallelTestingClonesAreTheJobsLaneDevices(t *testing.T) {
 		return handled, result, err
 	}
 	engine := laneEngine(t, runner, 3)
-	var pausesMu sync.Mutex
-	var pauses []time.Duration
-	engine.pause = func(ctx context.Context, d time.Duration) error {
-		pausesMu.Lock()
-		pauses = append(pauses, d)
-		pausesMu.Unlock()
-		time.Sleep(time.Millisecond)
-		return ctx.Err()
-	}
+	clock := newTestClock(engine)
 	source, data := checkoutFixture(t, map[string]string{".macserve.json": parallelConfig})
 	result, err := engine.Execute(context.Background(), parallelUITestJob(t, `"parallel_testing":{"workers":2}`), source, bytes.NewReader(data), nil)
 	if err != nil || result.State != model.Succeeded || !result.CleanupOK {
@@ -220,10 +213,201 @@ func TestParallelTestingClonesAreTheJobsLaneDevices(t *testing.T) {
 	if got := set.left(); !slices.Equal(got, []string{siblingClone}) {
 		t.Fatalf("XCTest devices after the job = %v", got)
 	}
-	pausesMu.Lock()
-	defer pausesMu.Unlock()
-	if !slices.ContainsFunc(pauses, func(d time.Duration) bool { return d > 5*time.Second && d <= 30*time.Second }) {
-		t.Fatalf("test run not spaced from the simulator boot: pauses %v", pauses)
+	if !slices.ContainsFunc(clock.waits(), func(d time.Duration) bool { return d > 5*time.Second && d <= 30*time.Second }) {
+		t.Fatalf("test run not spaced from the simulator boot: pauses %v", clock.waits())
+	}
+}
+
+// testClock is an engine's fake time: Options.Now reads it and every pause
+// advances it (recording the wait) at once.
+type testClock struct {
+	now    atomic.Int64
+	mu     sync.Mutex
+	paused []time.Duration
+}
+
+func newTestClock(engine *Engine) *testClock {
+	c := &testClock{}
+	c.now.Store(time.Now().UnixNano())
+	engine.options.Now = c.Now
+	engine.pause = func(ctx context.Context, d time.Duration) error {
+		c.mu.Lock()
+		c.paused = append(c.paused, d)
+		c.mu.Unlock()
+		c.advance(d)
+		time.Sleep(time.Millisecond)
+		return ctx.Err()
+	}
+	return c
+}
+
+func (c *testClock) Now() time.Time          { return time.Unix(0, c.now.Load()) }
+func (c *testClock) advance(d time.Duration) { c.now.Add(int64(d)) }
+func (c *testClock) waits() []time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.paused)
+}
+
+// eventually polls cond every millisecond for up to limit of real time.
+func eventually(limit time.Duration, cond func() bool) bool {
+	for deadline := time.Now().Add(limit); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		if cond() {
+			return true
+		}
+	}
+	return cond()
+}
+
+// testingListing reports whether c lists XCTest's device set.
+func testingListing(c Command) bool {
+	return slices.Equal(c.Args, []string{"simctl", "--set", "testing", "list", "devices", "--json"})
+}
+
+// A clone the watch finds is the job's from then on, by UDID: it is saved in
+// the job's manifest while the run runs (a restart recovers it from there),
+// and deleted at the job's end even if it no longer bears its job's name.
+// Before, the watch kept it only in memory, and finalization, which
+// discovers by name, left a renamed clone behind.
+func TestParallelTestingWatchPersistsCloneOwnership(t *testing.T) {
+	report, err := os.ReadFile(filepath.Join("..", "evidence", "testdata", "herdrup-uitests.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := newLaneFake()
+	runner.fakeRunner.tests = string(report)
+	set := &testingSet{devices: map[string]string{}}
+	var engine *Engine
+	persisted := false
+	runner.fakeRunner.hook = func(ctx context.Context, c Command, out, stderr io.Writer) (bool, ProcessResult, error) {
+		handled, result, err := set.hook(ctx, c, out, stderr)
+		if slices.Contains(c.Args, "test-without-building") {
+			persisted = eventually(3*time.Second, func() bool {
+				var m manifest
+				return readJSON(engine.root, "manifests/job-1.json", &m) == nil && slices.Contains(m.TestClones, cloneOne)
+			})
+			set.mu.Lock()
+			set.devices[cloneOne] = "Renamed clone"
+			set.mu.Unlock()
+		}
+		return handled, result, err
+	}
+	engine = laneEngine(t, runner, 3)
+	newTestClock(engine)
+	source, data := checkoutFixture(t, map[string]string{".macserve.json": parallelConfig})
+	result, err := engine.Execute(context.Background(), parallelUITestJob(t, `"parallel_testing":{"workers":2}`), source, bytes.NewReader(data), nil)
+	if err != nil || result.State != model.Succeeded || !result.CleanupOK {
+		t.Fatalf("parallel-testing job: %+v %v", result, err)
+	}
+	if !persisted {
+		t.Fatal("the watch did not save the clone it found in the job's manifest")
+	}
+	if got := set.left(); !slices.Equal(got, []string{siblingClone}) {
+		t.Fatalf("XCTest devices after the job = %v, want only the sibling's clone", got)
+	}
+}
+
+// A discovery listing whose process cleanup failed or found contamination
+// fails the job and quarantines the worker, as the job's own commands do,
+// although later listings succeed. Before, the watch dropped every listing
+// error, and the job succeeded.
+func TestParallelTestingWatchKeepsCleanupFailures(t *testing.T) {
+	report, err := os.ReadFile(filepath.Join("..", "evidence", "testdata", "herdrup-uitests.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := newLaneFake()
+	runner.fakeRunner.tests = string(report)
+	set := &testingSet{devices: map[string]string{}}
+	var running, failed atomic.Bool
+	runner.fakeRunner.hook = func(ctx context.Context, c Command, out, stderr io.Writer) (bool, ProcessResult, error) {
+		if testingListing(c) && running.Load() && failed.CompareAndSwap(false, true) {
+			return true, ProcessResult{CleanupOK: false}, errors.Join(ErrCleanup, ErrContamination, errors.New("listing group still live after the cleanup window"))
+		}
+		handled, result, err := set.hook(ctx, c, out, stderr)
+		if slices.Contains(c.Args, "test-without-building") {
+			running.Store(true)
+			eventually(3*time.Second, failed.Load)
+		}
+		return handled, result, err
+	}
+	engine := laneEngine(t, runner, 3)
+	newTestClock(engine)
+	source, data := checkoutFixture(t, map[string]string{".macserve.json": parallelConfig})
+	result, err := engine.Execute(context.Background(), parallelUITestJob(t, `"parallel_testing":{"workers":2}`), source, bytes.NewReader(data), nil)
+	if !failed.Load() {
+		t.Fatal("the watch never listed during the run")
+	}
+	if !errors.Is(err, ErrContamination) || result.State != model.Failed || result.CleanupOK {
+		t.Fatalf("job after a contaminated discovery listing: %+v %v", result, err)
+	}
+	if engine.checkQuarantine() == nil {
+		t.Fatal("worker not quarantined")
+	}
+}
+
+// A boot on another lane while a parallel-testing run waits for the gap
+// restarts the wait: the run starts simulatorBootGap after the latest boot,
+// not after the one it first saw. Before, it started when its first wait
+// ended, a second after the other lane's boot.
+func TestParallelTestingRunWaitsForBootsDuringItsWait(t *testing.T) {
+	engine := laneEngine(t, newLaneFake(), 3)
+	clock := newTestClock(engine)
+	engine.noteSimulatorBoot()
+	var otherBoot time.Time
+	engine.pause = func(ctx context.Context, d time.Duration) error {
+		if otherBoot.IsZero() {
+			clock.advance(d - time.Second)
+			engine.noteSimulatorBoot()
+			otherBoot = clock.Now()
+			clock.advance(time.Second)
+		} else {
+			clock.advance(d)
+		}
+		return ctx.Err()
+	}
+	if err := engine.spaceSimulatorBoots(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if otherBoot.IsZero() {
+		t.Fatal("the run did not wait")
+	}
+	if gap := clock.Now().Sub(otherBoot); gap < 30*time.Second {
+		t.Fatalf("run started %s after another lane's boot", gap)
+	}
+}
+
+// A lane census (here a sibling's residue count) first has every running
+// clone watch claim the clones listed now, however long before its next
+// periodic pass: their processes are then labelled, not unattributed.
+func TestLaneCensusRefreshesCloneOwnershipFirst(t *testing.T) {
+	runner := newLaneFake()
+	set := &testingSet{devices: map[string]string{cloneOne: "Clone 1 of macserve-job-1"}}
+	runner.fakeRunner.hook = set.hook
+	engine := laneEngine(t, runner, 3)
+	// The periodic pass never comes.
+	engine.pause = func(ctx context.Context, _ time.Duration) error { <-ctx.Done(); return ctx.Err() }
+	m := manifest{JobID: "job-1", DeveloperDir: "/Applications/Xcode.app/Contents/Developer", TestClonesPending: true}
+	// Reached through an interface, so the test also builds, and fails,
+	// against a watch without refresh or ownership.
+	watcher, ok := any(engine).(interface {
+		watchTestClones(context.Context, *manifest) func() error
+	})
+	if !ok {
+		t.Fatal("engine has no clone watch that owns clones")
+	}
+	stop := watcher.watchTestClones(context.Background(), &m)
+	if _, err := engine.laneResidue(context.Background(), "job-2", &Result{Concurrency: &Concurrency{}}); err != nil {
+		t.Fatal(err)
+	}
+	if !contains(runner.take(), "device job-1 "+cloneOne) {
+		t.Fatal("clone not the job's before the census")
+	}
+	if err := stop(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(m.TestClones, []string{cloneOne}) {
+		t.Fatalf("manifest clones %v", m.TestClones)
 	}
 }
 
