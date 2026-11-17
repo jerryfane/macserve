@@ -23,7 +23,9 @@ import (
 //   - seeds: every command root the broker starts for the job (its direct
 //     child, which keeps its PID through launchctl asuser, _job-exec and the
 //     tool's exec); every launchd_sim whose arguments name a device directory
-//     .../CoreSimulator/Devices/<UDID>/ of a UDID the job created; every
+//     .../CoreSimulator/Devices/<UDID>/ of a UDID the job created, or
+//     .../XCTestDevices/<UDID>/ of a parallel-testing clone of its simulator
+//     (watchTestClones); every
 //     process whose executable lies under the job's workspace or one of its
 //     device directories; for the one job adopting devices (a concurrent
 //     script job's script, AdoptDevices), every such launchd_sim or process
@@ -227,6 +229,11 @@ func (t *laneTracker) crashWindows() []crashWindow {
 
 var deviceDirectory = regexp.MustCompile(`/CoreSimulator/Devices/([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})/`)
 
+// testDeviceDirectory is a device directory in XCTest's device set
+// (testingDeviceSet), where xcodebuild parallel testing makes its clones.
+// Only a job's own clones (AttachDevice) seed it: no job adopts devices there.
+var testDeviceDirectory = regexp.MustCompile(`/XCTestDevices/([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})/`)
+
 // startBefore reports whether start token a (kernel "sec:usec") is earlier
 // than b. Unparseable tokens are never earlier.
 func startBefore(a, b string) bool {
@@ -407,9 +414,11 @@ func (t *laneTracker) seed(p processSample) string {
 			claim(id)
 		}
 		for _, text := range []string{d.executable, d.args} {
-			for _, m := range deviceDirectory.FindAllStringSubmatch(text, -1) {
-				if j.udids[strings.ToUpper(m[1])] {
-					claim(id)
+			for _, pattern := range []*regexp.Regexp{deviceDirectory, testDeviceDirectory} {
+				for _, m := range pattern.FindAllStringSubmatch(text, -1) {
+					if j.udids[strings.ToUpper(m[1])] {
+						claim(id)
+					}
 				}
 			}
 		}
@@ -514,6 +523,15 @@ type laneRunner interface {
 	// terminate are not residual, and an unattributed process refuses with
 	// ErrDrain instead of contamination.
 	LaneAdmission(ctx context.Context) error
+	// SetCensusRefresh sets what every census of Residue and LaneAdmission
+	// runs after it samples the processes and before it judges them: the
+	// engine's refresh of device ownership (Engine.refreshTestClones), so
+	// a device created up to that sample is its job's when judged.
+	SetCensusRefresh(refresh func(context.Context))
+}
+
+func (r *nativeRunner) SetCensusRefresh(refresh func(context.Context)) {
+	r.censusRefresh.Store(&refresh)
 }
 
 func (r *nativeRunner) laneTracker() *laneTracker {
@@ -709,8 +727,13 @@ func (r *nativeRunner) crashResidue(ctx context.Context, samples []processSample
 // the census could not verify as that relaunch is still stopped by a
 // quiesce, and launchd starts it again if it serves the audited one (#155:
 // at 13:17:13Z j_7841d25a's lane admission drained, most likely beside the
-// WebKit GPU process that deferred j_645b8263 a minute later).
+// WebKit GPU process that deferred j_645b8263 a minute later). Before it
+// judges samples it runs the census refresh (SetCensusRefresh): a device
+// created before the sample is then its job's, and so are its processes.
 func (r *nativeRunner) laneCensus(ctx context.Context, samples []processSample) (processCensus, error) {
+	if refresh := r.censusRefresh.Load(); refresh != nil {
+		(*refresh)(ctx)
+	}
 	c, labelled, err := r.unattributedCensus(ctx, samples)
 	if err != nil {
 		return c, err

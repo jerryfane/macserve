@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"sync"
 	"time"
 
@@ -121,8 +122,15 @@ func retry(ctx context.Context, clock *leaseClock, attempt func(context.Context)
 // queued chunks only until the job's context ends; Stage(Finalizing), the
 // first step of cleanup, is queued and returns at once. Chunks and stages
 // reported before the job's context ended are still delivered, in order,
-// after it; later ones fail at once, as before #174. close waits for that
-// delivery, at most maxDrain, before the job's end is judged.
+// after it; later chunks and Stage(Running) fail at once, as before #174.
+// Stage(Finalizing) is queued even after the job's context ended (its
+// heartbeat ended with it), ahead of the queued chunks and behind any
+// queued stage: whatever ended the job, and however much output waits, the
+// controller learns at once that the worker owns the job's cleanup and
+// gives it the finalizing window instead of expiring the lease (#180
+// review F5: a backlog overflow cancels the job while the controller still
+// answers). close waits for the delivery, at most maxDrain, before the
+// job's end is judged.
 type remoteSink struct {
 	client              *Client
 	ctx                 context.Context
@@ -151,8 +159,9 @@ type remoteSink struct {
 // gets one attempt, and maxDrain bounds them together.
 const maxDrain = protocol.HeartbeatTimeout
 
-// sinkItem is one queued chunk, or a stage whose result is reported on
-// result (buffered: the sender never waits for a caller).
+// sinkItem is one queued chunk, or a stage. A stage its caller waits for
+// (every one but Finalizing) reports its delivery on result, buffered: the
+// sender never waits for a caller.
 type sinkItem struct {
 	log    protocol.Log
 	stage  *protocol.Stage
@@ -192,18 +201,31 @@ func (s *remoteSink) Log(stream, text string) error {
 }
 
 func (s *remoteSink) Stage(state model.State) error {
-	result := make(chan error, 1)
 	s.mu.Lock()
+	if state == model.Finalizing {
+		defer s.mu.Unlock()
+		if s.closed {
+			return errSinkClosed
+		}
+		// Only Finalizing's delivery is not waited for: it has no result.
+		at := 0
+		for i, item := range s.queue {
+			if item.stage != nil {
+				at = i + 1
+			}
+		}
+		s.queue = slices.Insert(s.queue, at, sinkItem{stage: &protocol.Stage{State: state}})
+		s.wake.Signal()
+		return nil
+	}
 	if s.closed || s.ctx.Err() != nil {
 		s.mu.Unlock()
 		return cmp.Or(s.ctx.Err(), errSinkClosed)
 	}
+	result := make(chan error, 1)
 	s.queue = append(s.queue, sinkItem{stage: &protocol.Stage{State: state}, result: result})
 	s.wake.Signal()
 	s.mu.Unlock()
-	if state == model.Finalizing {
-		return nil
-	}
 	select {
 	case err := <-result:
 		return err
@@ -265,7 +287,9 @@ func (s *remoteSink) run() {
 			if err != nil {
 				s.cancel(err)
 			}
-			item.result <- err
+			if item.result != nil {
+				item.result <- err
+			}
 			continue
 		}
 		var err error

@@ -292,3 +292,21 @@ func TestClaimKeepsConcurrentMemoryBudgetsUnderCap(t *testing.T) {
 		t.Fatal("cap admitted a seventh default 32 GiB budget")
 	}
 }
+
+// Six parallel-testing UI test jobs at a measured budget (20480 MiB: two
+// clones of a job that peaked at 5209 MiB, with headroom) fit the cap beside
+// one another, and beside a default 32 GiB job as a seventh. The cap sums
+// budgets only, so the opt-in itself does not matter here.
+func TestConcurrentMemoryCapAdmitsSixParallelTestingJobs(t *testing.T) {
+	parallel := model.Job{Profile: model.Profile{Kind: model.SimulatorUITest, MemoryLimitMiB: 20480}}
+	var running []model.Job
+	for len(running) < 6 {
+		if !memoryAdmits(running, parallel) {
+			t.Fatalf("cap refused parallel-testing job %d", len(running)+1)
+		}
+		running = append(running, parallel)
+	}
+	if !memoryAdmits(running, model.Job{Profile: model.Profile{MemoryLimitMiB: 32768}}) {
+		t.Fatal("cap refused a default job beside six parallel-testing jobs")
+	}
+}

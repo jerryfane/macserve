@@ -28,6 +28,8 @@ type laneFake struct {
 	gates map[string]chan struct{}
 	// started is signalled when a job's recipe command starts.
 	started chan string
+	// refresh is the engine's census refresh (SetCensusRefresh).
+	refresh func(context.Context)
 }
 
 func newLaneFake() *laneFake {
@@ -84,7 +86,24 @@ func (f *laneFake) QuiesceJob(ctx context.Context, job string) error {
 	f.event("quiesce " + job)
 	return ctx.Err()
 }
-func (f *laneFake) Residue(context.Context) ([]string, error) {
+
+// SetCensusRefresh, Residue and LaneAdmission: like the native census, each
+// census runs the refresh before it judges.
+func (f *laneFake) SetCensusRefresh(refresh func(context.Context)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.refresh = refresh
+}
+func (f *laneFake) census(ctx context.Context) {
+	f.mu.Lock()
+	refresh := f.refresh
+	f.mu.Unlock()
+	if refresh != nil {
+		refresh(ctx)
+	}
+}
+func (f *laneFake) Residue(ctx context.Context) ([]string, error) {
+	f.census(ctx)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	residue := make([]string, f.residue)
@@ -95,6 +114,7 @@ func (f *laneFake) Residue(context.Context) ([]string, error) {
 }
 func (f *laneFake) LaneAdmission(ctx context.Context) error {
 	f.event("lane-admission")
+	f.census(ctx)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.residue != 0 {

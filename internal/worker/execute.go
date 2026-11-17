@@ -13,6 +13,8 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -496,7 +498,29 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 			return result, err
 		}
 	}
+	stopWatch := func() error { return nil }
+	if job.Profile.ParallelTestingWorkers() > 0 {
+		// The clones xcodebuild makes of the job's simulator are this job's
+		// (see beginTestClones and watchTestClones); stopWriters deletes
+		// those it leaves. The inventory runs first: the spacing gate is
+		// the last step before the run, so no work after it can let
+		// another lane's boot go unaccounted.
+		if err := e.beginTestClones(ctx, &x.manifest); err != nil {
+			return result, err
+		}
+		if err := e.spaceSimulatorBoots(ctx); err != nil {
+			return result, err
+		}
+		// The watch is x.manifest's only writer until stopWatch returns.
+		stopWatch = e.watchTestClones(ctx, &x.manifest)
+	}
 	returned = x.recipe(ctx, x.job.Profile.Run, x.runEnvironment()...)
+	if err := stopWatch(); err != nil {
+		// A discovery listing whose cleanup failed or that found
+		// contamination fails the job like one of its own commands
+		// (execution.invoke), with the same quarantine authority.
+		returned = errors.Join(returned, e.quarantine(err))
+	}
 	return result, returned
 }
 
@@ -700,21 +724,21 @@ func (x *execution) recipe(ctx context.Context, recipe model.Command, env ...str
 			if arg == "-allowProvisioningUpdates" || arg == "-allowProvisioningDeviceRegistration" || strings.HasPrefix(arg, "-download") {
 				return errors.New("Xcode profile or platform fetching is forbidden")
 			}
-			if arg == "-jobs" || arg == "-parallel-testing-enabled" || arg == "-maximum-concurrent-test-simulator-destinations" {
+			if slices.Contains(forcedXcodeOptions, arg) {
 				if i+1 == len(args) {
 					return errors.New("missing Xcode option value")
 				}
 				i++
 				continue
 			}
-			if strings.HasPrefix(arg, "-jobs=") || strings.HasPrefix(arg, "-parallel-testing-enabled=") || strings.HasPrefix(arg, "-maximum-concurrent-test-simulator-destinations=") || strings.HasPrefix(arg, "CODE_SIGNING_ALLOWED=") {
+			if name, _, ok := strings.Cut(arg, "="); ok && slices.Contains(forcedXcodeOptions, name) || strings.HasPrefix(arg, "CODE_SIGNING_ALLOWED=") {
 				continue
 			}
 			filtered = append(filtered, arg)
 		}
 		args = append(filtered, "-jobs", "4", "CODE_SIGNING_ALLOWED=NO")
 		if testing {
-			args = append(args, "-parallel-testing-enabled", "NO", "-maximum-concurrent-test-simulator-destinations", "1")
+			args = append(args, testingOptions(x.job.Profile.ParallelTestingWorkers())...)
 		}
 	}
 	work := path.Join("checkout", x.job.Profile.WorkDir)
@@ -732,6 +756,21 @@ func (x *execution) recipe(ctx context.Context, recipe model.Command, env ...str
 	x.result.ExitCode = &outcome.ExitCode
 	x.result.Signal = outcome.Signal
 	return err
+}
+
+// forcedXcodeOptions are the xcodebuild options (each with one value) the
+// worker sets itself; a recipe's own are dropped.
+var forcedXcodeOptions = []string{"-jobs", "-parallel-testing-enabled", "-parallel-testing-worker-count", "-maximum-parallel-testing-workers", "-maximum-concurrent-test-simulator-destinations"}
+
+// testingOptions are the options of a test job's xcodebuild commands: one
+// simulator destination at a time and no parallel testing, or, for a UI-test
+// template that opts in (model.Profile.ParallelTestingWorkers), parallel
+// testing on workers clones of the job's simulator (see beginTestClones).
+func testingOptions(workers int) []string {
+	if workers == 0 {
+		return []string{"-parallel-testing-enabled", "NO", "-maximum-concurrent-test-simulator-destinations", "1"}
+	}
+	return []string{"-parallel-testing-enabled", "YES", "-parallel-testing-worker-count", strconv.Itoa(workers), "-maximum-concurrent-test-simulator-destinations", "1"}
 }
 
 func noSymlinkPath(root *os.Root, name string) error {

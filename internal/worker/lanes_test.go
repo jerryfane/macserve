@@ -339,6 +339,40 @@ func TestLaneAdopterClaimsUncreatedDevices(t *testing.T) {
 	}
 }
 
+// A parallel-testing clone of a job's simulator lives in XCTest's device set
+// (~/Library/Developer/XCTestDevices/<UDID>/): once the job records it, the
+// clone's launchd_sim, and so its children, are the job's. The one adopting
+// job (a concurrent script) never claims a clone no job recorded.
+func TestLaneClaimsRecordedTestClones(t *testing.T) {
+	const broker, uid = 100, 600
+	now := time.Now().Unix()
+	clone, unrecorded := "C1000000-0000-0000-0000-000000000001", "C3000000-0000-0000-0000-000000000003"
+	sim := func(udid string) processDescription {
+		return processDescription{executable: "launchd_sim", args: "launchd_sim /Users/u/Library/Developer/XCTestDevices/" + udid + "/data/var/run/launchd_bootstrap.plist"}
+	}
+	exe := map[int]processDescription{400: sim(clone), 401: {executable: "/Users/u/Library/Developer/XCTestDevices/" + clone + "/data/Containers/Bundle/Application/X/Herdr.app/Herdr"}, 500: sim(unrecorded)}
+	key := func(pid int) processInstance { return processInstance{pid, strconv.FormatInt(now, 10) + ":0"} }
+	tracker := trackerFor(broker, uid, exe)
+	tracker.begin("ui", time.Unix(now-100, 0))
+	tracker.begin("script", time.Unix(now-100, 0))
+	tracker.adoptDevices("script", time.Unix(now-100, 0))
+	tracker.addDevice("ui", clone)
+	samples := []processSample{laneSample(400, 1, uid, now), laneSample(401, 1, uid, now), laneSample(500, 1, uid, now)}
+	tracker.update(samples)
+	for _, pid := range []int{400, 401} {
+		if got := tracker.labels[key(pid)]; got != "ui" {
+			t.Fatalf("clone process %d labelled %q, want ui", pid, got)
+		}
+	}
+	if label, ok := tracker.labels[key(500)]; ok {
+		t.Fatalf("unrecorded clone labelled %q", label)
+	}
+	// The clone's processes are charged to the job's memory budget.
+	if mine, total, err := tracker.footprint(samples, "ui"); err != nil || mine != 2048 || total != 3072 {
+		t.Fatalf("footprint: job %d KiB of %d KiB, %v", mine, total, err)
+	}
+}
+
 // QuiesceJob signals only the job's own labelled processes: never its
 // sibling's, a shared service, the baseline or an unattributed process.
 // A labelled survivor is contamination.

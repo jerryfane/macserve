@@ -66,6 +66,12 @@ type Engine struct {
 	drain       string
 	idlePending bool
 	readyAt     time.Time
+	// bootsFrom is when the latest simulator boot or parallel-testing test
+	// run start of any lane happened (spaceSimulatorBoots).
+	bootsFrom time.Time
+	// cloneWatches are the running parallel-testing jobs' clone watches
+	// (watchTestClones), by job ID.
+	cloneWatches map[string]*cloneWatch
 	// deviceMu serializes simulator creation and the verification of an
 	// interrupted creation across lanes, so at most one creation is ever
 	// unrecorded.
@@ -132,6 +138,14 @@ type manifest struct {
 	ScriptDevicesPending bool     `json:"script_devices_pending,omitempty"`
 	ScriptDevicesBefore  []string `json:"script_devices_before,omitempty"`
 	ScriptDevices        []string `json:"script_devices,omitempty"`
+	// A parallel-testing UI test job's test run records the inventory of
+	// XCTest's device set it started from (TestClonesPending,
+	// TestClonesBefore); its cleanup adopts every device added since that is
+	// named as a clone of its simulator as TestClones, and then deletes those
+	// xcodebuild left (see beginTestClones).
+	TestClonesPending bool     `json:"test_clones_pending,omitempty"`
+	TestClonesBefore  []string `json:"test_clones_before,omitempty"`
+	TestClones        []string `json:"test_clones,omitempty"`
 }
 
 // Decode old resource records without retaining their quarantine authority.
@@ -258,7 +272,13 @@ func New(options Options) (*Engine, error) {
 		exports.Close()
 		return fail(err)
 	}
-	return &Engine{options: options, root: root, exports: exports, workspaces: workspaces, lock: lock, recording: map[string]*Result{}, verified: map[string]string{}, running: map[string]*laneEntry{}, changed: make(chan struct{}), mounts: mounttable.Read, pause: contextPause}, nil
+	e := &Engine{options: options, root: root, exports: exports, workspaces: workspaces, lock: lock, recording: map[string]*Result{}, verified: map[string]string{}, running: map[string]*laneEntry{}, changed: make(chan struct{}), mounts: mounttable.Read, pause: contextPause}
+	if lanes, ok := options.Runner.(laneRunner); ok {
+		// Every lane census first has the running parallel-testing jobs
+		// claim their clones (refreshTestClones).
+		lanes.SetCensusRefresh(e.refreshTestClones)
+	}
+	return e, nil
 }
 
 var accountName = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,254}$`)
@@ -444,7 +464,8 @@ func (e *Engine) recoverOwned(ctx context.Context, reset bool) error {
 			failures = append(failures, err)
 			continue
 		}
-		if !identifier.MatchString(m.JobID) || name != m.JobID+".json" || !filepath.IsAbs(m.DeveloperDir) || (m.DeviceUDID != "" && !udidPattern.MatchString(m.DeviceUDID)) || slices.ContainsFunc(m.ScriptDevices, func(id string) bool { return !udidPattern.MatchString(id) }) {
+		invalid := func(id string) bool { return !udidPattern.MatchString(id) }
+		if !identifier.MatchString(m.JobID) || name != m.JobID+".json" || !filepath.IsAbs(m.DeveloperDir) || (m.DeviceUDID != "" && invalid(m.DeviceUDID)) || slices.ContainsFunc(m.ScriptDevices, invalid) || slices.ContainsFunc(m.TestClones, invalid) {
 			failures = append(failures, ErrRecovery)
 			continue
 		}
