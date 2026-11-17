@@ -92,7 +92,10 @@ type PullRequest struct {
 	BaseRef          string
 	// BaseSHA is the base branch's commit the pull request currently
 	// targets; "" in pull lists stored before it was recorded.
-	BaseSHA   string
+	BaseSHA string
+	// Labels are the names of the pull request's labels; nil in pull lists
+	// stored before they were recorded.
+	Labels    []string
 	UpdatedAt time.Time
 }
 

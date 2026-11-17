@@ -86,7 +86,7 @@ func TestMatrixSkipPaths(t *testing.T) {
 				t.Fatalf("runs %v checks %v", runs, checks)
 			}
 			for _, entry := range policy.Matrix {
-				name := githubwire.CheckName(entry.Profile, entry.Shard)
+				name := githubwire.CheckName(entry.Profile, entry.Tier, entry.Shard)
 				run, check := runs[name], checks[name]
 				if !tc.skip {
 					if run.JobID == "" || run.Skipped != "" || check.Status != "queued" {
@@ -132,7 +132,7 @@ func TestMatrixSkipPathsReevaluatesEachHead(t *testing.T) {
 	f.poll(t)
 	runs := f.runsByCheck(t, headSHA('2'))
 	for _, entry := range policy.Matrix {
-		if run := runs[githubwire.CheckName(entry.Profile, entry.Shard)]; run.JobID == "" || run.Skipped != "" {
+		if run := runs[githubwire.CheckName(entry.Profile, entry.Tier, entry.Shard)]; run.JobID == "" || run.Skipped != "" {
 			t.Fatalf("code head %s: %+v", entry.Shard, run)
 		}
 	}

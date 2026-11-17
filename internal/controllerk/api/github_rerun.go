@@ -7,7 +7,6 @@ import (
 
 	"github.com/jerryfane/macserve/internal/controllerconfig"
 	"github.com/jerryfane/macserve/internal/controllerk/store"
-	"github.com/jerryfane/macserve/internal/githubwire"
 )
 
 // ErrNoGitHubPull refuses a GitHub rerun on a controller without GitHub pull
@@ -50,7 +49,7 @@ func (h *handler) githubRerun(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusAccepted
 	}
 	reply := map[string]any{"rerun": started, "run_key": run.Key, "repository_id": run.RepositoryID, "repo": run.Repository, "sha": run.SHA,
-		"profile": run.Profile, "check_name": githubwire.CheckName(run.Profile, run.Shard), "job_id": run.JobID, "attempt_id": run.AttemptID}
+		"profile": run.Profile, "check_name": h.GitHubCheckName(run), "job_id": run.JobID, "attempt_id": run.AttemptID}
 	if run.Shard != "" {
 		reply["shard"] = run.Shard
 	}

@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -599,5 +600,19 @@ func TestCommentPagesRejectNonForwardContinuations(t *testing.T) {
 				t.Fatalf("unsafe continuation accepted: %+v %v", comments, err)
 			}
 		})
+	}
+}
+
+// A pull list decodes each pull request's label names, which the poller's
+// full-tier label trigger reads.
+func TestPullListDecodesLabels(t *testing.T) {
+	c, _ := tokenClient(t, func(w http.ResponseWriter, r *http.Request) {
+		labelled := pullJSON(7)
+		labelled["labels"] = []any{map[string]any{"id": 1, "name": "ready-to-merge", "color": "0e8a16"}, map[string]any{"id": 2, "name": "ui"}}
+		writeJSON(t, w, []any{labelled, pullJSON(8)})
+	})
+	items, _, _, err := c.ListPulls(context.Background(), testRepo, "")
+	if err != nil || len(items) != 2 || !slices.Equal(items[0].Labels, []string{"ready-to-merge", "ui"}) || len(items[1].Labels) != 0 {
+		t.Fatalf("labels = %+v %v", items, err)
 	}
 }

@@ -46,7 +46,7 @@ func rerunHandler(t *testing.T, x *githubpull.RerunFixture, pullMode bool) http.
 		},
 		Receipt: func(context.Context, string) (json.RawMessage, error) { return nil, controller.ErrNotReady }}
 	if pullMode {
-		options.GitHubRerun = x.Poller.Rerun
+		options.GitHubRerun, options.GitHubCheckName = x.Poller.Rerun, x.Poller.CheckName
 	}
 	h, err := api.New(options)
 	if err != nil {

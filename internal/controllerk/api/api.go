@@ -46,7 +46,11 @@ type Options struct {
 	// run (githubpull.Poller.Rerun) for POST /v1/admin/github/rerun; nil
 	// refuses it.
 	GitHubRerun func(ctx context.Context, repositoryID int64, repository, sha, profile, shard string, now time.Time) (store.GitHubRun, bool, error)
-	Now         func() time.Time
+	// GitHubCheckName is a pull-mode run's check name
+	// (githubpull.Poller.CheckName), which a tiered matrix entry takes from
+	// its policy; required with GitHubRerun.
+	GitHubCheckName func(store.GitHubRun) string
+	Now             func() time.Time
 	// ServiceVersion is the controller's build version, reported as
 	// capabilities' service_version: the release tag for a release build.
 	ServiceVersion string
@@ -89,6 +93,9 @@ func (e *HeadMismatchError) Error() string {
 func New(o Options) (http.Handler, error) {
 	if o.Store == nil || o.Profiles == nil || o.Status == nil || o.Artifact == nil || o.Receipt == nil {
 		return nil, errors.New("API dependencies are required")
+	}
+	if (o.GitHubRerun == nil) != (o.GitHubCheckName == nil) {
+		return nil, errors.New("API GitHubRerun and GitHubCheckName are set together")
 	}
 	if o.Now == nil {
 		o.Now = time.Now
