@@ -287,13 +287,13 @@ func inRepository(repository string, err error) []error {
 	return failures
 }
 
-// atHead attributes a failure to one run of pull's head; shard "" with
-// profile "" for the head itself.
-func atHead(pull githubapi.PullRequest, profile, shard string, err error) error {
-	if profile == "" {
+// atHead attributes a failure to one run of pull's head: entry's profile and,
+// for a matrix entry, its tier and shard; the zero entry for the head itself.
+func atHead(pull githubapi.PullRequest, entry githubwire.MatrixEntry, err error) error {
+	if entry.Profile == "" {
 		return fmt.Errorf("pull=%d head=%s: %w", pull.Number, pull.HeadSHA, err)
 	}
-	return fmt.Errorf("pull=%d head=%s check=%s: %w", pull.Number, pull.HeadSHA, githubwire.CheckName(profile, shard), err)
+	return fmt.Errorf("pull=%d head=%s check=%s: %w", pull.Number, pull.HeadSHA, githubwire.CheckName(entry.Profile, entry.Tier, entry.Shard), err)
 }
 
 // Poll serializes this handle while SQLite serializes admissions/publications
@@ -581,6 +581,11 @@ func (p *Poller) admission(policy githubwire.Policy, pull githubapi.PullRequest,
 		// a job admitted with another timeout (before matrix runs got the
 		// template's maximum) is superseded and the run admitted afresh.
 		fields = append(fields, "matrix", shard, entry.Simulator.Runtime, entry.Simulator.RuntimeBuild, entry.Simulator.DeviceType, admission.Request.TimeoutSeconds)
+		if entry.Tier != "" {
+			// A tiered run binds its tier, which names its check: an entry
+			// moved to the other tier is another run, never a renamed one.
+			fields = append(fields, "tier", entry.Tier)
+		}
 	}
 	data, err := json.Marshal(fields)
 	if err != nil {
@@ -625,25 +630,25 @@ func (p *Poller) pollOwnerRepository(ctx context.Context, policy githubwire.Poli
 		}
 		allowed := eligible(policy, pull)
 		if err = p.options.Store.ObserveGitHubHead(ctx, policy.RepositoryID, pull.Number, pull.HeadSHA, allowed, now); err != nil {
-			return atHead(pull, "", "", err)
+			return atHead(pull, githubwire.MatrixEntry{}, err)
 		}
 		if !allowed {
 			continue
 		}
 		profile, err := p.selectProfile(ctx, policy, pull.HeadSHA, observed)
 		if err != nil {
-			return atHead(pull, "", "", err)
+			return atHead(pull, githubwire.MatrixEntry{}, err)
 		}
 		if profile == "" {
 			continue
 		}
 		input, err := p.admission(policy, pull, profile, "")
 		if err != nil {
-			return atHead(pull, profile, "", err)
+			return atHead(pull, githubwire.MatrixEntry{Profile: profile}, err)
 		}
 		currentKeys[input.Run.Key] = true
 		if _, err = p.options.Store.AdmitGitHub(ctx, input, now); err != nil {
-			failures = append(failures, atHead(pull, profile, "", err))
+			failures = append(failures, atHead(pull, githubwire.MatrixEntry{Profile: profile}, err))
 		}
 	}
 	more, err := p.maintain(ctx, policy, reconcile, currentKeys, now)
@@ -765,7 +770,7 @@ func (p *Poller) pollRepository(ctx context.Context, policy githubwire.Policy, o
 			continue
 		}
 		if err = p.options.Store.ObserveGitHubHead(ctx, policy.RepositoryID, pull.Number, pull.HeadSHA, allowed, now); err != nil {
-			return atHead(pull, "", "", err)
+			return atHead(pull, githubwire.MatrixEntry{}, err)
 		}
 		if !allowed && eligibleHeads[pull.HeadSHA] {
 			continue
@@ -773,15 +778,15 @@ func (p *Poller) pollRepository(ctx context.Context, policy githubwire.Policy, o
 		for _, run := range policyRuns(policy) {
 			input, err := p.admission(policy, pull, run.Profile, run.Shard)
 			if err != nil {
-				return atHead(pull, run.Profile, run.Shard, err)
+				return atHead(pull, run, err)
 			}
 			if run.Shard != "" && allowed {
-				failure, err := p.admitMatrix(ctx, policy, pull, input, observed, currentKeys, now)
+				failure, err := p.admitMatrix(ctx, policy, pull, run.Tier, input, observed, currentKeys, now)
 				if err != nil {
-					return atHead(pull, run.Profile, run.Shard, err)
+					return atHead(pull, run, err)
 				}
 				if failure != nil {
-					failures = append(failures, atHead(pull, run.Profile, run.Shard, failure))
+					failures = append(failures, atHead(pull, run, failure))
 				}
 				continue
 			}
@@ -792,7 +797,7 @@ func (p *Poller) pollRepository(ctx context.Context, policy githubwire.Policy, o
 				err = p.options.Store.BlockGitHub(ctx, input.Run, "PR head does not satisfy repository admission policy", now)
 			}
 			if err != nil {
-				failures = append(failures, atHead(pull, run.Profile, run.Shard, err))
+				failures = append(failures, atHead(pull, run, err))
 			}
 		}
 	}
@@ -878,9 +883,11 @@ func policyRuns(policy githubwire.Policy) []githubwire.MatrixEntry {
 	return append(runs, policy.Matrix...)
 }
 
-// admitMatrix admits one matrix entry's run at an eligible head. With
-// matrix_skip_drafts a draft head admits none, but keeps a run it already
-// has current without starting anything. A head whose .macserve.json does not
+// admitMatrix admits one matrix entry's run, of tier, at an eligible head.
+// When matrix_skip_drafts holds a draft head back from the entry
+// (Policy.HoldsBack: an untiered or full entry, unless the head carries the
+// full-tier label) it admits nothing, but keeps a run it already has current
+// without starting anything. A head whose .macserve.json does not
 // declare the entry's shard for the template's kind, or from which the
 // worker could not derive the entry's recipe, gets the run blocked: an
 // action_required check and no job. A head matrix_skip_paths skips gets the
@@ -888,9 +895,9 @@ func policyRuns(policy githubwire.Policy) []githubwire.MatrixEntry {
 // (admitted before, or by an owner rerun), which it keeps. failure is a store
 // refusal the poll reports and continues past; err ends the repository's
 // poll.
-func (p *Poller) admitMatrix(ctx context.Context, policy githubwire.Policy, pull githubapi.PullRequest, input store.GitHubAdmission, observed map[string]bool, currentKeys map[string]bool, now time.Time) (failure, err error) {
+func (p *Poller) admitMatrix(ctx context.Context, policy githubwire.Policy, pull githubapi.PullRequest, tier string, input store.GitHubAdmission, observed map[string]bool, currentKeys map[string]bool, now time.Time) (failure, err error) {
 	key := input.Run.Key
-	if policy.MatrixSkipDrafts && pull.Draft {
+	if policy.HoldsBack(tier, pull.Draft, pull.Labels) {
 		existing, err := p.options.Store.GitHubRun(ctx, key)
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, nil
@@ -1020,9 +1027,9 @@ func (p *Poller) acceptComment(ctx context.Context, policy githubwire.Policy, co
 // policy matrix entry's run, shard, with the comment mode=rerun rules: the
 // head must still be an eligible open pull request head whose current
 // admission is that run, the run's latest attempt must be terminal, and
-// requested reruns are bounded at two per run in any hour. A matrix run of a
-// policy with matrix_skip_drafts gets no new attempt while its pull request
-// is a draft (its current attempt is left alone). A skipped matrix run
+// requested reruns are bounded at two per run in any hour. A matrix run that
+// matrix_skip_drafts holds back at its draft head (Policy.HoldsBack) gets no
+// new attempt (its current attempt is left alone). A skipped matrix run
 // (matrix_skip_paths) starts its first attempt. The new attempt publishes to
 // the run's check name. It returns the run and whether a new attempt started
 // (false: the latest attempt is still queued or active). An unknown run is
@@ -1051,7 +1058,7 @@ func (p *Poller) Rerun(ctx context.Context, repositoryID int64, repository, sha,
 			if err != nil {
 				return store.GitHubRun{}, false, err
 			}
-			if !eligible(policy, pull) || pull.Number != number || pull.HeadSHA != run.SHA || run.Shard != "" && policy.MatrixSkipDrafts && pull.Draft {
+			if !eligible(policy, pull) || pull.Number != number || pull.HeadSHA != run.SHA || run.Shard != "" && policy.HoldsBack(policy.Tier(run.Profile, run.Shard), pull.Draft, pull.Labels) {
 				continue
 			}
 			input, err := p.admission(policy, pull, run.Profile, run.Shard)

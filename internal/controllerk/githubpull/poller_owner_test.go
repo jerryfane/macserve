@@ -102,7 +102,11 @@ func (g *orgGitHub) serve(w http.ResponseWriter, r *http.Request) {
 		rest = parts[2]
 	}
 	pullJSON := func(p githubapi.PullRequest) any {
-		return map[string]any{"number": p.Number, "state": p.State, "draft": p.Draft, "head": map[string]any{"sha": p.HeadSHA, "repo": map[string]any{"id": p.HeadRepositoryID}}, "user": map[string]any{"id": p.AuthorID}, "base": map[string]any{"ref": p.BaseRef, "sha": p.BaseSHA}, "updated_at": g.now.Format(time.RFC3339)}
+		labels := []any{}
+		for _, name := range p.Labels {
+			labels = append(labels, map[string]any{"name": name})
+		}
+		return map[string]any{"number": p.Number, "state": p.State, "draft": p.Draft, "head": map[string]any{"sha": p.HeadSHA, "repo": map[string]any{"id": p.HeadRepositoryID}}, "user": map[string]any{"id": p.AuthorID}, "base": map[string]any{"ref": p.BaseRef, "sha": p.BaseSHA}, "labels": labels, "updated_at": g.now.Format(time.RFC3339)}
 	}
 	checkJSON := func(c githubapi.Check) any {
 		return map[string]any{"id": c.ID, "name": c.Name, "head_sha": c.HeadSHA, "external_id": c.ExternalID, "status": c.Status, "conclusion": c.Conclusion, "app": map[string]any{"id": c.AppID}, "output": c.Output}

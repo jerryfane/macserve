@@ -41,9 +41,13 @@ import (
 // each entry is one job per eligible head, of one of Profiles with a shard of
 // the head's .macserve.json on one of the template's simulators. A profile
 // that is a simulator test or script template runs only through its matrix
-// entries. With MatrixSkipDrafts a draft pull request's head admits no matrix
-// entry; marking it ready admits them, and converting it back to a draft
-// ends none. With MatrixSkipPaths a head whose every changed file (against
+// entries. Matrix entries are untiered or each fast or full (Tier). With
+// MatrixSkipDrafts a draft pull request's head admits no untiered or full
+// matrix entry (fast ones run on drafts too), unless it carries the
+// MatrixFullLabel, which admits the full entries; marking it ready admits
+// them, and converting it back to a draft or removing the label ends none.
+// A new head is admitted afresh, so it has no full check until a trigger
+// holds for it. With MatrixSkipPaths a head whose every changed file (against
 // its base, as GitHub compares them) was added or modified and is one the
 // paths match (SkipPaths.Match) runs no matrix entry: each gets a neutral
 // check that says so. Any doubt (a failed or possibly truncated comparison,
@@ -60,6 +64,7 @@ type Policy struct {
 	Profiles         []string      `json:"profiles"`
 	Matrix           []MatrixEntry `json:"matrix,omitempty"`
 	MatrixSkipDrafts bool          `json:"matrix_skip_drafts,omitempty"`
+	MatrixFullLabel  string        `json:"matrix_full_label,omitempty"`
 	MatrixSkipPaths  *SkipPaths    `json:"matrix_skip_paths,omitempty"`
 	PolicyRevision   int           `json:"policy_revision"`
 	ActionsBotID     int64         `json:"actions_bot_id"`
@@ -95,19 +100,61 @@ func (s SkipPaths) Match(name string) (string, bool) {
 // profile's kind (ui_test, unit_test or script) and a simulator the template
 // pins.
 type MatrixEntry struct {
-	Profile   string          `json:"profile"`
-	Shard     string          `json:"shard"`
+	Profile string `json:"profile"`
+	Shard   string `json:"shard"`
+	// Tier is TierFast, TierFull or "" (an untiered entry, named as before
+	// tiers existed). A policy's entries are all tiered or all untiered.
+	Tier      string          `json:"tier,omitempty"`
 	Simulator model.Simulator `json:"simulator"`
 }
 
+// Matrix entry tiers. With matrix_skip_drafts a fast entry runs on draft
+// heads too; a full entry runs on a draft head only while it carries the
+// policy's matrix_full_label.
+const (
+	TierFast = "fast"
+	TierFull = "full"
+)
+
 // CheckName is the GitHub check run name of a run of profile and, for a
-// matrix entry, shard: mac-evidence/<profile>[/<shard>]. Every publisher,
-// reader and API report of a check name uses it.
-func CheckName(profile, shard string) string {
+// matrix entry, its tier and shard: mac-evidence/<tier>/<shard> for a tiered
+// entry, mac-evidence/<profile>/<shard> for an untiered one and
+// mac-evidence/<profile> for a run that is not a matrix entry. Every
+// publisher, reader and API report of a check name uses it.
+func CheckName(profile, tier, shard string) string {
 	if shard == "" {
 		return "mac-evidence/" + profile
 	}
+	if tier != "" {
+		return "mac-evidence/" + tier + "/" + shard
+	}
 	return "mac-evidence/" + profile + "/" + shard
+}
+
+// Tier is the tier of the policy's matrix entry for profile and shard, ""
+// for an untiered entry, a shard "" run or no such entry.
+func (p Policy) Tier(profile, shard string) string {
+	for _, entry := range p.Matrix {
+		if entry.Profile == profile && entry.Shard == shard {
+			return entry.Tier
+		}
+	}
+	return ""
+}
+
+// HoldsBack reports whether matrix_skip_drafts keeps a head of a pull request
+// that is draft and carries labels from admitting a matrix entry of tier: a
+// draft head admits fast entries, and full entries only with the policy's
+// matrix_full_label (compared as GitHub does, case-insensitively). The label
+// only adds work; it never bears on what a check concludes.
+func (p Policy) HoldsBack(tier string, draft bool, labels []string) bool {
+	if !p.MatrixSkipDrafts || !draft || tier == TierFast {
+		return false
+	}
+	if tier == TierFull && p.MatrixFullLabel != "" {
+		return !slices.ContainsFunc(labels, func(label string) bool { return strings.EqualFold(label, p.MatrixFullLabel) })
+	}
+	return true
 }
 
 var shardPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
@@ -120,20 +167,28 @@ const (
 	maxSkipPathGlobstars = 2
 )
 
-// CheckMatrix refuses a matrix (or matrix_skip_drafts or matrix_skip_paths)
-// on an owner-form policy, either option without a matrix, a matrix entry
-// that is not one of the policy's profiles, has an invalid shard name or an
-// incomplete simulator, or repeats a profile and shard, and skip paths
-// without an include glob, with more than MaxSkipPaths globs in a list, or
-// with an invalid (ValidSkipPath) or repeated glob. Whether the profile is a
-// simulator template pinning that simulator is checked against the profile
-// registry when the controller starts.
+// maxLabelRunes is GitHub's limit on a label name.
+const maxLabelRunes = 50
+
+// CheckMatrix refuses a matrix (or matrix_skip_drafts, matrix_skip_paths or
+// matrix_full_label) on an owner-form policy, any option without a matrix, a
+// matrix entry that is not one of the policy's profiles, has an invalid shard
+// name, an incomplete simulator or a tier other than fast or full, or repeats
+// a profile and shard, tiered and untiered entries in one matrix, two entries
+// with one tier and shard (one check name), a matrix_full_label without
+// matrix_skip_drafts and a full entry or that is not a GitHub label name, and
+// skip paths without an include glob, with more than MaxSkipPaths globs in a
+// list, or with an invalid (ValidSkipPath) or repeated glob. Whether the
+// profile is a simulator template pinning that simulator is checked against
+// the profile registry when the controller starts.
 func (p Policy) CheckMatrix() error {
-	options := p.MatrixSkipDrafts || p.MatrixSkipPaths != nil
+	options := p.MatrixSkipDrafts || p.MatrixSkipPaths != nil || p.MatrixFullLabel != ""
 	if p.OwnerScoped() && (len(p.Matrix) != 0 || options) || options && len(p.Matrix) == 0 {
-		return errors.New("a GitHub policy matrix (and matrix_skip_drafts and matrix_skip_paths) requires the repository form and at least one entry")
+		return errors.New("a GitHub policy matrix (and matrix_skip_drafts, matrix_skip_paths and matrix_full_label) requires the repository form and at least one entry")
 	}
 	seen := make(map[[2]string]bool, len(p.Matrix))
+	names := make(map[string]bool, len(p.Matrix))
+	full := false
 	for _, entry := range p.Matrix {
 		key := [2]string{entry.Profile, entry.Shard}
 		sim := entry.Simulator
@@ -141,6 +196,26 @@ func (p Policy) CheckMatrix() error {
 			return errors.New("each GitHub policy matrix entry names one of its profiles, a unique shard of that profile and a simulator runtime, runtime build and device type")
 		}
 		seen[key] = true
+		if entry.Tier != "" && entry.Tier != TierFast && entry.Tier != TierFull {
+			return fmt.Errorf("GitHub policy matrix entry tier %q is not %q or %q", entry.Tier, TierFast, TierFull)
+		}
+		if (entry.Tier == "") != (p.Matrix[0].Tier == "") {
+			return errors.New("GitHub policy matrix entries are all tiered or all untiered")
+		}
+		name := CheckName(entry.Profile, entry.Tier, entry.Shard)
+		if names[name] {
+			return fmt.Errorf("GitHub policy matrix check name %s is repeated: tiered entries need a unique tier and shard", name)
+		}
+		names[name] = true
+		full = full || entry.Tier == TierFull
+	}
+	if label := p.MatrixFullLabel; label != "" {
+		if !p.MatrixSkipDrafts || !full {
+			return errors.New("GitHub policy matrix_full_label requires matrix_skip_drafts and a full-tier matrix entry")
+		}
+		if !utf8.ValidString(label) || utf8.RuneCountInString(label) > maxLabelRunes || strings.TrimSpace(label) != label || strings.ContainsFunc(label, unicode.IsControl) {
+			return fmt.Errorf("GitHub policy matrix_full_label %q is not a GitHub label name", label)
+		}
 	}
 	if s := p.MatrixSkipPaths; s != nil {
 		if len(s.Include) == 0 || len(s.Include) > MaxSkipPaths || len(s.Exclude) > MaxSkipPaths {

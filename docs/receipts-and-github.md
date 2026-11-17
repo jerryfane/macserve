@@ -93,7 +93,8 @@ refused for queue space records nothing. The controller logs every failure of a 
 (`GitHub poll: GitHub repository <owner/name>: pull=<n> head=<sha> check=<name>: queue full` for a waiting run on
 each poll); a failure that ends a repository's poll names the head it stopped at.
 
-Require `mac-evidence/<profile>` (and `mac-evidence/<profile>/<shard>` for each [matrix](#policy-matrices) entry)
+Require `mac-evidence/<profile>` (and `mac-evidence/<profile>/<shard>` for each [matrix](#policy-matrices) entry,
+or each `mac-evidence/full/<shard>` of a [tiered](#fast-and-full-tiers) matrix)
 **from the configured App**. Checks target the PR head, never the synthetic
 merge commit. Only the current attempt may update the stable check; publication retry/restart reconciles
 `external_id=job-id` rather than rerunning work. Failure, timeout, cancellation, missing evidence and policy
@@ -243,7 +244,7 @@ Each entry names a `profile` of the policy's `profiles`, a `shard` (`^[a-z0-9][a
 appears once. Every simulator test or script template in `profiles` needs at least one entry and runs only through
 its entries; build profiles in `profiles` keep running exactly as before, one job per head. A policy that breaks
 these rules is refused at configuration load (shape) or controller start (templates and simulators). Owner-form
-policies refuse `matrix`, `matrix_skip_drafts` and `matrix_skip_paths`.
+policies refuse `matrix`, `matrix_skip_drafts`, `matrix_full_label` and `matrix_skip_paths`.
 
 Checks: a matrix entry publishes `mac-evidence/<profile>/<shard>` (for example
 `mac-evidence/org-ios-sim-uitest-v1/chat`); other profiles keep `mac-evidence/<profile>`. Require every one of them
@@ -301,6 +302,59 @@ runs there, so list the build template (e.g. `org-ios-sim-build-v1`) in the repo
 (`"themartianapp/herdrup": 1318951363`). Its runs are new runs (new run keys), so checks the owner policy already
 published for open heads stop updating, and each head's build check is published again, under the same name, by
 the repository policy's run.
+
+#### Fast and full tiers
+
+A matrix entry may name a `tier`, `"fast"` or `"full"`. Either every entry of a policy names one or none does: a
+policy without tiers behaves, and names its checks, exactly as above. A tiered entry publishes
+`mac-evidence/<tier>/<shard>` instead of `mac-evidence/<profile>/<shard>` (build profiles keep
+`mac-evidence/<profile>`), so two tiered entries with the same tier and shard are refused at configuration load.
+The tier is part of the entry's run: moving an entry to the other tier admits a new run under the new name.
+
+```json
+"policy_revision": 2, "matrix_skip_drafts": true, "matrix_full_label": "ready-to-merge",
+"matrix": [
+ {"profile": "org-ios-sim-uitest-v1", "shard": "smoke", "tier": "fast", "simulator": {…iPhone-18-Pro}},
+ {"profile": "org-ios-sim-uitest-v1", "shard": "iphone-terminal", "tier": "full", "simulator": {…iPhone-18-Pro}},
+ {"profile": "org-ios-sim-uitest-v1", "shard": "iphone-app", "tier": "full", "simulator": {…iPhone-18-Pro}},
+ {"profile": "org-ios-sim-uitest-v1", "shard": "ipad", "tier": "full", "simulator": {…iPad-Pro-13-M5}},
+ {"profile": "org-ios-sim-script-v1", "shard": "ipad-script", "tier": "full", "simulator": {…iPhone-18-Pro}}]
+```
+
+With `matrix_skip_drafts`, fast entries run on draft heads too; full entries (like untiered ones) are held back
+while the pull request is a draft. `matrix_full_label` (optional; requires `matrix_skip_drafts` and a full
+entry; a GitHub label name of at most 50 characters) is a second trigger: a draft whose labels include it (compared
+case-insensitively) admits the full entries on the next poll. The full tier is admitted when the head is eligible
+and the pull request is ready for review or carries the label. The label only adds work: publication, receipts
+and the keyholder never read it, and a check's conclusion still comes only from a verified signed receipt.
+Removing the label, or converting the pull request back to a draft, cancels nothing: full runs the head already
+has stay current and finish, and no new full attempt starts (the owner rerun API answers 409 `not_eligible`)
+until a trigger holds again. Anyone who can label the pull request (triage access or higher, or an Actions token
+or App with issue or pull request write access) can start the full tier; the cost stays bounded by the per-principal
+limit on unfinished jobs.
+
+Checks attach to the exact head. A new push gets new runs: fast entries are admitted at once, but the new head has
+**no** full check until it is ready for review or labelled, and a missing required check blocks the merge, so the
+gate fails closed.
+
+Branch protection for herdrup's tiered policy (GitHub requires exact names, no wildcards), each pinned to the
+configured App:
+
+- `mac-evidence/org-ios-sim-build-v1`
+- `mac-evidence/full/iphone-terminal`
+- `mac-evidence/full/iphone-app`
+- `mac-evidence/full/ipad`
+- `mac-evidence/full/ipad-script`
+
+plus the repository's other required checks. Do not require `mac-evidence/fast/*`: it is a fast signal on drafts,
+not the gate. Enable "Require branches to be up to date before merging" (`strict: true`): without it the gated head
+need not contain the current base branch, so the full matrix does not test the merged tree. Open pull requests as
+drafts: a pull request that is ready for review runs the full tier on every push.
+
+Migration: switching an untiered policy to tiers renames its matrix checks (the old
+`mac-evidence/<profile>/<shard>` names stop updating on open heads); bump `policy_revision`, activate with an empty
+queue, then add the four `mac-evidence/full/*` names to branch protection. Open drafts then stay unmergeable until
+they are ready or labelled, which is intended.
 
 ## Signer receipts
 

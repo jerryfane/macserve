@@ -139,7 +139,7 @@ func serveController(parent context.Context, config controllerconfig.Config) err
 	}
 	// Pull mode's owner rerun (POST /v1/admin/github/rerun).
 	if integrations.poller != nil {
-		apiOptions.GitHubRerun = integrations.poller.Rerun
+		apiOptions.GitHubRerun, apiOptions.GitHubCheckName = integrations.poller.Rerun, integrations.poller.CheckName
 	}
 	handler, err := api.New(apiOptions)
 	if err != nil {

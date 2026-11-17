@@ -25,6 +25,9 @@ type pullWire struct {
 		Ref string `json:"ref"`
 		SHA string `json:"sha"`
 	} `json:"base"`
+	Labels []struct {
+		Name string `json:"name"`
+	} `json:"labels"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
@@ -33,7 +36,11 @@ func (p pullWire) value() PullRequest {
 	if p.Head.Repo != nil {
 		repoID = p.Head.Repo.ID
 	}
-	return PullRequest{Number: p.Number, State: p.State, Draft: p.Draft, HeadSHA: p.Head.SHA, HeadRepositoryID: repoID, AuthorID: p.User.ID, BaseRef: p.Base.Ref, BaseSHA: p.Base.SHA, UpdatedAt: p.UpdatedAt}
+	var labels []string
+	for _, label := range p.Labels {
+		labels = append(labels, label.Name)
+	}
+	return PullRequest{Number: p.Number, State: p.State, Draft: p.Draft, HeadSHA: p.Head.SHA, HeadRepositoryID: repoID, AuthorID: p.User.ID, BaseRef: p.Base.Ref, BaseSHA: p.Base.SHA, Labels: labels, UpdatedAt: p.UpdatedAt}
 }
 
 type commentWire struct {

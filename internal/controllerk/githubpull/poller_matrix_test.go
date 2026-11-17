@@ -83,7 +83,7 @@ func (f *ownerFixture) runsByCheck(t *testing.T, sha string) map[string]store.Gi
 	runs := make(map[string]store.GitHubRun)
 	for _, run := range all {
 		if run.SHA == sha {
-			runs[githubwire.CheckName(run.Profile, run.Shard)] = run
+			runs[f.p.CheckName(run)] = run
 		}
 	}
 	return runs
@@ -264,7 +264,7 @@ func TestMatrixMissingShardRequiresAction(t *testing.T) {
 		t.Fatalf("head without .macserve.json: %v", runs)
 	}
 	for _, entry := range matrixPolicy().Matrix {
-		name := githubwire.CheckName(entry.Profile, entry.Shard)
+		name := githubwire.CheckName(entry.Profile, entry.Tier, entry.Shard)
 		if runs[name].JobID != "" || checks[name].Conclusion != "action_required" {
 			t.Fatalf("%s without .macserve.json: run %+v check %+v", name, runs[name], checks[name])
 		}

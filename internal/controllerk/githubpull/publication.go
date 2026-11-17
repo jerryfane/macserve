@@ -84,7 +84,7 @@ func (p *Poller) publish(ctx context.Context) error {
 
 func (p *Poller) checkInput(ctx context.Context, run store.GitHubRun) (githubapi.CheckInput, error) {
 	packet := githubwire.Packet{Schema: 1, JobID: run.JobID, AttemptID: run.AttemptID, Requests: make([]githubwire.Correlation, 0)}
-	input := githubapi.CheckInput{Name: githubwire.CheckName(run.Profile, run.Shard), HeadSHA: run.SHA, ExternalID: run.JobID, Status: "queued", Output: githubapi.CheckOutput{Title: "Mac evidence queued", Summary: "Waiting for controller execution; no signed result yet."}}
+	input := githubapi.CheckInput{Name: p.CheckName(run), HeadSHA: run.SHA, ExternalID: run.JobID, Status: "queued", Output: githubapi.CheckOutput{Title: "Mac evidence queued", Summary: "Waiting for controller execution; no signed result yet."}}
 	if run.JobID == "" {
 		input.ExternalID = "denied:" + run.Key
 		if run.Skipped != "" && run.Blocked == "" {
@@ -203,9 +203,18 @@ func (p *Poller) checkInput(ctx context.Context, run store.GitHubRun) (githubapi
 	return input, nil
 }
 
+// CheckName is run's check name under its configured policy, which names a
+// tiered matrix entry's check by its tier (githubwire.CheckName). The
+// publisher publishes only a run its policy still admits under the same key,
+// which binds the tier, so the name never changes during the run's life.
+func (p *Poller) CheckName(run store.GitHubRun) string {
+	policy, _ := p.runPolicy(run)
+	return githubwire.CheckName(run.Profile, policy.Tier(run.Profile, run.Shard), run.Shard)
+}
+
 // skipped logs why publishOne neither created nor updated run's check.
-func skipped(run store.GitHubRun, reason string) {
-	log.Printf("GitHub publication skipped: repository=%s head=%s check=%s run=%s job=%s check_id=%d: %s", run.Repository, run.SHA, githubwire.CheckName(run.Profile, run.Shard), run.Key, run.JobID, run.CheckID, reason)
+func (p *Poller) skipped(run store.GitHubRun, reason string) {
+	log.Printf("GitHub publication skipped: repository=%s head=%s check=%s run=%s job=%s check_id=%d: %s", run.Repository, run.SHA, p.CheckName(run), run.Key, run.JobID, run.CheckID, reason)
 }
 
 // refusal is why the publisher never publishes run's check under the
@@ -245,7 +254,7 @@ func (p *Poller) publishOne(ctx context.Context, run store.GitHubRun) (int64, er
 		return 0, err
 	}
 	if reason != "" {
-		skipped(run, reason)
+		p.skipped(run, reason)
 		return run.CheckID, nil
 	}
 	input, err := p.checkInput(ctx, run)
