@@ -453,23 +453,76 @@ func TestNativeRunnerMemorySampleTimeoutDoesNotStopChild(t *testing.T) {
 	}
 }
 
-func TestNativeRunnerMemorySampleFailureStopsChild(t *testing.T) {
+// Memory that cannot be sampled is degraded monitoring, never a verdict. A
+// sampler that keeps failing, or one still running when the command exits,
+// leaves the command to run to its own exit; the broker logs it. Until
+// v0.1.67 memory unobserved for 30 s failed the command: on the Studio
+// (2026-11-17 15:52:36Z) three parallel-testing UI-test runs were killed
+// with "no sample succeeded for 34.679s (0 failed)", and the cleanup of
+// what was killed quarantined the worker. Run does not wait for a sample its
+// command no longer needs either: it may be held in the kernel or behind the
+// lane tracker.
+func TestNativeRunnerUnavailableMemorySampleNeverFailsCommand(t *testing.T) {
+	for _, blocked := range []bool{false, true} {
+		runner, command := helperRunner(t, "linger")
+		command.MemoryLimitMiB = 1024
+		// Memory goes unobserved for many degraded windows (degradedAfterTimeouts
+		// of these: 30 s at the production 5 s); cleanup's group inspection
+		// keeps an unhurried listing.
+		runner.sampleTimeout = 10 * time.Millisecond
+		runner.inspect = func(context.Context) ([]processSample, error) { return sampleProcesses(context.Background()) }
+		release, returned := make(chan struct{}), make(chan struct{})
+		t.Cleanup(func() { close(release) })
+		runner.sample = afterBaseline(nil, func(context.Context) ([]processSample, error) {
+			if !blocked {
+				return nil, errors.New("sampler unavailable")
+			}
+			select {
+			case <-release:
+			case <-time.After(10 * time.Second):
+			}
+			close(returned)
+			return gigabytesOfJobUID(0, 1), nil
+		})
+		var log bytes.Buffer
+		runner.diagnostics = &log
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		result, err := runner.Run(ctx, command, io.Discard, io.Discard)
+		cancel()
+		if err != nil || result.ExitCode != 0 || result.Signal != "" || !result.CleanupOK {
+			t.Fatalf("blocked=%v: unsampled memory failed the command: %+v, %v", blocked, result, err)
+		}
+		if !strings.Contains(log.String(), "memory monitoring degraded") {
+			t.Fatalf("blocked=%v: degraded monitoring not logged: %q", blocked, log.String())
+		}
+		if blocked {
+			select {
+			case <-returned:
+				t.Fatal("Run waited for a memory sample its command no longer needed")
+			default:
+			}
+		}
+	}
+}
+
+// A sample that completes late is still a measurement: over budget, it fails
+// the command with the memory verdict alone, which stops the command and is
+// never contamination, the only failure that quarantines the worker.
+func TestNativeRunnerLateOverBudgetSampleStillFails(t *testing.T) {
 	runner, command := helperRunner(t, "hang")
-	// Memory goes unobserved for sampleFailureTimeouts of these; cleanup's
-	// group inspection keeps an unhurried ps.
-	runner.sampleTimeout = 20 * time.Millisecond
+	command.MemoryLimitMiB = 1024
+	runner.sampleTimeout = 10 * time.Millisecond
 	runner.inspect = func(context.Context) ([]processSample, error) { return sampleProcesses(context.Background()) }
-	sampleErr := errors.New("sampler unavailable")
-	var calls atomic.Int32
-	runner.sample = afterBaseline(nil, func(context.Context) ([]processSample, error) {
-		calls.Add(1)
-		return nil, sampleErr
+	runner.sample = afterBaseline(gigabytesOfJobUID(40, 0), func(context.Context) ([]processSample, error) {
+		// Five degraded windows (60 ms here, 30 s in production).
+		time.Sleep(300 * time.Millisecond)
+		return gigabytesOfJobUID(42, 0), nil
 	})
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	result, err := runner.Run(ctx, command, io.Discard, io.Discard)
-	if !errors.Is(err, sampleErr) || errors.Is(err, ErrMemoryLimit) || !result.CleanupOK || result.Signal == "" || calls.Load() < 2 {
-		t.Fatalf("persistent sampling failure was not fail-closed after retries: %+v, %v, %d samples", result, err, calls.Load())
+	if !errors.Is(err, ErrMemoryLimit) || errors.Is(err, ErrContamination) || errors.Is(err, ErrCleanup) || !result.CleanupOK || result.Signal == "" || result.PeakMemoryMiB != 2048 {
+		t.Fatalf("a late over-budget sample did not fail the command on its memory alone: %+v, %v", result, err)
 	}
 }
 
@@ -686,6 +739,46 @@ func TestLaneCommandSkipsAccountBaseline(t *testing.T) {
 		if lane == refused {
 			t.Fatalf("lane=%v: baseline refusal %v (err %v)", lane, refused, err)
 		}
+	}
+}
+
+// A lane command's memory charge reads the lane labels, which the lane
+// sampler and every lane's census and quiesce relabel under one tracker,
+// reading each unlabelled instance's executable from the kernel. A
+// relabelling held up there delays the charge, never the command: until
+// v0.1.67 the charge relabelled in Run's own loop, and waited there.
+func TestLaneCommandNotHeldByRelabelling(t *testing.T) {
+	runner, command := helperRunner(t, "linger")
+	command.JobID = "job-a"
+	command.MemoryLimitMiB = 1024
+	runner.sampleTimeout = 10 * time.Millisecond
+	runner.inspect = func(context.Context) ([]processSample, error) { return sampleProcesses(context.Background()) }
+	release, described := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	runner.lanes = newLaneTracker(syscall.Getpid(), os.Geteuid(), "/ws", func(int, bool) (processDescription, error) {
+		once.Do(func() { close(described) })
+		<-release
+		return processDescription{executable: "/usr/libexec/agent"}, nil
+	})
+	now := time.Now()
+	runner.lanes.begin("job-a", now.Add(-time.Second))
+	// Once the command runs, another lane's relabelling meets a process
+	// started during the job that no seed claims, and its read takes 200 ms
+	// (20 sample timeouts here).
+	var relabel sync.Once
+	runner.sample = func(context.Context) ([]processSample, error) {
+		relabel.Do(func() {
+			go runner.lanes.update([]processSample{laneSample(4242, 1, os.Geteuid(), now.Unix())})
+			<-described
+			time.AfterFunc(200*time.Millisecond, func() { close(release) })
+		})
+		return gigabytesOfJobUID(0, 1), nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result, err := runner.Run(ctx, command, io.Discard, io.Discard)
+	if err != nil || result.ExitCode != 0 || result.Signal != "" || !result.CleanupOK {
+		t.Fatalf("a slow relabelling failed the lane command: %+v, %v", result, err)
 	}
 }
 

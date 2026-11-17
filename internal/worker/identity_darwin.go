@@ -42,7 +42,8 @@ func identityProcesses(ctx context.Context) ([]processSample, error) {
 // phys_footprint, with the resident size alongside for diagnostics. Both come
 // from the kernel in-process, so a sample never waits on a subprocess, however
 // many processes a booting simulator has started. A process that exits
-// between the table read and its memory read is omitted.
+// between the table read and its memory read is omitted. ctx is checked
+// between processes: a sample its command no longer needs stops there.
 func memoryProcesses(ctx context.Context, uid int) ([]processSample, error) {
 	rows, err := identityProcesses(ctx)
 	if err != nil {
@@ -50,6 +51,9 @@ func memoryProcesses(ctx context.Context, uid int) ([]processSample, error) {
 	}
 	samples := rows[:0]
 	for _, p := range rows {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if p.uid != uid || p.zombie {
 			continue
 		}
