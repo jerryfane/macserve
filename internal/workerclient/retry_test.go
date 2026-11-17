@@ -37,6 +37,9 @@ type stallController struct {
 	stages    []model.State
 	beats     int
 	completed chan worker.Result
+	// finalizingAfter is how many output bytes the controller had when
+	// Finalizing arrived.
+	finalizingAfter int
 }
 
 func newStallController(t *testing.T) (*stallController, Config) {
@@ -112,6 +115,9 @@ func (f *stallController) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if n := len(f.stages); n == 0 || f.stages[n-1] != stage.State {
 			f.stages = append(f.stages, stage.State)
+			if stage.State == model.Finalizing {
+				f.finalizingAfter = f.logs.Len()
+			}
 		}
 		w.WriteHeader(http.StatusNoContent)
 	case "/complete":
@@ -296,6 +302,54 @@ func TestLogLimitRefusalEndsJobAtOnce(t *testing.T) {
 	defer f.mu.Unlock()
 	if f.logPosts != 1 || result.State != model.Cancelled || !strings.Contains(result.Reason, "413") {
 		t.Fatalf("log posts %d, result %s %q", f.logPosts, result.State, result.Reason)
+	}
+}
+
+// A job its own output backlog cancels (the controller answered too slowly)
+// still tells the controller it is finalizing: Stage(Finalizing) after the
+// cancellation is queued, not refused, and is delivered ahead of the
+// backlog. The controller then gives the job's cleanup its finalizing
+// window; without it, the heartbeat, which ended with the job's context,
+// stops and the lease expires 30 s later into a dispatch quarantine (#180
+// review F5). The output queued before the overflow is delivered.
+func TestBacklogCancellationStillDeliversFinalizing(t *testing.T) {
+	t.Parallel()
+	f, cfg := newStallController(t)
+	var stageErr error
+	chunk := strings.Repeat("x", 32<<10-1) + "\n"
+	queued := 0
+	engine := &fakeExecutor{execute: func(ctx context.Context, _ model.Job, _ worker.Source, r io.Reader, sink worker.Sink) (worker.Result, error) {
+		io.ReadAll(r)
+		if err := sink.Stage(model.Running); err != nil {
+			return worker.Result{}, err
+		}
+		f.stall(time.Now().Add(time.Hour))
+		for sink.Log("stdout", chunk) == nil {
+			queued++
+		}
+		if ctx.Err() == nil {
+			t.Error("backlog overflow did not cancel the job")
+		}
+		f.resume()
+		// The engine's cleanup: Stage(Finalizing), then stopWriters.
+		stageErr = sink.Stage(model.Finalizing)
+		return worker.Result{State: model.Cancelled, CleanupOK: true}, ctx.Err()
+	}}
+	executeStallLease(t, cfg, engine)
+	f.result(t)
+	if stageErr != nil {
+		t.Fatalf("Stage(Finalizing) after the backlog cancellation: %v", stageErr)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.stages) != 2 || f.stages[0] != model.Running || f.stages[1] != model.Finalizing {
+		t.Fatalf("controller stages %v, want [running finalizing]", f.stages)
+	}
+	if f.finalizingAfter >= queued*len(chunk) {
+		t.Fatalf("Finalizing arrived after all %d queued bytes", f.finalizingAfter)
+	}
+	if f.logs.Len() != queued*len(chunk) {
+		t.Fatalf("delivered %d bytes of %d queued", f.logs.Len(), queued*len(chunk))
 	}
 }
 

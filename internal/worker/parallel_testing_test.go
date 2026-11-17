@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -408,6 +409,69 @@ func TestLaneCensusRefreshesCloneOwnershipFirst(t *testing.T) {
 	}
 	if !slices.Equal(m.TestClones, []string{cloneOne}) {
 		t.Fatalf("manifest clones %v", m.TestClones)
+	}
+}
+
+// The native lane census claims clones at its own boundary: it runs the
+// census refresh before it labels and judges its sample, so a clone made
+// just before that sample (here, found only by the refresh) is its job's,
+// whatever the caller did between its own start and the census.
+func TestNativeLaneCensusRefreshesBeforeJudging(t *testing.T) {
+	h := newCrashHost()
+	clone := cloneOne
+	h.runner.lanes = trackerFor(syscall.Getpid(), crashUID, map[int]processDescription{
+		400: {executable: "launchd_sim", args: "launchd_sim /Users/u/Library/Developer/XCTestDevices/" + clone + "/data/var/run/launchd_bootstrap.plist"},
+	})
+	h.runner.lanes.begin("ui", time.Now().Add(-time.Minute))
+	h.add(400, 1, time.Now(), "launchd_sim", false)
+	refresher, ok := any(h.runner).(interface{ SetCensusRefresh(func(context.Context)) })
+	if !ok {
+		t.Fatal("native runner has no census refresh")
+	}
+	refresher.SetCensusRefresh(func(context.Context) { h.runner.AttachDevice("ui", clone) })
+	if got := h.residual(t); len(got) != 0 {
+		t.Fatalf("clone process judged unattributed: %v", got)
+	}
+}
+
+// A boot on another lane during the run's pre-run clone inventory counts:
+// the spacing gate is the last step before the run, so the run starts
+// simulatorBootGap after that boot. Before, the gate ran before the
+// inventory, and the run started at once after a boot made meanwhile (#180
+// review F3, observed gap 1 s).
+func TestParallelTestingBootDuringCloneInventoryIsSpaced(t *testing.T) {
+	report, err := os.ReadFile(filepath.Join("..", "evidence", "testdata", "herdrup-uitests.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := newLaneFake()
+	runner.fakeRunner.tests = string(report)
+	set := &testingSet{devices: map[string]string{}}
+	var engine *Engine
+	var clock *testClock
+	var siblingBoot, run time.Time
+	runner.fakeRunner.hook = func(ctx context.Context, c Command, out, stderr io.Writer) (bool, ProcessResult, error) {
+		if testingListing(c) && siblingBoot.IsZero() {
+			engine.noteSimulatorBoot()
+			siblingBoot = clock.Now()
+		}
+		if slices.Contains(c.Args, "test-without-building") {
+			run = clock.Now()
+		}
+		return set.hook(ctx, c, out, stderr)
+	}
+	engine = laneEngine(t, runner, 3)
+	clock = newTestClock(engine)
+	source, data := checkoutFixture(t, map[string]string{".macserve.json": parallelConfig})
+	result, err := engine.Execute(context.Background(), parallelUITestJob(t, `"parallel_testing":{"workers":2}`), source, bytes.NewReader(data), nil)
+	if err != nil || result.State != model.Succeeded || !result.CleanupOK {
+		t.Fatalf("parallel-testing job: %+v %v", result, err)
+	}
+	if siblingBoot.IsZero() || run.IsZero() {
+		t.Fatalf("no inventory or run: boot %v run %v", siblingBoot, run)
+	}
+	if gap := run.Sub(siblingBoot); gap < 30*time.Second {
+		t.Fatalf("run started %s after a boot during its clone inventory, want 30s", gap)
 	}
 }
 

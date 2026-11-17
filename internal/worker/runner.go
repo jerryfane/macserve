@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -80,6 +81,9 @@ type nativeRunner struct {
 	workspaceRoot  string
 	describe       func(int, bool) (processDescription, error)
 	lineage        func(int, string) (uint64, uint64, error)
+	// censusRefresh runs in every lane census before it judges (see
+	// SetCensusRefresh).
+	censusRefresh atomic.Pointer[func(context.Context)]
 }
 
 // newProcessRunner is the process/pipes implementation. Production construction

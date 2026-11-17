@@ -272,7 +272,13 @@ func New(options Options) (*Engine, error) {
 		exports.Close()
 		return fail(err)
 	}
-	return &Engine{options: options, root: root, exports: exports, workspaces: workspaces, lock: lock, recording: map[string]*Result{}, verified: map[string]string{}, running: map[string]*laneEntry{}, changed: make(chan struct{}), mounts: mounttable.Read, pause: contextPause}, nil
+	e := &Engine{options: options, root: root, exports: exports, workspaces: workspaces, lock: lock, recording: map[string]*Result{}, verified: map[string]string{}, running: map[string]*laneEntry{}, changed: make(chan struct{}), mounts: mounttable.Read, pause: contextPause}
+	if lanes, ok := options.Runner.(laneRunner); ok {
+		// Every lane census first has the running parallel-testing jobs
+		// claim their clones (refreshTestClones).
+		lanes.SetCensusRefresh(e.refreshTestClones)
+	}
+	return e, nil
 }
 
 var accountName = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,254}$`)

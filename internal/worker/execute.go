@@ -502,11 +502,13 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 	if job.Profile.ParallelTestingWorkers() > 0 {
 		// The clones xcodebuild makes of the job's simulator are this job's
 		// (see beginTestClones and watchTestClones); stopWriters deletes
-		// those it leaves.
-		if err := e.spaceSimulatorBoots(ctx); err != nil {
+		// those it leaves. The inventory runs first: the spacing gate is
+		// the last step before the run, so no work after it can let
+		// another lane's boot go unaccounted.
+		if err := e.beginTestClones(ctx, &x.manifest); err != nil {
 			return result, err
 		}
-		if err := e.beginTestClones(ctx, &x.manifest); err != nil {
+		if err := e.spaceSimulatorBoots(ctx); err != nil {
 			return result, err
 		}
 		// The watch is x.manifest's only writer until stopWatch returns.

@@ -523,6 +523,15 @@ type laneRunner interface {
 	// terminate are not residual, and an unattributed process refuses with
 	// ErrDrain instead of contamination.
 	LaneAdmission(ctx context.Context) error
+	// SetCensusRefresh sets what every census of Residue and LaneAdmission
+	// runs after it samples the processes and before it judges them: the
+	// engine's refresh of device ownership (Engine.refreshTestClones), so
+	// a device created up to that sample is its job's when judged.
+	SetCensusRefresh(refresh func(context.Context))
+}
+
+func (r *nativeRunner) SetCensusRefresh(refresh func(context.Context)) {
+	r.censusRefresh.Store(&refresh)
 }
 
 func (r *nativeRunner) laneTracker() *laneTracker {
@@ -718,8 +727,13 @@ func (r *nativeRunner) crashResidue(ctx context.Context, samples []processSample
 // the census could not verify as that relaunch is still stopped by a
 // quiesce, and launchd starts it again if it serves the audited one (#155:
 // at 13:17:13Z j_7841d25a's lane admission drained, most likely beside the
-// WebKit GPU process that deferred j_645b8263 a minute later).
+// WebKit GPU process that deferred j_645b8263 a minute later). Before it
+// judges samples it runs the census refresh (SetCensusRefresh): a device
+// created before the sample is then its job's, and so are its processes.
 func (r *nativeRunner) laneCensus(ctx context.Context, samples []processSample) (processCensus, error) {
+	if refresh := r.censusRefresh.Load(); refresh != nil {
+		(*refresh)(ctx)
+	}
 	c, labelled, err := r.unattributedCensus(ctx, samples)
 	if err != nil {
 		return c, err

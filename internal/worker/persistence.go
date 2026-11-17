@@ -234,7 +234,6 @@ func (e *Engine) laneAdmission(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	e.refreshTestClones(ctx)
 	if err := e.laneRunner().LaneAdmission(ctx); err != nil {
 		if errors.Is(err, ErrDrain) {
 			e.setDrain(PublicReason(err))
