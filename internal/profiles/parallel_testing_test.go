@@ -2,6 +2,7 @@ package profiles_test
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -65,8 +66,11 @@ func TestParallelTestingTemplateBounds(t *testing.T) {
 }
 
 // A parallel-testing template's memory budget covers its clones: omitted, it
-// is the default budget plus 4096 MiB per worker, and a budget below that
-// refuses to load.
+// is the default budget plus 4096 MiB per worker. An explicit budget loads
+// from 8192 MiB plus 4096 MiB per worker (the measured UI-test peak of 5209
+// MiB with headroom, and an allowance per clone) and refuses below that. A
+// budget that lets six jobs fit the controller's cap, 20480 MiB for two
+// workers, loads.
 func TestParallelTestingTemplateMemoryBudget(t *testing.T) {
 	omitted := strings.Replace(withParallel(uiTemplate, `"parallel_testing":{"workers":2}`), `,"memory_limit_mib":32768`, ``, 1)
 	r := templatesFile(t, omitted)
@@ -78,8 +82,21 @@ func TestParallelTestingTemplateMemoryBudget(t *testing.T) {
 	if err != nil || a.Profile.MemoryLimitMiB != want || member(t, *a.Profile.Template, "parallel_testing") != `{"workers":2}` {
 		t.Fatalf("admitted snapshot: %+v %v", a.Profile, err)
 	}
-	if _, err := loadTemplates(withParallel(uiTemplate, `"parallel_testing":{"workers":2}`)); !errors.Is(err, profiles.ErrInvalid) || !strings.Contains(err.Error(), "memory_limit_mib must be at least") {
-		t.Fatalf("budget below the clones' allowance: %v", err)
+	budget := func(workers, mib int) string {
+		return strings.Replace(withParallel(uiTemplate, fmt.Sprintf(`"parallel_testing":{"workers":%d}`, workers)), `"memory_limit_mib":32768`, fmt.Sprintf(`"memory_limit_mib":%d`, mib), 1)
+	}
+	for workers := 1; workers <= 4; workers++ {
+		floor := 8192 + workers*4096
+		r, err := loadTemplates(budget(workers, floor))
+		if err != nil || r.Templates()[0].MemoryLimitMiB != floor {
+			t.Fatalf("%d workers at the %d MiB floor: %v", workers, floor, err)
+		}
+		if _, err := loadTemplates(budget(workers, floor-1)); !errors.Is(err, profiles.ErrInvalid) || !strings.Contains(err.Error(), fmt.Sprintf("memory_limit_mib must be at least %d for %d workers", floor, workers)) {
+			t.Fatalf("%d workers below the floor: %v", workers, err)
+		}
+	}
+	if _, err := loadTemplates(budget(2, 20480)); err != nil {
+		t.Fatalf("20480 MiB for two workers: %v", err)
 	}
 }
 

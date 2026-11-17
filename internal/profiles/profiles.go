@@ -352,15 +352,22 @@ const MaxParallelTestingWorkers = 4
 
 // ParallelTestingCloneMiB is the memory a parallel-testing template's budget
 // allows for each simulator clone (its launchd_sim, the app under test and
-// the test runner), on top of the default 32768 MiB budget: the clones are
-// charged to the job, and the controller's concurrent memory cap sums the
-// budgets. It is an allowance, not a measurement; a template may set more.
+// the test runner): the clones are charged to the job, and the controller's
+// concurrent memory cap sums the budgets. It is an allowance, not a
+// measurement.
 const ParallelTestingCloneMiB = 4096
+
+// ParallelTestingBaseFloorMiB is the least budget a parallel-testing
+// template may set before its clones: the job's xcodebuild, its own
+// simulator and the app under test. Signed receipts of herdrup and tandem UI
+// test jobs (no clones) peaked at 5209 MiB.
+const ParallelTestingBaseFloorMiB = 8192
 
 // normalizeParallelTesting admits parallel_testing only on a
 // simulator_ui_test template, with 1 to MaxParallelTestingWorkers workers.
-// Its memory budget defaults to, and must be at least, the default budget
-// plus ParallelTestingCloneMiB per worker.
+// An omitted memory budget defaults to the default 32768 MiB plus
+// ParallelTestingCloneMiB per worker; an explicit one must be at least
+// ParallelTestingBaseFloorMiB plus ParallelTestingCloneMiB per worker.
 func normalizeParallelTesting(t *model.Template) error {
 	p := t.ParallelTesting
 	if p == nil {
@@ -372,11 +379,10 @@ func normalizeParallelTesting(t *model.Template) error {
 	if p.Workers < 1 || p.Workers > MaxParallelTestingWorkers {
 		return fmt.Errorf("%w: parallel_testing workers must be 1 to %d", ErrInvalid, MaxParallelTestingWorkers)
 	}
-	floor := 32768 + p.Workers*ParallelTestingCloneMiB
 	if t.MemoryLimitMiB == 0 {
-		t.MemoryLimitMiB = floor
+		t.MemoryLimitMiB = 32768 + p.Workers*ParallelTestingCloneMiB
 	}
-	if t.MemoryLimitMiB < floor {
+	if floor := ParallelTestingBaseFloorMiB + p.Workers*ParallelTestingCloneMiB; t.MemoryLimitMiB < floor {
 		return fmt.Errorf("%w: a parallel_testing template's memory_limit_mib must be at least %d for %d workers", ErrInvalid, floor, p.Workers)
 	}
 	return nil

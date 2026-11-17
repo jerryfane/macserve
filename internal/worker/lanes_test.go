@@ -357,7 +357,8 @@ func TestLaneClaimsRecordedTestClones(t *testing.T) {
 	tracker.begin("script", time.Unix(now-100, 0))
 	tracker.adoptDevices("script", time.Unix(now-100, 0))
 	tracker.addDevice("ui", clone)
-	tracker.update([]processSample{laneSample(400, 1, uid, now), laneSample(401, 1, uid, now), laneSample(500, 1, uid, now)})
+	samples := []processSample{laneSample(400, 1, uid, now), laneSample(401, 1, uid, now), laneSample(500, 1, uid, now)}
+	tracker.update(samples)
 	for _, pid := range []int{400, 401} {
 		if got := tracker.labels[key(pid)]; got != "ui" {
 			t.Fatalf("clone process %d labelled %q, want ui", pid, got)
@@ -365,6 +366,10 @@ func TestLaneClaimsRecordedTestClones(t *testing.T) {
 	}
 	if label, ok := tracker.labels[key(500)]; ok {
 		t.Fatalf("unrecorded clone labelled %q", label)
+	}
+	// The clone's processes are charged to the job's memory budget.
+	if mine, total, err := tracker.footprint(samples, "ui"); err != nil || mine != 2048 || total != 3072 {
+		t.Fatalf("footprint: job %d KiB of %d KiB, %v", mine, total, err)
 	}
 }
 

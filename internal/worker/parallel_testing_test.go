@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -128,6 +130,34 @@ func TestParallelTestingCleanupDeletesTheJobsClones(t *testing.T) {
 	assertExactCleanup(t, runner, true)
 	if _, err := engine.root.Stat("manifests/job-1.json"); !os.IsNotExist(err) {
 		t.Fatalf("manifest kept: %v", err)
+	}
+}
+
+// A parallel-testing run stopped for exceeding its memory budget (the runner
+// kills its process group and reports ErrMemoryLimit) fails the job, not
+// the worker: xcodebuild cannot delete the clones it booted, so the job's
+// cleanup does, proves them absent and leaves no quarantine.
+func TestParallelTestingMemoryLimitCleansUpClonesWithoutQuarantine(t *testing.T) {
+	set := &testingSet{devices: map[string]string{}}
+	runner := &fakeRunner{}
+	runner.hook = func(ctx context.Context, c Command, out, stderr io.Writer) (bool, ProcessResult, error) {
+		handled, result, err := set.hook(ctx, c, out, stderr)
+		if slices.Contains(c.Args, "test-without-building") {
+			return true, ProcessResult{ExitCode: -1, Signal: "killed", CleanupOK: true, PeakMemoryMiB: 20481}, fmt.Errorf("%w: sampled 20481 MiB in the job's own processes, budget 20480 MiB", ErrMemoryLimit)
+		}
+		return handled, result, err
+	}
+	engine := engineFixture(t, runner)
+	source, data := checkoutFixture(t, map[string]string{".macserve.json": parallelConfig})
+	result, err := engine.Execute(context.Background(), parallelUITestJob(t, `"parallel_testing":{"workers":2},"memory_limit_mib":20480`), source, bytes.NewReader(data), nil)
+	if !errors.Is(err, ErrMemoryLimit) || errors.Is(err, ErrContamination) || errors.Is(err, ErrRecovery) || result.State != model.Failed || !result.CleanupOK {
+		t.Fatalf("over-budget job: %+v %v", result, err)
+	}
+	if got := set.left(); !slices.Equal(got, []string{siblingClone}) {
+		t.Fatalf("XCTest devices after the job = %v", got)
+	}
+	if err := engine.checkQuarantine(); err != nil {
+		t.Fatalf("worker quarantined: %v", err)
 	}
 }
 
