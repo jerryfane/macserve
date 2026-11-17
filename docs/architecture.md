@@ -461,8 +461,9 @@ sibling's simulator or on CoreSimulator; the contract in [configuration.md](conf
 simulator into XCTest's device set (`simctl --set testing`, `~/Library/Developer/XCTestDevices`), names each clone
 `Clone <n> of macserve-<job>`, boots them and deletes them when the run ends. That set is not the default set the
 engine lists, so before the test run the engine records the testing set's inventory in the manifest
-(`test_clones_pending`, `test_clones_before`). While the run runs, it lists the set every 5 s, and again just before
-any lane census judges the account (a sibling's residue count, a lane admission or readiness check), and makes every
+(`test_clones_pending`, `test_clones_before`). While the run runs, it lists the set every 5 s, and again inside every
+lane census (a sibling's residue count, a lane admission or readiness check) after the census samples the processes
+and before it judges them, and makes every
 clone of its own simulator (added since, and named for its own device) one of the job's `test_clones` at once, saving
 the manifest: from then on the clone is the job's by UDID, whatever it is named later, and a restart recovers it. In
 lane mode it is also attached to the tracker; its `launchd_sim` (its arguments name `.../XCTestDevices/<UDID>/`) and
@@ -476,5 +477,6 @@ manifest, and a survivor is contamination. Name and inventory together decide wh
 job's simulator (another job ID) or one listed before the run is never the job's. A parallel-testing run boots its
 clones at once, after the build, which the controller's start stagger does not cover; in lane mode the engine
 therefore starts the run only once 30 s have passed since the latest simulator boot or parallel-testing run start of
-any lane, checking again after every wait, so a boot during the wait restarts it.
+any lane, checking again after every wait, so a boot during the wait restarts it. This gate is the last step before
+the run, after the clone inventory, so no work between the gate and the run can miss a boot.
 
