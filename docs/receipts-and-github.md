@@ -347,9 +347,12 @@ configured App:
 - `mac-evidence/full/ipad-script`
 
 plus the repository's other required checks. Do not require `mac-evidence/fast/*`: it is a fast signal on drafts,
-not the gate. Enable "Require branches to be up to date before merging" (`strict: true`): without it the gated head
-need not contain the current base branch, so the full matrix does not test the merged tree. Open pull requests as
-drafts: a pull request that is ready for review runs the full tier on every push.
+not the gate. Whether to require branches to be up to date before merging is the repository owner's choice. With
+`strict: true` the gated head contains the current base branch, so the full matrix tests the merged tree, but every
+merge makes each other ready pull request update and rerun its full tier, which serializes merges. With
+`strict: false` merges do not wait on one another and the full tier still must pass at the exact head, but that
+head need not contain the latest base branch. Open pull requests as drafts: a pull request that is ready for review
+runs the full tier on every push.
 
 Migration: switching an untiered policy to tiers renames its matrix checks (the old
 `mac-evidence/<profile>/<shard>` names stop updating on open heads); bump `policy_revision`, activate with an empty
