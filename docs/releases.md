@@ -38,6 +38,8 @@ stated limit (never root, the owner's home or Apple signing) only with the keyho
 
 Any failed gate stops the run before `gh release create`; no unsigned release is published.
 
+After every **full** release (never a controller-carry), bump the tap: open a PR in `jerryfane/homebrew-macserve` replacing `Formula/macserve.rb` with the release's `macserve.rb` asset once `gh release download "$RELEASE_TAG" -R jerryfane/macserve -p macserve.rb -p SHA256SUMS && grep -F "sha256 \"$(awk '$2 == "macserve-darwin-arm64" {print $1}' SHA256SUMS)\"" macserve.rb` prints the matching line ([Homebrew formula](install.md#homebrew-formula-release-asset)).
+
 ## `release-manifest.json`
 
 Schema `macserve-release-manifest/1` (interface contract with macserve-admin):
