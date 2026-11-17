@@ -25,18 +25,23 @@ type stallController struct {
 	mu         sync.Mutex
 	stallUntil time.Time
 	released   chan struct{}
-	logStatus  int
-	logs       strings.Builder
-	lastSeq    int64
-	logPosts   int
-	resent     int
-	stages     []model.State
-	beats      int
-	completed  chan worker.Result
+	// resumed, once closed, ends every stall: requests waiting in one
+	// take effect at once.
+	resumed   chan struct{}
+	resume    func()
+	logStatus int
+	logs      strings.Builder
+	lastSeq   int64
+	logPosts  int
+	resent    int
+	stages    []model.State
+	beats     int
+	completed chan worker.Result
 }
 
 func newStallController(t *testing.T) (*stallController, Config) {
-	f := &stallController{released: make(chan struct{}), completed: make(chan worker.Result, 1)}
+	f := &stallController{released: make(chan struct{}), resumed: make(chan struct{}), completed: make(chan worker.Result, 1)}
+	f.resume = sync.OnceFunc(func() { close(f.resumed) })
 	t.Cleanup(func() { close(f.released) })
 	cfg, _ := unixController(t, f)
 	return f, cfg
@@ -57,6 +62,7 @@ func (f *stallController) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.mu.Unlock()
 		select {
 		case <-time.After(time.Until(until)):
+		case <-f.resumed:
 		case <-f.released:
 			return
 		}
@@ -126,6 +132,11 @@ func (f *stallController) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func executeStallLease(t *testing.T, cfg Config, engine *fakeExecutor) {
 	t.Helper()
+	executeStallLeaseCtx(context.Background(), t, cfg, engine)
+}
+
+func executeStallLeaseCtx(ctx context.Context, t *testing.T, cfg Config, engine *fakeExecutor) {
+	t.Helper()
 	client, err := NewWithChecks(cfg, engine, testChecks)
 	if err != nil {
 		t.Fatal(err)
@@ -133,7 +144,7 @@ func executeStallLease(t *testing.T, cfg Config, engine *fakeExecutor) {
 	defer client.Close()
 	deadline := time.Now().Add(5 * time.Minute)
 	lease := protocol.Lease{Job: admittedJob(t, "j_test", client.epoch, &deadline, fixtureRequest), Token: "lease"}
-	if _, err := client.execute(context.Background(), lease); err != nil {
+	if _, err := client.execute(ctx, lease); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -285,5 +296,63 @@ func TestLogLimitRefusalEndsJobAtOnce(t *testing.T) {
 	defer f.mu.Unlock()
 	if f.logPosts != 1 || result.State != model.Cancelled || !strings.Contains(result.Reason, "413") {
 		t.Fatalf("log posts %d, result %s %q", f.logPosts, result.State, result.Reason)
+	}
+}
+
+// A job cancelled while its Stage(Running) waits behind a log request the
+// controller holds enters cleanup at once: Stage returns when the job's
+// context ends, and Stage(Finalizing), the first step of the engine's
+// cleanup, never waits on the controller, so stopping the job's processes
+// is not delayed by a stalled controller. The queued output is still
+// delivered, in order, before the completion (#178 review F1).
+func TestStageReleasedWhenJobCancelled(t *testing.T) {
+	t.Parallel()
+	f, cfg := newStallController(t)
+	ctx, cancelJob := context.WithCancel(context.Background())
+	defer cancelJob()
+	var cancelled, staged, cleanupStarted time.Time
+	var stageErr error
+	engine := &fakeExecutor{execute: func(ctx context.Context, _ model.Job, _ worker.Source, r io.Reader, sink worker.Sink) (worker.Result, error) {
+		io.ReadAll(r)
+		f.stall(time.Now().Add(time.Hour))
+		if err := sink.Log("stdout", "held\n"); err != nil {
+			return worker.Result{}, err
+		}
+		// A regression holds Stage until the held request ends: resume
+		// the controller well after the cancellation so that it fails
+		// fast.
+		watchdog := time.AfterFunc(2*time.Second, f.resume)
+		defer watchdog.Stop()
+		go func() {
+			time.Sleep(300 * time.Millisecond)
+			cancelled = time.Now()
+			cancelJob()
+		}()
+		stageErr = sink.Stage(model.Running)
+		staged = time.Now()
+		// The engine's cleanup: Stage(Finalizing), then stopWriters.
+		sink.Stage(model.Finalizing)
+		cleanupStarted = time.Now()
+		f.resume()
+		return worker.Result{State: model.Cancelled, CleanupOK: true}, ctx.Err()
+	}}
+	executeStallLeaseCtx(ctx, t, cfg, engine)
+	result := f.result(t)
+	if stageErr == nil {
+		t.Fatal("Stage(Running) of a cancelled job reported success")
+	}
+	if wait := staged.Sub(cancelled); wait > 100*time.Millisecond {
+		t.Fatalf("Stage(Running) returned %s after the job was cancelled", wait)
+	}
+	if wait := cleanupStarted.Sub(staged); wait > 100*time.Millisecond {
+		t.Fatalf("cleanup started %s after Stage(Running) returned", wait)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if got := f.logs.String(); got != "held\n" {
+		t.Fatalf("queued output not delivered before the completion: %q", got)
+	}
+	if result.State != model.Cancelled {
+		t.Fatalf("result %s %q", result.State, result.Reason)
 	}
 }

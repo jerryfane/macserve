@@ -112,18 +112,26 @@ func retry(ctx context.Context, clock *leaseClock, attempt func(context.Context)
 // seq (protocol.Log), for one sender, and returns; at most maxLogBacklog
 // bytes wait. The sender retries a transiently failed request (retry): the
 // controller records each seq once, so a chunk whose first answer was lost
-// is not duplicated. Stage waits for its own delivery behind the queued
-// chunks. A refusal, a request still failing when the lease window ends or
-// an overflowing backlog ends the job (cancel), as a failed request did
-// before #174, and every later Log returns that error. Chunks and stages
-// reported before the job's context ended are delivered after it too;
-// later ones fail at once, as before #174. close waits for the queue.
+// is not duplicated. A refusal, a request still failing when the lease
+// window ends or an overflowing backlog ends the job (cancel), as a failed
+// request did before #174, and every later Log returns that error.
+//
+// The engine's cleanup never waits on the controller: Stage(Running), the
+// gate before the job's recipe runs, waits for its delivery behind the
+// queued chunks only until the job's context ends; Stage(Finalizing), the
+// first step of cleanup, is queued and returns at once. Chunks and stages
+// reported before the job's context ended are still delivered, in order,
+// after it; later ones fail at once, as before #174. close waits for that
+// delivery, at most maxDrain, before the job's end is judged.
 type remoteSink struct {
 	client              *Client
 	ctx                 context.Context
 	clock               *leaseClock
 	epoch, jobID, lease string
 	cancel              context.CancelCauseFunc
+	// send bounds the sender's requests; close's drain bound ends it.
+	send     context.Context
+	stopSend context.CancelFunc
 
 	mu      sync.Mutex
 	wake    *sync.Cond
@@ -136,7 +144,15 @@ type remoteSink struct {
 	once    sync.Once
 }
 
-// sinkItem is one queued chunk, or a stage whose caller waits on result.
+// maxDrain bounds close's wait for the queued output once the engine
+// returned: the heartbeat tolerance of the controller's finalizing window,
+// which covers the transport of the job's evidence. Within the lease window
+// retry already bounds each request; past it every queued request still
+// gets one attempt, and maxDrain bounds them together.
+const maxDrain = protocol.HeartbeatTimeout
+
+// sinkItem is one queued chunk, or a stage whose result is reported on
+// result (buffered: the sender never waits for a caller).
 type sinkItem struct {
 	log    protocol.Log
 	stage  *protocol.Stage
@@ -145,6 +161,7 @@ type sinkItem struct {
 
 func newRemoteSink(c *Client, ctx context.Context, clock *leaseClock, epoch, jobID, lease string, cancel context.CancelCauseFunc) *remoteSink {
 	s := &remoteSink{client: c, ctx: ctx, clock: clock, epoch: epoch, jobID: jobID, lease: lease, cancel: cancel, done: make(chan struct{})}
+	s.send, s.stopSend = context.WithCancel(context.Background())
 	s.wake = sync.NewCond(&s.mu)
 	go s.run()
 	return s
@@ -184,16 +201,39 @@ func (s *remoteSink) Stage(state model.State) error {
 	s.queue = append(s.queue, sinkItem{stage: &protocol.Stage{State: state}, result: result})
 	s.wake.Signal()
 	s.mu.Unlock()
-	return <-result
+	if state == model.Finalizing {
+		return nil
+	}
+	select {
+	case err := <-result:
+		return err
+	case <-s.ctx.Done():
+		return s.ctx.Err()
+	}
 }
 
-// close delivers what is queued, then stops the sender.
+// close delivers what is queued, waiting at most maxDrain; then it ends the
+// job (cancel) if output is still undelivered, and stops the sender.
 func (s *remoteSink) close() {
 	s.once.Do(func() {
 		s.mu.Lock()
 		s.closed = true
 		s.wake.Signal()
 		s.mu.Unlock()
+		timer := time.NewTimer(maxDrain)
+		defer timer.Stop()
+		select {
+		case <-s.done:
+		case <-timer.C:
+			err := fmt.Errorf("job output not delivered to the controller within %s of the job's end", maxDrain)
+			s.mu.Lock()
+			if s.err == nil {
+				s.err = err
+			}
+			s.mu.Unlock()
+			s.cancel(err)
+		}
+		s.stopSend()
 		<-s.done
 	})
 }
@@ -218,7 +258,7 @@ func (s *remoteSink) run() {
 		s.queue = s.queue[1:]
 		s.mu.Unlock()
 		if item.stage != nil {
-			err := retry(context.Background(), s.clock, func(ctx context.Context) error {
+			err := retry(s.send, s.clock, func(ctx context.Context) error {
 				_, err := s.client.json(ctx, http.MethodPost, path+"/stage", s.epoch, s.lease, item.stage, nil)
 				return err
 			})
@@ -230,7 +270,7 @@ func (s *remoteSink) run() {
 		}
 		var err error
 		if !lost {
-			err = retry(context.Background(), s.clock, func(ctx context.Context) error {
+			err = retry(s.send, s.clock, func(ctx context.Context) error {
 				_, err := s.client.json(ctx, http.MethodPost, path+"/logs", s.epoch, s.lease, item.log, nil)
 				return err
 			})
