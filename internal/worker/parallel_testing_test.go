@@ -55,17 +55,37 @@ func parallelUITestJob(t *testing.T, members string) model.Job {
 // fakeRunner: the test run (test-without-building) clones job-1's
 // simulator twice, as xcodebuild parallel testing does, and, like a
 // sibling's run, adds a clone of job-10's; xcodebuild leaves its clones (a
-// run cut short). shutdown and delete act on a listed device.
+// run cut short). shutdown and delete act on a listed device. With onDisk,
+// the set is a directory in the job's home, as on a Mac: a listing exits 1
+// while it does not exist, and the test run creates it with its clones.
 type testingSet struct {
 	mu      sync.Mutex
 	devices map[string]string
 	deleted []string
+	onDisk  bool
+	// missing counts the listings that found no set directory.
+	missing int
 }
 
-func (s *testingSet) hook(_ context.Context, c Command, out, _ io.Writer) (bool, ProcessResult, error) {
+// testingSetDir is the testing set directory of c's environment.
+func testingSetDir(c Command) string {
+	for _, kv := range c.Env {
+		if home, ok := strings.CutPrefix(kv, "HOME="); ok {
+			return filepath.Join(home, "Library", "Developer", "XCTestDevices")
+		}
+	}
+	return ""
+}
+
+func (s *testingSet) hook(_ context.Context, c Command, out, stderr io.Writer) (bool, ProcessResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if slices.Contains(c.Args, "test-without-building") {
+		if s.onDisk {
+			if err := os.MkdirAll(testingSetDir(c), 0o700); err != nil {
+				return true, ProcessResult{}, err
+			}
+		}
 		s.devices[cloneOne] = "Clone 1 of macserve-job-1"
 		s.devices[cloneTwo] = "Clone 2 of macserve-job-1"
 		s.devices[siblingClone] = "Clone 1 of macserve-job-10"
@@ -73,6 +93,13 @@ func (s *testingSet) hook(_ context.Context, c Command, out, _ io.Writer) (bool,
 	}
 	if len(c.Args) < 3 || c.Args[0] != "simctl" || c.Args[1] != "--set" || c.Args[2] != "testing" {
 		return false, ProcessResult{}, nil
+	}
+	if s.onDisk {
+		if _, err := os.Stat(testingSetDir(c)); err != nil {
+			s.missing++
+			_, err := io.WriteString(stderr, "Provided set path does not exist: "+testingSetDir(c)+"\n")
+			return true, ProcessResult{ExitCode: 1, CleanupOK: true}, err
+		}
 	}
 	switch args := c.Args[3:]; {
 	case slices.Equal(args, []string{"list", "devices", "--json"}):
@@ -516,6 +543,137 @@ func TestParallelTestingArguments(t *testing.T) {
 						t.Fatalf("%s given %d times: %q", flag, n, args)
 					}
 				}
+			}
+		})
+	}
+}
+
+// On a job home where Xcode has not yet made a clone, XCTest's device set
+// does not exist and `simctl --set testing list` exits 1 ("Provided set path
+// does not exist"): the run's starting inventory is empty, the worker does
+// not create the set, and the clones the run then makes are still the
+// job's and deleted. Before, that listing failed every parallel-testing job
+// on a fresh job home (v0.1.66 qualification, org-ios-sim-uitest-v1).
+func TestParallelTestingMissingSetIsAnEmptyInventory(t *testing.T) {
+	report, err := os.ReadFile(filepath.Join("..", "evidence", "testdata", "herdrup-uitests.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := &testingSet{devices: map[string]string{}, onDisk: true}
+	existedBeforeRun := false
+	runner := &fakeRunner{tests: string(report)}
+	runner.hook = func(ctx context.Context, c Command, out, stderr io.Writer) (bool, ProcessResult, error) {
+		if slices.Contains(c.Args, "test-without-building") {
+			_, err := os.Lstat(testingSetDir(c))
+			existedBeforeRun = !os.IsNotExist(err)
+		}
+		return set.hook(ctx, c, out, stderr)
+	}
+	engine := engineFixture(t, runner)
+	source, data := checkoutFixture(t, map[string]string{".macserve.json": parallelConfig})
+	result, err := engine.Execute(context.Background(), parallelUITestJob(t, `"parallel_testing":{"workers":2}`), source, bytes.NewReader(data), nil)
+	if err != nil || result.State != model.Succeeded || !result.CleanupOK {
+		t.Fatalf("parallel-testing job on a fresh job home: %+v %v", result, err)
+	}
+	if set.missing == 0 || existedBeforeRun {
+		t.Fatalf("listings without a set = %d, set existed before the run = %v", set.missing, existedBeforeRun)
+	}
+	if slices.Sort(set.deleted); !slices.Equal(set.deleted, []string{cloneOne, cloneTwo}) {
+		t.Fatalf("deleted clones = %v", set.deleted)
+	}
+}
+
+// The watch's polls before Xcode creates the set find no clones and do not
+// fail the job; once the set appears mid-run, the next pass claims its
+// clones of the job's simulator.
+func TestParallelTestingWatchClaimsClonesOfASetMadeMidRun(t *testing.T) {
+	report, err := os.ReadFile(filepath.Join("..", "evidence", "testdata", "herdrup-uitests.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := newLaneFake()
+	runner.fakeRunner.tests = string(report)
+	set := &testingSet{devices: map[string]string{}, onDisk: true}
+	var engine *Engine
+	polledMissing, claimed := false, false
+	runner.fakeRunner.hook = func(ctx context.Context, c Command, out, stderr io.Writer) (bool, ProcessResult, error) {
+		if slices.Contains(c.Args, "test-without-building") {
+			// The starting inventory and at least one watch poll find no set.
+			polledMissing = eventually(3*time.Second, func() bool {
+				set.mu.Lock()
+				defer set.mu.Unlock()
+				return set.missing >= 2
+			})
+			handled, result, err := set.hook(ctx, c, out, stderr)
+			claimed = eventually(3*time.Second, func() bool {
+				var m manifest
+				return readJSON(engine.root, "manifests/job-1.json", &m) == nil && slices.Contains(m.TestClones, cloneOne) && slices.Contains(m.TestClones, cloneTwo)
+			})
+			return handled, result, err
+		}
+		return set.hook(ctx, c, out, stderr)
+	}
+	engine = laneEngine(t, runner, 3)
+	newTestClock(engine)
+	source, data := checkoutFixture(t, map[string]string{".macserve.json": parallelConfig})
+	result, err := engine.Execute(context.Background(), parallelUITestJob(t, `"parallel_testing":{"workers":2}`), source, bytes.NewReader(data), nil)
+	if err != nil || result.State != model.Succeeded || !result.CleanupOK {
+		t.Fatalf("parallel-testing job: %+v %v", result, err)
+	}
+	if !polledMissing || !claimed {
+		t.Fatalf("watch polled the missing set = %v, claimed the clones mid-run = %v", polledMissing, claimed)
+	}
+	if got := set.left(); !slices.Equal(got, []string{siblingClone}) {
+		t.Fatalf("XCTest devices after the job = %v, want only the sibling's clone", got)
+	}
+}
+
+// Only a set that does not exist is empty: a listing that fails while the
+// set exists, or while its path cannot be checked (a stat error other than
+// not-exist) or is not a directory, still fails the job before its run.
+func TestParallelTestingUnlistableSetFails(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setUp func(dir string) error
+	}{
+		{"existing set", func(dir string) error { return os.MkdirAll(dir, 0o700) }},
+		{"set is a file", func(dir string) error {
+			if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+				return err
+			}
+			return os.WriteFile(dir, nil, 0o600)
+		}},
+		{"parent is a file (ENOTDIR)", func(dir string) error {
+			if err := os.MkdirAll(filepath.Dir(filepath.Dir(dir)), 0o700); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Dir(dir), nil, 0o600)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ran := false
+			runner := &fakeRunner{}
+			runner.hook = func(_ context.Context, c Command, _, stderr io.Writer) (bool, ProcessResult, error) {
+				if slices.Contains(c.Args, "test-without-building") {
+					ran = true
+				}
+				if !testingListing(c) {
+					return false, ProcessResult{}, nil
+				}
+				dir := testingSetDir(c)
+				if _, err := os.Lstat(dir); os.IsNotExist(err) {
+					if err := tc.setUp(dir); err != nil {
+						return true, ProcessResult{}, err
+					}
+				}
+				_, err := io.WriteString(stderr, "simctl failed\n")
+				return true, ProcessResult{ExitCode: 1, CleanupOK: true}, err
+			}
+			engine := engineFixture(t, runner)
+			source, data := checkoutFixture(t, map[string]string{".macserve.json": parallelConfig})
+			result, err := engine.Execute(context.Background(), parallelUITestJob(t, `"parallel_testing":{"workers":2}`), source, bytes.NewReader(data), nil)
+			if err == nil || result.State == model.Succeeded || ran {
+				t.Fatalf("job with an unlistable set: ran %v, %+v %v", ran, result, err)
 			}
 		})
 	}
