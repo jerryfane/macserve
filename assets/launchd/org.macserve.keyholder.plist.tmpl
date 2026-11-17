@@ -9,7 +9,8 @@
 <key>RunAtLoad</key><false/>
 <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
 <key>ThrottleInterval</key><integer>60</integer>
-<key>ProcessType</key><string>Background</string>
+<!-- Standard, not Background: jobs run clamped to the background band, and the controller waits on the keyholder's receipts and tokens within bounded worker requests, so it must outrank them. -->
+<key>ProcessType</key><string>Standard</string>
 <key>Nice</key><integer>10</integer>
 <key>Umask</key><integer>63</integer>
 <key>WorkingDirectory</key><string>/Library/macserve/var/keyholder</string>

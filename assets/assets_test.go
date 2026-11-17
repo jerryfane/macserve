@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -77,16 +78,14 @@ func TestLaunchDaemonsRemainDisabledAndSeparated(t *testing.T) {
 			if role == "controller" {
 				user, group, work = "servicecontrol", "servicecontrol", "/Library/macserve/var/controller"
 			}
-			// The health observer must outrank the jobs it watches, which run
-			// clamped to the background band (taskpolicy -b): at
-			// ProcessType=Background it shared that band and, with several
-			// lanes busy, its probes missed their deadlines until health
-			// expired and every running job was cancelled.
-			processType := "Background"
-			if role == "maintenance" {
-				processType = "Standard"
-			}
-			for key, want := range map[string]string{"Label": "org.macserve." + role, "UserName": user, "GroupName": group, "WorkingDirectory": work, "ProcessType": processType} {
+			// Every daemon here must outrank the jobs, which run clamped to
+			// the background band (taskpolicy -b). At ProcessType=Background
+			// the health observer's probes missed their deadlines until health
+			// expired and every running job was cancelled (#145); the
+			// controller answered worker requests in over 10 s and the
+			// worker, at its request bound, cancelled jobs it then could not
+			// prove clean and quarantined itself (#174).
+			for key, want := range map[string]string{"Label": "org.macserve." + role, "UserName": user, "GroupName": group, "WorkingDirectory": work, "ProcessType": "Standard"} {
 				if fields[key].XMLName.Local != "string" || fields[key].Text != want {
 					t.Fatalf("%s = %+v, want %s", key, fields[key], want)
 				}
@@ -119,6 +118,48 @@ func TestLaunchDaemonsRemainDisabledAndSeparated(t *testing.T) {
 				if fields[key].Text != expected {
 					t.Fatalf("log outside protected role directory: %s", fields[key].Text)
 				}
+			}
+		})
+	}
+}
+
+// TestLaunchDaemonMigrationFromInstalledPlists pins what release-install
+// must change on a host installed from the v0.1.65 templates
+// (testdata/launchd-v0.1.65, rendered alike). The controller, worker and
+// keyholder plists differ from them in ProcessType only, Background to
+// Standard: the one plist migration the admin package approves for them, as
+// for maintenance in #145 (XML comments are not plist data; Nice stays 10).
+// The maintenance and signer plists are byte-identical, so nothing migrates
+// them.
+func TestLaunchDaemonMigrationFromInstalledPlists(t *testing.T) {
+	fields := func(t *testing.T, data []byte) map[string]plistNode {
+		var root plistNode
+		if err := xml.Unmarshal(data, &root); err != nil {
+			t.Fatal(err)
+		}
+		if root.XMLName.Local != "plist" || len(root.Children) != 1 {
+			t.Fatal("invalid plist root")
+		}
+		return dictionary(t, root.Children[0])
+	}
+	for role, migrates := range map[string]bool{"controller": true, "worker": true, "keyholder": true, "maintenance": false, "signer": false} {
+		t.Run(role, func(t *testing.T) {
+			name := "org.macserve." + role + ".plist.tmpl"
+			installed, target := render(t, "testdata/launchd-v0.1.65/"+name), render(t, "launchd/"+name)
+			if !migrates {
+				if !bytes.Equal(installed, target) {
+					t.Fatal("plist differs from the installed one without an approved migration")
+				}
+				return
+			}
+			old, updated := fields(t, installed), fields(t, target)
+			if old["ProcessType"].Text != "Background" || updated["ProcessType"].Text != "Standard" {
+				t.Fatalf("ProcessType %q -> %q, want Background -> Standard", old["ProcessType"].Text, updated["ProcessType"].Text)
+			}
+			delete(old, "ProcessType")
+			delete(updated, "ProcessType")
+			if !reflect.DeepEqual(old, updated) {
+				t.Fatal("plist changes more than ProcessType; no migration approves that")
 			}
 		})
 	}
@@ -716,7 +757,10 @@ func TestKeyholderLaunchDaemon(t *testing.T) {
 	state := "/Library/macserve/var/keyholder"
 	for key, want := range map[string]string{
 		"Label": "org.macserve.keyholder", "UserName": "_macserve_key", "GroupName": "_macserve_key",
-		"WorkingDirectory": state, "ProcessType": "Background",
+		// Standard: the controller seals every completion through it inside
+		// the worker's bounded completion request, and exports sources with
+		// its tokens, so it must outrank the background-band jobs.
+		"WorkingDirectory": state, "ProcessType": "Standard",
 		"StandardOutPath": state + "/log/keyholder.out.log", "StandardErrorPath": state + "/log/keyholder.err.log",
 	} {
 		if fields[key].XMLName.Local != "string" || fields[key].Text != want {

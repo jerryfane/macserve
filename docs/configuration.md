@@ -328,6 +328,18 @@ running job (Studio, 2026-11-13). A probe forks some 60 short inspection command
 500 (`launchctl print` and `plutil` for each launchd-started job agent), so their time is that of their forks.
 At `Standard` the observer's CPU stays bounded by `GOMAXPROCS=2` plus those short-lived children.
 
+The controller, worker and keyholder run at `ProcessType=Standard` with `Nice=10` too, for the same reason. At
+`Background` they shared the jobs' band, and at five or six jobs the controller answered worker requests slowly:
+on 2026-11-16 heartbeats timed out at 10:30Z (#167), and at 19:50Z worker `/logs` POSTs took 7.8–10.9 s and two
+hit the worker's 10 s request bound (#174). Each time the worker cancelled the jobs, could not prove their cleanup
+and quarantined itself until an owner restart; source exports took up to 1m22s the same day. The keyholder seals
+every completion receipt inside the worker's bounded completion request and mints the tokens source exports use,
+so it moves with them. `Nice=10` keeps each daemon below default-priority work such as the simulators, and every
+job command still runs in the background band below it; the job clamp itself is unchanged. The signer stays at
+`Background`: it runs only on an owner's signing request, outside any job's completion. launchd applies a new
+`ProcessType` only when it bootstraps the label, so an installed host takes it through the release-install that
+publishes the new plists.
+
 Offered/running workers retain the ordinary 30-second heartbeat-loss fence. Cancellation, deadline or finalizing
 starts a fixed cleanup/delivery grace (the worker's finalization bound of 210 seconds, two minutes of delivery,
 plus heartbeat tolerance: 360 seconds); repeated heartbeats cannot
