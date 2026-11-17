@@ -59,6 +59,8 @@ type Client struct {
 
 var ErrPeerIdentity = errors.New("controller Unix peer UID mismatch")
 
+var errRedirect = errors.New("worker redirects are forbidden")
+
 // HTTPError is a non-2xx controller reply to Method Path (the socket URL
 // path; no query, headers or body).
 type HTTPError struct {
@@ -126,7 +128,7 @@ func NewWithChecks(config Config, engine Executor, checks Checks) (*Client, erro
 			return conn, nil
 		},
 	}
-	return &Client{config: config, engine: engine, root: root, epoch: epoch, sealKey: sealKey, checks: checks, http: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("worker redirects are forbidden") }}}, nil
+	return &Client{config: config, engine: engine, root: root, epoch: epoch, sealKey: sealKey, checks: checks, http: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return errRedirect }}}, nil
 }
 
 func (c *Client) Close() error { c.http.CloseIdleConnections(); return c.root.Close() }
@@ -233,7 +235,8 @@ func heldForIdle(result worker.Result) bool {
 
 // Run never executes a new lease while a saved completion from before it
 // started is awaiting durable acknowledgement. Losing heartbeat or evidence
-// delivery cancels local work.
+// delivery cancels local work: a request that fails transiently is retried
+// until the controller would expire the lease (#174, leaseClock).
 //
 // It executes up to max_concurrent_jobs leases at once, each on its own
 // goroutine, under one epoch. Recover runs only while no lease executes.
@@ -494,21 +497,37 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 	defer deadlineCancel()
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
+	// The heartbeat retries a transiently failed request (retry) and ends
+	// the job only once no heartbeat succeeded for the controller's lease
+	// window, never after the controller expired the lease.
+	clock := newLeaseClock(time.Duration(c.config.RequestTimeoutSeconds) * time.Second)
+	beatCtx, beatCancel := context.WithCancel(ctx)
 	heartbeatDone := make(chan struct{})
-	stopHeartbeat := make(chan struct{})
 	go func() {
 		defer close(heartbeatDone)
 		ticker := time.NewTicker(time.Duration(c.config.HeartbeatSeconds) * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-stopHeartbeat:
-				return
-			case <-ctx.Done():
+			case <-beatCtx.Done():
 				return
 			case <-ticker.C:
 				var pulse protocol.Heartbeat
-				_, err := c.json(ctx, http.MethodPost, "/jobs/"+lease.Job.ID+"/heartbeat", epoch, lease.Token, struct{}{}, &pulse)
+				err := retry(beatCtx, clock, func(ctx context.Context) error {
+					sent := time.Now()
+					if !sent.Before(clock.expiry()) {
+						return fmt.Errorf("no heartbeat answered within the controller's %s lease window", protocol.HeartbeatTimeout)
+					}
+					pulse = protocol.Heartbeat{}
+					_, err := c.json(ctx, http.MethodPost, "/jobs/"+lease.Job.ID+"/heartbeat", epoch, lease.Token, struct{}{}, &pulse)
+					if err == nil {
+						clock.renew(sent)
+					}
+					return err
+				})
+				if beatCtx.Err() != nil {
+					return
+				}
 				if err != nil {
 					cancel(fmt.Errorf("controller heartbeat: %w", err))
 					return
@@ -524,9 +543,9 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 			}
 		}
 	}()
-	stopBeat := sync.OnceFunc(func() { close(stopHeartbeat); <-heartbeatDone })
+	stopBeat := sync.OnceFunc(func() { beatCancel(); <-heartbeatDone })
 	defer stopBeat()
-	sink := &remoteSink{client: c, ctx: ctx, epoch: epoch, jobID: lease.Job.ID, lease: lease.Token, cancel: cancel}
+	sink := newRemoteSink(c, ctx, clock, epoch, lease.Job.ID, lease.Token, cancel)
 	result := worker.Result{State: model.Failed, Reason: "source transfer failed", Source: lease.Source, StartedAt: time.Now().UTC()}
 	executed := false
 	resolution, err := c.resolveLease(lease.Job)
@@ -549,6 +568,9 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 			}
 		}
 	}
+	// Every chunk the engine reported is delivered (or the job cancelled)
+	// before the job's end is judged and its completion delivered.
+	sink.close()
 	// The cause of an early end is judged when the job's execution ended: a
 	// held completion's wait for the idle check is not part of its
 	// execution, so neither its deadline nor a cancellation during the hold
@@ -688,31 +710,6 @@ func (c *Client) holdHeartbeat(lease protocol.Lease, epoch string) (stop func())
 		}
 	}()
 	return func() { cancel(); <-done }
-}
-
-type remoteSink struct {
-	client              *Client
-	ctx                 context.Context
-	epoch, jobID, lease string
-	cancel              context.CancelCauseFunc
-	mu                  sync.Mutex
-}
-
-func (s *remoteSink) Log(stream, text string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, err := s.client.json(s.ctx, http.MethodPost, "/jobs/"+s.jobID+"/logs", s.epoch, s.lease, protocol.Log{Stream: stream, Data: []byte(text)}, nil)
-	if err != nil {
-		s.cancel(err)
-	}
-	return err
-}
-func (s *remoteSink) Stage(state model.State) error {
-	_, err := s.client.json(s.ctx, http.MethodPost, "/jobs/"+s.jobID+"/stage", s.epoch, s.lease, protocol.Stage{State: state}, nil)
-	if err != nil {
-		s.cancel(err)
-	}
-	return err
 }
 
 // admissionStatus is an observation, never an authority for clearing quarantine.

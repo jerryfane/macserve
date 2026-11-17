@@ -76,6 +76,8 @@ PF enforcement may be a separately reviewed future opt-in; it is not implemented
   Test JSON capture and parsing share the same 32 MiB input bound.
 - `internal/workerclient`: authenticated Unix peer credentials, heartbeat cancellation, streamed logs and
   durable completion replay. Retrying delivery does not execute the job again. Uncertain cleanup stops dispatch.
+  Transiently failed heartbeat, log and stage requests are retried within the controller's lease window; log
+  chunks carry a per-lease `seq` the store records once (see configuration, #174).
 - `internal/source`: isolated controller-side Git fetch, exact commit/tree verification and bounded deterministic
   full-tree tar export. Git archive attributes cannot omit or substitute committed bytes. Links, submodules and
   Git LFS requirements are rejected explicitly. Source exports default to a 2 GiB limit.

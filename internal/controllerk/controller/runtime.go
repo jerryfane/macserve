@@ -269,7 +269,7 @@ func New(options Options) (*Controller, error) {
 // provides bounded transport grace.
 func (o *Options) defaultBudgets() {
 	if o.HeartbeatTimeout == 0 {
-		o.HeartbeatTimeout = 30 * time.Second
+		o.HeartbeatTimeout = protocol.HeartbeatTimeout
 	}
 	if o.CleanupTimeout == 0 {
 		o.CleanupTimeout = worker.FinalizationTimeout

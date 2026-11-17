@@ -52,7 +52,7 @@ func respond(w http.ResponseWriter, r *http.Request, value any, err error) {
 			status = http.StatusGone
 		case errors.Is(err, store.ErrNotFound):
 			status = http.StatusNotFound
-		case errors.Is(err, store.ErrConflict), errors.Is(err, store.ErrTransition):
+		case errors.Is(err, store.ErrConflict), errors.Is(err, store.ErrTransition), errors.Is(err, store.ErrLogGap):
 			status = http.StatusConflict
 		case errors.Is(err, receipt.ErrInvalid):
 			// The signer refused the evidence; replaying it cannot succeed.
@@ -154,8 +154,8 @@ func (c *Controller) handler() http.Handler {
 }
 
 // slowWorkerRequest is how long a worker request may take before it is
-// logged: the worker's requests time out after at most 10 s, and it cancels
-// a job on its first failed heartbeat (#167).
+// logged: the worker's requests time out after at most 10 s, and it ends a
+// job once its retries span the lease window (#167, #174).
 const slowWorkerRequest = 5 * time.Second
 
 func (c *Controller) requestJob(r *http.Request, replay bool) (model.Job, error) {
@@ -187,8 +187,8 @@ func leaseMatches(r *http.Request, job model.Job) error {
 
 // heartbeatStoreWait bounds how long a heartbeat waits for the store. The
 // store has one connection: slow store work (a prune, a long write) would
-// otherwise hold every heartbeat, and the worker cancels a job on its first
-// failed heartbeat (#167).
+// otherwise hold every heartbeat, and the worker ends a job once no
+// heartbeat succeeded for the lease window (#167, #174).
 const heartbeatStoreWait = 500 * time.Millisecond
 
 // heartbeat renews a delivered lease and tells the worker whether to cancel.
@@ -298,7 +298,9 @@ func (c *Controller) stage(w http.ResponseWriter, r *http.Request) {
 // logs appends the worker's output. Like stage, it waits on the store
 // without c.mu: AppendLog checks the lease and the job's state itself, and a
 // log-limit rejection requests the job's cancellation in its own transaction,
-// so no completion can record success between the two.
+// so no completion can record success between the two. A chunk with a seq
+// is recorded once per lease (store.AppendWorkerLog): the worker resends a
+// chunk whose answer it did not get (#174), and a gap answers 409.
 func (c *Controller) logs(w http.ResponseWriter, r *http.Request) {
 	var value protocol.Log
 	if err := decodeJSON(r.Body, 128<<10, &value); err != nil {
@@ -319,9 +321,12 @@ func (c *Controller) logs(w http.ResponseWriter, r *http.Request) {
 		if value.Stream != "stdout" && value.Stream != "stderr" {
 			return store.ErrInvalid
 		}
-		_, err = c.options.Store.AppendLog(r.Context(), job.ID, job.LeaseToken, value.Stream, string(value.Data), c.options.Now())
+		_, err = c.options.Store.AppendWorkerLog(r.Context(), job.ID, job.LeaseToken, value.Stream, string(value.Data), value.Seq, c.options.Now())
 		if errors.Is(err, store.ErrLogLimit) {
 			log.Printf("controller job log evidence limit exceeded: job=%s source=%s; cancellation requested", job.ID, model.CancelLogLimit)
+		}
+		if errors.Is(err, store.ErrLogGap) {
+			log.Printf("controller job worker log gap refused: job=%s seq=%d", job.ID, value.Seq)
 		}
 		return err
 	}()

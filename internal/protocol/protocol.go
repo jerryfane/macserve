@@ -50,10 +50,22 @@ type Stage struct {
 	Held  bool        `json:"held,omitempty"`
 }
 
+// Log is a chunk of a job's output. Seq numbers a lease's chunks from 1,
+// consecutively, so a resent chunk (its first request's answer was lost) is
+// recorded once: the controller acknowledges a seq it already recorded for
+// the lease without appending it again, and refuses a gap (409: output was
+// lost). A Log without Seq (0) is appended unconditionally, as before Seq.
 type Log struct {
 	Stream string `json:"stream"`
 	Data   []byte `json:"data"`
+	Seq    int64  `json:"seq,omitempty"`
 }
+
+// HeartbeatTimeout is how long a delivered lease that is not finalizing
+// lives without a heartbeat: the controller's default lease window, and how
+// long the worker retries a failed heartbeat, log or stage request before it
+// ends the job.
+const HeartbeatTimeout = 30 * time.Second
 
 // Completion is the worker's final report: its result and the root
 // worker's signed build seal over that result, which the controller passes
