@@ -27,10 +27,16 @@ var (
 	ErrCleanup = errors.New("worker process cleanup failed")
 )
 
-// sampleFailureTimeouts bounds how long memory may go unobserved: the job
-// fails closed once no sample has succeeded for this many sample timeouts
-// (30 s at the production 5 s), never because one sample was slow or failed.
-const sampleFailureTimeouts = 6
+// degradedAfterTimeouts is how long memory may go unobserved before the
+// broker logs that a command's memory monitoring is degraded: no sample has
+// completed for this many sample timeouts (30 s at the production 5 s).
+// Degraded monitoring is never a failure: the command keeps running and its
+// budget is enforced on the next sample that completes. Until v0.1.67 it
+// failed the command: at three lanes with two parallel-testing clones each
+// (Studio, 2026-11-17 15:52:36Z), three UI-test runs failed together with
+// "no sample succeeded for 34.679s (0 failed)", and the cleanup of the test
+// runs they killed quarantined the worker.
+const degradedAfterTimeouts = 6
 
 type processSample struct {
 	pid    int
@@ -43,6 +49,14 @@ type processSample struct {
 	footprintKiB int64
 	zombie       bool
 	start        string
+}
+
+// memoryCharge is one completed memory sample's charge to a command: charged
+// is the footprint the budget judges (KiB), total the job UID's whole
+// footprint (KiB, lane mode only), err why the sample has no charge.
+type memoryCharge struct {
+	charged, total int64
+	err            error
 }
 
 type processSampler func(context.Context) ([]processSample, error)
@@ -308,46 +322,54 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 			result.Signal = status.Signal().String()
 		}
 	}
-	observe := func(samples []processSample) error {
+	// enforce records a completed sample's charge (KiB) and judges it against
+	// the budget: a measured charge over budget is the only memory verdict
+	// that fails a command.
+	enforce := func(c memoryCharge) error {
+		charged := kibToMiB(c.charged)
+		result.PeakMemoryMiB = max(result.PeakMemoryMiB, charged)
 		if tracker != nil {
-			tracker.update(samples)
-			mine, total, err := tracker.footprint(samples, command.JobID)
-			if err != nil {
-				return err
-			}
-			charged := kibToMiB(mine)
-			result.PeakMemoryMiB = max(result.PeakMemoryMiB, charged)
-			result.HostPeakMemoryMiB = max(result.HostPeakMemoryMiB, kibToMiB(total))
-			if command.MemoryLimitMiB > 0 && charged > int64(command.MemoryLimitMiB) {
-				return fmt.Errorf("%w: sampled %d MiB in the job's own processes, budget %d MiB (monitored, not a hard cap)", ErrMemoryLimit, charged, command.MemoryLimitMiB)
-			}
+			result.HostPeakMemoryMiB = max(result.HostPeakMemoryMiB, kibToMiB(c.total))
+		}
+		if command.MemoryLimitMiB <= 0 || charged <= int64(command.MemoryLimitMiB) {
 			return nil
 		}
-		totalKiB, err := footprintKiB(samples, uid)
+		if tracker != nil {
+			return fmt.Errorf("%w: sampled %d MiB in the job's own processes, budget %d MiB (monitored, not a hard cap)", ErrMemoryLimit, charged, command.MemoryLimitMiB)
+		}
+		return fmt.Errorf("%w: sampled %d MiB above the %d MiB job-UID baseline, budget %d MiB (monitored, not a hard cap)", ErrMemoryLimit, charged, kibToMiB(baselineKiB), command.MemoryLimitMiB)
+	}
+	// measure samples memory and charges it: in lane mode the job's own
+	// processes by the labels the lane sampler keeps current
+	// (startLaneSampler), which it reads without relabelling; otherwise the
+	// job UID's footprint above the baseline.
+	measure := func(ctx context.Context) memoryCharge {
+		samples, err := r.sample(ctx)
 		if err != nil {
-			return err
+			return memoryCharge{err: err}
 		}
-		charged := kibToMiB(max(0, totalKiB-baselineKiB))
-		result.PeakMemoryMiB = max(result.PeakMemoryMiB, charged)
-		if command.MemoryLimitMiB > 0 && charged > int64(command.MemoryLimitMiB) {
-			return fmt.Errorf("%w: sampled %d MiB above the %d MiB job-UID baseline, budget %d MiB (monitored, not a hard cap)", ErrMemoryLimit, charged, kibToMiB(baselineKiB), command.MemoryLimitMiB)
+		if tracker != nil {
+			mine, total, err := tracker.footprint(samples, command.JobID)
+			return memoryCharge{charged: mine, total: total, err: err}
 		}
-		return nil
+		total, err := footprintKiB(samples, uid)
+		return memoryCharge{charged: max(0, total-baselineKiB), err: err}
 	}
 
 	poll := time.NewTicker(r.pollInterval)
 	defer poll.Stop()
 	memory := time.NewTicker(r.sampleInterval)
 	defer memory.Stop()
-	// Sampling runs beside the loop, so a slow sample never delays reaping,
-	// output or cancellation. A failed or timed-out sample is reported and
-	// tolerated; the job fails closed once no sample has succeeded for
-	// sampleFailureTimeouts sample timeouts.
-	type memorySample struct {
-		samples []processSample
-		err     error
-	}
-	sampled := make(chan memorySample, 1)
+	// Memory is sampled and charged beside the loop, one sample at a time:
+	// the process table, the kernel memory reads and the lane labels (one
+	// tracker, which every lane's commands, the lane sampler, the census and
+	// the lane quiesce share) never delay reaping, output or cancellation.
+	// Until v0.1.67 the charge ran in the loop, which then waited for the
+	// tracker behind the other lanes' labelling. A sample has no deadline of
+	// its own: its kernel reads cannot be interrupted, and a late sample is
+	// still a measurement. A sample that fails, or none completing for
+	// degradedAfterTimeouts sample timeouts, is logged, never a failure.
+	charges := make(chan memoryCharge, 1)
 	sampling := false
 	samplingCtx, stopSampling := context.WithCancel(context.Background())
 	sampleMemory := func() {
@@ -355,38 +377,42 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 			return
 		}
 		sampling = true
-		go func() {
-			ctx, cancel := context.WithTimeout(samplingCtx, r.sampleTimeout)
-			defer cancel()
-			samples, err := r.sample(ctx)
-			sampled <- memorySample{samples: samples, err: err}
-		}()
+		go func() { charges <- measure(samplingCtx) }()
 	}
 	observed := time.Now()
 	failures := 0
 	var lastFailure error
-	recordSample := func(s memorySample) {
+	degraded := false
+	recordCharge := func(c memoryCharge) {
 		sampling = false
-		if s.err != nil {
+		if c.err != nil {
 			failures++
-			lastFailure = s.err
-			if r.diagnostics != nil {
-				fmt.Fprintf(r.diagnostics, "macserve worker: %s: memory sample failed (%d consecutive): %v\n", label, failures, s.err)
+			lastFailure = c.err
+			if !degraded && r.diagnostics != nil {
+				fmt.Fprintf(r.diagnostics, "macserve worker: %s: memory sample failed (%d consecutive): %v\n", label, failures, c.err)
 			}
 			return
 		}
-		observed, failures, lastFailure = time.Now(), 0, nil
-		runErr = errors.Join(runErr, observe(s.samples))
+		if degraded && r.diagnostics != nil {
+			fmt.Fprintf(r.diagnostics, "macserve worker: %s: memory monitoring restored after %s unobserved (%d failed)\n", label, time.Since(observed).Round(time.Millisecond), failures)
+		}
+		observed, failures, lastFailure, degraded = time.Now(), 0, nil, false
+		runErr = errors.Join(runErr, enforce(c))
 	}
 	checkObserved := func() {
 		unobserved := time.Since(observed)
-		if unobserved <= sampleFailureTimeouts*r.sampleTimeout {
+		if degraded || unobserved <= degradedAfterTimeouts*r.sampleTimeout {
 			return
 		}
-		if lastFailure == nil {
-			lastFailure = errors.New("memory sample did not complete")
+		degraded = true
+		if r.diagnostics == nil {
+			return
 		}
-		runErr = errors.Join(runErr, fmt.Errorf("%s: sample worker memory: no sample succeeded for %s (%d failed): %w", label, unobserved.Round(time.Millisecond), failures, lastFailure))
+		cause := "a sample is still running"
+		if lastFailure != nil {
+			cause = "last error: " + lastFailure.Error()
+		}
+		fmt.Fprintf(r.diagnostics, "macserve worker: %s: memory monitoring degraded: no sample completed for %s (%d failed; %s); the command keeps running and its budget is enforced on the next completed sample\n", label, unobserved.Round(time.Millisecond), failures, cause)
 	}
 	sampleMemory()
 	for runErr == nil {
@@ -400,19 +426,18 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 		case p := <-pipes:
 			recordPipe(p)
 		case <-poll.C:
-		case s := <-sampled:
-			recordSample(s)
+		case c := <-charges:
+			recordCharge(c)
 		case <-memory.C:
 			checkObserved()
 			sampleMemory()
 		}
 	}
 	// The command has finished or failed; a sample still in flight no longer
-	// decides anything and must not outlive Run.
+	// decides anything. Run does not wait for it: it may be held in the kernel
+	// or behind the lane tracker. It ends on its own into the buffered channel,
+	// and its charge is dropped.
 	stopSampling()
-	if sampling {
-		<-sampled
-	}
 	if ctx.Err() != nil {
 		runErr = errors.Join(runErr, ctx.Err())
 	}

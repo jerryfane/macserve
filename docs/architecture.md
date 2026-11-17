@@ -60,8 +60,12 @@ PF enforcement may be a separately reviewed future opt-in; it is not implemented
   first command (the always-logged-in GUI session's footprint, which includes compressed and swapped memory),
   so pages a booting simulator's processes share are not charged once per process. A command whose baseline
   cannot be sampled does not start; `peak_memory_mib` is the charged peak, and the baseline is written to the
-  broker log at job start and to budget failures. A slow or failed sample is tolerated until memory has gone
-  unobserved for 30 s. This is not a kernel memory cap and excludes the broker and other-UID system daemons.
+  broker log at job start and to budget failures. Memory is sampled beside the command, one sample at a time; only
+  a completed sample over budget fails it. A sample that fails or is slow is degraded monitoring, never a failure:
+  memory unobserved for 30 s is logged, the command keeps running, and its budget is enforced on the next sample
+  that completes (until v0.1.67 it failed the command, which killed three parallel-testing UI-test runs together
+  on 2026-11-17 and quarantined the worker). This is not a kernel memory cap and excludes the broker and other-UID
+  system daemons.
   After a command exits, its output pipes get 10 s to reach end of file (each output chunk is a controller log
   request; 250 ms until v0.1.60 failed simulator boots at six lanes, #155), which still bounds a pipe a descendant
   that left the process group keeps open. A failed `simctl boot` or `bootstatus` is retried once on a new device,
@@ -339,8 +343,9 @@ one instance make it nobody's. Validated on live Studio captures (`internal/work
 job and three booting simulators split with no unattributed process. Instances no lineage claims are judged by the
 existing census (audited baseline, verified relaunches, tolerated Apple/developer-tool launches such as
 CoreSimulatorService, SimLaunchHost, testmanagerd, CoreDevice); what remains is *unattributed*. The memory budget then
-charges the summed `phys_footprint` of the job's own labelled processes (no job-UID baseline);
-`host_peak_memory_mib` records the whole job UID.
+charges the summed `phys_footprint` of the job's own labelled processes (no job-UID baseline), by the labels the 100 ms
+sampling keeps: a memory sample does not relabel. `host_peak_memory_mib` records the whole job UID. A labelling pass
+reads each unlabelled instance's executable (and a `launchd_sim`'s arguments) from the kernel at most once.
 
 **Cleanup.** A job that starts while no other job runs is admitted by the full admission and preflight quiesce. A job
 started beside others is admitted by a lane admission: other jobs' labelled processes are not residual, and an

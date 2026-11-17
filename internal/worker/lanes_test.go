@@ -373,6 +373,41 @@ func TestLaneClaimsRecordedTestClones(t *testing.T) {
 	}
 }
 
+// update holds the tracker every lane's census, quiesce and memory charge
+// share while it reads unlabelled instances from the kernel. A booting
+// parallel-testing clone is unlabelled until its UDID is the job's
+// (watchTestClones): each of its instances is read once per pass, not once
+// per descendant (its launchd_sim's arguments once per simulator process).
+func TestLaneUpdateDescribesEachInstanceOncePerPass(t *testing.T) {
+	const broker, uid, sim = 100, 600, 400
+	now := time.Now().Unix()
+	device := "/Users/u/Library/Developer/XCTestDevices/C1000000-0000-0000-0000-000000000001/data/"
+	reads := map[int]int{}
+	tracker := newLaneTracker(broker, uid, "/ws", func(pid int, wantArgs bool) (processDescription, error) {
+		reads[pid]++
+		if pid == sim {
+			return processDescription{executable: "launchd_sim", args: "launchd_sim " + device + "var/run/launchd_bootstrap.plist"}, nil
+		}
+		return processDescription{executable: device + "usr/libexec/daemon"}, nil
+	})
+	tracker.begin("ui", time.Unix(now-100, 0))
+	samples := []processSample{laneSample(sim, 1, uid, now)}
+	for pid := sim + 1; pid <= sim+50; pid++ {
+		samples = append(samples, laneSample(pid, sim, uid, now))
+	}
+	tracker.update(samples)
+	for _, p := range samples {
+		// launchd_sim: its executable, then its arguments.
+		want := 1
+		if p.pid == sim {
+			want = 2
+		}
+		if reads[p.pid] != want {
+			t.Fatalf("pid %d read %d times in one pass, want %d", p.pid, reads[p.pid], want)
+		}
+	}
+}
+
 // QuiesceJob signals only the job's own labelled processes: never its
 // sibling's, a shared service, the baseline or an unattributed process.
 // A labelled survivor is contamination.

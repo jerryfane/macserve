@@ -264,7 +264,12 @@ func startTime(s string) (time.Time, bool) {
 }
 
 // update labels the instances of samples (one full process table) and
-// forgets instances no longer listed.
+// forgets instances no longer listed. It holds the tracker, which every
+// lane's census, quiesce and memory charge share, so each instance is
+// resolved, and its executable read, at most once per pass: an unlabelled
+// tree (a booting parallel-testing clone before its UDID is the job's) was
+// otherwise described again for every descendant, its launchd_sim's
+// arguments once per process of the simulator.
 func (t *laneTracker) update(samples []processSample) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -318,7 +323,7 @@ func (t *laneTracker) update(samples []processSample) {
 			}
 		}
 	}
-	visiting := map[int]bool{}
+	resolved := map[processInstance]bool{}
 	var resolve func(p processSample) string
 	resolve = func(p processSample) string {
 		key := processInstance{p.pid, p.start}
@@ -328,11 +333,10 @@ func (t *laneTracker) update(samples []processSample) {
 			}
 			return label
 		}
-		if t.conflicts[key] || p.uid != t.uid || p.start == "" || p.pid <= 1 || visiting[p.pid] {
+		if t.conflicts[key] || p.uid != t.uid || p.start == "" || p.pid <= 1 || resolved[key] {
 			return ""
 		}
-		visiting[p.pid] = true
-		defer delete(visiting, p.pid)
+		resolved[key] = true
 		seed := t.seed(p)
 		var inherited string
 		if parent, ok := byPID[p.parent]; ok && p.parent > 1 && !startBefore(p.start, parent.start) {
