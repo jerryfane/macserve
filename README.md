@@ -19,7 +19,7 @@ macserve turns a Mac you own into a build-and-test machine for your iOS apps. Wh
 commit, your Mac builds and tests that exact commit with the Xcode version you chose. It sends the result back to
 GitHub as a pass or fail check, with a signed receipt that proves what ran.
 
-[![Watch the 4-minute explainer](docs/assets/explainer-poster.jpg)](docs/assets/macserve-explainer.mp4)
+[![Watch the 4-minute explainer](docs/assets/explainer-poster.jpg)](https://jerryfane.github.io/macserve/)
 
 *Watch the 4-minute explainer (opens the video page).*
 
