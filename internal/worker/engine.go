@@ -66,6 +66,10 @@ type Engine struct {
 	drain       string
 	idlePending bool
 	readyAt     time.Time
+	// bootsFrom is when the latest simulator boot burst of any lane began,
+	// or the start a parallel-testing test run has reserved after it
+	// (spaceSimulatorBoots).
+	bootsFrom time.Time
 	// deviceMu serializes simulator creation and the verification of an
 	// interrupted creation across lanes, so at most one creation is ever
 	// unrecorded.
@@ -132,6 +136,14 @@ type manifest struct {
 	ScriptDevicesPending bool     `json:"script_devices_pending,omitempty"`
 	ScriptDevicesBefore  []string `json:"script_devices_before,omitempty"`
 	ScriptDevices        []string `json:"script_devices,omitempty"`
+	// A parallel-testing UI test job's test run records the inventory of
+	// XCTest's device set it started from (TestClonesPending,
+	// TestClonesBefore); its cleanup adopts every device added since that is
+	// named as a clone of its simulator as TestClones, and then deletes those
+	// xcodebuild left (see beginTestClones).
+	TestClonesPending bool     `json:"test_clones_pending,omitempty"`
+	TestClonesBefore  []string `json:"test_clones_before,omitempty"`
+	TestClones        []string `json:"test_clones,omitempty"`
 }
 
 // Decode old resource records without retaining their quarantine authority.
@@ -444,7 +456,8 @@ func (e *Engine) recoverOwned(ctx context.Context, reset bool) error {
 			failures = append(failures, err)
 			continue
 		}
-		if !identifier.MatchString(m.JobID) || name != m.JobID+".json" || !filepath.IsAbs(m.DeveloperDir) || (m.DeviceUDID != "" && !udidPattern.MatchString(m.DeviceUDID)) || slices.ContainsFunc(m.ScriptDevices, func(id string) bool { return !udidPattern.MatchString(id) }) {
+		invalid := func(id string) bool { return !udidPattern.MatchString(id) }
+		if !identifier.MatchString(m.JobID) || name != m.JobID+".json" || !filepath.IsAbs(m.DeveloperDir) || (m.DeviceUDID != "" && invalid(m.DeviceUDID)) || slices.ContainsFunc(m.ScriptDevices, invalid) || slices.ContainsFunc(m.TestClones, invalid) {
 			failures = append(failures, ErrRecovery)
 			continue
 		}

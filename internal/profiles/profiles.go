@@ -60,7 +60,8 @@ type Registry struct {
 // templates. Missing timeouts default to 1800 seconds (2400 for UI tests, 3600
 // for scripts), with a 3600-second maximum (7200 for scripts); a UI-test
 // recipe may set a maximum up to 7200. Missing memory budgets default to
-// 32768 MiB. It does not probe installed tools.
+// 32768 MiB (plus ParallelTestingCloneMiB per parallel-testing worker). It
+// does not probe installed tools.
 func New(profiles []model.Profile, templates []model.Template) (*Registry, error) {
 	r := &Registry{entries: make([]entry, 0, len(profiles)), byID: make(map[string]int, len(profiles)), byTmplID: make(map[string]int, len(templates))}
 	for _, original := range profiles {
@@ -339,7 +340,46 @@ func normalizeTemplate(t *model.Template) error {
 	if err := normalizeFlutterPin(*t); err != nil {
 		return err
 	}
+	if err := normalizeParallelTesting(t); err != nil {
+		return err
+	}
 	return normalizeBudgets(t.Kind, &t.DefaultTimeoutSeconds, &t.MaxTimeoutSeconds, &t.MemoryLimitMiB)
+}
+
+// MaxParallelTestingWorkers bounds a UI-test template's parallel_testing
+// workers: simulator clones in one job.
+const MaxParallelTestingWorkers = 4
+
+// ParallelTestingCloneMiB is the memory a parallel-testing template's budget
+// allows for each simulator clone (its launchd_sim, the app under test and
+// the test runner), on top of the default 32768 MiB budget: the clones are
+// charged to the job, and the controller's concurrent memory cap sums the
+// budgets. It is an allowance, not a measurement; a template may set more.
+const ParallelTestingCloneMiB = 4096
+
+// normalizeParallelTesting admits parallel_testing only on a
+// simulator_ui_test template, with 1 to MaxParallelTestingWorkers workers.
+// Its memory budget defaults to, and must be at least, the default budget
+// plus ParallelTestingCloneMiB per worker.
+func normalizeParallelTesting(t *model.Template) error {
+	p := t.ParallelTesting
+	if p == nil {
+		return nil
+	}
+	if t.Kind != model.SimulatorUITest {
+		return fmt.Errorf("%w: only simulator_ui_test templates may set parallel_testing", ErrInvalid)
+	}
+	if p.Workers < 1 || p.Workers > MaxParallelTestingWorkers {
+		return fmt.Errorf("%w: parallel_testing workers must be 1 to %d", ErrInvalid, MaxParallelTestingWorkers)
+	}
+	floor := 32768 + p.Workers*ParallelTestingCloneMiB
+	if t.MemoryLimitMiB == 0 {
+		t.MemoryLimitMiB = floor
+	}
+	if t.MemoryLimitMiB < floor {
+		return fmt.Errorf("%w: a parallel_testing template's memory_limit_mib must be at least %d for %d workers", ErrInvalid, floor, p.Workers)
+	}
+	return nil
 }
 
 func normalizeProfile(p *model.Profile) error {
@@ -545,6 +585,10 @@ func cloneTemplate(t model.Template) model.Template {
 	if t.Flutter != nil {
 		pin := *t.Flutter
 		t.Flutter = &pin
+	}
+	if t.ParallelTesting != nil {
+		parallel := *t.ParallelTesting
+		t.ParallelTesting = &parallel
 	}
 	return t
 }

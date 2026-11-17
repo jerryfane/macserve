@@ -250,6 +250,17 @@ func (p Profile) Concurrent() bool {
 	return p.Kind == SimulatorScript && p.Template != nil && p.Template.Concurrent
 }
 
+// ParallelTestingWorkers is the number of xcodebuild parallel-testing
+// workers (clones of the job's simulator) of a simulator_ui_test template
+// job snapshot whose template opts in (Template.ParallelTesting); 0 when it
+// does not.
+func (p Profile) ParallelTestingWorkers() int {
+	if p.Kind != SimulatorUITest || p.Template == nil || p.Template.ParallelTesting == nil {
+		return 0
+	}
+	return p.Template.ParallelTesting.Workers
+}
+
 // Template is a controller-owned, owner-scoped recipe. Every repository of a
 // listed GitHub account may use it by declaring its Xcode project or workspace
 // and scheme, and for a test or script template its shards, in .macserve.json;
@@ -274,6 +285,18 @@ type Template struct {
 	// templates may set it. It is omitted when false, so a template without
 	// it keeps its digest.
 	Concurrent bool `json:"concurrent,omitempty"`
+	// ParallelTesting opts a simulator_ui_test template's jobs in to
+	// xcodebuild parallel testing on clones of the job's simulator. It is
+	// omitted when absent, so a template without it keeps its digest.
+	ParallelTesting *ParallelTesting `json:"parallel_testing,omitempty"`
+}
+
+// ParallelTesting is a UI-test template's parallel-testing opt-in: the
+// worker runs its tests with -parallel-testing-enabled YES and
+// -parallel-testing-worker-count Workers (1 to 4), each worker on a clone
+// of the job's simulator that xcodebuild creates in XCTest's own device set.
+type ParallelTesting struct {
+	Workers int `json:"workers"`
 }
 
 // FlutterPin is a Flutter template's exact tool identity: the Flutter SDK

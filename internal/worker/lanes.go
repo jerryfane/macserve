@@ -23,7 +23,9 @@ import (
 //   - seeds: every command root the broker starts for the job (its direct
 //     child, which keeps its PID through launchctl asuser, _job-exec and the
 //     tool's exec); every launchd_sim whose arguments name a device directory
-//     .../CoreSimulator/Devices/<UDID>/ of a UDID the job created; every
+//     .../CoreSimulator/Devices/<UDID>/ of a UDID the job created, or
+//     .../XCTestDevices/<UDID>/ of a parallel-testing clone of its simulator
+//     (watchTestClones); every
 //     process whose executable lies under the job's workspace or one of its
 //     device directories; for the one job adopting devices (a concurrent
 //     script job's script, AdoptDevices), every such launchd_sim or process
@@ -227,6 +229,11 @@ func (t *laneTracker) crashWindows() []crashWindow {
 
 var deviceDirectory = regexp.MustCompile(`/CoreSimulator/Devices/([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})/`)
 
+// testDeviceDirectory is a device directory in XCTest's device set
+// (testingDeviceSet), where xcodebuild parallel testing makes its clones.
+// Only a job's own clones (AttachDevice) seed it: no job adopts devices there.
+var testDeviceDirectory = regexp.MustCompile(`/XCTestDevices/([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})/`)
+
 // startBefore reports whether start token a (kernel "sec:usec") is earlier
 // than b. Unparseable tokens are never earlier.
 func startBefore(a, b string) bool {
@@ -407,9 +414,11 @@ func (t *laneTracker) seed(p processSample) string {
 			claim(id)
 		}
 		for _, text := range []string{d.executable, d.args} {
-			for _, m := range deviceDirectory.FindAllStringSubmatch(text, -1) {
-				if j.udids[strings.ToUpper(m[1])] {
-					claim(id)
+			for _, pattern := range []*regexp.Regexp{deviceDirectory, testDeviceDirectory} {
+				for _, m := range pattern.FindAllStringSubmatch(text, -1) {
+					if j.udids[strings.ToUpper(m[1])] {
+						claim(id)
+					}
 				}
 			}
 		}

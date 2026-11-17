@@ -82,8 +82,18 @@ func TestTemplateJobSealsAgainstDerivedRecipe(t *testing.T) {
 // Target/Class selectors.
 func testTemplateFixture(t *testing.T, kind model.Kind) (Options, model.Job, worker.Result, Expected) {
 	t.Helper()
+	return testTemplateFixtureWith(t, kind, nil)
+}
+
+// testTemplateFixtureWith is testTemplateFixture of a template that edit
+// changes, when not nil.
+func testTemplateFixtureWith(t *testing.T, kind model.Kind, edit func(*model.Template)) (Options, model.Job, worker.Result, Expected) {
+	t.Helper()
 	options, job, result, expected := fixture(t, model.SimulatorUITest)
 	template := model.Template{ID: "org-test-v1", Version: 1, Kind: kind, Owners: []string{"example-org"}, Xcode: job.Profile.Xcode, DeveloperDir: job.Profile.DeveloperDir, Simulators: []model.Simulator{*job.Profile.Simulator}, DefaultTimeoutSeconds: 300, MaxTimeoutSeconds: 600, MemoryLimitMiB: 8192}
+	if edit != nil {
+		edit(&template)
+	}
 	registry, err := profiles.New(nil, []model.Template{template})
 	if err != nil {
 		t.Fatal(err)
@@ -142,6 +152,33 @@ func TestTemplateUITestReceiptValidates(t *testing.T) {
 				t.Fatal("receipt matched the snapshot's empty required tests")
 			}
 		})
+	}
+}
+
+// A UI-test template's parallel_testing opt-in is part of the snapshot the
+// receipt binds: a parallel-testing job's receipt validates against its own
+// template digest, not against the digest of the template without it.
+func TestParallelTestingReceiptBindsItsTemplate(t *testing.T) {
+	_, _, _, plain := testTemplateFixture(t, model.SimulatorUITest)
+	options, job, result, expected := testTemplateFixtureWith(t, model.SimulatorUITest, func(template *model.Template) {
+		// Its JSON spelling, as in profiles.json, with the defaulted budget.
+		if err := json.Unmarshal([]byte(`{"parallel_testing":{"workers":2},"memory_limit_mib":0}`), template); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if expected.ProfileDigest == plain.ProfileDigest {
+		t.Fatal("parallel_testing left the template digest unchanged")
+	}
+	if snapshot, err := json.Marshal(job.Profile.Template); err != nil || !strings.Contains(string(snapshot), `"parallel_testing":{"workers":2}`) || job.Profile.MemoryLimitMiB != 32768+2*4096 {
+		t.Fatalf("parallel-testing snapshot: %s %+v %v", snapshot, job.Profile, err)
+	}
+	_, _, p := sealFixture(t, options, job, result)
+	if err := ValidateSuccess(p, expected); err != nil {
+		t.Fatal(err)
+	}
+	expected.ProfileDigest = plain.ProfileDigest
+	if ValidateSuccess(p, expected) == nil {
+		t.Fatal("parallel-testing receipt validated against the plain template's digest")
 	}
 }
 

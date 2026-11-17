@@ -132,7 +132,7 @@ func (x *execution) createDevice(ctx context.Context, pin *model.Simulator) (str
 	if err := x.engine.saveManifest(x.manifest); err != nil {
 		return "", err
 	}
-	output, err := x.capture(ctx, "/usr/bin/xcrun", "simctl", "create", "macserve-"+x.job.ID, pin.DeviceType, pin.Runtime)
+	output, err := x.capture(ctx, "/usr/bin/xcrun", "simctl", "create", deviceName(x.job.ID), pin.DeviceType, pin.Runtime)
 	id := strings.TrimSpace(string(output))
 	if !udidPattern.MatchString(id) {
 		return "", errors.Join(err, errors.New("simulator creation did not return a valid owned UDID"))
@@ -155,6 +155,7 @@ func (x *execution) createDevice(ctx context.Context, pin *model.Simulator) (str
 // plain boot failure: simctl failed with its processes cleaned up, nothing was
 // contaminated and the job itself is still live.
 func (x *execution) bootDevice(ctx context.Context, id string) (retryable bool, err error) {
+	x.engine.noteSimulatorBoot()
 	for _, args := range [][]string{{"simctl", "boot", id}, {"simctl", "bootstatus", id, "-b"}} {
 		result, err := x.invoke(ctx, x.command("/usr/bin/xcrun", args), x.stdout, x.stderr)
 		if err != nil {
@@ -162,6 +163,50 @@ func (x *execution) bootDevice(ctx context.Context, id string) (retryable bool, 
 		}
 	}
 	return false, nil
+}
+
+// simulatorBootGap spaces a parallel-testing test run, which boots its
+// clones at once, from every other simulator boot burst on the worker: a
+// lane's own device boot, and another parallel-testing run
+// (spaceSimulatorBoots). The controller's simulator start stagger spaces job
+// starts only, while a job's clones boot when its test run starts, after its
+// build.
+const simulatorBootGap = 30 * time.Second
+
+// noteSimulatorBoot records that a lane boots its own simulator now.
+func (e *Engine) noteSimulatorBoot() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.bootsFrom = later(e.bootsFrom, e.options.Now())
+}
+
+// spaceSimulatorBoots holds a parallel-testing test run, in lane mode, until
+// simulatorBootGap after the latest boot burst any lane began or reserved,
+// and reserves that start for its own clones. One lane boots nothing beside
+// the job and does not wait.
+func (e *Engine) spaceSimulatorBoots(ctx context.Context) error {
+	if !e.laneMode() {
+		return nil
+	}
+	e.mu.Lock()
+	now := e.options.Now()
+	start := now
+	if !e.bootsFrom.IsZero() {
+		start = later(now, e.bootsFrom.Add(simulatorBootGap))
+	}
+	e.bootsFrom = start
+	e.mu.Unlock()
+	if wait := start.Sub(now); wait > 0 {
+		return e.pause(ctx, wait)
+	}
+	return nil
+}
+
+func later(a, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
 }
 
 // environment is the whole environment of every job command. HOME, TMPDIR and
@@ -177,13 +222,14 @@ func environment(workspace, developer, account string) []string {
 	return []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "USER=" + account, "LOGNAME=" + account, "DEVELOPER_DIR=" + developer, "HOME=" + filepath.Join(workspace, "home"), "TMPDIR=" + filepath.Join(workspace, "tmp"), "TMP=" + filepath.Join(workspace, "tmp"), "TEMP=" + filepath.Join(workspace, "tmp"), "CFFIXED_USER_HOME=" + filepath.Join(workspace, "home"), "XDG_CACHE_HOME=" + filepath.Join(workspace, "caches"), "CLANG_MODULE_CACHE_PATH=" + filepath.Join(workspace, "caches", "clang"), "SWIFT_MODULECACHE_PATH=" + filepath.Join(workspace, "caches", "swift"), "LANG=en_US.UTF-8", "LC_ALL=en_US.UTF-8"}
 }
 
-// stopWriters stops m's simulators (its own and those its script created)
-// and then the job processes jobID's cleanup may stop (accountQuiesce);
-// jobID "" is recovery, which stops every job process. A concurrent script
-// job's recorded start (beginScriptDevices) is released only after a
-// second adoption, once those processes are stopped, has deleted any device
-// one of them created after the first: until then it stays in the manifest
-// for recovery.
+// stopWriters stops m's simulators (its own, those its script created and
+// the parallel-testing clones xcodebuild made of its own) and then the job
+// processes jobID's cleanup may stop (accountQuiesce); jobID "" is recovery,
+// which stops every job process. A concurrent script job's recorded start
+// (beginScriptDevices) and a parallel-testing job's recorded test run start
+// (beginTestClones) are released only after a second adoption, once those
+// processes are stopped, has deleted any device one of them created after
+// the first: until then they stay in the manifest for recovery.
 func (e *Engine) stopWriters(ctx context.Context, m *manifest, jobID string) error {
 	ctx, cancel := context.WithTimeout(ctx, e.options.CleanupTimeout)
 	defer cancel()
@@ -194,27 +240,34 @@ func (e *Engine) stopWriters(ctx context.Context, m *manifest, jobID string) err
 	if err := e.adoptScriptDevices(ctx, m); err != nil {
 		return err
 	}
+	if err := e.adoptTestClones(ctx, m); err != nil {
+		return err
+	}
 	if m.DeviceUDID != "" {
 		if err := e.reconcileDevice(ctx, m); err != nil {
 			return err
 		}
 		simulatorErr = e.stopDevice(ctx, m)
 	}
-	simulatorErr = errors.Join(simulatorErr, e.stopScriptDevices(ctx, m))
+	simulatorErr = errors.Join(simulatorErr, e.stopScriptDevices(ctx, m), e.stopTestClones(ctx, m))
 	quietErr := e.accountQuiesce(ctx, jobID)
 	if quietErr != nil {
 		return errors.Join(ErrRecovery, simulatorErr, quietErr)
 	}
-	if simulatorErr != nil || !m.ScriptDevicesPending {
+	if simulatorErr != nil || !m.ScriptDevicesPending && !m.TestClonesPending {
 		return simulatorErr
 	}
 	if err := e.adoptScriptDevices(ctx, m); err != nil {
 		return err
 	}
-	if err := e.stopScriptDevices(ctx, m); err != nil {
+	if err := e.adoptTestClones(ctx, m); err != nil {
+		return err
+	}
+	if err := errors.Join(e.stopScriptDevices(ctx, m), e.stopTestClones(ctx, m)); err != nil {
 		return err
 	}
 	m.ScriptDevicesPending, m.ScriptDevicesBefore = false, nil
+	m.TestClonesPending, m.TestClonesBefore = false, nil
 	return e.saveManifest(*m)
 }
 
@@ -223,7 +276,7 @@ func (e *Engine) stopDevice(ctx context.Context, m *manifest) error {
 		if !udidPattern.MatchString(m.DeviceUDID) {
 			return ErrRecovery
 		}
-		if err := e.removeDevice(ctx, m, m.DeviceUDID); err != nil {
+		if err := e.removeDevice(ctx, m, "", m.DeviceUDID); err != nil {
 			return err
 		}
 		if err := e.reconcileDevice(ctx, m); err != nil {
@@ -236,12 +289,13 @@ func (e *Engine) stopDevice(ctx context.Context, m *manifest) error {
 	return nil
 }
 
-// removeDevice shuts down and deletes the simulator udid that m records.
-func (e *Engine) removeDevice(ctx context.Context, m *manifest, udid string) error {
+// removeDevice shuts down and deletes the simulator udid of device set set
+// ("" the default set) that m records.
+func (e *Engine) removeDevice(ctx context.Context, m *manifest, set, udid string) error {
 	command := Command{Executable: "/usr/bin/xcrun", Dir: "/", Env: environment(filepath.Join(e.options.WorkspaceRoot, m.JobID), m.DeveloperDir, e.options.JobUser), JobID: m.JobID}
 	var failures []error
 	for _, action := range []string{"shutdown", "delete"} {
-		command.Args = []string{"simctl", action, udid}
+		command.Args = simctlArgs(set, action, udid)
 		output := &boundedBuffer{max: 1 << 20}
 		stderr := &boundedBuffer{max: 1 << 20}
 		result, err := e.run(ctx, command, output, stderr)
@@ -341,7 +395,7 @@ func (e *Engine) stopScriptDevices(ctx context.Context, m *manifest) error {
 	var failures []error
 	for _, udid := range m.ScriptDevices {
 		if slices.Contains(ids, udid) {
-			failures = append(failures, e.removeDevice(ctx, m, udid))
+			failures = append(failures, e.removeDevice(ctx, m, "", udid))
 		}
 	}
 	if err := errors.Join(failures...); err != nil {
@@ -363,6 +417,189 @@ func (e *Engine) stopScriptDevices(ctx context.Context, m *manifest) error {
 	return nil
 }
 
+// testingDeviceSet is XCTest's own device set (`simctl --set testing`):
+// xcodebuild parallel testing clones the destination simulator into it,
+// names each clone "Clone <n> of <device name>" and deletes them when the
+// run ends.
+const testingDeviceSet = "testing"
+
+// testCloneWatchInterval is how often a parallel-testing job's test run
+// looks for new clones of its simulator (watchTestClones).
+const testCloneWatchInterval = 5 * time.Second
+
+// deviceName is the name of jobID's own simulator (createDevice).
+func deviceName(jobID string) string { return "macserve-" + jobID }
+
+// testClone reports whether name is xcodebuild's name for a parallel-testing
+// clone of jobID's simulator: "Clone <n> of macserve-<jobID>".
+func testClone(name, jobID string) bool {
+	rest, ok := strings.CutPrefix(name, "Clone ")
+	if !ok {
+		return false
+	}
+	n, device, ok := strings.Cut(rest, " of ")
+	return ok && n != "" && n[0] != '0' && strings.Trim(n, "0123456789") == "" && device == deviceName(jobID)
+}
+
+// beginTestClones runs just before a parallel-testing UI test job's test
+// run (model.Profile.ParallelTestingWorkers): it records in m the inventory
+// of XCTest's device set (testingDeviceSet) the run starts from. The job's
+// cleanup then adopts the clones xcodebuild made of its simulator
+// (adoptTestClones) and deletes those xcodebuild left (stopTestClones), also
+// after a restart (Recover).
+func (e *Engine) beginTestClones(ctx context.Context, m *manifest) error {
+	before, err := e.cloneInventory(ctx, m)
+	if err != nil {
+		return err
+	}
+	m.TestClonesPending, m.TestClonesBefore = true, before
+	return e.saveManifest(*m)
+}
+
+// testClones lists, from a recorded test run start (beginTestClones), every
+// device of XCTest's device set that was not in the inventory the run
+// started from and is named as a clone of m's simulator (testClone). Both
+// are required: the device set may be shared by every job of the account,
+// and only xcodebuild's clones of a job's simulator bear its job ID. record
+// records the listing in the job's result (Engine.run).
+func (e *Engine) testClones(ctx context.Context, m *manifest, record bool) ([]string, error) {
+	devices, err := e.listDevices(ctx, m, testingDeviceSet, record)
+	if err != nil {
+		return nil, err
+	}
+	before := make(map[string]bool, len(m.TestClonesBefore))
+	for _, id := range m.TestClonesBefore {
+		before[strings.ToUpper(id)] = true
+	}
+	var clones []string
+	for _, device := range devices {
+		if !before[strings.ToUpper(device.UDID)] && testClone(device.Name, m.JobID) {
+			clones = append(clones, device.UDID)
+		}
+	}
+	return clones, nil
+}
+
+// adoptTestClones makes every clone of m's simulator listed now (testClones)
+// one of m's TestClones, and in lane mode the job's for the lane attribution.
+// The start stays recorded (stopWriters releases it).
+func (e *Engine) adoptTestClones(ctx context.Context, m *manifest) error {
+	if !m.TestClonesPending {
+		return nil
+	}
+	clones, err := e.testClones(ctx, m, true)
+	if err != nil {
+		return err
+	}
+	for _, id := range clones {
+		if slices.ContainsFunc(m.TestClones, func(own string) bool { return strings.EqualFold(own, id) }) {
+			continue
+		}
+		m.TestClones = append(m.TestClones, id)
+		if lanes := e.laneRunner(); lanes != nil && e.laneMode() {
+			lanes.AttachDevice(m.JobID, id)
+		}
+	}
+	return e.saveManifest(*m)
+}
+
+// watchTestClones gives the lane attribution, every testCloneWatchInterval
+// while a parallel-testing job's test run runs, each clone of its simulator
+// xcodebuild made (testClones): the clones' processes are then the job's (its
+// memory budget and lane quiesce), not unattributed residue beside a
+// sibling's cleanup. Its listings run beside the job's own commands, so they
+// are not recorded in its result; a failed one is skipped, and the job's
+// cleanup adopts the clones into its manifest regardless (adoptTestClones).
+// Outside lane mode every job-UID process is the one job's, and it does
+// nothing. stop ends the watch and waits for it.
+func (e *Engine) watchTestClones(ctx context.Context, m manifest) (stop func()) {
+	lanes := e.laneRunner()
+	if lanes == nil || !e.laneMode() {
+		return func() {}
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		attached := map[string]bool{}
+		for e.pause(ctx, testCloneWatchInterval) == nil {
+			clones, err := e.testClones(ctx, &m, false)
+			if err != nil {
+				continue
+			}
+			for _, id := range clones {
+				if !attached[id] {
+					attached[id] = true
+					lanes.AttachDevice(m.JobID, id)
+				}
+			}
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+// cloneInventory lists the UDIDs of XCTest's device set (testingDeviceSet).
+func (e *Engine) cloneInventory(ctx context.Context, m *manifest) ([]string, error) {
+	devices, err := e.listDevices(ctx, m, testingDeviceSet, true)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(devices))
+	for _, device := range devices {
+		ids = append(ids, device.UDID)
+	}
+	return ids, nil
+}
+
+// stopTestClones shuts down and deletes every clone of m's simulator still
+// listed in XCTest's device set and proves them all absent; m keeps only
+// those that remain, which is contamination. xcodebuild deletes its clones
+// itself when a run ends, so a clone gone by the second listing is absent
+// whatever its own removal reported.
+func (e *Engine) stopTestClones(ctx context.Context, m *manifest) error {
+	if len(m.TestClones) == 0 {
+		return nil
+	}
+	if slices.ContainsFunc(m.TestClones, func(id string) bool { return !udidPattern.MatchString(id) }) {
+		return ErrRecovery
+	}
+	ids, err := e.cloneInventory(ctx, m)
+	if err != nil {
+		return err
+	}
+	var failures []error
+	for _, udid := range m.TestClones {
+		if !slices.Contains(ids, udid) {
+			continue
+		}
+		if err := e.removeDevice(ctx, m, testingDeviceSet, udid); errors.Is(err, ErrRecovery) {
+			return err
+		} else if err != nil {
+			failures = append(failures, err)
+		}
+	}
+	if ids, err = e.cloneInventory(ctx, m); err != nil {
+		return errors.Join(append(failures, err)...)
+	}
+	m.TestClones = slices.DeleteFunc(m.TestClones, func(id string) bool { return !slices.Contains(ids, id) })
+	if len(m.TestClones) == 0 {
+		m.TestClones = nil
+	}
+	if err := e.saveManifest(*m); err != nil {
+		return err
+	}
+	if len(m.TestClones) != 0 {
+		if err := errors.Join(failures...); err != nil {
+			return err
+		}
+		return fmt.Errorf("%w: %d parallel-testing simulator clone(s) remain after deletion", ErrContamination, len(m.TestClones))
+	}
+	return nil
+}
+
 // simctlAlreadyShutdown is CoreSimulator's refusal to shut down a device that
 // is already in the Shutdown state.
 const simctlAlreadyShutdown = "Unable to shutdown device in current state: Shutdown"
@@ -380,7 +617,7 @@ func alreadyShutdown(err error, result ProcessResult, output, stderr *boundedBuf
 func (e *Engine) cleanup(ctx context.Context, m *manifest) error {
 	ctx, cancel := context.WithTimeout(ctx, e.options.CleanupTimeout)
 	defer cancel()
-	if m.DeviceCreatePending || m.DeviceUDID != "" || m.ScriptDevicesPending || len(m.ScriptDevices) != 0 {
+	if m.DeviceCreatePending || m.DeviceUDID != "" || m.ScriptDevicesPending || len(m.ScriptDevices) != 0 || m.TestClonesPending || len(m.TestClones) != 0 {
 		return fmt.Errorf("%w: unresolved simulator ownership", ErrRecovery)
 	}
 	if err := e.unmountMetalToolchain(ctx, m); err != nil {
@@ -408,18 +645,42 @@ func (e *Engine) cleanup(ctx context.Context, m *manifest) error {
 // failure. Recovery proves that exact UDID absent, without matching device names
 // or touching any unrecorded simulator.
 func (e *Engine) deviceInventory(ctx context.Context, m *manifest) ([]string, error) {
+	devices, err := e.listDevices(ctx, m, "", true)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(devices))
+	for _, device := range devices {
+		ids = append(ids, device.UDID)
+	}
+	return ids, nil
+}
+
+// listedDevice is one device of a `simctl list devices --json` listing.
+type listedDevice struct {
+	UDID string `json:"udid"`
+	Name string `json:"name"`
+}
+
+// listDevices lists the devices of CoreSimulator's device set set (the
+// default set when "", else a `simctl --set` value such as testingDeviceSet)
+// as m's job, in its environment; record records the listing in the job's
+// result (Engine.run), which only the job's own goroutine may do.
+func (e *Engine) listDevices(ctx context.Context, m *manifest, set string, record bool) ([]listedDevice, error) {
 	ctx, cancel := context.WithTimeout(ctx, e.options.CleanupTimeout)
 	defer cancel()
 	output := &boundedBuffer{max: 16 << 20}
 	stderr := &boundedBuffer{max: 1 << 20}
-	result, err := e.run(ctx, Command{Executable: "/usr/bin/xcrun", Args: []string{"simctl", "list", "devices", "--json"}, Dir: "/", Env: environment(filepath.Join(e.options.WorkspaceRoot, m.JobID), m.DeveloperDir, e.options.JobUser), JobID: m.JobID}, output, stderr)
+	run := e.options.Runner.Run
+	if record {
+		run = e.run
+	}
+	result, err := run(ctx, Command{Executable: "/usr/bin/xcrun", Args: simctlArgs(set, "list", "devices", "--json"), Dir: "/", Env: environment(filepath.Join(e.options.WorkspaceRoot, m.JobID), m.DeveloperDir, e.options.JobUser), JobID: m.JobID}, output, stderr)
 	if err != nil || result.ExitCode != 0 || result.Signal != "" || !result.CleanupOK || output.err != nil || stderr.err != nil {
 		return nil, errors.Join(err, output.err, stderr.err, errors.New("cannot verify recorded simulator inventory"))
 	}
 	var listing struct {
-		Devices map[string][]struct {
-			UDID string `json:"udid"`
-		} `json:"devices"`
+		Devices map[string][]listedDevice `json:"devices"`
 	}
 	if err := json.Unmarshal(output.Bytes(), &listing); err != nil {
 		return nil, err
@@ -427,16 +688,24 @@ func (e *Engine) deviceInventory(ctx context.Context, m *manifest) ([]string, er
 	if listing.Devices == nil {
 		return nil, errors.New("simulator inventory has no devices object")
 	}
-	ids := make([]string, 0)
+	var listed []listedDevice
 	for _, devices := range listing.Devices {
 		for _, device := range devices {
 			if !udidPattern.MatchString(device.UDID) {
 				return nil, errors.New("simulator inventory contains an invalid UDID")
 			}
-			ids = append(ids, device.UDID)
+			listed = append(listed, device)
 		}
 	}
-	return ids, nil
+	return listed, nil
+}
+
+// simctlArgs is `simctl <args>` on device set set ("" the default set).
+func simctlArgs(set string, args ...string) []string {
+	if set == "" {
+		return append([]string{"simctl"}, args...)
+	}
+	return append([]string{"simctl", "--set", set}, args...)
 }
 
 func (e *Engine) reconcileDevice(ctx context.Context, m *manifest) error {
