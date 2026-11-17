@@ -33,7 +33,7 @@ high-entropy bearer credentials belong in the caller's private credential storag
 Optional `signer` connects the controller to the [code signer](#code-signer).
 
 - `POST /v1/jobs` requires `Idempotency-Key` and a profile-matching exact-SHA request.
-- Queued jobs run one at a time in fair order. The next claim takes the oldest queued job of the repository
+- Queued jobs are claimed in fair order, into as many lanes as [`max_concurrent_jobs`](#concurrent-jobs-max_concurrent_jobs) allows. The next claim takes the oldest queued job of the repository
   that has waited longest since its last claim (its newest retained job's start); a repository with no retained
   started job goes first, and ties keep submission order. A burst from one repository therefore delays another
   repository's job by at most one claim per other repository with queued jobs, and each repository's own jobs
@@ -100,6 +100,35 @@ Optional `signer` connects the controller to the [code signer](#code-signer).
   `ios_archive` job through the code signer: `202` while signing, `200` once signed, a failed signing is retried.
   `GET /v1/jobs/{id}/signing` reports the signing sub-status. The agent then uploads the signed `App.ipa` with
   `macserve testflight-upload` ([TestFlight](testflight.md)); macserve never contacts App Store Connect.
+
+### Example: submit a job with curl
+
+(Moved from the README.) From another machine, use the API directly. It listens only on the Mac's tailnet address, over TLS 1.3 with the
+installer-generated certificate. The request must carry the template's exact Xcode pins, which
+`GET /v1/capabilities` reports:
+
+```sh
+MACSERVE=https://100.64.0.10:8443          # your controller's tailnet address and port
+CURL=(curl -fsS --cacert tls-cert.pem -H "Authorization: Bearer $MACSERVE_TOKEN")
+
+XCODE=$("${CURL[@]}" "$MACSERVE/v1/capabilities" |
+  jq -c '.templates[] | select(.id == "org-ios-sim-build-v1") | .xcode')
+
+JOB=$(jq -n --arg sha "$(git rev-parse HEAD)" --argjson xcode "$XCODE" \
+  '{repo: "your-org/your-app", sha: $sha, kind: "build", profile: "org-ios-sim-build-v1", xcode: $xcode}' |
+  "${CURL[@]}" -X POST "$MACSERVE/v1/jobs" \
+    -H "Content-Type: application/json" -H "Idempotency-Key: $(uuidgen)" --data-binary @- |
+  jq -r .id)
+
+"${CURL[@]}" "$MACSERVE/v1/jobs/$JOB"          # status
+"${CURL[@]}" "$MACSERVE/v1/jobs/$JOB/logs"     # paged logs (or /logs/stream for SSE)
+"${CURL[@]}" "$MACSERVE/v1/jobs/$JOB/results"  # xcresult summary (or /results/junit)
+"${CURL[@]}" "$MACSERVE/v1/jobs/$JOB/receipt"  # signed receipt; 409 until one exists
+```
+
+`tls-cert.pem` is the controller certificate installed at `/Library/macserve/config/tls-cert.pem`. The token needs
+the `jobs:submit` and `jobs:read` scopes for that repository (or an `owner/*` entry). Resending the identical
+request with the same `Idempotency-Key` returns the existing job; a different request under that key is refused.
 
 Job kinds are `build`, `unit_test`, `simulator_ui_test`, `simulator_script` and `ios_archive`; the last two run only
 from an org template. A `simulator_script` request names a `shard` of the repository's `.macserve.json` `script` section,
