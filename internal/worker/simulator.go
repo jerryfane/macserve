@@ -429,8 +429,17 @@ func (e *Engine) stopScriptDevices(ctx context.Context, m *manifest) error {
 // testingDeviceSet is XCTest's own device set (`simctl --set testing`):
 // xcodebuild parallel testing clones the destination simulator into it,
 // names each clone "Clone <n> of <device name>" and deletes them when the
-// run ends.
+// run ends. CoreSimulator keeps it in the job's home (environment), at
+// testingSetPath, and Xcode creates that directory only when it makes its
+// first clone; until then `simctl --set testing` exits 1 ("Provided set path
+// does not exist").
 const testingDeviceSet = "testing"
+
+// testingSetPath is jobID's testingDeviceSet directory, relative to the
+// workspace root: XCTestDevices in the job's home (environment).
+func testingSetPath(jobID string) string {
+	return filepath.Join(jobID, "home", "Library", "Developer", "XCTestDevices")
+}
 
 // testCloneWatchInterval is how often a parallel-testing job's test run
 // looks for new clones of its simulator (watchTestClones).
@@ -763,7 +772,10 @@ type listedDevice struct {
 // listDevices lists the devices of CoreSimulator's device set set (the
 // default set when "", else a `simctl --set` value such as testingDeviceSet)
 // as m's job, in its environment; record records the listing in the job's
-// result (Engine.run), which only the job's own goroutine may do.
+// result (Engine.run), which only the job's own goroutine may do. A
+// testingDeviceSet listing that only exited non-zero while the set's
+// directory does not exist (Xcode has not made a clone in the job's home
+// yet) is an empty set; the directory is never created here.
 func (e *Engine) listDevices(ctx context.Context, m *manifest, set string, record bool) ([]listedDevice, error) {
 	ctx, cancel := context.WithTimeout(ctx, e.options.CleanupTimeout)
 	defer cancel()
@@ -775,6 +787,14 @@ func (e *Engine) listDevices(ctx context.Context, m *manifest, set string, recor
 	}
 	result, err := run(ctx, Command{Executable: "/usr/bin/xcrun", Args: simctlArgs(set, "list", "devices", "--json"), Dir: "/", Env: environment(filepath.Join(e.options.WorkspaceRoot, m.JobID), m.DeveloperDir, e.options.JobUser), JobID: m.JobID}, output, stderr)
 	if err != nil || result.ExitCode != 0 || result.Signal != "" || !result.CleanupOK || output.err != nil || stderr.err != nil {
+		exitOnly := (err == nil || onlyExitStatus(err, result.ExitCode)) && result.ExitCode > 0 && result.Signal == "" && result.CleanupOK && output.err == nil && stderr.err == nil
+		if set == testingDeviceSet && exitOnly {
+			_, statErr := e.workspaces.Lstat(testingSetPath(m.JobID))
+			if errors.Is(statErr, os.ErrNotExist) {
+				return nil, nil
+			}
+			err = errors.Join(err, statErr)
+		}
 		if !result.CleanupOK {
 			err = errors.Join(err, errListingCleanup)
 		}

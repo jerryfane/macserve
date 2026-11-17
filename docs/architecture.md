@@ -458,10 +458,14 @@ sibling's simulator or on CoreSimulator; the contract in [configuration.md](conf
 
 **Parallel-testing clones.** A `simulator_ui_test` job of a template with `parallel_testing`
 (`model.Profile.ParallelTestingWorkers`) runs its tests with xcodebuild parallel testing, which clones the job's
-simulator into XCTest's device set (`simctl --set testing`, `~/Library/Developer/XCTestDevices`), names each clone
+simulator into XCTest's device set (`simctl --set testing`, `Library/Developer/XCTestDevices` in the job's home), names each clone
 `Clone <n> of macserve-<job>`, boots them and deletes them when the run ends. That set is not the default set the
 engine lists, so before the test run the engine records the testing set's inventory in the manifest
-(`test_clones_pending`, `test_clones_before`). While the run runs, it lists the set every 5 s, and again inside every
+(`test_clones_pending`, `test_clones_before`). Xcode creates the set's directory only with its first clone, and until
+then `simctl --set testing list` exits 1 ("Provided set path does not exist"): every listing of the set (inventory,
+discovery, census refresh, cleanup, recovery) that only exited non-zero while the directory does not exist (lstat
+ENOENT) is an empty set; the engine never creates it. A failed listing of an existing set, or one whose path cannot be
+checked or is not a directory, stays a failure. While the run runs, it lists the set every 5 s, and again inside every
 lane census (a sibling's residue count, a lane admission or readiness check) after the census samples the processes
 and before it judges them, and makes every
 clone of its own simulator (added since, and named for its own device) one of the job's `test_clones` at once, saving
