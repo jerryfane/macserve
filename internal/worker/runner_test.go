@@ -557,8 +557,11 @@ func TestNativeRunnerUnverifiableCleanupFails(t *testing.T) {
 	runner.sampleTimeout = 10 * time.Millisecond
 	inspectErr := errors.New("cannot inspect process ownership")
 	runner.inspect = func(context.Context) ([]processSample, error) { return nil, inspectErr }
-	runner.sample = afterBaseline(nil, func(context.Context) ([]processSample, error) { return nil, inspectErr })
-	result, err := runner.Run(context.Background(), command, io.Discard, io.Discard)
+	runner.sample = func(context.Context) ([]processSample, error) { return nil, nil }
+	// The deadline stops the command; its cleanup cannot be confirmed.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	result, err := runner.Run(ctx, command, io.Discard, io.Discard)
 	if !errors.Is(err, ErrCleanup) || !errors.Is(err, inspectErr) || result.CleanupOK {
 		t.Fatalf("unverified cleanup was accepted: %+v, %v", result, err)
 	}
