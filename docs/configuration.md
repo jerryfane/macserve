@@ -344,7 +344,7 @@ Offered/running workers retain the ordinary 30-second heartbeat-loss fence. Canc
 starts a fixed cleanup/delivery grace (the worker's finalization bound of 210 seconds, two minutes of delivery,
 plus heartbeat tolerance: 360 seconds); repeated heartbeats cannot
 extend it. Source streaming instead receives the ten-minute preparation budget plus heartbeat tolerance.
-The worker cancels a job on its first failed heartbeat, so the controller answers heartbeats even while slow
+The worker ends a job only once no heartbeat has succeeded for that 30-second window, and the controller answers heartbeats even while slow
 store work holds its single database connection (#167): a heartbeat waits at most 500 ms for the job's record,
 then answers from the lease's in-memory claim (its token, epoch and deadline) and the cancellation the store
 published when it committed it (a client's cancel, an administrator's `cancel_active` pause, a GitHub run
@@ -352,8 +352,20 @@ blocked or superseded, a log limit or the controller's own), so a cancel committ
 still delivered. A worker request slower
 than 5 s is logged with its route. A log-limit rejection requests the job's cancellation in the same transaction,
 so a concurrent completion cannot record success over truncated logs.
-The worker still cancels on its first failed `/logs` or `/stage` request, which wait for the store; those no
-longer hold the controller lock while they wait, but tolerating a slow store there needs a worker change.
+The worker retries a heartbeat, `/logs` or `/stage` request that timed out, lost its connection or got a 5xx or
+429 answer, with a backoff from 250 ms up to 2 s, each request still bounded by its 10 s timeout (#174). It ends the
+job only when a request still fails once the controller would expire the lease (30 s after the send time of the
+last heartbeat it answered, never later than the controller's own fence), or at once on a refusal (410 lease gone,
+409, 413 log limit). Job output waits in memory meanwhile, in order, up to 4 MiB; a job that outruns that ends as
+if its output could not be delivered. Its stages are sent behind the output. The job's cleanup never waits on the
+controller: the `running` stage, which gates the job's recipe, is waited for only until the job is cancelled, and
+the `finalizing` stage is queued without waiting. The completion is delivered only after the queued output, waiting
+at most 30 s for it after the job ended (undelivered output then cancels the job). Each `/logs` chunk carries `seq`,
+numbered from 1 per lease: the store records the last seq accepted per
+job and lease (`jobs.worker_log_seq`, store schema version 8), answers a resent seq it already recorded as accepted
+without appending it again, and refuses a gap with 409, so a request whose answer was lost is never recorded twice.
+A chunk without `seq` (a worker from before it) is appended unconditionally. The worker and controller of this
+change ship together in a full release.
 Controller source-cleanup debt is durable and independent of worker cleanup: registration cannot erase it,
 and only successful protected source removal clears it. Retention may relieve disk-only pressure, but never
 runs through manual/owner pause or unqualified security readiness.

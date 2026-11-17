@@ -13,6 +13,16 @@ import (
 const MaxLogRecordBytes = 64 << 10
 const MaxLogPageBytes = 1 << 20
 
+// workerLogSeqSchema records, per job, the last worker log seq accepted
+// (protocol.Log Seq) and the lease it was accepted under: a new lease of the
+// job counts from 1 again. Controller records ("system") and seq-less worker
+// records never touch it.
+const workerLogSeqSchema = `
+ALTER TABLE jobs ADD COLUMN worker_log_seq INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE jobs ADD COLUMN worker_log_lease TEXT NOT NULL DEFAULT '';
+PRAGMA user_version=8;
+`
+
 // AppendLog preserves raw bytes without sanitizing terminal controls. Renderers
 // must escape untrusted output. A rejected oversized record or full log persists
 // the completeness flag separately, so a full byte cap cannot hide truncation.
@@ -21,7 +31,17 @@ const MaxLogPageBytes = 1 << 20
 // rejection was committing, since Finish refuses success once cancellation is
 // requested.
 func (s *Store) AppendLog(ctx context.Context, id, lease, stream, text string, now time.Time) (int64, error) {
-	if stream != "stdout" && stream != "stderr" && stream != "system" || text == "" || !validTime(now) {
+	return s.AppendWorkerLog(ctx, id, lease, stream, text, 0, now)
+}
+
+// AppendWorkerLog is AppendLog of the worker's chunk seq of lease
+// (protocol.Log): a seq at or below the last one accepted under the lease
+// was recorded before (a resend whose answer was lost) and returns 0 and no
+// error without appending; the next seq is appended and recorded; a later
+// one is refused with ErrLogGap, since output between them was lost. Seq 0
+// appends unconditionally, as AppendLog.
+func (s *Store) AppendWorkerLog(ctx context.Context, id, lease, stream, text string, seq int64, now time.Time) (int64, error) {
+	if stream != "stdout" && stream != "stderr" && stream != "system" || text == "" || !validTime(now) || seq < 0 || seq > 0 && stream == "system" {
 		return 0, ErrInvalid
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -29,10 +49,10 @@ func (s *Store) AppendLog(ctx context.Context, id, lease, stream, text string, n
 		return 0, err
 	}
 	defer tx.Rollback()
-	var sequence, bytes int64
+	var sequence, bytes, lastSeq int64
 	var state model.State
-	var currentLease string
-	err = tx.QueryRowContext(ctx, "SELECT log_sequence,log_bytes,state,lease_token FROM jobs WHERE id=?", id).Scan(&sequence, &bytes, &state, &currentLease)
+	var currentLease, seqLease string
+	err = tx.QueryRowContext(ctx, "SELECT log_sequence,log_bytes,state,lease_token,worker_log_seq,worker_log_lease FROM jobs WHERE id=?", id).Scan(&sequence, &bytes, &state, &currentLease, &lastSeq, &seqLease)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, ErrNotFound
 	}
@@ -44,6 +64,15 @@ func (s *Store) AppendLog(ctx context.Context, id, lease, stream, text string, n
 	}
 	if lease == "" || lease != currentLease {
 		return 0, ErrLease
+	}
+	if seqLease != lease {
+		lastSeq = 0
+	}
+	if seq > 0 && seq <= lastSeq {
+		return 0, nil
+	}
+	if seq > lastSeq+1 {
+		return 0, ErrLogGap
 	}
 	fits := len(text) <= MaxLogRecordBytes && int64(len(text)) <= s.options.MaxLogBytes-bytes && int64(len(text)) <= s.options.MaxTotalLogBytes
 	if fits {
@@ -77,6 +106,11 @@ func (s *Store) AppendLog(ctx context.Context, id, lease, stream, text string, n
 	_, err = tx.ExecContext(ctx, "UPDATE jobs SET log_sequence=?,log_bytes=log_bytes+? WHERE id=?", sequence, len(text), id)
 	if err != nil {
 		return 0, err
+	}
+	if seq > 0 {
+		if _, err := tx.ExecContext(ctx, "UPDATE jobs SET worker_log_seq=?,worker_log_lease=? WHERE id=?", seq, lease, id); err != nil {
+			return 0, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err

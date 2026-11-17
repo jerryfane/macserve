@@ -275,13 +275,16 @@ func (c *Controller) next(ctx context.Context, epoch string, running []string) (
 		offer, lease = a, &protocol.Lease{Job: job, Token: job.LeaseToken, Source: a.source.Source}
 	}
 	if offer != nil {
+		// Every delivery starts the lease's heartbeat window anew: the
+		// worker counts its window from when it asked for the lease it
+		// received (#174), and a resent offer is one the worker asked for.
+		c.beatMu.Lock()
 		if !offer.offered {
-			c.beatMu.Lock()
 			offer.offered = true
 			offer.offeredAt = c.options.Now()
-			offer.heartbeat = offer.offeredAt
-			c.beatMu.Unlock()
 		}
+		offer.heartbeat = c.options.Now()
+		c.beatMu.Unlock()
 		return lease, nil
 	}
 	// A held completion waits for the worker's idle check: nothing new

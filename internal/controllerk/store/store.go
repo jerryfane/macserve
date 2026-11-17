@@ -39,6 +39,7 @@ var (
 	ErrLogLimit    = errors.New("log limit exceeded")
 	ErrResultLimit = errors.New("result envelope limit exceeded")
 	ErrLogExpired  = errors.New("log bytes expired")
+	ErrLogGap      = errors.New("worker log sequence gap")
 )
 
 type Options struct {
@@ -172,7 +173,7 @@ func (s *Store) Close() error { return s.db.Close() }
 
 // SchemaVersion is the SQLite user_version this build migrates to and the
 // newest it opens.
-const SchemaVersion = 7
+const SchemaVersion = 8
 
 func (s *Store) initialize(ctx context.Context) error {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -219,6 +220,11 @@ func (s *Store) initialize(ctx context.Context) error {
 	}
 	if version < 7 {
 		if _, err := tx.ExecContext(ctx, laneSchema); err != nil {
+			return err
+		}
+	}
+	if version < 8 {
+		if _, err := tx.ExecContext(ctx, workerLogSeqSchema); err != nil {
 			return err
 		}
 	}
