@@ -11,7 +11,7 @@ import (
 
 // undoLaneSchema returns a current database to the version 6 jobs table, for
 // tests that emulate an older database.
-const undoLaneSchema = "DROP TRIGGER jobs_active_lane_insert; DROP TRIGGER jobs_active_lane_update; DROP INDEX jobs_active_lane; ALTER TABLE jobs DROP COLUMN lane; CREATE UNIQUE INDEX jobs_one_active ON jobs ((1)) WHERE state IN ('preparing','running','cancelling','finalizing');"
+const undoLaneSchema = undoWorkerLogSeqSchema + "DROP TRIGGER jobs_active_lane_insert; DROP TRIGGER jobs_active_lane_update; DROP INDEX jobs_active_lane; ALTER TABLE jobs DROP COLUMN lane; CREATE UNIQUE INDEX jobs_one_active ON jobs ((1)) WHERE state IN ('preparing','running','cancelling','finalizing');"
 
 func claimLanes(t *testing.T, s *Store, epoch string, now time.Time, lanes int) model.Job {
 	t.Helper()
