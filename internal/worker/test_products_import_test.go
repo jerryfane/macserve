@@ -290,7 +290,7 @@ func TestExtractTestProductsRefuses(t *testing.T) {
 		{"orphan", []tarEntry{{name: "Debug-iphonesimulator/App.app/x", typeflag: tar.TypeReg, body: "x"}, platform, xctestrun}, "precedes its directory"},
 		{"escaping plist", []tarEntry{platform, {name: fixtureXctestrun, typeflag: tar.TypeReg, body: escaping}}, "not a path inside the products"},
 		{"absolute test host", []tarEntry{platform, {name: fixtureXctestrun, typeflag: tar.TypeReg, body: absolute}}, "not a path inside the products"},
-		{"absolute library path", []tarEntry{platform, {name: fixtureXctestrun, typeflag: tar.TypeReg, body: absoluteDyld}}, "not inside the products or Xcode"},
+		{"absolute library path", []tarEntry{platform, {name: fixtureXctestrun, typeflag: tar.TypeReg, body: absoluteDyld}}, "is not inside the products, Xcode"},
 		{"binary plist", []tarEntry{platform, {name: fixtureXctestrun, typeflag: tar.TypeReg, body: "bplist00"}}, "not an XML property list"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -323,5 +323,136 @@ func TestExtractTestProductsRefuses(t *testing.T) {
 	defer other.Close()
 	if err := extractTestProducts(context.Background(), other, bytes.NewReader(products), "Other.xctestrun", 1<<30); err == nil || !strings.Contains(err.Error(), "unexpected entry") {
 		t.Fatalf("products imported under another .xctestrun name: %v", err)
+	}
+}
+
+// herdrupXctestrun is herdrup's real .xctestrun from the generic arm64
+// build-for-testing of bft-facts job j_7c60e5fd (Xcode 27.1): its
+// DYLD_INSERT_LIBRARIES names Xcode's /usr/lib/libRPAC.dylib, and its
+// environment holds flags such as PERFC_RESET_INSERT_LIBRARIES=1.
+func herdrupXctestrun(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("testdata", "herdrup.xctestrun"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+// The importer accepts herdrup's real .xctestrun, sealed with products as
+// the producer's export seals them.
+func TestImportAcceptsHerdrupXctestrun(t *testing.T) {
+	plist := herdrupXctestrun(t)
+	if err := checkXctestrun([]byte(plist)); err != nil {
+		t.Fatalf("real .xctestrun refused: %v", err)
+	}
+	files := productsFixture()
+	files[fixtureXctestrun] = archiveFile{plist, 0644}
+	_, workspace := archiveWorkspace(t, prefixed("derived-data/Build/Products/", files))
+	tree, _, err := scanTestProducts(context.Background(), workspace, fixtureLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tree.root.Close()
+	var sealed bytes.Buffer
+	if _, err := sealTree(context.Background(), tree, &sealed, fixtureLimits.bytes, testProductsTarName); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := extractTestProducts(context.Background(), root, &sealed, fixtureXctestrun, 1<<30); err != nil {
+		t.Fatalf("real products refused: %v", err)
+	}
+	if imported, err := root.ReadFile(profiles.ConsumerXctestrun); err != nil || string(imported) != plist {
+		t.Fatalf("imported .xctestrun differs: %v", err)
+	}
+}
+
+// withEnvironment is the real .xctestrun with name=value added to the UI
+// first test target's TestingEnvironmentVariables.
+func withEnvironment(t *testing.T, name, value string) string {
+	t.Helper()
+	plist := herdrupXctestrun(t)
+	marker := "<key>TestingEnvironmentVariables</key>\n\t\t<dict>"
+	if !strings.Contains(plist, marker) {
+		t.Fatal("fixture lacks TestingEnvironmentVariables")
+	}
+	return strings.Replace(plist, marker, marker+"\n<key>"+name+"</key>\n<string>"+value+"</string>", 1)
+}
+
+// Every library, framework and injection path component and every other
+// path-valued key must stay inside the products, the pinned Xcode or the
+// runtime's system libraries: an outside absolute path, a relative or
+// placeholder-relative ../ escape, an empty component and an unknown
+// placeholder are refused before the products are imported.
+func TestXctestrunLibraryPathsConfined(t *testing.T) {
+	for name, tc := range map[string]struct{ key, value string }{
+		"inserted library outside":       {"DYLD_INSERT_LIBRARIES", "__TESTHOST__/Frameworks/libXCTestBundleInject.dylib:/tmp/evil.dylib"},
+		"library path outside":           {"DYLD_LIBRARY_PATH", "/Users/attacker/lib"},
+		"framework path relative escape": {"DYLD_FRAMEWORK_PATH", "../../checkout/unsealed"},
+		"toolchain placeholder escape":   {"DYLD_FRAMEWORK_PATH", "__PLATFORMS__/../../../../../../tmp/unsealed"},
+		"product placeholder escape":     {"DYLD_LIBRARY_PATH", "__TESTROOT__/../checkout"},
+		"system root escape":             {"DYLD_INSERT_LIBRARIES", "/usr/lib/../../tmp/evil.dylib"},
+		"unknown placeholder":            {"DYLD_FRAMEWORK_PATH", "__EVILROOT__/Frameworks"},
+		"placeholder lookalike":          {"DYLD_LIBRARY_PATH", "__TESTROOT__evil/lib"},
+		"empty component":                {"DYLD_LIBRARY_PATH", "__TESTROOT__/Debug-iphonesimulator::/x"},
+		"xpc inserted library":           {"__XPC_DYLD_INSERT_LIBRARIES", "/private/tmp/evil.dylib"},
+		"unknown path key":               {"MACSERVE_PLUGIN_PATH", "/tmp/plugins"},
+		"unknown camel path key":         {"ExtraLibraryPaths", "relative/lib"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			plist := withEnvironment(t, tc.key, tc.value)
+			if err := checkXctestrun([]byte(plist)); err == nil || !strings.Contains(err.Error(), "is not inside the products") {
+				t.Fatalf("accepted %s=%s: %v", tc.key, tc.value, err)
+			}
+			root, err := os.OpenRoot(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			products := tarOf(t, tarEntry{name: "Debug-iphonesimulator/", typeflag: tar.TypeDir}, tarEntry{name: fixtureXctestrun, typeflag: tar.TypeReg, body: plist})
+			if err := extractTestProducts(context.Background(), root, bytes.NewReader(products), fixtureXctestrun, 1<<30); err == nil {
+				t.Fatal("imported")
+			}
+			if _, err := root.Stat(profiles.ConsumerXctestrun); err == nil {
+				t.Fatal("a refused .xctestrun was written")
+			}
+		})
+	}
+	for name, edit := range map[string][2]string{
+		"test host outside":   {"__TESTROOT__/Debug-iphonesimulator/HerdrUITests-Runner.app</string>", "/Users/attacker/Runner.app</string>"},
+		"bundle in toolchain": {"__TESTHOST__/PlugIns/HerdrUITests.xctest</string>", "__PLATFORMS__/evil.xctest</string>"},
+		"injected into":       {"<string>unused</string>", "<string>/tmp/host</string>"},
+		"project escape":      {"<string>Herdr.xcodeproj</string>", "<string>../Herdr.xcodeproj</string>"},
+	} {
+		plist := herdrupXctestrun(t)
+		if !strings.Contains(plist, edit[0]) {
+			t.Fatalf("%s: fixture lacks %q", name, edit[0])
+		}
+		if err := checkXctestrun([]byte(strings.Replace(plist, edit[0], edit[1], 1))); err == nil {
+			t.Fatalf("%s: accepted", name)
+		}
+	}
+}
+
+// Strings that are not paths are left as they are: an environment value or
+// argument with ':' (a URL, a port) does not make it a path list.
+func TestXctestrunOrdinaryStringsAccepted(t *testing.T) {
+	for name, tc := range map[string]struct{ key, value string }{
+		"url with port":  {"API_URL", "https://example.com:8443/x"},
+		"base url":       {"API_BASE_URL", "https://api.example.com"},
+		"time":           {"FIXED_TIME", "12:30:00"},
+		"absolute value": {"HOME_HINT", "/Users/someone"},
+	} {
+		if err := checkXctestrun([]byte(withEnvironment(t, tc.key, tc.value))); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	plist := strings.Replace(herdrupXctestrun(t), "<key>IsUITestBundle</key>", "<key>CommandLineArguments</key>\n<array><string>-endpoint</string><string>http://127.0.0.1:8080/api</string></array>\n<key>IsUITestBundle</key>", 1)
+	if err := checkXctestrun([]byte(plist)); err != nil {
+		t.Fatalf("command line arguments: %v", err)
 	}
 }

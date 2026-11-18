@@ -284,7 +284,13 @@ ${PRODUCTS}/macserve.xctestrun -destination id=${SIMULATOR_ID} -resultBundlePath
 runs, the worker (as root) downloads `GET /v1/jobs/{job}/products`, hashes the stream into a root-owned staging
 file and refuses the job unless its SHA-256 is D; it then extracts only the platform tree and the one `.xctestrun`
 N into `${WORKSPACE}/products` (renamed `macserve.xctestrun`), with the export's entry rules, after checking that
-the plist is XML and every bundle and library path is `__TESTROOT__`/`__TESTHOST__`/Xcode-relative. Missing,
+the plist is XML, every bundle path (`TestHostPath`, `TestBundlePath`, `UITargetAppPath`, `DependentProductPaths`,
+`ProductPaths`, `XCInjectBundleInto` unless `unused`) is `__TESTROOT__`/`__TESTHOST__`-relative, and every
+component of every path list (`DYLD_*`, `__XPC_DYLD_*` and any other `*_PATH(S)`/`*Path(s)` key, in any
+dictionary) is `__TESTROOT__`/`__TESTHOST__`/`__PLATFORMS__`/`__SHAREDFRAMEWORKS__`/`__DEVELOPERUSRLIB__`-relative
+or a clean path under the runtime's `/usr/lib/` or `/System/Library/` (Xcode injects `/usr/lib/libRPAC.dylib`); a
+relative, escaping, empty or unknown-placeholder component is refused. Other strings (arguments, ordinary
+environment values) are not paths and are not checked. Missing,
 evicted or mismatched products fail the job (`test products: …`, cleanup_ok, no quarantine); a consumer
 prepared after its bytes were evicted fails with `test products unavailable` before anything is leased. The
 worker seal names the imported digest (`imported_products_sha256`). The keyholder signs a consumer's success

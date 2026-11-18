@@ -191,23 +191,59 @@ func writeNew(root *os.Root, name string, content io.Reader, mode os.FileMode) e
 	return errors.Join(err, file.Close())
 }
 
-// xctestrunPathKeys are the .xctestrun keys whose values xcodebuild
-// resolves to the bundles it installs and runs; each must be a path inside
-// the products or the pinned Xcode (placeholderPath).
-var xctestrunPathKeys = map[string]bool{"TestHostPath": true, "TestBundlePath": true, "UITargetAppPath": true, "DependentProductPaths": true, "ProductPaths": true}
+// xctestrunBundleKeys are the .xctestrun keys whose values xcodebuild
+// resolves to the bundles it installs and runs: each must be inside the
+// products (rootedPath under xctestrunProductRoots). XCInjectBundleInto may
+// also be "unused".
+var xctestrunBundleKeys = map[string]bool{"TestHostPath": true, "TestBundlePath": true, "UITargetAppPath": true, "DependentProductPaths": true, "ProductPaths": true, "XCInjectBundleInto": true}
+
+// xctestrunProductRoots are the placeholders xcodebuild resolves inside the
+// imported products: the products directory and a test host inside it.
+var xctestrunProductRoots = []string{"__TESTROOT__", "__TESTHOST__"}
 
 // xctestrunToolchainRoots are the placeholders xcodebuild resolves inside
 // the pinned Xcode (a UI test's runner and the injected test libraries).
 var xctestrunToolchainRoots = []string{"__PLATFORMS__", "__SHAREDFRAMEWORKS__", "__DEVELOPERUSRLIB__"}
 
+// xctestrunSystemRoots are the absolute directories a library path list may
+// name: the simulator runtime's system libraries (Xcode itself injects
+// /usr/lib/libRPAC.dylib), read-only on the host and in the pinned runtime.
+var xctestrunSystemRoots = []string{"/usr/lib/", "/System/Library/"}
+
+// pathListKey reports whether key's value is a ':'-separated list of paths
+// a process loads code or resources from: every dyld variable (also as
+// launchd passes them to XPC services: DYLD_INSERT_LIBRARIES,
+// DYLD_FRAMEWORK_PATH, DYLD_LIBRARY_PATH, ...), and any other key whose
+// name says it holds paths. Such a key xcodebuild does not know of is
+// confined the same way, never accepted unchecked. (Library-injection
+// variables outside dyld's namespace are flags, such as Xcode's
+// PERFC_RESET_INSERT_LIBRARIES=1; dyld reads only DYLD_*.)
+func pathListKey(key string) bool {
+	if strings.HasPrefix(key, "DYLD_") || strings.HasPrefix(key, "__XPC_DYLD_") {
+		return true
+	}
+	for _, suffix := range []string{"_PATH", "_PATHS", "Path", "Paths"} {
+		if strings.HasSuffix(key, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
 // checkXctestrun requires an .xctestrun to be an XML property list that is
-// relocatable into the imported products: every bundle path
-// (xctestrunPathKeys) is a placeholder path, every ':'-separated component
-// of any string that is a path is a placeholder path (never absolute), and
-// every __TESTROOT__ or __TESTHOST__ path stays below its root. A
-// placeholder path is __TESTROOT__ (the products directory), __TESTHOST__
-// (a test host inside it) or a pinned Xcode root, followed by a clean
-// relative path.
+// relocatable into the imported products and loads code from nowhere else:
+//   - every bundle path (xctestrunBundleKeys) is __TESTROOT__ or __TESTHOST__
+//     followed by a clean relative path;
+//   - every component of a path list (pathListKey: DYLD_*, __XPC_DYLD_*,
+//     *_PATH(S), *Path(s), in any dictionary) is that, a pinned
+//     Xcode placeholder followed by a clean relative path, or a clean path in
+//     the runtime's system libraries; empty, relative, escaping, other
+//     absolute and unknown-placeholder components are refused;
+//   - BlueprintProviderRelativePath, the project's name, is a safe relative
+//     path.
+//
+// Any other string (an argument, an ordinary environment value such as a
+// URL) is not a path and is left as it is.
 func checkXctestrun(plist []byte) error {
 	if !bytes.HasPrefix(bytes.TrimLeft(plist, " \t\r\n"), []byte("<?xml")) {
 		return archiveRefusal(".xctestrun is not an XML property list")
@@ -279,26 +315,37 @@ func checkXctestrun(plist []byte) error {
 }
 
 func checkXctestrunString(key, value string) error {
-	if xctestrunPathKeys[key] && !placeholderPath(value) {
-		return archiveRefusal(".xctestrun %s %s is not a path inside the products", key, strconv.Quote(value))
-	}
-	for part := range strings.SplitSeq(value, ":") {
-		if strings.HasPrefix(part, "/") || strings.Contains(part, "__TESTROOT__") || strings.Contains(part, "__TESTHOST__") {
-			if !placeholderPath(part) {
-				return archiveRefusal(".xctestrun %s path %s is not inside the products or Xcode", key, strconv.Quote(part))
+	switch {
+	case xctestrunBundleKeys[key]:
+		if !(key == "XCInjectBundleInto" && value == "unused") && !rootedPath(value, xctestrunProductRoots) {
+			return archiveRefusal(".xctestrun %s %s is not a path inside the products", key, strconv.Quote(value))
+		}
+	case key == "BlueprintProviderRelativePath":
+		if !safeRelative(value) {
+			return archiveRefusal(".xctestrun %s %s is not a safe relative path", key, strconv.Quote(value))
+		}
+	case pathListKey(key):
+		for part := range strings.SplitSeq(value, ":") {
+			if !rootedPath(part, xctestrunProductRoots) && !rootedPath(part, xctestrunToolchainRoots) && !rootedPath(part, xctestrunSystemRoots) {
+				return archiveRefusal(".xctestrun %s path %s is not inside the products, Xcode or the runtime's system libraries", key, strconv.Quote(part))
 			}
 		}
 	}
 	return nil
 }
 
-// placeholderPath reports whether p is a placeholder root followed by
-// nothing or a clean relative path.
-func placeholderPath(p string) bool {
-	for _, root := range append([]string{"__TESTROOT__", "__TESTHOST__"}, xctestrunToolchainRoots...) {
-		if rest, ok := strings.CutPrefix(p, root); ok {
-			return cleanBelow(rest)
+// rootedPath reports whether p is one of roots followed by nothing or a
+// clean relative path (a root ending in '/' must be followed by one).
+func rootedPath(p string, roots []string) bool {
+	for _, root := range roots {
+		rest, ok := strings.CutPrefix(p, root)
+		if !ok {
+			continue
 		}
+		if strings.HasSuffix(root, "/") {
+			return rest != "" && safeRelative(strings.TrimSuffix(rest, "/"))
+		}
+		return cleanBelow(rest)
 	}
 	return false
 }
