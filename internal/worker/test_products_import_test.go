@@ -456,3 +456,41 @@ func TestXctestrunOrdinaryStringsAccepted(t *testing.T) {
 		t.Fatalf("command line arguments: %v", err)
 	}
 }
+
+// dyld flags and modes are not paths: known ones are accepted with valid
+// values, also as __XPC_DYLD_*, while every path-valued dyld variable stays
+// confined and an unknown dyld variable is refused, so one dyld might read
+// as a path never passes as a flag.
+func TestXctestrunDyldFlagsAndModes(t *testing.T) {
+	for _, tc := range []struct{ key, value string }{
+		{"DYLD_PRINT_LIBRARIES", "1"},
+		{"DYLD_PRINT_STATISTICS", "YES"},
+		{"DYLD_PRINT_APIS", ""},
+		{"DYLD_IMAGE_SUFFIX", "_debug"},
+		{"DYLD_SHARED_REGION", "avoid"},
+		{"__XPC_DYLD_PRINT_LIBRARIES", "1"},
+		{"__XPC_DYLD_IMAGE_SUFFIX", "_profile"},
+		{"DYLD_FALLBACK_LIBRARY_PATH", "__PLATFORMS__/iPhoneSimulator.platform/Developer/usr/lib:/usr/lib/system"},
+	} {
+		if err := checkXctestrun([]byte(withEnvironment(t, tc.key, tc.value))); err != nil {
+			t.Fatalf("%s=%s refused: %v", tc.key, tc.value, err)
+		}
+	}
+	for _, tc := range []struct{ key, value, want string }{
+		{"DYLD_FOO", "/tmp/x", "not a dyld setting the importer knows"},
+		{"__XPC_DYLD_FOO", "1", "not a dyld setting the importer knows"},
+		{"DYLD_IMAGE_SUFFIX", "/../../tmp/x", "not a valid setting"},
+		{"DYLD_IMAGE_SUFFIX", "", "not a valid setting"},
+		{"DYLD_SHARED_REGION", "/tmp/cache", "not a valid setting"},
+		{"DYLD_PRINT_LIBRARIES", "/tmp/x", "not a valid setting"},
+		{"DYLD_FALLBACK_FRAMEWORK_PATH", "/tmp/frameworks", "is not inside the products"},
+		{"DYLD_VERSIONED_LIBRARY_PATH", "../lib", "is not inside the products"},
+		{"DYLD_ROOT_PATH", "/tmp/root", "is not inside the products"},
+		{"__XPC_DYLD_FALLBACK_LIBRARY_PATH", "/tmp/lib", "is not inside the products"},
+		{"DYLD_PRINT_TO_FILE", "/tmp/out", "is not inside the products"},
+	} {
+		if err := checkXctestrun([]byte(withEnvironment(t, tc.key, tc.value))); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s=%s: %v, want %q", tc.key, tc.value, err, tc.want)
+		}
+	}
+}

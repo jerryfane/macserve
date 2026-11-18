@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -210,17 +211,56 @@ var xctestrunToolchainRoots = []string{"__PLATFORMS__", "__SHAREDFRAMEWORKS__", 
 // /usr/lib/libRPAC.dylib), read-only on the host and in the pinned runtime.
 var xctestrunSystemRoots = []string{"/usr/lib/", "/System/Library/"}
 
+// dyldPathVariables are the dyld variables (without DYLD_) whose value is a
+// ':'-separated list of paths dyld loads code from or resolves against,
+// or a path it reads or writes; each component is confined (pathListKey).
+var dyldPathVariables = map[string]bool{"INSERT_LIBRARIES": true, "LIBRARY_PATH": true, "FRAMEWORK_PATH": true, "FALLBACK_LIBRARY_PATH": true, "FALLBACK_FRAMEWORK_PATH": true, "VERSIONED_LIBRARY_PATH": true, "VERSIONED_FRAMEWORK_PATH": true, "ROOT_PATH": true, "SHARED_CACHE_DIR": true, "PRINT_TO_FILE": true}
+
+// dyldFlagVariables are the dyld diagnostic and behaviour flags (without
+// DYLD_): dyld tests only whether they are set, so a value is a short
+// alphanumeric token such as 1 or YES.
+var dyldFlagVariables = map[string]bool{"PRINT_LIBRARIES": true, "PRINT_LIBRARIES_POST_LAUNCH": true, "PRINT_APIS": true, "PRINT_BINDINGS": true, "PRINT_WEAK_BINDINGS": true, "PRINT_REBASINGS": true, "PRINT_INITIALIZERS": true, "PRINT_SEGMENTS": true, "PRINT_STATISTICS": true, "PRINT_STATISTICS_DETAILS": true, "PRINT_ENV": true, "PRINT_OPTS": true, "PRINT_DOFS": true, "PRINT_RPATHS": true, "PRINT_SEARCHING": true, "PRINT_WARNINGS": true, "PRINT_CODE_SIGNATURES": true, "PRINT_INTERPOSING": true, "PRINT_NOTIFICATIONS": true, "BIND_AT_LAUNCH": true, "DISABLE_DOFS": true, "NO_FIX_PREBINDING": true, "FORCE_FLAT_NAMESPACE": true, "PREBIND_DEBUG": true}
+
+var (
+	dyldFlagValue   = regexp.MustCompile(`^[A-Za-z0-9]{0,16}$`)
+	dyldImageSuffix = regexp.MustCompile(`^[A-Za-z0-9_-]{1,32}$`)
+)
+
+// dyldVariable classifies key when it is a dyld variable (DYLD_*, or as
+// launchd passes it to XPC services, __XPC_DYLD_*): its name without the
+// prefix, and whether it is one.
+func dyldVariable(key string) (string, bool) {
+	name, ok := strings.CutPrefix(strings.TrimPrefix(key, "__XPC_"), "DYLD_")
+	return name, ok
+}
+
+// checkDyldValue checks a dyld variable that is not a path list: a known
+// flag holds a short token, DYLD_SHARED_REGION a mode, DYLD_IMAGE_SUFFIX a
+// file-name suffix (no '/', so it never leaves a library's directory). Any
+// other dyld variable is refused: one dyld might read as a path is never
+// accepted as a flag.
+func checkDyldValue(key, name, value string) error {
+	switch {
+	case dyldFlagVariables[name] && dyldFlagValue.MatchString(value),
+		name == "SHARED_REGION" && (value == "avoid" || value == "use" || value == "private"),
+		name == "IMAGE_SUFFIX" && dyldImageSuffix.MatchString(value):
+		return nil
+	case dyldFlagVariables[name] || name == "SHARED_REGION" || name == "IMAGE_SUFFIX":
+		return archiveRefusal(".xctestrun %s value %s is not a valid setting", key, strconv.Quote(value))
+	}
+	return archiveRefusal(".xctestrun %s is not a dyld setting the importer knows", key)
+}
+
 // pathListKey reports whether key's value is a ':'-separated list of paths
-// a process loads code or resources from: every dyld variable (also as
-// launchd passes them to XPC services: DYLD_INSERT_LIBRARIES,
-// DYLD_FRAMEWORK_PATH, DYLD_LIBRARY_PATH, ...), and any other key whose
-// name says it holds paths. Such a key xcodebuild does not know of is
-// confined the same way, never accepted unchecked. (Library-injection
-// variables outside dyld's namespace are flags, such as Xcode's
+// a process loads code or resources from: a path-valued dyld variable
+// (dyldPathVariables, also as __XPC_DYLD_*), and any other key whose name
+// says it holds paths. Such a key xcodebuild does not know of is confined
+// the same way, never accepted unchecked. (Library-injection variables
+// outside dyld's namespace are flags, such as Xcode's
 // PERFC_RESET_INSERT_LIBRARIES=1; dyld reads only DYLD_*.)
 func pathListKey(key string) bool {
-	if strings.HasPrefix(key, "DYLD_") || strings.HasPrefix(key, "__XPC_DYLD_") {
-		return true
+	if name, ok := dyldVariable(key); ok {
+		return dyldPathVariables[name]
 	}
 	for _, suffix := range []string{"_PATH", "_PATHS", "Path", "Paths"} {
 		if strings.HasSuffix(key, suffix) {
@@ -234,11 +274,14 @@ func pathListKey(key string) bool {
 // relocatable into the imported products and loads code from nowhere else:
 //   - every bundle path (xctestrunBundleKeys) is __TESTROOT__ or __TESTHOST__
 //     followed by a clean relative path;
-//   - every component of a path list (pathListKey: DYLD_*, __XPC_DYLD_*,
-//     *_PATH(S), *Path(s), in any dictionary) is that, a pinned
-//     Xcode placeholder followed by a clean relative path, or a clean path in
-//     the runtime's system libraries; empty, relative, escaping, other
-//     absolute and unknown-placeholder components are refused;
+//   - every component of a path list (pathListKey: the path-valued DYLD_*
+//     and __XPC_DYLD_* variables, *_PATH(S), *Path(s), in any dictionary)
+//     is that, a pinned Xcode placeholder followed by a clean relative path,
+//     or a clean path in the runtime's system libraries; empty, relative,
+//     escaping, other absolute and unknown-placeholder components are
+//     refused;
+//   - every other dyld variable is a known flag or mode with a valid value
+//     (checkDyldValue); an unknown one is refused;
 //   - BlueprintProviderRelativePath, the project's name, is a safe relative
 //     path.
 //
@@ -329,6 +372,10 @@ func checkXctestrunString(key, value string) error {
 			if !rootedPath(part, xctestrunProductRoots) && !rootedPath(part, xctestrunToolchainRoots) && !rootedPath(part, xctestrunSystemRoots) {
 				return archiveRefusal(".xctestrun %s path %s is not inside the products, Xcode or the runtime's system libraries", key, strconv.Quote(part))
 			}
+		}
+	default:
+		if name, ok := dyldVariable(key); ok {
+			return checkDyldValue(key, name, value)
 		}
 	}
 	return nil

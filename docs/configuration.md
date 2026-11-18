@@ -286,11 +286,15 @@ file and refuses the job unless its SHA-256 is D; it then extracts only the plat
 N into `${WORKSPACE}/products` (renamed `macserve.xctestrun`), with the export's entry rules, after checking that
 the plist is XML, every bundle path (`TestHostPath`, `TestBundlePath`, `UITargetAppPath`, `DependentProductPaths`,
 `ProductPaths`, `XCInjectBundleInto` unless `unused`) is `__TESTROOT__`/`__TESTHOST__`-relative, and every
-component of every path list (`DYLD_*`, `__XPC_DYLD_*` and any other `*_PATH(S)`/`*Path(s)` key, in any
-dictionary) is `__TESTROOT__`/`__TESTHOST__`/`__PLATFORMS__`/`__SHAREDFRAMEWORKS__`/`__DEVELOPERUSRLIB__`-relative
-or a clean path under the runtime's `/usr/lib/` or `/System/Library/` (Xcode injects `/usr/lib/libRPAC.dylib`); a
-relative, escaping, empty or unknown-placeholder component is refused. Other strings (arguments, ordinary
-environment values) are not paths and are not checked. Missing,
+component of every path list (the path-valued dyld variables `DYLD_INSERT_LIBRARIES`, `DYLD_[FALLBACK_|VERSIONED_]LIBRARY_PATH`,
+`DYLD_[FALLBACK_|VERSIONED_]FRAMEWORK_PATH`, `DYLD_ROOT_PATH`, `DYLD_SHARED_CACHE_DIR`, `DYLD_PRINT_TO_FILE`, also
+as `__XPC_DYLD_*`, and any other `*_PATH(S)`/`*Path(s)` key, in any dictionary) is
+`__TESTROOT__`/`__TESTHOST__`/`__PLATFORMS__`/`__SHAREDFRAMEWORKS__`/`__DEVELOPERUSRLIB__`-relative or a clean path
+under the runtime's `/usr/lib/` or `/System/Library/` (Xcode injects `/usr/lib/libRPAC.dylib`); a relative,
+escaping, empty or unknown-placeholder component is refused. Any other dyld variable must be a known flag
+(`DYLD_PRINT_*`, `DYLD_BIND_AT_LAUNCH`, ...; a short alphanumeric value), `DYLD_SHARED_REGION`
+(`avoid`/`use`/`private`) or `DYLD_IMAGE_SUFFIX` (a 1–32 character `[A-Za-z0-9_-]` suffix); an unknown dyld
+variable is refused. Other strings (arguments, ordinary environment values) are not paths and are not checked. Missing,
 evicted or mismatched products fail the job (`test products: …`, cleanup_ok, no quarantine); a consumer
 prepared after its bytes were evicted fails with `test products unavailable` before anything is leased. The
 worker seal names the imported digest (`imported_products_sha256`). The keyholder signs a consumer's success
