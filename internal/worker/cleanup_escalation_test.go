@@ -182,3 +182,38 @@ func TestQuiesceSlowSIGTERMIsNotASurvivor(t *testing.T) {
 		t.Fatalf("SIGKILL survivor: %v", err)
 	}
 }
+
+// #195 review round 3: the final listing gets the same foreign-UID and
+// GUI-baseline checks as every other listing before its members are split
+// into SIGKILL survivors and unescalated ones. A GUI baseline PID first seen
+// in the job's group there is contamination, not unconfirmed cleanup, which
+// the full-account quiesce (excluding baseline PIDs) would never report.
+func TestProtectedCleanupBaselinePIDInFinalListingIsContamination(t *testing.T) {
+	r := newProcessRunner()
+	r.termGrace, r.killGrace, r.pollInterval, r.cleanupConfirm = 5*time.Millisecond, 5*time.Millisecond, time.Millisecond, 0
+	r.scope = scopeFixture()
+	const group = 201
+	until := time.Now().Add(r.termGrace + r.killGrace)
+	var mu sync.Mutex
+	after := 0
+	r.scope.sample = func(context.Context) ([]processSample, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if time.Now().Before(until) {
+			return nil, nil
+		}
+		// The listing after the bound sees the group empty; the final
+		// listing finds the audited GUI process (PID 100) in it.
+		if after++; after < 2 {
+			return nil, nil
+		}
+		baseline := trustedGUI()
+		baseline.group = group
+		return []processSample{baseline}, nil
+	}
+	r.signalProcess = func(context.Context, processSample, syscall.Signal) error { return nil }
+	err := r.cleanupProtectedGroup(group, testJobUID, func() {}, func() bool { return false })
+	if !errors.Is(err, ErrContamination) || !strings.Contains(err.Error(), "GUI baseline PID") {
+		t.Fatalf("baseline PID in the final listing: %v; want contamination", err)
+	}
+}

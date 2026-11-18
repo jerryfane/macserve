@@ -78,11 +78,13 @@ PF enforcement may be a separately reviewed future opt-in; it is not implemented
   `process_cleanup_seconds` in `worker.json` (180 s by default, also the maximum); a member listed then that no
   SIGKILL has reached gets one more 30 s SIGKILL round and 1 s to go before the verdict. The bound is hard, and
   cleanup is confirmed only when a listing shows no live group member and the direct child is reaped. A member still
-  listed after a SIGKILL was delivered to it, a foreign UID or a GUI baseline PID in the group is contamination. A
-  member no SIGKILL reached within the bound leaves cleanup unconfirmed instead: no quarantine marker; the job ends
-  with `cleanup_ok=false` (the controller fences the epoch), its final account or lane quiesce SIGKILLs and judges
-  what is left, and the worker drains to the idle check, whose full-account quiesce and admission let it register
-  again without an owner. At load 53 a 100 ms helper output wait and the 1.5 s window left a cancelled xcodebuild
+  listed after a SIGKILL was delivered to it, a foreign UID or a GUI baseline PID in the group (checked in every
+  listing, the final one included) is contamination. A member no SIGKILL reached within the bound leaves that
+  command's cleanup unconfirmed instead: no quarantine marker, and the command fails. The job's finalization then
+  tries to repair it: its account or lane quiesce SIGKILLs and judges what is left. Only if the job's final cleanup
+  is still unconfirmed does the job end with `cleanup_ok=false`, which fences the epoch and drains the worker to the
+  idle check, whose full-account quiesce and admission let it register again without an owner. At load 53 a 100 ms
+  helper output wait and the 1.5 s window left a cancelled xcodebuild
   group judged contaminated and quarantined the worker (2026-11-18, #194). The account and lane quiesces judge a
   survivor by escalation too: an instance is a survivor only when still listed a grace after a SIGKILL to it
   completed, and their settle bound excludes time spent signalling. A job's finalization budget
