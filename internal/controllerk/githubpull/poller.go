@@ -161,13 +161,18 @@ func New(options Options) (*Poller, error) {
 			// A producer is a build template without a Flutter pin (the
 			// only recipe build_for_testing admits), and only entries of a
 			// test template without a Flutter pin consume products: a script
-			// shard owns its xcodebuild calls and keeps its own build.
+			// shard owns its xcodebuild calls and keeps its own build. Both
+			// pin the same Xcode: the keyholder signs a consumer's receipt
+			// only for products its own Xcode built.
 			if entry.Build == "" {
 				continue
 			}
 			build, ok := p.recipe(policy, entry.Build)
 			if !snapshot.Kind.Tests() || snapshot.Template.Flutter != nil || !ok || build.Template == nil || build.Kind != model.Build || build.Template.Flutter != nil {
 				return nil, fmt.Errorf("invalid GitHub policy matrix: entry %s shard %s names build %s, but only a test template entry consumes test products, from a build template, neither with a Flutter pin", entry.Profile, entry.Shard, entry.Build)
+			}
+			if build.Xcode != snapshot.Xcode {
+				return nil, fmt.Errorf("invalid GitHub policy matrix: entry %s shard %s pins Xcode %s (%s), but its build %s pins Xcode %s (%s)", entry.Profile, entry.Shard, snapshot.Xcode.Version, snapshot.Xcode.Build, entry.Build, build.Xcode.Version, build.Xcode.Build)
 			}
 		}
 		p.policies[policy.Repository] = policy
@@ -617,9 +622,18 @@ func (p *Poller) admission(policy githubwire.Policy, pull githubapi.PullRequest,
 			fields = append(fields, "tier", entry.Tier)
 		}
 		if entry.Build != "" {
-			// A consumer binds its producer profile: an entry that starts or
-			// stops consuming test products is another run.
-			fields = append(fields, "build", entry.Build)
+			// A consumer binds its producer's logical run (its key: the
+			// build profile, its recipe digest and pins at this head), not
+			// an attempt or its products: a rerun of the same build keeps
+			// the consumer's run, while an entry that starts or stops
+			// consuming test products, or a change of the producer's recipe
+			// (a new template version, say), is another run, and the
+			// consumer jobs of the old recipe stop being current.
+			producer, err := p.admission(policy, pull, entry.Build, "", nil)
+			if err != nil {
+				return store.GitHubAdmission{}, err
+			}
+			fields = append(fields, "build", entry.Build, producer.Run.Key)
 		}
 	}
 	data, err := json.Marshal(fields)
@@ -980,11 +994,11 @@ func (p *Poller) admitMatrix(ctx context.Context, policy githubwire.Policy, pull
 // supply is a consumer entry's view of its build-for-testing producer run
 // at a head. Exactly one holds: products is the retained test products of
 // the run's succeeded current job, ready to run from; evicted, that job
-// succeeded but the products pool no longer holds its products; blocked,
-// why its consumers cannot run (the job failed, timed out, was cancelled or
-// expired, succeeded without sealed products or is no longer retained, or
-// the run is blocked); otherwise the consumers wait for the producer (no
-// run or job yet, or an unfinished job).
+// succeeded but the products pool no longer holds its products, or
+// retention pruned the job; blocked, why its consumers cannot run (the job
+// failed, timed out, was cancelled or expired, or succeeded without sealed
+// products, or the run is blocked); otherwise the consumers wait for the
+// producer (no run or job yet, or an unfinished job).
 type supply struct {
 	producer store.GitHubAdmission
 	run      store.GitHubRun
@@ -1018,9 +1032,10 @@ func (p *Poller) supply(ctx context.Context, policy githubwire.Policy, pull gith
 	}
 	job, err := p.options.Store.Get(ctx, run.JobID)
 	if errors.Is(err, store.ErrNotFound) {
-		// Its record was pruned, and with it the products' provenance; the
-		// store cannot rerun a run whose job it no longer has.
-		s.blocked = fmt.Sprintf("Build job %s (%s) is no longer retained; no test products to run this shard from.", run.JobID, name)
+		// Retention pruned its ended job, and with it the products'
+		// provenance (a draft held at one head past the metadata window):
+		// like evicted products, a due consumer rebuilds the producer.
+		s.evicted = true
 		return s, nil
 	}
 	if err != nil {

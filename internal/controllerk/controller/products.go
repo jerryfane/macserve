@@ -278,11 +278,15 @@ func (c *Controller) trimProducts(ctx context.Context, reservation, limit int64)
 
 // evictProduct removes the pool's bytes of digest and, for a ledger digest,
 // records the eviction, unless a download used them after used, the use
-// time the trim's candidate snapshot read. It holds productsMu, which a
-// download holds while it opens and touches a product, so a download either
-// refreshes the use time before this check (and the bytes stay) or opens
-// them after the removal (and finds them gone); a download that opened them
-// before keeps reading its descriptor.
+// time the trim's candidate snapshot read, or the digest is pinned when the
+// eviction commits. It holds productsMu, which a download holds while it
+// opens and touches a product, so a download either refreshes the use time
+// before this check (and the bytes stay) or opens them after the removal
+// (and finds them gone); a download that opened them before keeps reading
+// its descriptor. A ledger digest's eviction is recorded first, in the
+// store transaction that rechecks its pins (Store.EvictUnpinnedProduct): a
+// consumer admitted after the trim's snapshot either pinned it first (the
+// bytes stay) or is refused, never acknowledged with bytes about to go.
 func (c *Controller) evictProduct(ctx context.Context, digest string, ledger bool, used, now time.Time) (bool, error) {
 	c.productsMu.Lock()
 	defer c.productsMu.Unlock()
@@ -294,14 +298,13 @@ func (c *Controller) evictProduct(ctx context.Context, digest string, ledger boo
 		if err == nil && current.EvictedAt == nil && current.UsedAt.After(used) {
 			return false, nil
 		}
+		evicted, err := c.options.Store.EvictUnpinnedProduct(ctx, digest, now)
+		if err != nil || !evicted {
+			return false, err
+		}
 	}
 	if err := c.root.Remove(productsDir + "/" + productFile(digest)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return false, err
-	}
-	if ledger {
-		if err := c.options.Store.EvictProduct(ctx, digest, now); err != nil {
-			return false, err
-		}
 	}
 	return true, nil
 }

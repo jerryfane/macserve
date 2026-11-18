@@ -279,6 +279,13 @@ func (s *Store) AdmitGitHub(ctx context.Context, input GitHubAdmission, now time
 	kind := attemptInitial
 	if !create {
 		job, err := getTx(ctx, tx, r.JobID)
+		if errors.Is(err, ErrNotFound) {
+			// Retention pruned the attempt's ended job (Prune deletes only
+			// terminal jobs): an ensure keeps the run as it is, while a
+			// requested rerun or a rebuild starts a new attempt of the
+			// unchanged run.
+			job, err = model.Job{ID: r.JobID, State: model.Expired}, nil
+		}
 		if err != nil {
 			return GitHubRun{}, err
 		}

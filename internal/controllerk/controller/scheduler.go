@@ -639,7 +639,7 @@ func (c *Controller) sweep(ctx context.Context) error {
 	if err := c.trimPool(ctx, 0, maxArtifactPoolBytes); err != nil {
 		return err
 	}
-	if err := c.trimProducts(ctx, 0, maxProductsPoolBytes); err != nil {
+	if err := c.trimProducts(ctx, 0, c.productsBudget); err != nil {
 		return err
 	}
 	pruneStarted := time.Now()

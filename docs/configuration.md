@@ -384,7 +384,12 @@ rebuild of identical bytes is stored once), never in the evidence pool: bytes un
 then the least recently used until the pool fits, never pinned ones: those of a producer still running, those an
 unfinished (queued or active) consumer job names, and those of each succeeded producer that is the current attempt
 of a current eligible GitHub run, whose shards wait for, run from or may later rerun from them (a draft head's
-shards included). A superseded or closed head's products are unpinned once its consumers end. The store's
+shards included). A superseded or closed head's products are unpinned once its consumers end. Each eviction
+rechecks the digest's pins in the store transaction that records it, before the bytes are removed, so a consumer
+admitted meanwhile either keeps them or is refused. When pinned products leave no room for a producer's
+`test-products.tar`, the upload is still answered (the worker stays up) but nothing is stored, and the producer
+fails with reason `test products: the products pool has no room …`; its shards are blocked until a rerun of the
+build fits. The store's
 `products` table (schema version 9) records each retained digest and, for each eviction, its proof (digest,
 bytes, evicted_at), kept as long as job metadata. Metadata persists for 90 days;
 expired downloads, log pages and newly opened log streams return `410`.

@@ -149,6 +149,9 @@ func (c *Controller) complete(ctx context.Context, job model.Job, result worker.
 		}
 		c.mu.Lock()
 		err = c.options.Store.Finish(ctx, job.ID, job.LeaseToken, normalized.State, encoded.Bytes(), normalized.CleanupOK, normalized.Reason, c.options.Now())
+		if err == nil {
+			delete(c.productsRefused, job.ID)
+		}
 		if a := c.execution(job.ID); err == nil && a != nil {
 			a.cancel()
 			c.release(a)
@@ -254,7 +257,11 @@ func (c *Controller) verifyResult(ctx context.Context, job model.Job, result wor
 			return result, evidence.ErrArtifactLimit
 		}
 		if uploaded, found := uploadedByName[artifact.Name]; !found || uploaded != artifact {
-			reject("artifact not uploaded")
+			if productsArtifact(job, artifact) && c.productsRefused[job.ID] {
+				reject("test products: the products pool has no room: pinned test products of current heads and unfinished shards fill it")
+			} else {
+				reject("artifact not uploaded")
+			}
 			continue
 		}
 		file, err := c.openJobArtifact(job, artifact)

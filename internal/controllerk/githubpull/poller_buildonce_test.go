@@ -11,9 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jerryfane/macserve/internal/controllerk/store"
 	"github.com/jerryfane/macserve/internal/githubapi"
 	"github.com/jerryfane/macserve/internal/githubwire"
 	"github.com/jerryfane/macserve/internal/model"
+	"github.com/jerryfane/macserve/internal/profiles"
 )
 
 // buildOncePolicy is herdrup's UI shards consuming the org build's test
@@ -325,6 +327,113 @@ func TestBuildOncePolicyValidation(t *testing.T) {
 		mutate(&policy)
 		if _, err := newOrgFixture(t, matrixTemplates(), policy); err == nil || !strings.Contains(err.Error(), "build") {
 			t.Errorf("%s: accepted or wrong error: %v", name, err)
+		}
+	}
+}
+
+// A consumer run binds its producer's logical run: a change of the build
+// template's recipe (a new version) makes new producer and consumer runs,
+// and the old consumer job no longer passes the dispatch check, while a
+// rerun of the same producer keeps the consumer's run (review F2).
+func TestBuildOnceProducerRecipeChangeSupersedesConsumers(t *testing.T) {
+	ctx := context.Background()
+	f := newMatrixFixture(t, buildOncePolicy())
+	sha := headSHA('1')
+	f.pull(matrixRepo, matrixPull(1, sha), matrixConfig)
+	f.poll(t)
+	f.succeedProducer(t, f.runsByCheck(t, sha)[buildCheck].JobID, "version 1 products")
+	f.poll(t)
+	consumer := f.runsByCheck(t, sha)[shardChecks[0]]
+	job := f.job(t, consumer.JobID)
+	if err := f.p.checkDispatch(ctx, job); err != nil {
+		t.Fatalf("current consumer refused: %v", err)
+	}
+	templates := matrixTemplates()
+	for i := range templates {
+		if templates[i].ID == nativeBuild {
+			templates[i].Version = 2
+		}
+	}
+	registry, err := profiles.New(nil, templates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.options.Profiles = registry
+	f.restart(t)
+	input, err := f.p.admission(f.p.policies[matrixRepo], matrixPull(1, sha), uiTemplate, consumer.Shard, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if input.Run.Key == consumer.Key {
+		t.Fatal("consumer run unchanged by its producer's recipe change")
+	}
+	if err := f.p.checkDispatch(ctx, job); !errors.Is(err, ErrIneligible) {
+		t.Fatalf("old-recipe consumer dispatch: %v", err)
+	}
+}
+
+// A producer and its consumers pin one Xcode: the keyholder signs a
+// consumer only for products its own Xcode built (review F5).
+func TestBuildOnceRefusesProducerOfAnotherXcode(t *testing.T) {
+	templates := matrixTemplates()
+	for i := range templates {
+		if templates[i].ID == uiTemplate {
+			templates[i].Xcode.Build = "17A101"
+		}
+	}
+	if _, err := newOrgFixture(t, templates, buildOncePolicy()); err == nil || !strings.Contains(err.Error(), "Xcode") {
+		t.Fatalf("producer of another Xcode accepted or wrong error: %v", err)
+	}
+	policy := buildOncePolicy()
+	for i := range policy.Matrix {
+		policy.Matrix[i].Build = ""
+	}
+	if _, err := newOrgFixture(t, templates, policy); err != nil {
+		t.Fatalf("Xcode pins checked without a build: %v", err)
+	}
+}
+
+// A draft held at one head past metadata retention loses its succeeded
+// producer's job record; marking it ready rebuilds the producer (a bounded
+// rebuild of the unchanged run) and its shards wait for, then run from,
+// the rebuild (review F4).
+func TestBuildOncePrunedProducerIsRebuilt(t *testing.T) {
+	ctx := context.Background()
+	policy := buildOncePolicy()
+	policy.MatrixSkipDrafts = true
+	f := newMatrixFixture(t, policy)
+	sha := headSHA('1')
+	pull := matrixPull(1, sha)
+	pull.Draft = true
+	f.pull(matrixRepo, pull, matrixConfig)
+	f.poll(t)
+	producer := f.runsByCheck(t, sha)[buildCheck]
+	f.succeedProducer(t, producer.JobID, "draft products")
+	f.advance(91 * 24 * time.Hour)
+	if _, err := f.s.Prune(ctx, f.options.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.s.Get(ctx, producer.JobID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("producer job not pruned: %v", err)
+	}
+	f.setPull(matrixRepo, func(p *githubapi.PullRequest) { p.Draft = false })
+	f.poll(t)
+	runs := f.runsByCheck(t, sha)
+	rebuilt := runs[buildCheck]
+	if rebuilt.JobID == "" || rebuilt.JobID == producer.JobID || rebuilt.Key != producer.Key {
+		t.Fatalf("producer not rebuilt: %+v", rebuilt)
+	}
+	for _, name := range shardChecks {
+		if run := runs[name]; run.JobID != "" || run.Blocked != "" || run.Awaits != producer.Key {
+			t.Fatalf("%s: %+v", name, run)
+		}
+	}
+	digest := f.succeedProducer(t, rebuilt.JobID, "rebuilt products")
+	f.poll(t)
+	for _, name := range shardChecks {
+		run := f.runsByCheck(t, sha)[name]
+		if run.JobID == "" || f.job(t, run.JobID).Request.Products.SHA256 != digest {
+			t.Fatalf("%s not admitted from the rebuild: %+v", name, run)
 		}
 	}
 }
