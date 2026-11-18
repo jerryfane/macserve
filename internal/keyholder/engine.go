@@ -240,6 +240,9 @@ func (e *Engine) Seal(ctx context.Context, req SealRequest) (json.RawMessage, er
 	if req.Result.State == model.Succeeded && (seal.Resolution == nil || seal.State != model.Succeeded) {
 		return nil, refusal("a success receipt needs the worker's registry resolution and success seal")
 	}
+	if err := bindProducts(job, seal, req.Result); err != nil {
+		return nil, err
+	}
 	// Controller-supplied release provenance never reaches a receipt: a
 	// succeeded ios_archive job carries only the keyholder's own.
 	job.ReleaseProvenance = nil
@@ -274,6 +277,24 @@ func bindSeal(job model.Job, result worker.Result, seal buildseal.Seal) error {
 	digest, err := buildseal.Digest(result)
 	if err != nil || digest != seal.ResultDigest || result.State != seal.State || result.Source != seal.Source {
 		return refusal("worker result differs from its seal")
+	}
+	return nil
+}
+
+// bindProducts checks the test products a seal names. Only a
+// build-for-testing job's seal names any, and its success receipt needs the
+// worker's sealed products digest, equal to the digest of the result's
+// test-products.tar artifact, and the valid name of the one .xctestrun the
+// worker found in them, as its result observed.
+func bindProducts(job model.Job, seal buildseal.Seal, result worker.Result) error {
+	if !job.Request.BuildForTesting {
+		if seal.ProductsSHA256 != "" || seal.Xctestrun != "" {
+			return refusal("worker seal names test products for a job that builds none")
+		}
+		return nil
+	}
+	if result.State == model.Succeeded && (seal.ProductsSHA256 == "" || seal.ProductsSHA256 != artifactDigest(result.Artifacts, profiles.TestProductsArtifact) || !profiles.ValidXctestrun(seal.Xctestrun) || seal.Xctestrun != result.Observation.Xctestrun) {
+		return refusal("test products digest or .xctestrun differ from the worker's seal")
 	}
 	return nil
 }

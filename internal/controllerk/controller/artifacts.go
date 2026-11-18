@@ -248,7 +248,8 @@ func (c *Controller) putArtifact(ctx context.Context, job model.Job, a evidence.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	existing, err := c.openArtifact(job.ID, a.ID)
+	products := productsArtifact(job, a)
+	existing, err := c.openJobArtifact(job, a)
 	if err == nil {
 		verifyErr := verifyBytes(existing, a.SizeBytes, a.SHA256)
 		existing.Close()
@@ -259,15 +260,37 @@ func (c *Controller) putArtifact(ctx context.Context, job model.Job, a evidence.
 		if duplicate {
 			return ErrExpired
 		}
-		if err := c.trimPool(ctx, a.SizeBytes, maxArtifactPoolBytes); err != nil {
-			return err
+		if products {
+			// Test products live in their own pool, never the evidence
+			// pool, where they would evict test evidence.
+			if err := c.trimProducts(ctx, a.SizeBytes, maxProductsPoolBytes); err != nil {
+				return err
+			}
+			if err := c.root.Rename(temporary, productsDir+"/"+productFile(a.SHA256)); err != nil {
+				return err
+			}
+		} else {
+			if err := c.trimPool(ctx, a.SizeBytes, maxArtifactPoolBytes); err != nil {
+				return err
+			}
+			if err := c.root.Rename(temporary, directory+"/"+a.ID); err != nil {
+				return err
+			}
+			c.poolBytes += a.SizeBytes
 		}
-		if err := c.root.Rename(temporary, directory+"/"+a.ID); err != nil {
-			return err
-		}
-		c.poolBytes += a.SizeBytes
 	} else {
 		return err
+	}
+	if products {
+		// The rename must be durable before the product is recorded or
+		// its upload acknowledged; a retried upload of bytes already in the
+		// pool syncs again, since an earlier sync may have failed.
+		if err := c.syncProductsDir(); err != nil {
+			return err
+		}
+		if err := c.options.Store.RecordProduct(ctx, a.SHA256, a.SizeBytes, job.ID, c.options.Now()); err != nil {
+			return err
+		}
 	}
 	if duplicate {
 		return nil
@@ -312,7 +335,10 @@ func (c *Controller) Artifact(ctx context.Context, id, artifactID string) (*os.F
 		if !c.options.Now().Before(artifact.ExpiresAt) {
 			return nil, artifact, ErrExpired
 		}
-		file, err := c.openArtifact(id, artifactID)
+		if productsArtifact(job, artifact) {
+			return c.openProductDownload(ctx, artifact)
+		}
+		file, err := c.openJobArtifact(job, artifact)
 		if errors.Is(err, os.ErrNotExist) {
 			err = ErrExpired
 		}

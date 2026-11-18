@@ -21,9 +21,11 @@ import (
 
 // ArchiveEvidenceTimeout bounds an ios_archive job's root-side archive
 // evidence: building the signing manifest, sealing the archive and
-// collecting both exports. A multi-gigabyte archive does not fit the
-// cleanup budget, so this is a separate window after the job's processes
-// have stopped; the controller's finalizing window must include it.
+// collecting both exports; and a build-for-testing job's root-side test
+// products: sealing test-products.tar and collecting it. A multi-gigabyte
+// tar does not fit the cleanup budget, so this is a separate window after
+// the job's processes have stopped; the controller's finalizing window must
+// include it.
 const ArchiveEvidenceTimeout = 15 * time.Minute
 
 // Plist decoding bounds for the default decoder.

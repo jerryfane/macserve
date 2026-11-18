@@ -89,6 +89,11 @@ func profileBytes(admission model.Admission) ([]byte, error) {
 	if (request.Simulator == nil) != (profile.Simulator == nil) || request.Simulator != nil && *request.Simulator != *profile.Simulator {
 		return nil, ErrInvalid
 	}
+	// A build-for-testing producer is a non-Flutter build template job whose
+	// snapshot carries the request's flag.
+	if profile.BuildForTesting != request.BuildForTesting || request.BuildForTesting && (profile.Template == nil || profile.Kind != model.Build || profile.Template.Flutter != nil) {
+		return nil, ErrInvalid
+	}
 	data, err := json.Marshal(profile)
 	if err != nil {
 		return nil, err
@@ -531,14 +536,16 @@ func (s *Store) expire(ctx context.Context, tx *sql.Tx, now time.Time) (int64, e
 type PruneCounts struct {
 	// Expired counts queued jobs past the queue TTL; LogJobs the terminal
 	// jobs whose logs passed log retention; LogRows the log records
-	// deleted; Jobs the terminal jobs past retention.
-	Expired, LogJobs, LogRows, Jobs int64
+	// deleted; Jobs the terminal jobs past retention; Products the products
+	// pool eviction proofs past retention.
+	Expired, LogJobs, LogRows, Jobs, Products int64
 	// Batches counts the write transactions.
 	Batches int
 }
 
 // Prune retains terminal metadata and idempotency for Retention after terminal
-// completion, and log records for LogRetention. It does not delete artifact
+// completion, products pool eviction proofs for Retention after eviction, and
+// log records for LogRetention. It does not delete artifact or products
 // bytes, which the caller owns. Every step runs in bounded batches, each its
 // own short write transaction (pruneBatch), so the single store connection
 // is released between them and no request waits behind an unbounded delete
@@ -578,6 +585,16 @@ func (s *Store) Prune(ctx context.Context, now time.Time) (PruneCounts, error) {
 			return counts, err
 		}
 		if n == 0 {
+			break
+		}
+	}
+	for {
+		n, err := s.pruneBatch(ctx, &counts, func(tx *sql.Tx) (int64, error) { return deleteEvictionProofs(ctx, tx, retained) })
+		counts.Products += n
+		if err != nil {
+			return counts, err
+		}
+		if n < pruneBatchJobs {
 			break
 		}
 	}

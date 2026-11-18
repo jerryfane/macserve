@@ -38,18 +38,23 @@ func TestFinalizingLeaseSurvivesLongFinalizationThenUpload(t *testing.T) {
 // The controller's default finalizing lease outlasts the worker's longest
 // finalization (worker.FinalizationTimeout) and the worker client's delivery
 // of the completion after it (protocol.DeliveryTimeout), with heartbeat
-// grace to spare, for every kind (an ios_archive job's archive evidence runs
-// in its own window besides). Both sides derive their budgets from these
-// constants (#152 review r1); a lease shorter than their sum expires
-// mid-delivery and fences the epoch as unconfirmed cleanup.
+// grace to spare, for every kind (an ios_archive job's archive evidence and
+// a build-for-testing job's test products run in their own window besides).
+// Both sides derive their budgets from these constants (#152 review r1); a
+// lease shorter than their sum expires mid-delivery and fences the epoch as
+// unconfirmed cleanup.
 func TestControllerFinalizingLeaseCoversFinalizationAndDelivery(t *testing.T) {
+	requests := []model.Request{{Kind: model.Build, BuildForTesting: true}}
 	for _, kind := range []model.Kind{model.Build, model.UnitTest, model.SimulatorUITest, model.SimulatorScript, model.IOSArchive} {
+		requests = append(requests, model.Request{Kind: kind})
+	}
+	for _, request := range requests {
 		worst := worker.FinalizationTimeout + protocol.DeliveryTimeout
-		if kind == model.IOSArchive {
+		if request.Kind == model.IOSArchive || request.BuildForTesting {
 			worst += worker.ArchiveEvidenceTimeout
 		}
-		if lease := FinalizingWindow(Options{}, kind); lease <= worst {
-			t.Fatalf("%s: controller finalizing lease %v does not outlast finalization and delivery %v", kind, lease, worst)
+		if lease := FinalizingWindow(Options{}, request); lease <= worst {
+			t.Fatalf("%s (build_for_testing %t): controller finalizing lease %v does not outlast finalization and delivery %v", request.Kind, request.BuildForTesting, lease, worst)
 		}
 	}
 }

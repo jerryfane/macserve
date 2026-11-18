@@ -40,7 +40,11 @@ type execution struct {
 	ranRecipe    bool
 	// archiveSealed records that archiveEvidence wrote an ios_archive job's
 	// sealed archive and signing manifest into the protected evidence root.
-	archiveSealed  bool
+	archiveSealed bool
+	// productsSealed records that exportTestProducts wrote a
+	// build-for-testing job's test-products.tar into the protected evidence
+	// root.
+	productsSealed bool
 	stdout, stderr *logWriter
 	cancel         context.CancelFunc
 	logs           *logState
@@ -133,9 +137,10 @@ const DefaultCleanupTimeout = 2 * time.Minute
 // FinalizationTimeout bounds a job's finalization, from its end until
 // Execute returns: the cleanup budget, at most DefaultCleanupTimeout, shared
 // by the writer barriers and the evidence steps, then finalVerificationWindow
-// at most for the last steps (210s). An ios_archive job's archive evidence
-// runs in its own ArchiveEvidenceTimeout besides. The controller's
-// finalizing lease budget is derived from it (#150 review r1).
+// at most for the last steps (210s). An ios_archive job's archive evidence,
+// and a build-for-testing job's test products, run in their own
+// ArchiveEvidenceTimeout besides. The controller's finalizing lease budget
+// is derived from it (#150 review r1).
 const FinalizationTimeout = DefaultCleanupTimeout + finalVerificationWindow
 
 // finalInspectionTimeout bounds the account's verification in a job's
@@ -238,9 +243,10 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 	defer func() {
 		finalCtx, finalCancel := context.WithTimeout(context.Background(), e.options.CleanupTimeout)
 		defer func() { finalCancel() }()
-		// An ios_archive job's archive evidence and its collection run in
-		// their own ArchiveEvidenceTimeout window; time spent there is not
-		// charged to the cleanup budget.
+		// An ios_archive job's archive evidence, a build-for-testing job's
+		// test products, and their collection run in their own
+		// ArchiveEvidenceTimeout window; time spent there is not charged to
+		// the cleanup budget.
 		var archiveCtx context.Context
 		uncharge := func(spent time.Duration) {
 			deadline, _ := finalCtx.Deadline()
@@ -268,12 +274,16 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 			if x.ranRecipe && job.Request.Kind.Tests() {
 				returned = errors.Join(returned, x.testEvidence(finalCtx))
 			}
-			if x.ranRecipe && job.Request.Kind == model.IOSArchive && returned == nil {
+			if x.ranRecipe && (job.Request.Kind == model.IOSArchive || job.Request.BuildForTesting) && returned == nil {
 				var archiveCancel context.CancelFunc
 				archiveCtx, archiveCancel = context.WithTimeout(context.Background(), ArchiveEvidenceTimeout)
 				defer archiveCancel()
 				start := time.Now()
-				returned = errors.Join(returned, x.archiveEvidence(archiveCtx))
+				if job.Request.BuildForTesting {
+					returned = errors.Join(returned, x.exportTestProducts(archiveCtx))
+				} else {
+					returned = errors.Join(returned, x.archiveEvidence(archiveCtx))
+				}
 				uncharge(time.Since(start))
 			}
 		}
@@ -982,9 +992,11 @@ func (x *execution) writeEvidence(name string, data []byte) error {
 // collect exports the job's logs, test evidence and artifacts under ctx and
 // writes the export manifest. An ios_archive job's artifacts are its sealed
 // archive and signing manifest, which archiveEvidence wrote into the
-// protected evidence root; they are exported from there, never from the
-// workspace, under archiveCtx, and collect returns the time that took so the
-// caller does not charge it to ctx's cleanup budget.
+// protected evidence root, and a build-for-testing job's artifact is its
+// test-products.tar, which exportTestProducts wrote there; they are exported
+// from there, never from the workspace, under archiveCtx, and collect
+// returns the time that took so the caller does not charge it to ctx's
+// cleanup budget.
 func (x *execution) collect(ctx, archiveCtx context.Context) (time.Duration, error) {
 	if err := x.engine.accountQuiesce(ctx, x.job.ID); err != nil {
 		return 0, x.engine.quarantine(err)
@@ -1037,6 +1049,14 @@ func (x *execution) collect(ctx, archiveCtx context.Context) (time.Duration, err
 		if x.archiveSealed {
 			start := time.Now()
 			collect(archiveCtx, protectedEvidence, []model.ArtifactRule{{Path: profiles.ArchiveArtifact, Required: true}, {Path: profiles.SigningManifestArtifact, Required: true}})
+			spent = time.Since(start)
+		}
+	case x.job.Request.BuildForTesting:
+		// Without sealed test products the job has already failed; nothing
+		// the job left in its workspace is exported in their place.
+		if x.productsSealed {
+			start := time.Now()
+			collect(archiveCtx, protectedEvidence, []model.ArtifactRule{{Path: profiles.TestProductsArtifact, Required: true}})
 			spent = time.Since(start)
 		}
 	case len(x.job.Profile.Artifacts) > 0:

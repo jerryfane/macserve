@@ -44,6 +44,10 @@ type Observation struct {
 	// Flutter is set for Flutter template jobs only; see
 	// observeFlutterToolchain.
 	Flutter *FlutterObservation `json:"flutter,omitempty"`
+	// Xctestrun is set for a build-for-testing job whose trusted export
+	// sealed its test products: the name of the one .xctestrun file its
+	// test-products.tar holds at the top level; see exportTestProducts.
+	Xctestrun string `json:"xctestrun,omitempty"`
 }
 
 // FlutterObservation is a Flutter job's observed toolchain: the framework and
