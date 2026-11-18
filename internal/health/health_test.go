@@ -246,3 +246,54 @@ func TestProbeFailuresNeverOutliveLastValidHealth(t *testing.T) {
 		}
 	}
 }
+
+// Invalid health carries fail-closed placeholders (accounted_bytes -1,
+// memory_pressure true), not measurements. Studio 2026-11-18 09:50Z (#194):
+// after five probes timed out the gate named service_disk_budget_exceeded
+// and host_memory_pressure with 377 GB free and no memory pressure. Only
+// isolation_unavailable (which cancels) and the failed probes are known.
+func TestInvalidHealthNamesNoUnmeasuredFacts(t *testing.T) {
+	g, h, _ := readyGuard(t)
+	h.BoundaryValidated = false
+	h.AccountedBytes = -1
+	h.MemoryPressure = true
+	h.QualifiedProfiles = nil
+	withProbeFailures(t, h, 5)
+	state, err := g.Check(context.Background())
+	if err != nil || state.Ready || !state.CancelActive || state.CapacityOnly || !reflect.DeepEqual(state.Blockers, []string{"isolation_unavailable", "maintenance_probe_failed"}) {
+		t.Fatalf("invalid health: %+v %v", state, err)
+	}
+}
+
+// A record carrying the last valid health's facts while probes fail without
+// evidence names their check in last_valid_at. It blocks admission only
+// while consistent: last_valid_at with failed probes, not after the record's
+// own check and no more than MaxProbeOutage ago. Anything else cancels.
+func TestCarriedHealthIsConsistentOrCancels(t *testing.T) {
+	carry := func(t *testing.T, h *Health, failures int, lastValid time.Time) {
+		t.Helper()
+		data := `{"probe_failures":` + strconv.Itoa(failures) + `,"last_valid_at":"` + lastValid.Format(time.RFC3339Nano) + `"}`
+		if err := json.Unmarshal([]byte(data), h); err != nil {
+			t.Fatal(err)
+		}
+	}
+	g, h, _ := readyGuard(t)
+	carry(t, h, 54, h.CheckedAt.Add(-9*time.Minute))
+	if state, err := g.Check(context.Background()); err != nil || state.Ready || state.CancelActive || !reflect.DeepEqual(state.Blockers, []string{"maintenance_probe_failed"}) {
+		t.Fatalf("facts carried 9 minutes: %+v %v", state, err)
+	}
+	for name, c := range map[string]struct {
+		failures int
+		age      time.Duration
+	}{
+		"after its check":       {1, -time.Second},
+		"older than the bound":  {400, time.Hour + time.Second},
+		"without probe failure": {0, time.Minute},
+	} {
+		g, h, _ := readyGuard(t)
+		carry(t, h, c.failures, h.CheckedAt.Add(-c.age))
+		if state, err := g.Check(context.Background()); err != nil || state.Ready || !state.CancelActive || state.Blockers[0] != "isolation_unavailable" {
+			t.Fatalf("carried facts %s kept work: %+v %v", name, state, err)
+		}
+	}
+}

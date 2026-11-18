@@ -603,8 +603,9 @@ func (r *nativeRunner) identities(ctx context.Context) ([]processSample, error) 
 }
 
 // QuiesceJob is the lane quiesce: the quiesce algorithm (processScope.quiesce:
-// SIGTERM in the first grace, SIGKILL after, an instance listed two graces
-// after its first sighting is a survivor, settle after ten graces) restricted
+// SIGTERM in the first grace, SIGKILL after, an instance still listed a grace
+// after its SIGKILL completed is a survivor, settle after ten graces plus the
+// time spent signalling; see escalation) restricted
 // to jobID's labelled instances and the crash agents (crash_agents.go) that
 // started after jobID began and before this quiesce did (its crashWindow,
 // which this quiesce closes): a bounded set, so a sibling that keeps
@@ -618,9 +619,7 @@ func (r *nativeRunner) QuiesceJob(ctx context.Context, jobID string) error {
 	s := r.scope
 	begun := time.Now()
 	window, running := tracker.quiesce(jobID, begun)
-	termUntil := begun.Add(s.grace)
-	settleUntil := begun.Add(quiesceSettleGraces * s.grace)
-	firstSeen := map[processInstance]time.Time{}
+	e := newEscalation(begun, s.grace)
 	empty := false
 	for {
 		if err := ctx.Err(); err != nil {
@@ -649,26 +648,16 @@ func (r *nativeRunner) QuiesceJob(ctx context.Context, jobID string) error {
 			empty = false
 			survivor := false
 			for _, p := range mine {
-				key := processInstance{p.pid, p.start}
-				first, seen := firstSeen[key]
-				if !seen {
-					first = sampled
-					firstSeen[key] = first
-				}
-				survivor = survivor || !sampled.Before(first.Add(2*s.grace))
+				survivor = survivor || e.survivor(p, sampled)
 			}
 			if survivor {
 				return s.contaminated("job processes remain after lane termination", processCensus{residual: mine})
 			}
-			if !sampled.Before(settleUntil) {
+			if e.settled(sampled) {
 				return s.contaminated("job processes keep appearing after lane termination", processCensus{residual: mine})
 			}
-			sig := syscall.SIGTERM
-			if !time.Now().Before(termUntil) {
-				sig = syscall.SIGKILL
-			}
 			for _, p := range mine {
-				if err := s.signal(ctx, p, sig); err != nil {
+				if err := e.send(ctx, s.signal, p); err != nil {
 					return errors.Join(ErrCleanup, err)
 				}
 			}

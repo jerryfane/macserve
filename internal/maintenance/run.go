@@ -20,11 +20,12 @@ import (
 
 // Run requires the protected fixed deployment topology. Every cycle reloads all
 // approval inputs. A finding publishes invalid health, as do startup and
-// shutdown; no failure path extends the lifetime of a successful observation.
-// A probe that failed without evidence (keepLastValid) is not a finding
-// (#53): the last valid health is republished unchanged with the count of
-// such probes in a row, which blocks admission until that health expires;
-// only its expiry (or a finding) cancels active work.
+// shutdown. A probe that failed without evidence (keepLastValid) is not a
+// finding (#53): for up to the configured probe outage bound after the last
+// valid health (ProbeOutageSeconds, DefaultProbeOutage) the probe publishes
+// that health's facts with the count of such probes in a row, which blocks
+// admission only (#194); a finding, the end of that bound or a daemon that
+// stops publishing (every record's own lifetime) cancels active work.
 // The facts a probe may take from an earlier observation are the byte census
 // and the GUI-baseline check, which run in the background and may be up to
 // censusMaxAge and guiBaselineMaxAge old (tracker); every other fact is
@@ -85,6 +86,8 @@ func Run(ctx context.Context, c Config, scanLog io.Writer) error {
 			if cc, ccErr := controllerconfig.LoadConfig(current.ControllerConfig); ccErr == nil {
 				report.lanes = health.EffectiveLanes(cc.Lanes())
 			}
+			probes.outage = time.Duration(current.ProbeOutageSeconds) * time.Second
+			report.outage = probes.outage
 			probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 			h, err = observe(probeCtx, current, bg)
 			cancel()
@@ -119,35 +122,63 @@ func Run(ctx context.Context, c Config, scanLog io.Writer) error {
 	}
 }
 
-// probeRecord is the run loop's last valid health and the number of
-// consecutive probes since that failed without evidence.
+// probeRecord is the run loop's last valid health, the number of consecutive
+// probes since that failed without evidence, and the probe outage bound.
 type probeRecord struct {
 	lastValid health.Health
 	failures  int
+	// outage is Config.ProbeOutageSeconds; zero means DefaultProbeOutage.
+	outage time.Duration
+}
+
+// outageBound is a configured probe outage bound, DefaultProbeOutage when
+// unset.
+func outageBound(configured time.Duration) time.Duration {
+	if configured <= 0 {
+		return DefaultProbeOutage
+	}
+	return configured
 }
 
 // publication returns the health to publish for one probe that returned h and
 // err at now. A valid probe publishes h and restarts the count. A probe that
-// failed without evidence after valid health counts one more failure and
-// republishes that health, still valid but with the count (the gate blocks
-// admission only; its expiry cancels active work), or once it has
-// expired publishes invalid h with the count. Any other failure is a finding:
-// it publishes invalid h and forgets the last valid health, so the next
-// failure of any kind cannot keep it either.
+// failed without evidence after valid health counts one more failure and,
+// within the outage bound, publishes that health's facts with the count
+// (carried: the gate blocks admission only), or once the bound has passed
+// publishes invalid h with the count. Any other failure is a finding: it
+// publishes invalid h and forgets the last valid health, so the next
+// failure of any kind cannot carry it either.
 func (r *probeRecord) publication(h health.Health, err error, now time.Time) health.Health {
 	switch {
 	case err == nil:
-		*r = probeRecord{lastValid: h}
+		r.lastValid, r.failures = h, 0
 		return h
 	case !withoutEvidence(err) || !r.lastValid.BoundaryValidated:
-		*r = probeRecord{}
+		r.lastValid, r.failures = health.Health{}, 0
 		return h
 	}
 	r.failures++
-	if keepLastValid(err, r.lastValid, now) {
-		h = r.lastValid
+	if bound := outageBound(r.outage); keepLastValid(err, r.lastValid, now) && now.Before(r.lastValid.CheckedAt.Add(bound)) {
+		h = carried(r.lastValid, now, bound)
 	}
 	h.ProbeFailures = r.failures
+	return h
+}
+
+// carried is the record a probe that failed without evidence at now publishes
+// within the outage bound: the facts of last, the last valid health, with
+// LastValidAt its check, checked at now and expiring after healthLifetime,
+// or at the end of the bound if that is sooner. Its own timestamps prove the
+// daemon still publishes; the facts are never refreshed, and admission stays
+// blocked while it is in force (maintenance_probe_failed).
+func carried(last health.Health, now time.Time, outage time.Duration) health.Health {
+	h := last
+	h.LastValidAt = last.CheckedAt
+	h.CheckedAt = now
+	h.ExpiresAt = now.Add(healthLifetime)
+	if end := last.CheckedAt.Add(outage); end.Before(h.ExpiresAt) {
+		h.ExpiresAt = end
+	}
 	return h
 }
 
@@ -176,12 +207,13 @@ func withoutEvidence(err error) bool {
 	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errAcceptedMountChanged) || errors.Is(err, errCoexistingServiceRestarting) || errors.Is(err, exec.ErrWaitDelay)
 }
 
-// keepLastValid reports whether a probe that failed without evidence
-// (withoutEvidence) republishes the last valid health with its failure count:
-// only while that health has not yet expired. A finding, and any failure once
-// the last valid health has expired, publishes invalid health.
+// keepLastValid reports whether a probe that failed with err at now may carry
+// the facts of last, the last valid health: a failure without evidence
+// (withoutEvidence) after valid health checked no later than now. A finding
+// publishes invalid health; publication carries the facts only within the
+// probe outage bound after last was checked.
 func keepLastValid(err error, last health.Health, now time.Time) bool {
-	return withoutEvidence(err) && last.BoundaryValidated && last.ExpiresAt.After(now)
+	return withoutEvidence(err) && last.BoundaryValidated && last.ExpiresAt.After(last.CheckedAt) && !last.CheckedAt.After(now)
 }
 
 func sleepUntil(ctx context.Context, at time.Time) bool {

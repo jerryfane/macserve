@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/jerryfane/macserve/internal/hostguard"
 	"github.com/jerryfane/macserve/internal/model"
@@ -43,6 +44,11 @@ type Config struct {
 	// one job account (1..model.MaxConcurrentJobs; omitted means 1, the
 	// single-job broker).
 	MaxConcurrentJobs int `json:"max_concurrent_jobs,omitempty"`
+	// ProcessCleanupSeconds is how long a command's cleanup keeps
+	// confirming its process group after the signalling window
+	// (worker.Options.ProcessCleanupTimeout; omitted means
+	// worker.DefaultProcessCleanupTimeout, 180, which is also its maximum).
+	ProcessCleanupSeconds int `json:"process_cleanup_seconds,omitempty"`
 }
 
 // Lanes is MaxConcurrentJobs, 1 when omitted.
@@ -68,7 +74,7 @@ func (c Config) LeaseAuthority() error {
 // options; the broker, worker-reset, persistence review and qualification tool
 // evidence all use this one mapping.
 func (c Config) EngineOptions() worker.Options {
-	return worker.Options{Root: c.Root, ExportRoot: c.ExportRoot, WorkspaceRoot: c.WorkspaceRoot, JobUID: c.JobUID, JobGID: c.JobGID, OwnerUID: c.OwnerUID, ControllerUID: c.ControllerUID, HelperPath: c.HelperPath, BaselinePath: c.BaselinePath, PersistencePath: c.PersistencePath, Lanes: c.Lanes()}
+	return worker.Options{Root: c.Root, ExportRoot: c.ExportRoot, WorkspaceRoot: c.WorkspaceRoot, JobUID: c.JobUID, JobGID: c.JobGID, OwnerUID: c.OwnerUID, ControllerUID: c.ControllerUID, HelperPath: c.HelperPath, BaselinePath: c.BaselinePath, PersistencePath: c.PersistencePath, Lanes: c.Lanes(), ProcessCleanupTimeout: time.Duration(c.ProcessCleanupSeconds) * time.Second}
 }
 
 func LoadConfig(path string) (Config, error) {
@@ -146,6 +152,9 @@ func normalize(cfg Config) (Config, error) {
 	}
 	if cfg.MaxConcurrentJobs < 0 || cfg.MaxConcurrentJobs > model.MaxConcurrentJobs {
 		return cfg, fmt.Errorf("max_concurrent_jobs must be 1..%d", model.MaxConcurrentJobs)
+	}
+	if limit := int(worker.DefaultProcessCleanupTimeout / time.Second); cfg.ProcessCleanupSeconds < 0 || cfg.ProcessCleanupSeconds > limit {
+		return cfg, fmt.Errorf("process_cleanup_seconds must be 0..%d", limit)
 	}
 	return cfg, nil
 }

@@ -11,13 +11,14 @@ import (
 )
 
 // A probe that only ran out of time while a build loads the host is
-// inconclusive. It must not replace still-valid health (which made the
-// controller cancel every real build on the Studio), but it must never extend
-// that health past its own expiry, and genuine findings must still publish
-// invalid health at once.
-func TestKeepLastValidOnlyForTimeoutsWithinLifetime(t *testing.T) {
+// inconclusive. It must not replace valid health (which made the controller
+// cancel every real build on the Studio), and genuine findings must still
+// publish invalid health at once. How long the last valid facts may be
+// carried is publication's (the probe outage bound), not the last valid
+// health's own expiry (#194).
+func TestKeepLastValidOnlyForTimeoutsAfterValidHealth(t *testing.T) {
 	now := time.Date(2026, 11, 1, 21, 9, 0, 0, time.UTC)
-	valid := health.Health{BoundaryValidated: true, CheckedAt: now.Add(-12 * time.Second), ExpiresAt: now.Add(18 * time.Second)}
+	valid := health.Health{BoundaryValidated: true, CheckedAt: now.Add(-12 * time.Second), ExpiresAt: now.Add(28 * time.Second)}
 	// Exactly the error the Studio produced: Inspect's own 8 s deadline,
 	// wrapped by the census, while the outer probe context was still live.
 	inner := fmt.Errorf("mutable census /Users/macservejob: %w", context.DeadlineExceeded)
@@ -29,15 +30,15 @@ func TestKeepLastValidOnlyForTimeoutsWithinLifetime(t *testing.T) {
 		want bool
 	}{
 		{"inner Inspect deadline within lifetime", inner, valid, now, true},
-		{"timeout after expiry", inner, valid, valid.ExpiresAt, false},
+		{"timeout after expiry", inner, valid, valid.ExpiresAt.Add(time.Minute), true},
 		{"timeout without prior valid health", inner, health.Health{}, now, false},
 		{"prior health invalid", inner, health.Health{ExpiresAt: now.Add(time.Minute)}, now, false},
+		{"prior health checked later", inner, valid, valid.CheckedAt.Add(-time.Second), false},
 		{"real finding", errors.New("GUI baseline process changed; worker-reset required"), valid, now, false},
 		{"permission failure", errors.New(`mutable census /Library/macserve/var: "controller/Library/Mail": operation not permitted`), valid, now, false},
 		// Studio, 2026-11-02, as a real build finished: the accepted
 		// CoreDevice devicefs changed during the census.
 		{"CoreDevice mount changed within lifetime", fmt.Errorf("mutable census /Users/macservejob: %q: %w", coreDeviceMountPoint, errAcceptedMountChanged), valid, now, true},
-		{"CoreDevice mount changed after expiry", fmt.Errorf("mutable census /Users/macservejob: %q: %w", coreDeviceMountPoint, errAcceptedMountChanged), valid, valid.ExpiresAt, false},
 		{"same text, not the race", errors.New(`mutable census /Users/macservejob: "Library/Developer/CoreDevice/DeviceFS": mutable mount table changed during census`), valid, now, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

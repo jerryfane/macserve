@@ -3,6 +3,8 @@ package controller
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -660,7 +662,17 @@ func TestHeldCompletionWaitsForIdleCheck(t *testing.T) {
 	if _, _, err := f.db.Enqueue(context.Background(), "owner", "one", admission, f.now); err != nil {
 		t.Fatal(err)
 	}
-	f.enqueue(t, "two", model.Build)
+	// The sibling's deadline must outlast the held job's finalizing window
+	// (worker.FinalizationTimeout, which includes a command's process cleanup
+	// under load, #194).
+	sibling := runtimeAdmission(model.Build)
+	sibling.Profile.DefaultTimeoutSeconds, sibling.Profile.MaxTimeoutSeconds, sibling.Request.TimeoutSeconds = 1200, 1200, 1200
+	data, _ := json.Marshal(sibling.Profile)
+	digest := sha256.Sum256(data)
+	sibling.ProfileDigest = hex.EncodeToString(digest[:])
+	if _, _, err := f.db.Enqueue(context.Background(), "owner", "two", sibling, f.now); err != nil {
+		t.Fatal(err)
+	}
 	waiting := f.enqueue(t, "three", model.Build)
 	f.register(t, "epoch-a", 2)
 	first := f.start(t, "epoch-a")

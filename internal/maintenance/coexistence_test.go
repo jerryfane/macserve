@@ -282,8 +282,9 @@ func TestCoexistingServiceRelaunchKeepsLastValidHealth(t *testing.T) {
 			if !keepLastValid(err, last, last.CheckedAt.Add(10*time.Second)) {
 				t.Errorf("relaunch replaced still-valid health: %v", err)
 			}
-			if keepLastValid(err, last, last.ExpiresAt) || keepLastValid(err, health.Health{}, last.CheckedAt) {
-				t.Errorf("relaunch kept expired or absent health: %v", err)
+			r := probeRecord{lastValid: last}
+			if h := r.publication(health.Health{}, err, last.CheckedAt.Add(documentedProbeOutage)); h.BoundaryValidated || keepLastValid(err, health.Health{}, last.CheckedAt) {
+				t.Errorf("relaunch kept health past the probe outage bound or absent health: %v", err)
 			}
 		})
 	}

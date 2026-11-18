@@ -282,8 +282,9 @@ func New(options Options) (*Controller, error) {
 
 // defaultBudgets sets the unset lease budgets. CleanupTimeout and
 // DeliveryTimeout are the worker's finalization (worker.FinalizationTimeout:
-// its cleanup budget and, since #150, the final verification window after
-// the evidence steps) and evidence-delivery (protocol.DeliveryTimeout)
+// its cleanup budget, since #150 the final verification window after the
+// evidence steps and, since #194, one command's process cleanup under load)
+// and evidence-delivery (protocol.DeliveryTimeout)
 // bounds; SourceTimeout its source read budget. HeartbeatTimeout also
 // provides bounded transport grace.
 func (o *Options) defaultBudgets() {

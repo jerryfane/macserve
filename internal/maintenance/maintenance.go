@@ -7,7 +7,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
+	"github.com/jerryfane/macserve/internal/health"
 	"github.com/jerryfane/macserve/internal/hostguard"
 )
 
@@ -19,7 +21,10 @@ type Config struct {
 	CoexistingAnchors    []string `json:"coexisting_anchors,omitempty"`
 	CoexistingServices   []string `json:"coexisting_services,omitempty"`
 	IntervalSeconds      int      `json:"interval_seconds"`
-	path                 string
+	// ProbeOutageSeconds bounds how long probes that fail without evidence
+	// keep active work (see probeRecord): 0 means DefaultProbeOutage.
+	ProbeOutageSeconds int `json:"probe_outage_seconds,omitempty"`
+	path               string
 }
 
 func decode(data []byte, v any) error {
@@ -52,12 +57,17 @@ func protectedRead(path string) ([]byte, error) {
 	return data, nil
 }
 func LoadConfig(path string) (Config, error) {
-	var c Config
 	data, err := protectedRead(path)
 	if err != nil {
-		return c, err
+		return Config{}, err
 	}
-	if err = decode(data, &c); err != nil {
+	return parseConfig(data, path)
+}
+
+// parseConfig decodes and validates the maintenance config read from path.
+func parseConfig(data []byte, path string) (Config, error) {
+	var c Config
+	if err := decode(data, &c); err != nil {
 		return c, err
 	}
 	c.path = path
@@ -66,6 +76,14 @@ func LoadConfig(path string) (Config, error) {
 	}
 	if c.IntervalSeconds < 5 || c.IntervalSeconds > 15 {
 		return c, errors.New("unsupported maintenance interval")
+	}
+	if c.ProbeOutageSeconds == 0 {
+		c.ProbeOutageSeconds = int(DefaultProbeOutage / time.Second)
+	}
+	// Compare the integer itself: converting first would let a value whose
+	// product overflows wrap into range (#195 review F4).
+	if c.ProbeOutageSeconds < int(healthLifetime/time.Second) || c.ProbeOutageSeconds > int(health.MaxProbeOutage/time.Second) {
+		return c, errors.New("unsupported maintenance probe outage bound")
 	}
 	if err := ValidateCoexistenceConfig(&c); err != nil {
 		return c, err

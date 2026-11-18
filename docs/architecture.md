@@ -70,6 +70,27 @@ PF enforcement may be a separately reviewed future opt-in; it is not implemented
   request; 250 ms until v0.1.60 failed simulator boots at six lanes, #155), which still bounds a pipe a descendant
   that left the process group keeps open. A failed `simctl boot` or `bootstatus` is retried once on a new device,
   15 s after the failed device's teardown, so the retry does not meet the load that failed the first boot at once.
+  A command's process group is cleaned up by SIGTERM to every listed member, SIGKILL after 0.5 s, then a 1 s window;
+  each signal is a `_job-signal` helper run as the job UID that re-reads the target's identity, with 8 s and a 1 s
+  output wait per run and up to three runs when one fails only on time. Each signalling round chooses SIGTERM or
+  SIGKILL per member as it reaches it and ends with the cleanup's bound. If the group is still listed when the
+  window closes, the worker keeps listing it with backoff (doubling to 5 s) and SIGKILLing what remains for up to
+  `process_cleanup_seconds` in `worker.json` (180 s by default, also the maximum); a member listed then that no
+  SIGKILL has reached gets one more 30 s SIGKILL round and 1 s to go before the verdict. The bound is hard, and
+  cleanup is confirmed only when a listing shows no live group member and the direct child is reaped. A member still
+  listed after a SIGKILL was delivered to it, a foreign UID or a GUI baseline PID in the group (checked in every
+  listing, the final one included) is contamination. A member no SIGKILL reached within the bound leaves that
+  command's cleanup unconfirmed instead: no quarantine marker, and the command fails. The job's finalization then
+  tries to repair it: its account or lane quiesce SIGKILLs and judges what is left. Only if the job's final cleanup
+  is still unconfirmed does the job end with `cleanup_ok=false`, which fences the epoch and drains the worker to the
+  idle check, whose full-account quiesce and admission let it register again without an owner. At load 53 a 100 ms
+  helper output wait and the 1.5 s window left a cancelled xcodebuild
+  group judged contaminated and quarantined the worker (2026-11-18, #194). The account and lane quiesces judge a
+  survivor by escalation too: an instance is a survivor only when still listed a grace after a SIGKILL to it
+  completed, and their settle bound excludes time spent signalling. A job's finalization budget
+  (`FinalizationTimeout`, 883.5 s, which sizes the controller's finalizing and cancelling leases) includes three such
+  cleanups, one per context window that runs commands: a cancelled job's recipe command, the cleanup budget's
+  evidence commands and the verification window's Metal toolchain unmount.
 - `internal/evidence`: bounded xcresult test parsing, required-test execution checks, JUnit, deterministic
   artifact archives and content-addressed exports, including a script job's required `output.tar.gz`. Missing or incomplete test evidence cannot report success.
   Failed plans, bundles and suites remain explicit `container` diagnostics and JUnit errors even when child

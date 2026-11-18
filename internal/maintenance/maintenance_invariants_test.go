@@ -2,8 +2,11 @@ package maintenance
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"reflect"
 	"testing"
 	"time"
 
@@ -12,9 +15,10 @@ import (
 
 // This file is class B in BOUNDARY.json. It pins the invariants that health
 // timing and the run loop (run.go, timing.go) must keep whatever their
-// tuning: a published observation never outlives the controller's acceptance
-// window, an inconclusive probe never extends or fabricates valid health, and
-// no boundary fact can be dropped from Evaluate.
+// tuning: a published record never outlives the controller's acceptance
+// window, an inconclusive probe never refreshes or fabricates valid facts,
+// never admits and never carries them past the probe outage bound, and no
+// boundary fact can be dropped from Evaluate.
 
 // controllerAcceptance is the lifetime bound in internal/controller/guards.go.
 const controllerAcceptance = 45 * time.Second
@@ -56,9 +60,8 @@ func TestMaintenanceInvariantsKeepLastValid(t *testing.T) {
 		for name, last := range map[string]health.Health{
 			"none":         {},
 			"invalid":      {ExpiresAt: valid.ExpiresAt, CheckedAt: valid.CheckedAt},
-			"expired":      {BoundaryValidated: true, CheckedAt: now.Add(-50 * time.Second), ExpiresAt: now.Add(-10 * time.Second)},
-			"expires now":  {BoundaryValidated: true, CheckedAt: now.Add(-40 * time.Second), ExpiresAt: now},
 			"zero expires": {BoundaryValidated: true, CheckedAt: now},
+			"from future":  {BoundaryValidated: true, CheckedAt: now.Add(time.Second), ExpiresAt: now.Add(41 * time.Second)},
 		} {
 			if keepLastValid(err, last, now) {
 				t.Errorf("%v: kept %s health", err, name)
@@ -68,6 +71,66 @@ func TestMaintenanceInvariantsKeepLastValid(t *testing.T) {
 	for _, err := range findings {
 		if keepLastValid(err, valid, now) {
 			t.Errorf("%v: finding kept last valid health", err)
+		}
+	}
+}
+
+// A record published while probes fail without evidence carries the last
+// valid health's facts exactly (last_valid_at names their check), blocks
+// admission without cancelling, has its own lifetime within the acceptance
+// window, never expires after the end of the probe outage bound, and is
+// replaced by invalid health once that bound has passed.
+func TestMaintenanceInvariantsCarriedRecord(t *testing.T) {
+	start, q, e, o := approvedFixture()
+	last, err := Evaluate(start, q, e, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts := func(h health.Health) map[string]any {
+		data, _ := json.Marshal(h)
+		var m map[string]any
+		if err := json.Unmarshal(data, &m); err != nil {
+			t.Fatal(err)
+		}
+		return m
+	}
+	want := facts(last)
+	var r probeRecord
+	r.publication(last, nil, start)
+	for at := 10 * time.Second; at <= documentedProbeOutage+time.Minute; at += 10 * time.Second {
+		now := start.Add(at)
+		h := r.publication(health.Health{}, context.DeadlineExceeded, now)
+		if at >= documentedProbeOutage {
+			if h.BoundaryValidated {
+				t.Fatalf("+%v: facts carried past the probe outage bound", at)
+			}
+			continue
+		}
+		got := facts(h)
+		if got["last_valid_at"] != want["checked_at"] || !h.CheckedAt.Equal(now) || h.ProbeFailures != int(at/(10*time.Second)) {
+			t.Fatalf("+%v: carried record %v, want checked now with last_valid_at %v", at, got, want["checked_at"])
+		}
+		for _, k := range []string{"checked_at", "expires_at", "probe_failures", "last_valid_at"} {
+			delete(got, k)
+		}
+		kept := maps.Clone(want)
+		delete(kept, "checked_at")
+		delete(kept, "expires_at")
+		if !reflect.DeepEqual(got, kept) {
+			t.Fatalf("+%v: carried facts %v, want %v", at, got, kept)
+		}
+		if life := h.ExpiresAt.Sub(h.CheckedAt); life <= 0 || life > healthLifetime || h.ExpiresAt.After(last.CheckedAt.Add(documentedProbeOutage)) {
+			t.Fatalf("+%v: carried record expires %v", at, h.ExpiresAt)
+		}
+		var names []string
+		for _, b := range health.HealthBlockers(h, now, o.JobUID, o.Profiles, 1) {
+			names = append(names, b.Name)
+			if b.Cancel {
+				t.Fatalf("+%v: carried record cancels (%s)", at, b.Name)
+			}
+		}
+		if !reflect.DeepEqual(names, []string{"maintenance_probe_failed"}) {
+			t.Fatalf("+%v: carried record blockers %v", at, names)
 		}
 	}
 }
