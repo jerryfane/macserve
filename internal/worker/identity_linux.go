@@ -42,15 +42,12 @@ func identityProcesses(ctx context.Context) ([]processSample, error) {
 	return samples, nil
 }
 
-// processCommand is pid's kernel command name (comm: its executable's name,
-// at most 15 bytes; never an argument or the environment) while pid still
-// names the process started at start.
-func processCommand(pid int, start string) (string, bool) {
+// kernelProcess is pid's kernel record and its command name (comm: its
+// executable's name, at most 15 bytes; never an argument or the
+// environment); ok is false once no process has pid.
+func kernelProcess(pid int) (p processSample, command string, ok bool) {
 	p, command, ok, err := readStat(pid)
-	if err != nil || !ok || p.start != start {
-		return "", false
-	}
-	return command, true
+	return p, command, ok && err == nil
 }
 
 // readStat reads pid's /proc stat record and its command name; ok is false

@@ -81,11 +81,12 @@ func (s *processScope) contaminated(what string, c processCensus) error {
 // another UID (foreign) or with a GUI baseline PID (baseline). It names each
 // by its kernel identity: PID, UID, parent, process group, start time and
 // command name, at most contaminationEntries of them. The command name is
-// the kernel's (processCommand: the executable's name, 16 bytes at most,
+// the kernel's (kernelProcess: the executable's name, 16 bytes at most,
 // never an argument or the environment), read when the refusal is made;
-// "unavailable" once the PID no longer names the listed process. Until #196
-// the refusal named no process, and the member a herdrup smoke run's clone
-// listing refused on 18 Nov 13:43Z could not be identified from the log.
+// "unavailable" once the PID no longer names the listed process (another
+// start time). Until #196 the refusal named no process, and the member a
+// herdrup smoke run's clone listing refused on 18 Nov 13:43Z could not be
+// identified from the log.
 // As for every refusal here, the members reach only root; a job's reason
 // (PublicReason) keeps the refusal and their count.
 func groupRefusal(foreign, baseline []processSample) error {
@@ -100,7 +101,7 @@ func groupRefusal(foreign, baseline []processSample) error {
 	name := func(refused []processSample, why string) {
 		for _, p := range refused[:min(len(refused), contaminationEntries-len(members.entries))] {
 			command := "unavailable"
-			if comm, ok := processCommand(p.pid, p.start); ok {
+			if k, comm, ok := kernelProcess(p.pid); ok && k.start == p.start {
 				command = strconv.Quote(comm)
 			}
 			members.entries = append(members.entries, fmt.Sprintf("pid=%d uid=%d ppid=%d pgid=%d start=%s command=%s: %s", p.pid, p.uid, p.parent, p.group, p.start, command, why))

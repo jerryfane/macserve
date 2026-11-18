@@ -212,7 +212,7 @@ func TestProtectedCleanupBaselinePIDInFinalListingIsContamination(t *testing.T) 
 		return []processSample{baseline}, nil
 	}
 	r.signalProcess = func(context.Context, processSample, syscall.Signal) error { return nil }
-	err := r.cleanupProtectedGroup(group, testJobUID, func() {}, func() bool { return false })
+	err := r.cleanupProtectedGroup(processInstance{pid: group}, testJobUID, func() {}, func() bool { return false })
 	if !errors.Is(err, ErrContamination) || !strings.Contains(err.Error(), "GUI baseline PID") {
 		t.Fatalf("baseline PID in the final listing: %v; want contamination", err)
 	}

@@ -31,22 +31,25 @@ func identityProcesses(ctx context.Context) ([]processSample, error) {
 		return nil, err
 	}
 	samples := make([]processSample, 0, len(rows))
-	for _, row := range rows {
-		p := row.Proc
-		samples = append(samples, processSample{pid: int(p.P_pid), parent: int(row.Eproc.Ppid), group: int(row.Eproc.Pgid), uid: int(row.Eproc.Ucred.Uid), zombie: p.P_stat == 5, start: startToken(&p)})
+	for i := range rows {
+		samples = append(samples, kinfoSample(&rows[i]))
 	}
 	return samples, ctx.Err()
 }
 
-// processCommand is pid's kernel command name (p_comm: its executable's
-// name, at most 16 bytes; never an argument or the environment) while pid
-// still names the process started at start.
-func processCommand(pid int, start string) (string, bool) {
+func kinfoSample(k *unix.KinfoProc) processSample {
+	return processSample{pid: int(k.Proc.P_pid), parent: int(k.Eproc.Ppid), group: int(k.Eproc.Pgid), uid: int(k.Eproc.Ucred.Uid), zombie: k.Proc.P_stat == 5, start: startToken(&k.Proc)}
+}
+
+// kernelProcess is pid's kernel record and its command name (p_comm: its
+// executable's name, at most 16 bytes; never an argument or the
+// environment); ok is false once no process has pid.
+func kernelProcess(pid int) (p processSample, command string, ok bool) {
 	k, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
-	if err != nil || int(k.Proc.P_pid) != pid || startToken(&k.Proc) != start {
-		return "", false
+	if err != nil || int(k.Proc.P_pid) != pid {
+		return p, "", false
 	}
-	return unix.ByteSliceToString(k.Proc.P_comm[:]), true
+	return kinfoSample(k), unix.ByteSliceToString(k.Proc.P_comm[:]), true
 }
 
 // memoryProcesses reads the live processes of uid and charges each its

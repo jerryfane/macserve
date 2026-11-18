@@ -82,8 +82,12 @@ PF enforcement may be a separately reviewed future opt-in; it is not implemented
   listing, the final one included) is contamination. That refusal names the refused members (eight at most, then a
   count) by PID, UID, parent, process group, kernel start time and kernel command name (never arguments or the
   environment) in the broker's log and the quarantine record; the job's reason keeps only the refusal and the count
-  (#196). A member no SIGKILL reached within the bound leaves that
-  command's cleanup unconfirmed instead: no quarantine marker, and the command fails. The job's finalization then
+  (#196). The one UID 0 member that is not foreign is the command's own launcher: its unreaped direct child while
+  still `launchctl asuser` or `_job-exec` before the drop, with the PID and start time recorded at spawn, leading
+  its group. The kernel gives no other process that PID until it is reaped, so the worker SIGTERMs and SIGKILLs it
+  by PID as root and judges it like any member; any other UID 0 member, or one whose PID or start time differs, is
+  contamination. A member no SIGKILL reached within the bound leaves that command's cleanup unconfirmed instead: no
+  quarantine marker, and the command fails. The job's finalization then
   tries to repair it: its account or lane quiesce SIGKILLs and judges what is left. Only if the job's final cleanup
   is still unconfirmed does the job end with `cleanup_ok=false`, which fences the epoch and drains the worker to the
   idle check, whose full-account quiesce and admission let it register again without an owner. At load 53 a 100 ms

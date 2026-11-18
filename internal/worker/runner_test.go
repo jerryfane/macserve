@@ -569,7 +569,7 @@ func TestNativeRunnerUnverifiableCleanupFails(t *testing.T) {
 
 func TestNativeRunnerRefusesOwnerGroup(t *testing.T) {
 	runner, _ := helperRunner(t, "hang")
-	err := runner.cleanupGroup(syscall.Getpgrp(), os.Geteuid(), func() {}, func() bool { return true }, func() bool { return false })
+	err := runner.cleanupGroup(processInstance{pid: syscall.Getpgrp()}, os.Geteuid(), func() {}, func() bool { return true }, func() bool { return false })
 	if !errors.Is(err, ErrCleanup) {
 		t.Fatalf("owner group not rejected: %v", err)
 	}
@@ -595,7 +595,7 @@ func TestNativeRunnerRejectsForeignUIDGroup(t *testing.T) {
 			{pid: other.Process.Pid, group: other.Process.Pid, uid: os.Geteuid() + 1},
 		}, nil
 	}
-	err := runner.cleanupGroup(other.Process.Pid, os.Geteuid(), func() {}, func() bool { return true }, func() bool { return false })
+	err := runner.cleanupGroup(processInstance{pid: other.Process.Pid}, os.Geteuid(), func() {}, func() bool { return true }, func() bool { return false })
 	if !errors.Is(err, ErrCleanup) {
 		t.Fatalf("foreign group was accepted: %v", err)
 	}
@@ -673,7 +673,7 @@ func TestProtectedCleanupRetriesTransientListing(t *testing.T) {
 		return []processSample{trustedGUI()}, nil
 	}
 	r.signalProcess = func(context.Context, processSample, syscall.Signal) error { return nil }
-	if err := r.cleanupProtectedGroup(201, testJobUID, func() {}, func() bool { return true }); err != nil {
+	if err := r.cleanupProtectedGroup(processInstance{pid: 201}, testJobUID, func() {}, func() bool { return true }); err != nil {
 		t.Fatalf("one failed listing left cleanup unconfirmed: %v", err)
 	}
 }
@@ -688,7 +688,7 @@ func TestProtectedCleanupPersistentListingFailureFails(t *testing.T) {
 		t.Fatal("signalled without a listing")
 		return nil
 	}
-	if err := r.cleanupProtectedGroup(201, testJobUID, func() {}, func() bool { return true }); !errors.Is(err, ErrCleanup) || !errors.Is(err, listErr) || !strings.Contains(err.Error(), "protected cleanup: final listing: ") {
+	if err := r.cleanupProtectedGroup(processInstance{pid: 201}, testJobUID, func() {}, func() bool { return true }); !errors.Is(err, ErrCleanup) || !errors.Is(err, listErr) || !strings.Contains(err.Error(), "protected cleanup: final listing: ") {
 		t.Fatalf("persistent listing failure accepted: %v", err)
 	}
 }
