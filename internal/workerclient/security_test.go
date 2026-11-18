@@ -65,6 +65,29 @@ func TestWorkerConfigLanesUpToSix(t *testing.T) {
 	}
 }
 
+// worker.json's process_cleanup_seconds reaches the runner as
+// ProcessCleanupTimeout (omitted means the default); negative values and
+// values above the 180 s default, which FinalizationTimeout covers, are
+// refused (#194).
+func TestWorkerConfigProcessCleanupSeconds(t *testing.T) {
+	base := Config{Socket: "/service/controller.sock", ControllerUID: 503, OwnerUID: 501, JobUID: 502, JobGID: 20, Root: "/service/control", ExportRoot: "/service/exports", WorkspaceRoot: "/service/workspaces", HelperPath: "/service/bin/macserve", BaselinePath: "/service/control/gui-baseline.json", PersistencePath: "/service/control/reviewed-persistence.json"}
+	for seconds, want := range map[int]time.Duration{0: 0, 30: 30 * time.Second, 180: worker.DefaultProcessCleanupTimeout} {
+		c := base
+		c.ProcessCleanupSeconds = seconds
+		got, err := normalize(c)
+		if err != nil || got.EngineOptions().ProcessCleanupTimeout != want {
+			t.Fatalf("process_cleanup_seconds %d: %+v %v", seconds, got, err)
+		}
+	}
+	for _, seconds := range []int{-1, 181} {
+		c := base
+		c.ProcessCleanupSeconds = seconds
+		if _, err := normalize(c); err == nil {
+			t.Fatalf("process_cleanup_seconds %d accepted", seconds)
+		}
+	}
+}
+
 func TestSourceTransferFailureCannotInventSuccessfulCleanup(t *testing.T) {
 	for _, uncertain := range []bool{false, true} {
 		t.Run(map[bool]string{false: "quiescent", true: "residual-process"}[uncertain], func(t *testing.T) {
