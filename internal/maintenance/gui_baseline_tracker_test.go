@@ -122,7 +122,8 @@ func TestSlowGUIBaselineDoesNotStarveProbes(t *testing.T) {
 
 // Guard: a GUI-baseline check that stays inconclusive still fails closed. No
 // valid health is published from an observation older than guiBaselineMaxAge,
-// and invalid health replaces the last valid record once it expires.
+// and invalid health replaces the carried last valid facts once the probe
+// outage bound after them has passed.
 func TestGUIBaselineInconclusiveBeyondMaxAgeFailsClosed(t *testing.T) {
 	tr, f, clock := newTestGUIBaselineTracker(t)
 	go func() { f.release <- guiOutcome{boot: "boot-1"} }()
@@ -132,11 +133,11 @@ func TestGUIBaselineInconclusiveBeyondMaxAgeFailsClosed(t *testing.T) {
 	clean := clock.Now()
 	// The next observation never completes. Replay the daemon loop's decision
 	// at the 10 s cadence (Run): a valid probe publishes, an inconclusive one
-	// keeps the last valid health only until it expires.
-	var last health.Health
+	// carries the last valid health's facts only within the outage bound.
+	var r probeRecord
 	for {
 		now := clock.Now()
-		if now.Sub(clean) > 10*time.Minute {
+		if now.Sub(clean) > 2*documentedProbeOutage {
 			t.Fatal("invalid health was never published")
 		}
 		_, _, err, _ := checkBaseline(tr, 10*time.Millisecond, testBaseline)
@@ -144,13 +145,13 @@ func TestGUIBaselineInconclusiveBeyondMaxAgeFailsClosed(t *testing.T) {
 			if now.Sub(clean) > guiBaselineMaxAge {
 				t.Fatalf("valid health at +%s from an observation older than %s", now.Sub(clean), guiBaselineMaxAge)
 			}
-			last = health.Health{BoundaryValidated: true, CheckedAt: now, ExpiresAt: now.Add(healthLifetime)}
+			r.publication(health.Health{BoundaryValidated: true, CheckedAt: now, ExpiresAt: now.Add(healthLifetime)}, nil, now)
 		} else {
 			if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "GUI baseline") {
 				t.Fatalf("got %v; want an inconclusive probe naming the GUI baseline", err)
 			}
-			if !keepLastValid(err, last, now) {
-				if bound := guiBaselineMaxAge + healthLifetime + 10*time.Second; now.Sub(clean) > bound {
+			if h := r.publication(health.Health{}, err, now); !h.BoundaryValidated {
+				if bound := guiBaselineMaxAge + documentedProbeOutage + 10*time.Second; now.Sub(clean) > bound {
 					t.Fatalf("invalid health published at +%s, later than %s", now.Sub(clean), bound)
 				}
 				return

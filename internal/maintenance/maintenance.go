@@ -7,7 +7,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
+	"github.com/jerryfane/macserve/internal/health"
 	"github.com/jerryfane/macserve/internal/hostguard"
 )
 
@@ -19,7 +21,10 @@ type Config struct {
 	CoexistingAnchors    []string `json:"coexisting_anchors,omitempty"`
 	CoexistingServices   []string `json:"coexisting_services,omitempty"`
 	IntervalSeconds      int      `json:"interval_seconds"`
-	path                 string
+	// ProbeOutageSeconds bounds how long probes that fail without evidence
+	// keep active work (see probeRecord): 0 means DefaultProbeOutage.
+	ProbeOutageSeconds int `json:"probe_outage_seconds,omitempty"`
+	path               string
 }
 
 func decode(data []byte, v any) error {
@@ -66,6 +71,12 @@ func LoadConfig(path string) (Config, error) {
 	}
 	if c.IntervalSeconds < 5 || c.IntervalSeconds > 15 {
 		return c, errors.New("unsupported maintenance interval")
+	}
+	if c.ProbeOutageSeconds == 0 {
+		c.ProbeOutageSeconds = int(DefaultProbeOutage / time.Second)
+	}
+	if outage := time.Duration(c.ProbeOutageSeconds) * time.Second; outage < healthLifetime || outage > health.MaxProbeOutage {
+		return c, errors.New("unsupported maintenance probe outage bound")
 	}
 	if err := ValidateCoexistenceConfig(&c); err != nil {
 		return c, err

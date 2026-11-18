@@ -314,30 +314,37 @@ not migration. Merely creating a profile does not qualify it. Installation and a
 boundary qualification remain separate provisioning work.
 
 A maintenance probe that *failed without evidence* is not a finding
-([#53](https://github.com/jerryfane/macserve/issues/53)): it blocks admission at once and never cancels active work
-while the last valid health is in force. Maintenance counts these probes since the last valid health and, while that
-health is unexpired, republishes it unchanged (same `checked_at`, `expires_at` and facts) with `probe_failures`
-set to the count; the gate then reports `maintenance_probe_failed`, which blocks admission only. After the last valid
-health expires (40 s after its check) a failed probe publishes invalid health (which cancels) with the count. Two lanes
-booting simulators made three probes in a row time out while the last valid health had 9 s left and the next probe
-passed; cancelling from the third, as v0.1.46 and v0.1.47 did, ended both jobs for nothing. A valid probe
-resets the count; a finding resets it too and forgets the last valid health, so it cancels at once and no later
-failure can keep that health. Failures without evidence are a closed list, and anything else is a finding:
-the probe's deadline or a deadline inside it (`context deadline exceeded`, including a protected-input ACL
-inspection killed at its deadline, which reads `cannot inspect protected input ACL: signal: killed: context
-deadline exceeded`), the accepted CoreDevice `devicefs` changing during the census, a configured coexisting
-service between two launchd runs, and an inspection subprocess that exited but whose output did not close within
-its wait delay (`exec: WaitDelay expired before I/O complete`). Findings include a changed GUI baseline or boot, a nested or crossed mount, a
-special file or permission error in the census, a protected input that changed or is not root-protected, a
-persistence attestation that is invalid, needs review or changed during its read, a coexisting service that is
-not verifiably running, any qualification or evidence mismatch, and the daemon's own shutdown. At the 10 s cadence
-the third failure is published within 38 s of the start of the probe behind the last valid health (two intervals
-plus its 8 s bound), before that health's 40 s lifetime ends, so two failures in a row (about 20 s, the longest
-transient seen on the Studio, [#108](https://github.com/jerryfane/macserve/issues/108)) never cancel a job. The
-count never extends health: a republished record keeps the last valid health's `expires_at`, so an active job never
-runs more than 40 s past the publication of the last valid health (plus the controller's 1 s readiness check; 45 s
-acceptance window) whether probes fail, are slow, or the daemon stopped publishing; a finding cancels on the
-controller's next readiness check after it is published.
+([#53](https://github.com/jerryfane/macserve/issues/53), [#194](https://github.com/jerryfane/macserve/issues/194)):
+it blocks admission at once and never cancels active work for up to the **probe outage bound** after the last valid
+health was checked: `probe_outage_seconds` in the maintenance config, **600 (10 minutes) by default**, from 40 to
+3600. Maintenance counts these probes since the last valid health and, within the bound, publishes for each the last
+valid health's facts unchanged (boundary, accounting, memory pressure, persistence, profiles) under its own
+`checked_at` and a fresh lifetime (40 s, ending no later than the end of the bound), with `probe_failures` set to the
+count and `last_valid_at` the check of those facts; the gate then reports `maintenance_probe_failed`, which blocks
+admission only. A probe failing after the bound publishes invalid health (which cancels) with the count. On
+2026-11-18 three heavy jobs (load 53 on 36 cores) made five probes in a row time out; v0.1.69 published invalid
+health once the last valid health expired 40 s after its check and the controller cancelled all three jobs, whose
+cleanup then failed under the same load. Earlier, two lanes booting simulators made three probes in a row time out
+([#108](https://github.com/jerryfane/macserve/issues/108)). A valid probe resets the count; a finding resets it too
+and forgets the last valid health, so it cancels at once and no later failure can carry that health. Failures
+without evidence are a closed list, and anything else is a finding: the probe's deadline or a deadline inside it
+(`context deadline exceeded`, including a protected-input ACL inspection killed at its deadline, which reads `cannot
+inspect protected input ACL: signal: killed: context deadline exceeded`, and a GUI-baseline check with no
+observation completed in time, `GUI baseline: none completed conclusively within 45s`), the accepted CoreDevice
+`devicefs` changing during the census, a configured coexisting service between two launchd runs, and an inspection
+subprocess that exited but whose output did not close within its wait delay (`exec: WaitDelay expired before I/O
+complete`). Findings include a changed GUI baseline or boot, a nested or crossed mount, a special file or permission
+error in the census, a protected input that changed or is not root-protected, a persistence attestation that is
+invalid, needs review or changed during its read, a coexisting service that is not verifiably running, any
+qualification or evidence mismatch, and the daemon's own shutdown. A measured breach in the carried facts (service
+disk over budget, a changed profile) still cancels while they are carried. The count never refreshes facts: an
+active job never runs more than the bound past the check of the last valid health while probes fail without
+evidence, and never more than 40 s past the last publication if the daemon stops publishing (plus the controller's
+1 s readiness check; 45 s acceptance window). The controller refuses a record whose `last_valid_at` is set without
+failed probes, is after its `checked_at` or is more than an hour old. Invalid health carries no measurement
+(`accounted_bytes:-1` and `memory_pressure:true` are fail-closed placeholders), so its blockers are
+`isolation_unavailable` and, as known, `maintenance_probe_failed`, `persistence_attestation_unavailable` and
+`worker_admission_inconclusive`; disk, memory and toolchain blockers are named only from a validated record.
 
 Every stderr line of the controller, worker and maintenance daemons
 (`/Library/macserve/var/controller/log/controller.err.log`, `/Library/macserve/var/broker/log/worker.err.log` and
@@ -356,8 +363,9 @@ newer keyring servers drop `X-Forwarded-For`) but add no role header, and for su
 keyring server, so the line's time, job path and User-Agent are what match it to a role in the keyring's audit log. Maintenance
 logs `probe failed: <error>` for every failed probe, then `published invalid health checked_at=… last_valid_until=…
 probe_failures=… blockers=… cancels_active_job=…: <cause>` for every invalid record it publishes, including at its
-own start and stop, or `republished last valid health checked_at=… expires_at=… probe_failures=… blockers=…
-cancels_active_job=…: <cause>` when a probe failed without evidence; `last_valid_until=none` means no valid health
+own start and stop, or `republished last valid health checked_at=… last_valid_at=… expires_at=… probe_failures=…
+blockers=… cancels_active_job=…: <cause>` when a probe failed without evidence within the outage bound;
+`last_valid_until` is the end of the probe outage bound of the last valid health, and `none` means no valid health
 was held. A valid record is logged as `published health … blockers=…` when its blockers (for example
 `host_memory_pressure`, `service_disk_budget_exceeded`) differ from the previous record's. Toolchain
 qualification is the controller's own comparison and appears only in its lines.
@@ -607,9 +615,9 @@ simulators kept the GUI-baseline check near the probe deadline for over 40 s (se
 at most one minute after the starting job's delivery, when a lane is free. The one-minute bound is a controller
 constant, not a setting.
 
-Readiness cancellation distinguishes host facts from capacity: a trust blocker (`isolation_unavailable`,
-`maintenance_probe_failed` from its third failed probe, `toolchain_validation_unavailable`, `owner_pause_unavailable`,
-`disk_accounting_unavailable`) or a gate error cancels
+Readiness cancellation distinguishes host facts from capacity: a trust blocker (`isolation_unavailable`, which
+includes invalid health once probes have failed without evidence past the probe outage bound,
+`toolchain_validation_unavailable`, `owner_pause_unavailable`, `disk_accounting_unavailable`) or a gate error cancels
 every active job; when only capacity blockers cancel (`disk_emergency`, `service_disk_budget_exceeded`) the controller
 cancels the newest active job and re-evaluates after 30 s. A client, deadline or log-limit cancel touches its own job.
 A completion with `cleanup_ok=false`, or a lost heartbeat, fences the worker epoch: running siblings finish on their

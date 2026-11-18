@@ -137,11 +137,13 @@ const DefaultCleanupTimeout = 2 * time.Minute
 // FinalizationTimeout bounds a job's finalization, from its end until
 // Execute returns: the cleanup budget, at most DefaultCleanupTimeout, shared
 // by the writer barriers and the evidence steps, then finalVerificationWindow
-// at most for the last steps (210s). An ios_archive job's archive evidence,
-// and a build-for-testing job's test products, run in their own
-// ArchiveEvidenceTimeout besides. The controller's finalizing lease budget
-// is derived from it (#150 review r1).
-const FinalizationTimeout = DefaultCleanupTimeout + finalVerificationWindow
+// at most for the last steps, plus one command's protected process cleanup
+// at its longest (processCleanupBound: a cancelled job's last command, or one
+// evidence step's, may keep confirming its group that long under load, #194);
+// 427 s. An ios_archive job's archive evidence, and a build-for-testing
+// job's test products, run in their own ArchiveEvidenceTimeout besides. The
+// controller's finalizing lease budget is derived from it (#150 review r1).
+const FinalizationTimeout = DefaultCleanupTimeout + finalVerificationWindow + processCleanupBound
 
 // finalInspectionTimeout bounds the account's verification in a job's
 // finalization (see finalVerificationWindow), so that an inspection cut short

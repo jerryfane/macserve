@@ -2,12 +2,22 @@ package maintenance
 
 import "time"
 
-// healthLifetime is how long one published observation stays valid, within
-// the controller's 45 s acceptance window (internal/health). It is the bound
-// on how long probes that failed without evidence keep active work: the last
-// valid health is republished with their count, which blocks admission only,
-// until it expires.
+// healthLifetime is how long one published record stays valid, within the
+// controller's 45 s acceptance window (internal/health). Every record the
+// daemon publishes gets its own, so a daemon that stops publishing cancels
+// active work within it whatever the last record said.
 const healthLifetime = 40 * time.Second
+
+// DefaultProbeOutage is Config.ProbeOutageSeconds when unset: how long after
+// the last valid health probes that fail without evidence (withoutEvidence)
+// may carry its facts, blocking admission only, before the next one
+// publishes invalid health, which cancels active work. Three heavy jobs
+// (load 53 on 36 cores) made probes time out for over 40 s and the expiry
+// of the last valid health cancelled all three, which then could not be
+// cleaned up under the same load (Studio 2026-11-18 09:50Z, #194). Ten
+// minutes outlasts such a load peak; an outage longer than that is treated
+// as lost maintenance.
+const DefaultProbeOutage = 10 * time.Minute
 
 // censusBudget bounds one background byte census (see censusTracker). Under
 // heavy builds a census of the workspaces and job home has outlasted the 8 s

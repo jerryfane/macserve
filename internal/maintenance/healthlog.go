@@ -14,29 +14,32 @@ const timeLayout = "2006-01-02T15:04:05.000Z07:00"
 // healthReport logs published health in terms of the controller readiness
 // blockers it implies, so a job the controller cancels can be tied to the
 // maintenance failure behind it: every invalid record, with its cause and the
-// last valid health it replaced; every republished last valid health, with the
-// probe failure that kept it and their count; and every valid record whose
-// blockers differ from the previously published record's.
+// end of the outage bound of the last valid health it replaced; every record
+// carrying the last valid health's facts, with the probe failure behind it
+// and their count; and every valid record whose blockers differ from the
+// previously published record's.
 type healthReport struct {
 	blockers string
 	// lanes is the controller's max_concurrent_jobs, which sizes the
 	// service disk budget the controller applies (health.ServiceBudget).
 	lanes int
+	// outage is the configured probe outage bound (probeRecord.outage).
+	outage time.Duration
 }
 
 // failed logs h, published for a failed probe or the daemon's start or stop
 // with lastValid the last valid health before it: invalid health, or that
-// health republished with a probe failure count.
+// health's facts carried with a probe failure count.
 func (r *healthReport) failed(h, lastValid health.Health, cause string) {
 	blockers, cancel := healthBlockers(h, r.lanes)
 	r.blockers = blockers
 	if h.BoundaryValidated {
-		log.Printf("macserve maintenance: republished last valid health checked_at=%s expires_at=%s probe_failures=%d blockers=%s cancels_active_job=%t: %s", stamp(h.CheckedAt), stamp(h.ExpiresAt), h.ProbeFailures, blockers, cancel, cause)
+		log.Printf("macserve maintenance: republished last valid health checked_at=%s last_valid_at=%s expires_at=%s probe_failures=%d blockers=%s cancels_active_job=%t: %s", stamp(h.CheckedAt), stamp(h.LastValidAt), stamp(h.ExpiresAt), h.ProbeFailures, blockers, cancel, cause)
 		return
 	}
 	until := "none"
 	if lastValid.BoundaryValidated {
-		until = stamp(lastValid.ExpiresAt)
+		until = stamp(lastValid.CheckedAt.Add(outageBound(r.outage)))
 	}
 	log.Printf("macserve maintenance: published invalid health checked_at=%s last_valid_until=%s probe_failures=%d blockers=%s cancels_active_job=%t: %s", stamp(h.CheckedAt), until, h.ProbeFailures, blockers, cancel, cause)
 }

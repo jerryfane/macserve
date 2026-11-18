@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -437,6 +438,9 @@ func NewNativeRunner(options Options) (Runner, error) {
 	if err := hostguard.BrokerIdentity(options.JobUID, options.JobGID, options.ControllerUID, options.OwnerUID); err != nil {
 		return nil, err
 	}
+	if options.ProcessCleanupTimeout < 0 || options.ProcessCleanupTimeout > DefaultProcessCleanupTimeout {
+		return nil, errors.New("invalid process cleanup timeout")
+	}
 	for _, path := range []string{options.HelperPath} {
 		if err := hostguard.RootConfig(path); err != nil {
 			return nil, err
@@ -472,23 +476,26 @@ func nativeRunnerFor(options Options) *nativeRunner {
 	runner.console = func() error { return hostguard.CheckConsole(options.OwnerUID) }
 	runner.scope = &processScope{uid: runner.uid, sample: identityProcesses, agents: nativeAgents{}, interval: 50 * time.Millisecond, grace: 500 * time.Millisecond, childWait: toleratedChildWait}
 	runner.scope.signal = func(ctx context.Context, p processSample, sig syscall.Signal) error {
-		// The kernel checks the job UID, not root, at the signal operation itself.
-		// A PID reused by the owner/controller/another UID can never be signalled.
-		cmd := exec.CommandContext(ctx, options.HelperPath, "_job-signal", strconv.Itoa(p.pid), p.start, strconv.Itoa(int(sig)))
-		cmd.Dir = "/"
-		cmd.Env = []string{"PATH=/usr/bin:/bin", "LC_ALL=C"}
-		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: options.JobUID, Gid: options.JobGID, Groups: []uint32{}}}
-		cmd.WaitDelay = 100 * time.Millisecond
-		diagnostic := &boundedBuffer{max: 4096}
-		cmd.Stderr = diagnostic
-		err := cmd.Run()
-		if err != nil || diagnostic.err != nil {
-			return fmt.Errorf("signal job process pid=%d start=%q signal=%d: %w; helper stderr=%q",
-				p.pid, p.start, sig, errors.Join(err, diagnostic.err), diagnostic.String())
-		}
-		return nil
+		return signalWithRetry(ctx, func(ctx context.Context) error {
+			// The kernel checks the job UID, not root, at the signal operation itself.
+			// A PID reused by the owner/controller/another UID can never be signalled.
+			cmd := exec.CommandContext(ctx, options.HelperPath, "_job-signal", strconv.Itoa(p.pid), p.start, strconv.Itoa(int(sig)))
+			cmd.Dir = "/"
+			cmd.Env = []string{"PATH=/usr/bin:/bin", "LC_ALL=C"}
+			cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: options.JobUID, Gid: options.JobGID, Groups: []uint32{}}}
+			cmd.WaitDelay = inspectWaitDelay
+			diagnostic := &boundedBuffer{max: 4096}
+			cmd.Stderr = diagnostic
+			err := cmd.Run()
+			if err != nil || diagnostic.err != nil {
+				return fmt.Errorf("signal job process pid=%d start=%q signal=%d: %w; helper stderr=%q",
+					p.pid, p.start, sig, errors.Join(err, diagnostic.err), diagnostic.String())
+			}
+			return nil
+		})
 	}
 	runner.signalProcess = runner.scope.signal
+	runner.cleanupConfirm = cmp.Or(options.ProcessCleanupTimeout, DefaultProcessCleanupTimeout)
 	runner.workspaceRoot = options.WorkspaceRoot
 	runner.describe = describeProcess
 	runner.lineage = processLineage
@@ -587,4 +594,48 @@ func signalIdentity(samples []processSample, pid int, start string, uid int, sig
 		return nil
 	}
 	return nil
+}
+
+// jobSignalAttempts bounds the _job-signal helper runs for one cleanup
+// signal, and jobSignalAttemptTimeout each run: with their pauses (1 s, 2 s)
+// they fit within cleanupSignalTimeout.
+const (
+	jobSignalAttempts       = 3
+	jobSignalAttemptTimeout = 8 * time.Second
+)
+
+// signalWithRetry runs attempt, one run of the _job-signal helper, under its
+// own jobSignalAttemptTimeout. Under load the helper's fork/exec, its process
+// listing or the close of its stderr pipe has outlasted the 100 ms WaitDelay
+// it had ("signal job process pid=40294 … signal=15: exec: WaitDelay expired
+// before I/O complete", Studio 2026-11-18 09:50Z, #194). A run that failed
+// only on time, at its own deadline or its WaitDelay, is retried after a
+// pause while ctx allows, up to jobSignalAttempts; any other failure (a
+// changed identity, a refused signal) is returned at once. Running the helper
+// again is safe: it re-reads the target's identity (PID and start) and
+// signals only that instance, and repeating SIGTERM or SIGKILL changes
+// nothing.
+func signalWithRetry(ctx context.Context, attempt func(context.Context) error) error {
+	pause := time.Second
+	var err error
+	for i := range jobSignalAttempts {
+		if i > 0 {
+			timer := time.NewTimer(pause)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return errors.Join(err, ctx.Err())
+			case <-timer.C:
+			}
+			pause *= 2
+		}
+		run, cancel := context.WithTimeout(ctx, jobSignalAttemptTimeout)
+		err = attempt(run)
+		timedOut := run.Err() != nil && ctx.Err() == nil
+		cancel()
+		if err == nil || !timedOut && !errors.Is(err, exec.ErrWaitDelay) {
+			return err
+		}
+	}
+	return err
 }

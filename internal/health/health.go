@@ -93,16 +93,29 @@ type Health struct {
 	// ProbeFailures counts the consecutive maintenance probes since the last
 	// valid health that failed without evidence (a deadline or a race the
 	// maintenance daemon classifies as inconclusive; any other error is a
-	// finding and publishes invalid health without it). While that health is
-	// unexpired the daemon republishes it unchanged (same checked_at,
-	// expires_at and facts) with this count; afterwards it publishes invalid
-	// health with the count. The gate reports maintenance_probe_failed, which
-	// blocks admission only: active work is cancelled when the last valid
-	// health expires (isolation_unavailable) or a probe finds something, never
-	// for failed probes alone while that health is in force (two lanes booting
-	// simulators made three probes in a row time out, 2026-11-12).
+	// finding and publishes invalid health without it). For up to the
+	// daemon's probe outage bound (probe_outage_seconds, 10 minutes by
+	// default, at most MaxProbeOutage) after the last valid health was
+	// checked, each such probe publishes that health's facts unchanged with
+	// this count and LastValidAt, under its own checked_at and a fresh
+	// lifetime, so the record still proves the daemon is publishing;
+	// afterwards it publishes invalid health with the count. The gate reports
+	// maintenance_probe_failed, which blocks admission only: active work is
+	// cancelled when a probe finds something, when the outage outlasts the
+	// bound (isolation_unavailable) or when the daemon stops publishing (the
+	// record expires), never for probes that only ran out of time under load
+	// (three heavy jobs made probes time out for over 40 s, 2026-11-18, #194).
 	ProbeFailures int `json:"probe_failures,omitempty"`
+	// LastValidAt is set only with ProbeFailures: the checked_at of the
+	// last valid health whose facts the record carries.
+	LastValidAt time.Time `json:"last_valid_at,omitzero"`
 }
+
+// MaxProbeOutage bounds how long the facts of the last valid health may be
+// carried while maintenance probes fail without evidence: the gate refuses a
+// record carrying older facts, whatever the daemon's configured bound.
+const MaxProbeOutage = time.Hour
+
 type GuardOptions struct {
 	Root, HealthFile, PauseFile string
 	JobUID, OwnerUID            uint32
@@ -213,14 +226,21 @@ type Blocker struct {
 // qualified digests in profiles and lanes concurrent jobs (see
 // ServiceBudget); nil profiles skip toolchain qualification. The maintenance
 // daemon logs these for each health record it publishes. A record counting
-// probes that failed without evidence (ProbeFailures) is the last valid
-// health's, judged on its own timestamps and facts, plus
-// maintenance_probe_failed, which blocks admission and never cancels: the
-// record's own expiry does.
+// probes that failed without evidence (ProbeFailures) carries the last valid
+// health's facts under its own timestamps, plus maintenance_probe_failed,
+// which blocks admission and never cancels: the end of the daemon's outage
+// bound (invalid health), its own expiry or a finding does.
+//
+// The disk, memory and toolchain facts are judged only in a validated
+// record: an invalid one carries no measurement (Evaluate fails closed with
+// accounted_bytes -1, memory_pressure true and no profiles), and its
+// isolation_unavailable already refuses admission and cancels. Reporting
+// those placeholders named disk and memory blockers that nothing measured
+// (Studio 2026-11-18 09:50Z: 377 GB free, no memory pressure).
 func HealthBlockers(health Health, now time.Time, jobUID uint32, profiles map[string]string, lanes int) []Blocker {
 	var blockers []Blocker
 	fail := func(name string, cancel bool) { blockers = append(blockers, Blocker{name, cancel}) }
-	if health.Schema != 3 || health.JobUID != jobUID || !health.BoundaryValidated || !digestString(health.BoundaryReceiptSHA256) || health.CheckedAt.After(now.Add(5*time.Second)) || now.Sub(health.CheckedAt) > 45*time.Second || !health.ExpiresAt.After(now) || health.ExpiresAt.Sub(health.CheckedAt) > 45*time.Second || !health.ExpiresAt.After(health.CheckedAt) || health.ProbeFailures < 0 {
+	if health.Schema != 3 || health.JobUID != jobUID || !health.BoundaryValidated || !digestString(health.BoundaryReceiptSHA256) || health.CheckedAt.After(now.Add(5*time.Second)) || now.Sub(health.CheckedAt) > 45*time.Second || !health.ExpiresAt.After(now) || health.ExpiresAt.Sub(health.CheckedAt) > 45*time.Second || !health.ExpiresAt.After(health.CheckedAt) || health.ProbeFailures < 0 || !carriedFactsValid(health, now) {
 		fail("isolation_unavailable", true)
 	}
 	if health.ProbeFailures > 0 {
@@ -231,6 +251,9 @@ func HealthBlockers(health Health, now time.Time, jobUID uint32, profiles map[st
 	}
 	if health.AdmissionInconclusive != "" {
 		fail("worker_admission_inconclusive", false)
+	}
+	if !health.BoundaryValidated {
+		return blockers
 	}
 	if budget := ServiceBudget(lanes); health.AccountedBytes < 0 || health.AccountedBytes > budget {
 		fail("service_disk_budget_exceeded", true)
@@ -248,6 +271,19 @@ func HealthBlockers(health Health, now time.Time, jobUID uint32, profiles map[st
 	}
 	return blockers
 }
+
+// carriedFactsValid reports whether a record's LastValidAt is consistent: set
+// only with probe failures, not after the record's check, and no more than
+// MaxProbeOutage before now. A record without it (one published while the
+// last valid health was unexpired by a daemon before #194) is judged on its
+// own timestamps alone.
+func carriedFactsValid(h Health, now time.Time) bool {
+	if h.LastValidAt.IsZero() {
+		return true
+	}
+	return h.ProbeFailures > 0 && !h.LastValidAt.After(h.CheckedAt) && now.Sub(h.LastValidAt) <= MaxProbeOutage
+}
+
 func readRootHealth(path string) (Health, error) {
 	var h Health
 	if err := hostguard.RootConfig(path); err != nil {

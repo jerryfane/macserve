@@ -17,7 +17,9 @@ import (
 // lost the lease mid-delivery, and the controller then recorded unconfirmed
 // cleanup and fenced the epoch. On the default budgets that lease, and a
 // cancelled one finishing the same way, now lives; one that outlasts the
-// worker's finalization, its delivery and the heartbeat grace does not.
+// worker's finalization (worker.FinalizationTimeout, since #194 including a
+// command's process cleanup under load), its delivery and the heartbeat
+// grace does not.
 func TestFinalizingLeaseSurvivesLongFinalizationThenUpload(t *testing.T) {
 	f := newRuntime(t)
 	c := f.controller
@@ -29,7 +31,7 @@ func TestFinalizingLeaseSurvivesLongFinalizationThenUpload(t *testing.T) {
 		if !c.alive(a, job, since.Add(200*time.Second+80*time.Second)) {
 			t.Fatal("lease expired mid-delivery after a 200s finalization")
 		}
-		if c.alive(a, job, since.Add(210*time.Second+c.options.DeliveryTimeout+c.options.HeartbeatTimeout+time.Second)) {
+		if c.alive(a, job, since.Add(worker.FinalizationTimeout+c.options.DeliveryTimeout+c.options.HeartbeatTimeout+time.Second)) {
 			t.Fatal("lease outlives the worker's finalization, delivery and heartbeat grace")
 		}
 	}

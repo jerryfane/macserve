@@ -70,16 +70,21 @@ type Options struct {
 	JobGID        uint32
 	// JobUser is the job account's short name, set as USER and LOGNAME for job
 	// commands. New resolves it from JobUID (see jobAccountName).
-	JobUser           string
-	OwnerUID          uint32
-	ControllerUID     uint32
-	HelperPath        string
-	BaselinePath      string
-	PersistencePath   string
-	Runner            Runner
-	CleanupTimeout    time.Duration
-	MaxWorkspaceBytes int64
-	MaxArtifactBytes  int64
+	JobUser         string
+	OwnerUID        uint32
+	ControllerUID   uint32
+	HelperPath      string
+	BaselinePath    string
+	PersistencePath string
+	Runner          Runner
+	CleanupTimeout  time.Duration
+	// ProcessCleanupTimeout is how long a command's protected cleanup keeps
+	// confirming its process group after the signalling window
+	// (process_cleanup_seconds; 0 means DefaultProcessCleanupTimeout, its
+	// maximum).
+	ProcessCleanupTimeout time.Duration
+	MaxWorkspaceBytes     int64
+	MaxArtifactBytes      int64
 	// Lanes is how many jobs Execute runs at once (max_concurrent_jobs,
 	// 1..model.MaxConcurrentJobs; 0 means 1). With 1 every job owns the
 	// whole job account, as before lanes existed.

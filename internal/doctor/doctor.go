@@ -734,8 +734,12 @@ func (s *state) healthChecks() {
 	if h.AdmissionInconclusive != "" {
 		blockers = append(blockers, "worker_admission_inconclusive")
 	}
+	// Invalid health carries no measured disk or memory facts, only
+	// fail-closed placeholders (health.HealthBlockers).
 	budget := health.ServiceBudget(s.lanes())
 	switch {
+	case !h.BoundaryValidated:
+		s.set("disk", Unknown, "the maintenance health is invalid and carries no disk accounting", "")
 	case h.AccountedBytes < 0 || h.AccountedBytes > budget:
 		blockers = append(blockers, "service_disk_budget_exceeded")
 		s.set("disk", Fail, fmt.Sprintf("macserve accounts %d GiB of its %d GiB budget", h.AccountedBytes>>30, budget>>30), "Remove old jobs' evidence or wait for retention cleanup.")
@@ -745,7 +749,7 @@ func (s *state) healthChecks() {
 	default:
 		s.set("disk", Pass, fmt.Sprintf("macserve accounts %d GiB of its %d GiB budget", h.AccountedBytes>>30, budget>>30), "")
 	}
-	if h.MemoryPressure {
+	if h.BoundaryValidated && h.MemoryPressure {
 		blockers = append(blockers, "host_memory_pressure")
 	}
 	switch {
@@ -763,7 +767,7 @@ func (s *state) healthChecks() {
 	var text []string
 	for _, b := range blockers {
 		if b == "maintenance_probe_failed" {
-			text = append(text, fmt.Sprintf("%d maintenance probes in a row failed without evidence (active jobs are cancelled only when the last valid health expires)", h.ProbeFailures))
+			text = append(text, fmt.Sprintf("%d maintenance probes in a row failed without evidence (active jobs are cancelled only after the probe outage bound, 10 minutes by default)", h.ProbeFailures))
 			continue
 		}
 		text = append(text, blockerText[b])

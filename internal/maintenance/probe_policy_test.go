@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -13,11 +14,17 @@ import (
 	"github.com/jerryfane/macserve/internal/worker"
 )
 
+// documentedProbeOutage is the documented default probe outage bound
+// (probe_outage_seconds unset; docs/configuration.md).
+const documentedProbeOutage = 10 * time.Minute
+
 // probeStep is one probe of a replayed run loop: when it starts (from the
-// first probe), how long it takes and its error (nil: a valid observation).
+// first probe), how long it takes and its error (nil: a valid observation,
+// measuring accounted bytes of service disk; 0 means the fixture's).
 type probeStep struct {
 	start, took time.Duration
 	err         error
+	accounted   int64
 }
 
 // gateAt is what the controller derives at now from a published record: its
@@ -40,7 +47,11 @@ func replayPublications(t *testing.T, steps []probeStep) []gateAt {
 	var gates []gateAt
 	for _, s := range steps {
 		done := start.Add(s.start + s.took)
-		h, err := Evaluate(done, q, e, o)
+		observed := o
+		if s.accounted != 0 {
+			observed.AccountedBytes = s.accounted
+		}
+		h, err := Evaluate(done, q, e, observed)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -58,6 +69,21 @@ func replayPublications(t *testing.T, steps []probeStep) []gateAt {
 	return gates
 }
 
+// outage is a valid probe at 0, then probes every 10 s until last that each
+// fail without evidence (the probe's deadline, or a protected-input ACL
+// inspection killed at it, as on the Studio).
+func outage(last time.Duration) []probeStep {
+	steps := []probeStep{{0, 3 * time.Second, nil, 0}}
+	for at := 10 * time.Second; at <= last; at += 10 * time.Second {
+		err := probeDeadline
+		if at%(20*time.Second) == 0 {
+			err = aclKilled
+		}
+		steps = append(steps, probeStep{at, 8 * time.Second, err, 0})
+	}
+	return steps
+}
+
 var (
 	// aclKilled is the persistence-status read whose protected-input ACL
 	// inspection was killed at its deadline (Studio 2026-11-10 08:45:12Z).
@@ -72,10 +98,10 @@ var (
 // counted as a probe failure, not reported as a persistence violation.
 func TestTwoFailedProbesBlockAdmissionWithoutCancelling(t *testing.T) {
 	gates := replayPublications(t, []probeStep{
-		{0, 3 * time.Second, nil},
-		{10 * time.Second, 7 * time.Second, aclKilled},
-		{20 * time.Second, 8 * time.Second, probeDeadline},
-		{30 * time.Second, 4 * time.Second, nil},
+		{0, 3 * time.Second, nil, 0},
+		{10 * time.Second, 7 * time.Second, aclKilled, 0},
+		{20 * time.Second, 8 * time.Second, probeDeadline, 0},
+		{30 * time.Second, 4 * time.Second, nil, 0},
 	})
 	for i, g := range gates[1:3] {
 		if g.cancel || g.failures != i+1 || strings.Join(g.blockers, ",") != "maintenance_probe_failed" {
@@ -100,9 +126,9 @@ func TestCoexistingServiceWaitDelayBlocksAdmissionWithoutCancelling(t *testing.T
 		t.Fatal("coexistence observation ignored the WaitDelay failure")
 	}
 	gates := replayPublications(t, []probeStep{
-		{0, 3 * time.Second, nil},
-		{10 * time.Second, 2 * time.Second, waitDelay},
-		{20 * time.Second, 3 * time.Second, nil},
+		{0, 3 * time.Second, nil, 0},
+		{10 * time.Second, 2 * time.Second, waitDelay, 0},
+		{20 * time.Second, 3 * time.Second, nil, 0},
 	})
 	if g := gates[1]; g.cancel || g.failures != 1 || strings.Join(g.blockers, ",") != "maintenance_probe_failed" {
 		t.Fatalf("WaitDelay probe: %+v (%v)", g, waitDelay)
@@ -112,40 +138,66 @@ func TestCoexistingServiceWaitDelayBlocksAdmissionWithoutCancelling(t *testing.T
 	}
 }
 
-// Probes that fail without evidence block admission and keep active work
-// while the last valid health is in force, however many in a row; once it
-// has expired the next one publishes invalid health with the count, which
-// cancels. Studio v0.1.47, 2026-11-12: valid health 12:27:46, failed probes
-// 12:27:58, 12:28:07, 12:28:17 (the third cancelled both lanes), a valid
-// probe again 12:28:26 before expiry.
-func TestFailedProbesCancelOnlyAtExpiry(t *testing.T) {
-	gates := replayPublications(t, []probeStep{
-		{0, 3 * time.Second, nil},
-		{10 * time.Second, 8 * time.Second, probeDeadline},
-		{20 * time.Second, 8 * time.Second, aclKilled},
-		{30 * time.Second, 8 * time.Second, probeDeadline},
-		{40 * time.Second, 8 * time.Second, probeDeadline},
-	})
-	if g := gates[2]; g.cancel || g.failures != 2 {
-		t.Fatalf("second failed probe: %+v", g)
+// Studio v0.1.69, 2026-11-18 09:49-09:50Z (#194): three heavy jobs (load 53
+// on 36 cores) made the protected-input ACL inspection and the GUI-baseline
+// check time out five probes in a row. The last valid health expired at
+// 09:50:21, the next probe published invalid health and the controller
+// cancelled all three running jobs (isolation_unavailable), whose cleanup
+// then failed under the same load: an owner restart. Probes that only run
+// out of time block admission and never cancel for as long as the probe
+// outage bound (10 minutes by default) after the last valid health, however
+// many in a row, and a valid probe ends the outage.
+func TestProbeTimeoutsWithinOutageBoundNeverCancel(t *testing.T) {
+	steps := outage(documentedProbeOutage - 10*time.Second)
+	steps = append(steps, probeStep{documentedProbeOutage, 3 * time.Second, nil, 0})
+	gates := replayPublications(t, steps)
+	for i, g := range gates[1 : len(gates)-1] {
+		if g.cancel || g.failures != i+1 || strings.Join(g.blockers, ",") != "maintenance_probe_failed" {
+			t.Fatalf("failed probe %d at +%v: %+v", i+1, steps[i+1].start, g)
+		}
 	}
-	if g := gates[3]; g.cancel || g.failures != 3 || strings.Join(g.blockers, ",") != "maintenance_probe_failed" {
-		t.Fatalf("third failed probe before expiry: %+v", g)
-	}
-	if g := gates[4]; !g.cancel || g.failures != 4 || g.blockers[0] != "isolation_unavailable" {
-		t.Fatalf("failed probe after expiry: %+v", g)
+	if last := gates[len(gates)-1]; last.cancel || last.failures != 0 || len(last.blockers) != 0 {
+		t.Fatalf("valid probe after the outage: %+v", last)
 	}
 }
 
-// Guard (passes before #53 by design): a finding cancels at once, and the
-// last valid health it replaced is forgotten, so a later failure without
-// evidence cannot bring it back; the last valid health's expiry stays the
-// bound however few probes failed (here a probe that overran the cadence).
-func TestFindingsAndExpiryStillCancelAtOnce(t *testing.T) {
+// Guard (passes before #194 by design): probes that keep failing without
+// evidence past the probe outage bound publish invalid health, which
+// cancels, naming only what is known: isolation_unavailable and the failed
+// probes, never a disk or memory blocker nothing measured (the 09:50Z
+// record named service_disk_budget_exceeded and host_memory_pressure with
+// 377 GB free and no memory pressure).
+func TestProbeOutageBeyondBoundCancels(t *testing.T) {
+	steps := outage(documentedProbeOutage + 30*time.Second)
+	gates := replayPublications(t, steps)
+	for i, g := range gates[1:] {
+		if steps[i+1].start+steps[i+1].took < documentedProbeOutage {
+			continue
+		}
+		if !g.cancel || g.failures != i+1 || g.blockers[0] != "isolation_unavailable" {
+			t.Fatalf("failed probe %d at +%v, past the outage bound: %+v", i+1, steps[i+1].start, g)
+		}
+	}
+}
+
+// The invalid health published after the outage bound names no blocker for
+// a fact it did not measure.
+func TestInvalidHealthNamesOnlyMeasuredBlockers(t *testing.T) {
+	gates := replayPublications(t, outage(documentedProbeOutage+10*time.Second))
+	if g := gates[len(gates)-1]; !g.cancel || strings.Join(g.blockers, ",") != "isolation_unavailable,maintenance_probe_failed,persistence_attestation_unavailable" {
+		t.Fatalf("invalid health after the outage bound: %+v", g)
+	}
+}
+
+// Guard (passes before #53 and #194 by design): a finding cancels at once,
+// and the last valid health it replaced is forgotten, so a later failure
+// without evidence cannot bring it back; a measured breach in the last valid
+// health (service disk over budget) keeps cancelling while probes time out.
+func TestFindingsAndMeasuredBreachesStillCancel(t *testing.T) {
 	gates := replayPublications(t, []probeStep{
-		{0, 3 * time.Second, nil},
-		{10 * time.Second, 2 * time.Second, baselineChange},
-		{20 * time.Second, 8 * time.Second, probeDeadline},
+		{0, 3 * time.Second, nil, 0},
+		{10 * time.Second, 2 * time.Second, baselineChange, 0},
+		{20 * time.Second, 8 * time.Second, probeDeadline, 0},
 	})
 	for i, g := range gates[1:] {
 		if !g.cancel || g.failures != 0 || g.blockers[0] != "isolation_unavailable" {
@@ -153,11 +205,14 @@ func TestFindingsAndExpiryStillCancelAtOnce(t *testing.T) {
 		}
 	}
 	gates = replayPublications(t, []probeStep{
-		{0, 3 * time.Second, nil},
-		{40 * time.Second, 8 * time.Second, probeDeadline},
+		{0, 3 * time.Second, nil, health.ServiceBudget(1) + 1},
+		{10 * time.Second, 8 * time.Second, probeDeadline, 0},
+		{20 * time.Second, 8 * time.Second, aclKilled, 0},
 	})
-	if g := gates[1]; !g.cancel || g.failures != 1 || g.blockers[0] != "isolation_unavailable" {
-		t.Fatalf("failed probe after the last valid health expired: %+v", g)
+	for i, g := range gates {
+		if !g.cancel || !slices.Contains(g.blockers, "service_disk_budget_exceeded") {
+			t.Fatalf("probe %d after a measured disk breach: %+v", i, g)
+		}
 	}
 }
 
