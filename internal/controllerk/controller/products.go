@@ -106,8 +106,9 @@ func (c *Controller) productFiles() (map[string]int64, error) {
 // ledger digest whose bytes are gone, removes bytes the ledger does not
 // record and bytes unused for maxProductAge, then the least recently used
 // until the pool fits limit (maxProductsPoolBytes in production). It never
-// evicts the bytes of a producer job that is not terminal: its completion
-// still verifies them.
+// evicts a digest any active producer job uploaded (activeProducts): its
+// completion still verifies those bytes, whichever producer the ledger
+// names.
 func (c *Controller) trimProducts(ctx context.Context, reservation, limit int64) error {
 	now := c.options.Now()
 	files, err := c.productFiles()
@@ -127,6 +128,10 @@ func (c *Controller) trimProducts(ctx context.Context, reservation, limit int64)
 	}
 	var total int64
 	var candidates []candidate
+	protected, err := c.activeProducts(ctx)
+	if err != nil {
+		return err
+	}
 	recorded := make(map[string]store.Product, len(records))
 	for _, r := range records {
 		recorded[r.SHA256] = r
@@ -138,17 +143,13 @@ func (c *Controller) trimProducts(ctx context.Context, reservation, limit int64)
 	}
 	for digest, size := range files {
 		total += size
+		if protected[digest] {
+			continue
+		}
 		r, ok := recorded[digest]
 		if !ok {
 			candidates = append(candidates, candidate{digest: digest, bytes: size, expired: true})
 			continue
-		}
-		job, err := c.options.Store.Get(ctx, r.JobID)
-		if err == nil && !job.State.Terminal() {
-			continue
-		}
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			return err
 		}
 		candidates = append(candidates, candidate{digest: digest, bytes: size, used: r.UsedAt, ledger: true, expired: !now.Before(r.UsedAt.Add(maxProductAge))})
 	}
@@ -180,4 +181,44 @@ func (c *Controller) trimProducts(ctx context.Context, reservation, limit int64)
 		return evidence.ErrArtifactLimit
 	}
 	return nil
+}
+
+// activeProducts is the set of products digests the upload manifests of the
+// active producer jobs name. Uploads and trims both run under evidenceMu, so
+// a product stored for an active job is in its manifest before any trim.
+func (c *Controller) activeProducts(ctx context.Context) (map[string]bool, error) {
+	active, err := c.options.Store.ActiveJobs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	protected := map[string]bool{}
+	for _, job := range active {
+		if !job.Request.BuildForTesting {
+			continue
+		}
+		manifest, err := c.uploaded(job.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, a := range manifest {
+			if productsArtifact(job, a) {
+				protected[a.SHA256] = true
+			}
+		}
+	}
+	return protected, nil
+}
+
+// syncProductsDir makes a rename into the products pool durable before the
+// product is recorded or its upload acknowledged.
+func (c *Controller) syncProductsDir() error {
+	dir, err := c.root.OpenFile(productsDir, os.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	if c.syncProducts != nil {
+		return c.syncProducts(dir)
+	}
+	return dir.Sync()
 }

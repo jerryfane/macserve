@@ -102,6 +102,17 @@ func (s *Store) EvictProduct(ctx context.Context, sha256 string, now time.Time) 
 	return err
 }
 
+// TouchProduct records a use of the retained bytes of sha256 at now: it
+// moves their use time forward, never back, and changes nothing else (the
+// producer, the creation time). An evicted or unknown digest is unchanged.
+func (s *Store) TouchProduct(ctx context.Context, sha256 string, now time.Time) error {
+	if !validDigest(sha256) || !validTime(now) {
+		return ErrInvalid
+	}
+	_, err := s.db.ExecContext(ctx, "UPDATE products SET used_at=MAX(used_at,?) WHERE sha256=? AND evicted_at IS NULL", now.UnixNano(), sha256)
+	return err
+}
+
 // deleteEvictionProofs drops the products records evicted at or before
 // cutoff, at most pruneBatchJobs of them.
 func deleteEvictionProofs(ctx context.Context, tx *sql.Tx, cutoff time.Time) (int64, error) {

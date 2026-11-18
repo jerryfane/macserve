@@ -282,6 +282,12 @@ func (c *Controller) putArtifact(ctx context.Context, job model.Job, a evidence.
 		return err
 	}
 	if products {
+		// The rename must be durable before the product is recorded or
+		// its upload acknowledged; a retried upload of bytes already in the
+		// pool syncs again, since an earlier sync may have failed.
+		if err := c.syncProductsDir(); err != nil {
+			return err
+		}
 		if err := c.options.Store.RecordProduct(ctx, a.SHA256, a.SizeBytes, job.ID, c.options.Now()); err != nil {
 			return err
 		}
@@ -340,6 +346,14 @@ func (c *Controller) Artifact(ctx context.Context, id, artifactID string) (*os.F
 		if err != nil || info.Size() != artifact.SizeBytes {
 			file.Close()
 			return nil, artifact, evidence.ErrArtifact
+		}
+		if productsArtifact(job, artifact) {
+			// A download is a use: the products pool evicts least recently
+			// used bytes, so serving them refreshes their use time.
+			if err := c.options.Store.TouchProduct(ctx, artifact.SHA256, c.options.Now()); err != nil {
+				file.Close()
+				return nil, artifact, err
+			}
 		}
 		return file, artifact, nil
 	}

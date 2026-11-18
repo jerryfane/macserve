@@ -155,6 +155,9 @@ type Controller struct {
 	// afterEvictionSnapshot runs in trimPool between candidate selection
 	// and deletion; tests use it to interleave a signing request.
 	afterEvictionSnapshot func()
+	// syncProducts, when set, replaces the products pool directory's fsync
+	// in syncProductsDir; tests inject its failure.
+	syncProducts func(*os.File) error
 }
 
 func New(options Options) (*Controller, error) {
