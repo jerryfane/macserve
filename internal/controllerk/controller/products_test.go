@@ -302,3 +302,87 @@ func TestProductsUploadSyncsPoolDirectoryBeforeRecording(t *testing.T) {
 		t.Fatalf("retried product %+v %v", p, err)
 	}
 }
+
+// completedProducer is a finished build-for-testing job whose
+// test-products.tar holds content, stored in the products pool.
+func completedProducer(t *testing.T, f *runtimeFixture, content string) (model.Job, evidence.Artifact) {
+	t.Helper()
+	ctx := context.Background()
+	if _, _, err := f.db.Enqueue(ctx, "owner", "producer-"+content, buildForTestingAdmission(t), f.now); err != nil {
+		t.Fatal(err)
+	}
+	lease := f.dispatch(t)
+	products := f.artifact(t, lease.Job, profiles.TestProductsArtifact, []byte(content))
+	result := f.result(t, lease)
+	result.Artifacts = append(result.Artifacts, products)
+	if err := f.controller.complete(ctx, lease.Job, result, buildseal.Envelope{}); err != nil {
+		t.Fatal(err)
+	}
+	return lease.Job, products
+}
+
+// A trim that took its candidate snapshot before a download touched a
+// product does not evict it: each eviction re-reads the use time under the
+// lock the download holds while it opens and touches, so the touched
+// product survives and the trim evicts the next candidate instead (review
+// F3 race).
+func TestProductsTrimKeepsProductDownloadedAfterItsSnapshot(t *testing.T) {
+	f := newRuntime(t)
+	ctx := context.Background()
+	job, downloaded := completedProducer(t, f, "downloaded")
+	other := pooledProduct(t, f, "unused bytes", "other-producer", f.now.Add(time.Minute))
+	f.offset.Store(int64(time.Hour))
+	snapshotted, resume := make(chan struct{}), make(chan struct{})
+	f.controller.afterProductsSnapshot = func() { close(snapshotted); <-resume }
+	trimmed := make(chan error, 1)
+	go func() {
+		f.controller.evidenceMu.Lock()
+		defer f.controller.evidenceMu.Unlock()
+		trimmed <- f.controller.trimProducts(ctx, 0, downloaded.SizeBytes)
+	}()
+	<-snapshotted
+	file, _, err := f.controller.Artifact(ctx, job.ID, downloaded.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	close(resume)
+	if err := <-trimmed; err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(f.controller.options.Root, productsDir)
+	if _, err := os.Stat(filepath.Join(root, downloaded.SHA256+".tar")); err != nil {
+		t.Fatalf("product downloaded after the trim's snapshot evicted: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, other+".tar")); !os.IsNotExist(err) {
+		t.Fatalf("next candidate kept: %v", err)
+	}
+	if p, err := f.db.GetProduct(ctx, downloaded.SHA256); err != nil || p.EvictedAt != nil {
+		t.Fatalf("ledger %+v %v", p, err)
+	}
+}
+
+// A download that opened products before they are evicted reads them to
+// the end from its descriptor.
+func TestProductsDownloadSurvivesEvictionAfterOpen(t *testing.T) {
+	f := newRuntime(t)
+	ctx := context.Background()
+	job, products := completedProducer(t, f, "streamed products")
+	file, _, err := f.controller.Artifact(ctx, job.ID, products.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	f.controller.evidenceMu.Lock()
+	err = f.controller.trimProducts(ctx, 0, 0)
+	f.controller.evidenceMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(f.controller.options.Root, productsDir, products.SHA256+".tar")); !os.IsNotExist(err) {
+		t.Fatalf("products not evicted: %v", err)
+	}
+	if data, err := io.ReadAll(file); err != nil || string(data) != "streamed products" {
+		t.Fatalf("open download after eviction read %q %v", data, err)
+	}
+}

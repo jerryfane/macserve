@@ -158,6 +158,13 @@ type Controller struct {
 	// syncProducts, when set, replaces the products pool directory's fsync
 	// in syncProductsDir; tests inject its failure.
 	syncProducts func(*os.File) error
+	// productsMu serializes a products download's open and use-time touch
+	// with each products eviction (evictProduct). Downloads never take
+	// evidenceMu, and neither lock is held while a download streams.
+	productsMu sync.Mutex
+	// afterProductsSnapshot runs in trimProducts between candidate
+	// selection and eviction; tests use it to interleave a download.
+	afterProductsSnapshot func()
 }
 
 func New(options Options) (*Controller, error) {

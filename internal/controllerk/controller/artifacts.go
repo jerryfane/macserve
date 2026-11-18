@@ -335,6 +335,9 @@ func (c *Controller) Artifact(ctx context.Context, id, artifactID string) (*os.F
 		if !c.options.Now().Before(artifact.ExpiresAt) {
 			return nil, artifact, ErrExpired
 		}
+		if productsArtifact(job, artifact) {
+			return c.openProductDownload(ctx, artifact)
+		}
 		file, err := c.openJobArtifact(job, artifact)
 		if errors.Is(err, os.ErrNotExist) {
 			err = ErrExpired
@@ -346,14 +349,6 @@ func (c *Controller) Artifact(ctx context.Context, id, artifactID string) (*os.F
 		if err != nil || info.Size() != artifact.SizeBytes {
 			file.Close()
 			return nil, artifact, evidence.ErrArtifact
-		}
-		if productsArtifact(job, artifact) {
-			// A download is a use: the products pool evicts least recently
-			// used bytes, so serving them refreshes their use time.
-			if err := c.options.Store.TouchProduct(ctx, artifact.SHA256, c.options.Now()); err != nil {
-				file.Close()
-				return nil, artifact, err
-			}
 		}
 		return file, artifact, nil
 	}

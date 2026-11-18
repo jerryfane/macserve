@@ -67,6 +67,35 @@ func (c *Controller) openJobArtifact(job model.Job, a evidence.Artifact) (*os.Fi
 	return c.openArtifact(job.ID, a.ID)
 }
 
+// openProductDownload opens a products download and records the use: under
+// productsMu, so an eviction either sees the refreshed use time and keeps
+// the bytes, or removed them before the open (ErrExpired). The lock is
+// released before the caller streams the file; a later eviction only
+// unlinks it, and the open descriptor keeps reading the bytes.
+func (c *Controller) openProductDownload(ctx context.Context, a evidence.Artifact) (*os.File, evidence.Artifact, error) {
+	c.productsMu.Lock()
+	defer c.productsMu.Unlock()
+	file, err := c.openProduct(a.SHA256)
+	if errors.Is(err, os.ErrNotExist) {
+		err = ErrExpired
+	}
+	if err != nil {
+		return nil, a, err
+	}
+	info, err := file.Stat()
+	if err != nil || info.Size() != a.SizeBytes {
+		file.Close()
+		return nil, a, evidence.ErrArtifact
+	}
+	// A download is a use: the products pool evicts least recently used
+	// bytes, so serving them refreshes their use time.
+	if err := c.options.Store.TouchProduct(ctx, a.SHA256, c.options.Now()); err != nil {
+		file.Close()
+		return nil, a, err
+	}
+	return file, a, nil
+}
+
 // productFiles lists the pool's <sha256>.tar files and their sizes. Any
 // other name is not a product and is ignored.
 func (c *Controller) productFiles() (map[string]int64, error) {
@@ -163,24 +192,55 @@ func (c *Controller) trimProducts(ctx context.Context, reservation, limit int64)
 		}
 		return a.digest < b.digest
 	})
+	if c.afterProductsSnapshot != nil {
+		c.afterProductsSnapshot()
+	}
 	for _, old := range candidates {
 		if !old.expired && total <= limit-reservation {
 			break
 		}
-		if err := c.root.Remove(productsDir + "/" + productFile(old.digest)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		evicted, err := c.evictProduct(ctx, old.digest, old.ledger, old.used, now)
+		if err != nil {
 			return err
 		}
-		total -= old.bytes
-		if old.ledger {
-			if err := c.options.Store.EvictProduct(ctx, old.digest, now); err != nil {
-				return err
-			}
+		if evicted {
+			total -= old.bytes
 		}
 	}
 	if total > limit-reservation {
 		return evidence.ErrArtifactLimit
 	}
 	return nil
+}
+
+// evictProduct removes the pool's bytes of digest and, for a ledger digest,
+// records the eviction, unless a download used them after used, the use
+// time the trim's candidate snapshot read. It holds productsMu, which a
+// download holds while it opens and touches a product, so a download either
+// refreshes the use time before this check (and the bytes stay) or opens
+// them after the removal (and finds them gone); a download that opened them
+// before keeps reading its descriptor.
+func (c *Controller) evictProduct(ctx context.Context, digest string, ledger bool, used, now time.Time) (bool, error) {
+	c.productsMu.Lock()
+	defer c.productsMu.Unlock()
+	if ledger {
+		current, err := c.options.Store.GetProduct(ctx, digest)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return false, err
+		}
+		if err == nil && current.EvictedAt == nil && current.UsedAt.After(used) {
+			return false, nil
+		}
+	}
+	if err := c.root.Remove(productsDir + "/" + productFile(digest)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	if ledger {
+		if err := c.options.Store.EvictProduct(ctx, digest, now); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 // activeProducts is the set of products digests the upload manifests of the
