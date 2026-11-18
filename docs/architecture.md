@@ -76,15 +76,19 @@ PF enforcement may be a separately reviewed future opt-in; it is not implemented
   SIGKILL per member as it reaches it and ends with the cleanup's bound. If the group is still listed when the
   window closes, the worker keeps listing it with backoff (doubling to 5 s) and SIGKILLing what remains for up to
   `process_cleanup_seconds` in `worker.json` (180 s by default, also the maximum); a member listed then that no
-  SIGKILL has reached gets one more 30 s SIGKILL round and 1 s to go before the verdict. The verdict is unchanged:
-  cleanup is confirmed only when a listing shows no live group member and the direct child is reaped; a member
-  still listed after that, a foreign UID or a GUI baseline PID in the group is contamination. At load 53 a 100 ms
-  helper output wait and the 1.5 s window left a cancelled xcodebuild group unconfirmed and quarantined the worker
-  (2026-11-18, #194). The account and lane quiesces judge a survivor by escalation too: an instance is a survivor
-  only when still listed a grace after a SIGKILL to it completed, and their settle bound excludes time spent
-  signalling. A job's finalization budget (`FinalizationTimeout`, 660 s, which sizes the controller's finalizing
-  and cancelling leases) includes two such cleanups: a cancelled job's recipe command's and the evidence command
-  running when the cleanup budget ends.
+  SIGKILL has reached gets one more 30 s SIGKILL round and 1 s to go before the verdict. The bound is hard, and
+  cleanup is confirmed only when a listing shows no live group member and the direct child is reaped. A member still
+  listed after a SIGKILL was delivered to it, a foreign UID or a GUI baseline PID in the group is contamination. A
+  member no SIGKILL reached within the bound leaves cleanup unconfirmed instead: no quarantine marker; the job ends
+  with `cleanup_ok=false` (the controller fences the epoch), its final account or lane quiesce SIGKILLs and judges
+  what is left, and the worker drains to the idle check, whose full-account quiesce and admission let it register
+  again without an owner. At load 53 a 100 ms helper output wait and the 1.5 s window left a cancelled xcodebuild
+  group judged contaminated and quarantined the worker (2026-11-18, #194). The account and lane quiesces judge a
+  survivor by escalation too: an instance is a survivor only when still listed a grace after a SIGKILL to it
+  completed, and their settle bound excludes time spent signalling. A job's finalization budget
+  (`FinalizationTimeout`, 883.5 s, which sizes the controller's finalizing and cancelling leases) includes three such
+  cleanups, one per context window that runs commands: a cancelled job's recipe command, the cleanup budget's
+  evidence commands and the verification window's Metal toolchain unmount.
 - `internal/evidence`: bounded xcresult test parsing, required-test execution checks, JUnit, deterministic
   artifact archives and content-addressed exports, including a script job's required `output.tar.gz`. Missing or incomplete test evidence cannot report success.
   Failed plans, bundles and suites remain explicit `container` diagnostics and JUnit errors even when child

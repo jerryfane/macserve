@@ -65,12 +65,75 @@ func TestProtectedCleanupSlowTermStillSIGKILLs(t *testing.T) {
 // #195 review F3: a finalization's budget covers every command cleanup it
 // can wait for beyond its windows. A cancelled job waits for its recipe
 // command's cleanup before the finalizer, then for the evidence command
-// still running when the cleanup budget ends; the verification window
-// follows.
-func TestFinalizationTimeoutCoversCancelledRecipeAndEvidenceCleanups(t *testing.T) {
-	cancelled := processCleanupBound + DefaultCleanupTimeout + processCleanupBound + finalVerificationWindow
+// still running when the cleanup budget ends, then for the Metal toolchain
+// unmount (/sbin/umount through the protected runner) still running when the
+// verification window ends.
+func TestFinalizationTimeoutCoversEveryCommandWindow(t *testing.T) {
+	cancelled := processCleanupBound + DefaultCleanupTimeout + processCleanupBound + finalVerificationWindow + processCleanupBound
 	if FinalizationTimeout < cancelled {
-		t.Fatalf("FinalizationTimeout %v < a cancelled job's recipe cleanup, cleanup budget, evidence cleanup and verification window %v", FinalizationTimeout, cancelled)
+		t.Fatalf("FinalizationTimeout %v < a cancelled job's recipe cleanup, cleanup budget, evidence cleanup, verification window and unmount cleanup %v", FinalizationTimeout, cancelled)
+	}
+}
+
+// #195 review P3: processCleanupBound is the protected cleanup's own timing
+// at the runner's defaults, so a changed default cannot silently invalidate
+// the finalization budget and the controller leases derived from it.
+func TestProcessCleanupBoundFollowsRunnerDefaults(t *testing.T) {
+	r := newProcessRunner()
+	want := r.termGrace + r.killGrace + DefaultProcessCleanupTimeout + inspectWaitDelay + // window, confirmation, last helper output wait
+		r.sampleTimeout + r.signalTimeout + inspectWaitDelay + r.killGrace + // listing, SIGKILL round and settle after the bound
+		r.sampleTimeout // final listing
+	if processCleanupBound != want {
+		t.Fatalf("processCleanupBound %v, the runner's defaults give %v", processCleanupBound, want)
+	}
+}
+
+// #195 review F1 (round 2): the cleanup bound is hard, so with several slow
+// helpers the last round can end before SIGKILL reaches every member. Members
+// still listed that no SIGKILL reached are not evidence: cleanup is
+// unconfirmed (ErrCleanup), not contamination. Here each helper run takes
+// 25 ms, SIGTERM is ignored and SIGKILL kills.
+func TestProtectedCleanupUnescalatedMembersAreUnconfirmed(t *testing.T) {
+	runner, command := helperRunner(t, "success")
+	var started *exec.Cmd
+	launch := runner.command
+	runner.command = func(c Command) *exec.Cmd { started = launch(c); return started }
+	runner.termGrace, runner.killGrace, runner.pollInterval = 10*time.Millisecond, 20*time.Millisecond, time.Millisecond
+	runner.cleanupConfirm, runner.signalTimeout = 0, 60*time.Millisecond
+	runner.scope = scopeFixture()
+	var mu sync.Mutex
+	alive := map[int]bool{}
+	for pid := 2147483640; pid < 2147483645; pid++ {
+		alive[pid] = true
+	}
+	kills := 0
+	runner.scope.sample = func(context.Context) ([]processSample, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		var out []processSample
+		for pid := range alive {
+			out = append(out, processSample{pid: pid, group: started.Process.Pid, uid: runner.uid, start: "xcodebuild"})
+		}
+		return out, nil
+	}
+	runner.signalProcess = func(_ context.Context, p processSample, sig syscall.Signal) error {
+		time.Sleep(25 * time.Millisecond)
+		mu.Lock()
+		defer mu.Unlock()
+		if sig == syscall.SIGKILL {
+			kills++
+			delete(alive, p.pid)
+		}
+		return nil
+	}
+	result, err := runner.Run(context.Background(), command, io.Discard, io.Discard)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(alive) == 0 {
+		t.Fatalf("every member was SIGKILLed in time (%d kills); the bound did not bind", kills)
+	}
+	if result.CleanupOK || !errors.Is(err, ErrCleanup) || errors.Is(err, ErrContamination) {
+		t.Fatalf("%d members left without SIGKILL (%d delivered): %+v, %v; want unconfirmed, not contamination", len(alive), kills, result, err)
 	}
 }
 

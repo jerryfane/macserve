@@ -116,9 +116,9 @@ func newProcessRunner() *nativeRunner {
 		inspect:        inspectProcesses,
 		pollInterval:   20 * time.Millisecond,
 		sampleInterval: 250 * time.Millisecond,
-		sampleTimeout:  5 * time.Second,
-		termGrace:      500 * time.Millisecond,
-		killGrace:      time.Second,
+		sampleTimeout:  defaultSampleTimeout,
+		termGrace:      defaultTermGrace,
+		killGrace:      defaultKillGrace,
 		signalTimeout:  cleanupSignalTimeout,
 		drainTimeout:   outputDrainTimeout,
 		kill:           syscall.Kill,
@@ -159,13 +159,27 @@ const cleanupSignalTimeout = 30 * time.Second
 // after the signalling window: they start at pollInterval and double.
 const cleanupBackoffMax = 5 * time.Second
 
-// processCleanupBound bounds one protected cleanup at its defaults: the
-// window, DefaultProcessCleanupTimeout (listings and rounds inside it end
-// with it, plus at most a helper's output wait), then the listing, SIGKILL
-// round and killGrace settle after it, and the final listing (sampleTimeout
-// each). FinalizationTimeout counts it per command cleanup a finalization
-// can wait for.
-const processCleanupBound = 2*time.Second + DefaultProcessCleanupTimeout + 2*inspectWaitDelay + 5*time.Second + cleanupSignalTimeout + time.Second + 5*time.Second
+// The runner's cleanup timing defaults (newProcessRunner), which
+// processCleanupBound and so FinalizationTimeout are derived from.
+const (
+	// defaultTermGrace is how long members get SIGTERM before SIGKILL.
+	defaultTermGrace = 500 * time.Millisecond
+	// defaultKillGrace is the rest of the signalling window, and the settle
+	// after the SIGKILL round at the end of a protected cleanup.
+	defaultKillGrace = time.Second
+	// defaultSampleTimeout bounds one process listing.
+	defaultSampleTimeout = 5 * time.Second
+)
+
+// processCleanupBound bounds one protected cleanup (cleanupProtectedGroup) at
+// the runner's defaults: the signalling window and the confirmation phase
+// (every listing and round inside them ends with them, plus at most one
+// helper's output wait), then the listing, the SIGKILL round (plus its
+// output wait) and the settle after the bound, and the final listing.
+// FinalizationTimeout counts it per command cleanup a finalization can wait
+// for.
+const processCleanupBound = defaultTermGrace + defaultKillGrace + DefaultProcessCleanupTimeout + inspectWaitDelay +
+	defaultSampleTimeout + cleanupSignalTimeout + inspectWaitDelay + defaultKillGrace + defaultSampleTimeout
 
 type pipeResult struct {
 	stream string
@@ -649,14 +663,19 @@ func (r *nativeRunner) cleanupGroup(group, uid int, reap func(), reaped, waitFai
 // SIGKILL per member as it reaches it and ends with the bound, so a slow
 // SIGTERM round cannot hold back SIGKILL (#195 review F1). When the bound
 // closes, every member still listed that no SIGKILL has reached gets one
-// more round of cleanupSignalTimeout and killGrace to go: no member is judged
-// without a completed SIGKILL attempt.
+// more round of cleanupSignalTimeout and killGrace to go. The bound is hard:
+// a round that runs out before it reaches every member leaves the rest
+// without a completed SIGKILL.
 //
-// The verdict is unchanged: cleanup is confirmed exactly when a listing shows
-// no live group member and the direct child is reaped. A foreign-UID member or
-// a GUI baseline PID in the group is contamination at once; a member still
-// listed by a fresh bounded listing taken after that is contamination; a
-// listing that still fails then is unconfirmed.
+// Cleanup is confirmed exactly when a listing shows no live group member and
+// the direct child is reaped. A foreign-UID member or a GUI baseline PID in the
+// group is contamination at once. In the final listing, a member a SIGKILL
+// was delivered to is a proven survivor, which is contamination; a member no
+// SIGKILL reached within the bound (its signals kept failing or never ran)
+// is not evidence of anything and leaves cleanup unconfirmed (ErrCleanup
+// without ErrContamination: no quarantine marker; the job fails with
+// cleanup_ok false and its final account or lane quiesce SIGKILLs and judges
+// what is left, #195 review F1). A listing that still fails is unconfirmed.
 func (r *nativeRunner) cleanupProtectedGroup(group, uid int, reap func(), reaped func() bool) error {
 	begun := time.Now()
 	termUntil := begun.Add(r.termGrace)
@@ -708,12 +727,25 @@ func (r *nativeRunner) cleanupProtectedGroup(group, uid int, reap func(), reaped
 	if err != nil {
 		return errors.Join(ErrCleanup, cleanupFailure("protected cleanup: final listing", listErr, signalErr, err))
 	}
-	live, err := ownedGroup(samples, group, uid)
-	if err != nil {
+	if _, err := ownedGroup(samples, group, uid); err != nil {
 		return errors.Join(ErrCleanup, ErrContamination, cleanupFailure("protected cleanup: final listing", err))
 	}
-	if live {
-		return errors.Join(ErrCleanup, ErrContamination, cleanupFailure("protected cleanup", errors.New("job group still live after the cleanup window"), signalErr))
+	survivors, unescalated := 0, 0
+	for _, p := range samples {
+		if p.group != group || p.zombie {
+			continue
+		}
+		if killed[processInstance{p.pid, p.start}] {
+			survivors++
+		} else {
+			unescalated++
+		}
+	}
+	if survivors > 0 {
+		return errors.Join(ErrCleanup, ErrContamination, cleanupFailure("protected cleanup", fmt.Errorf("job group still live after the cleanup window: %d member(s) survived SIGKILL", survivors), signalErr))
+	}
+	if unescalated > 0 {
+		return errors.Join(ErrCleanup, cleanupFailure("protected cleanup", fmt.Errorf("job group still live after the cleanup window: no SIGKILL reached %d member(s) within the bound", unescalated), signalErr))
 	}
 	if !reaped() {
 		return errors.Join(ErrCleanup, cleanupFailure("protected cleanup", errors.New("direct child not reaped within the cleanup window"), signalErr))

@@ -139,20 +139,24 @@ const DefaultCleanupTimeout = 2 * time.Minute
 // by the writer barriers and the evidence steps, then finalVerificationWindow
 // at most for the last steps, plus finalizationCommandCleanups protected
 // process cleanups at their longest (processCleanupBound, #194). A command's
-// cleanup ignores its context, and commands start only while their context
-// lives, so each window of commands can be overrun by the cleanup of the one
-// running when it ends. A cancelled job waits for two: its recipe command's,
-// before the finalizer, and the evidence command's at the end of the cleanup
-// budget (#195 review F3); a finished ios_archive or build-for-testing job
-// for the evidence command's and the one running when its
-// ArchiveEvidenceTimeout window, which it has besides, ends. The verification
-// window runs no command. 660 s. The controller's finalizing and cancelling
-// lease budgets are derived from it (#150 review r1).
+// cleanup ignores its context, and a command starts only while its context
+// lives (nativeRunner.Run), so each context window of commands can be
+// overrun by the cleanup of at most one command: the one running, or
+// cleaning up, when the window ends. One finalization path has at most three
+// such windows. A cancelled job: its recipe command's, before the finalizer;
+// the cleanup budget's (stopWriters, the evidence commands); and the
+// verification window's, whose workspace cleanup runs /sbin/umount for an
+// accepted Metal toolchain mount (cleanup, unmountMetalToolchain; #195
+// review F3). A finished ios_archive or build-for-testing job: the cleanup
+// budget's, its ArchiveEvidenceTimeout window's (which the controller grants
+// besides) and the verification window's. 883.5 s. The controller's
+// finalizing and cancelling lease budgets are derived from it (#150 review
+// r1).
 const FinalizationTimeout = DefaultCleanupTimeout + finalVerificationWindow + finalizationCommandCleanups*processCleanupBound
 
 // finalizationCommandCleanups is how many command cleanups one finalization
 // path can wait for beyond its windows (see FinalizationTimeout).
-const finalizationCommandCleanups = 2
+const finalizationCommandCleanups = 3
 
 // finalInspectionTimeout bounds the account's verification in a job's
 // finalization (see finalVerificationWindow), so that an inspection cut short
