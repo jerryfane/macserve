@@ -502,7 +502,7 @@ func TestMatrixJobsGetTheTemplateMaximumTimeout(t *testing.T) {
 	f.remote.install(matrixRepo, matrixRepoID, martianID, "")
 	pull := matrixPull(1, headSHA('1'))
 	f.pull(matrixRepo, pull, matrixConfig)
-	old, err := f.p.admission(policy, pull, uiTemplate, "ipad")
+	old, err := f.p.admission(policy, pull, uiTemplate, "ipad", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -517,7 +517,7 @@ func TestMatrixJobsGetTheTemplateMaximumTimeout(t *testing.T) {
 	}
 	want := map[string]int{nativeBuild + "/": 60, uiTemplate + "/iphone-terminal": 7200, uiTemplate + "/iphone-app": 7200, uiTemplate + "/ipad": 7200, scriptTmpl + "/ipad-script": 7000}
 	for _, entry := range policyRuns(policy) {
-		input, err := f.p.admission(policy, pull, entry.Profile, entry.Shard)
+		input, err := f.p.admission(policy, pull, entry.Profile, entry.Shard, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

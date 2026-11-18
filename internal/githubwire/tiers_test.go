@@ -67,6 +67,26 @@ func TestCheckMatrixTiers(t *testing.T) {
 	}
 }
 
+// A matrix entry's build names a profile of the policy that has no matrix
+// entries of its own; Build and Producer report it.
+func TestCheckMatrixBuild(t *testing.T) {
+	policy := tieredPolicy()
+	policy.Matrix[0].Build, policy.Matrix[1].Build = "build", "build"
+	if err := policy.CheckMatrix(); err != nil {
+		t.Fatalf("valid build entries refused: %v", err)
+	}
+	if policy.Build("ui", "ipad") != "build" || policy.Build("script", "ipad-script") != "" || !policy.Producer("build") || policy.Producer("ui") || policy.Producer("") {
+		t.Fatalf("Build/Producer of %+v", policy.Matrix)
+	}
+	for name, build := range map[string]string{"not a profile": "other", "a matrix profile": "script"} {
+		policy := tieredPolicy()
+		policy.Matrix[0].Build = build
+		if err := policy.CheckMatrix(); err == nil || !strings.Contains(err.Error(), "build") {
+			t.Errorf("%s: accepted or wrong error: %v", name, err)
+		}
+	}
+}
+
 // matrix_skip_drafts holds a draft head back from untiered and full entries,
 // never from fast ones; the full-tier label (any case) releases only full
 // entries.

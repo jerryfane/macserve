@@ -89,6 +89,19 @@ func (p *Poller) checkInput(ctx context.Context, run store.GitHubRun) (githubapi
 		input.ExternalID = "denied:" + run.Key
 		if run.Skipped != "" && run.Blocked == "" {
 			input.ExternalID = "skipped:" + run.Key
+		} else if run.Skipped == "" && run.Blocked == "" && run.Awaits != "" {
+			// Waiting for its build-for-testing producer (store.AwaitGitHub):
+			// admitted by the poll after the producer succeeds.
+			input.ExternalID = "waiting:" + run.Key
+			producer, err := p.options.Store.GitHubRun(ctx, run.Awaits)
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				return input, err
+			}
+			input.Output.Title = "Waiting for build"
+			input.Output.Summary = "This shard runs from the test products its build produces for this head; a poll after that build succeeds starts it. No job has run, so this check is not evidence."
+			if producer.JobID != "" {
+				input.Output.Title = "Waiting for build " + producer.JobID
+			}
 		} else if run.Skipped == "" && run.Blocked == "" {
 			// Waiting (store.AdmitGitHub): admitted when the queue has space,
 			// by a later poll in the pull request list's order.
@@ -235,7 +248,7 @@ func (p *Poller) refusal(run store.GitHubRun) (string, error) {
 	if policy.OwnerScoped() && p.discovered[run.RepositoryID] != run.Repository {
 		return "the owner listing no longer has the repository under this name", nil
 	}
-	current, err := p.admission(policy, githubapi.PullRequest{Number: 1, HeadSHA: run.SHA}, run.Profile, run.Shard)
+	current, err := p.admission(policy, githubapi.PullRequest{Number: 1, HeadSHA: run.SHA}, run.Profile, run.Shard, nil)
 	if errors.Is(err, ErrIneligible) {
 		return "the policy no longer admits the run's profile and shard", nil
 	}

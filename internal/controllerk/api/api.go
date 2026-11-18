@@ -247,6 +247,8 @@ func writeError(w http.ResponseWriter, err error) {
 		status, code, message = 422, "unsupported_request", ErrNoGitHubPull.Error()
 	case errors.Is(err, githubpull.ErrIneligible):
 		status, code, message = 409, "not_eligible", "the head is no longer an eligible open pull request head of that run"
+	case errors.Is(err, githubpull.ErrNoProducts):
+		status, code, message = 409, "no_test_products", githubpull.ErrNoProducts.Error()
 	case errors.Is(err, store.ErrRerunLimit):
 		status, code, message = 429, "rerun_limit", "at most two requested reruns per run in any hour"
 	case errors.Is(err, ErrNoGitHubApp):

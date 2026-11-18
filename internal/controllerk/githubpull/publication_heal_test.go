@@ -58,7 +58,7 @@ func busyMatrix(t *testing.T) (*ownerFixture, string) {
 	}
 	for i := range 100000 {
 		sha := fmt.Sprintf("7%039x", i)
-		input, err := f.p.admission(f.p.policies[matrixRepo], matrixPull(7, sha), nativeBuild, "")
+		input, err := f.p.admission(f.p.policies[matrixRepo], matrixPull(7, sha), nativeBuild, "", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -157,7 +157,7 @@ func TestRerunOfRunWithoutCheckCreatesCheck(t *testing.T) {
 	f, sha := busyMatrix(t)
 	f.pull(matrixRepo, matrixPull(7, sha), matrixConfig)
 	// Admitted without a publication pass: waiting, no check.
-	input, err := f.p.admission(f.p.policies[matrixRepo], matrixPull(7, sha), nativeBuild, "")
+	input, err := f.p.admission(f.p.policies[matrixRepo], matrixPull(7, sha), nativeBuild, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +198,7 @@ func TestRerunOfRunWithoutCheckCreatesCheck(t *testing.T) {
 func TestHealSkipsRunsOfRemovedPolicies(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
-	input, err := f.p.admission(f.p.policies[testRepo], f.remote.pull, testProfile, "")
+	input, err := f.p.admission(f.p.policies[testRepo], f.remote.pull, testProfile, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +262,7 @@ func TestHealSkipsRunsOfRemovedPolicies(t *testing.T) {
 func TestPollHealsRunWithoutCheck(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
-	input, err := f.p.admission(f.p.policies[testRepo], f.remote.pull, testProfile, "")
+	input, err := f.p.admission(f.p.policies[testRepo], f.remote.pull, testProfile, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +312,7 @@ func TestPollHealsRunWithoutCheck(t *testing.T) {
 func TestPublicationSkipIsLogged(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
-	input, err := f.p.admission(f.p.policies[testRepo], githubapi.PullRequest{Number: 7, HeadSHA: testSHA}, testProfile, "")
+	input, err := f.p.admission(f.p.policies[testRepo], githubapi.PullRequest{Number: 7, HeadSHA: testSHA}, testProfile, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

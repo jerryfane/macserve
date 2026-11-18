@@ -159,7 +159,8 @@ response then echoes). It follows `mode=rerun`: the head must still be an open, 
 pull request head whose current admission is that run, the latest attempt must be terminal, and requested
 reruns are bounded at two per head/profile per hour. Responses: 202 with the new `job_id`/`attempt_id` and
 `check_name`; 200 with `"rerun": false` while the latest attempt is queued or active; 404 for an unknown run;
-409 `not_eligible`; 429 `rerun_limit`; 422 without GitHub pull mode.
+409 `not_eligible`; 409 `no_test_products` for a shard whose build has no retained test products to run from
+(rerun the build instead); 429 `rerun_limit`; 422 without GitHub pull mode.
 
 Initial comment intake starts 24 hours before startup with two minutes of overlap, never at repository creation.
 One page of at most 100 comments is processed per poll; page position and scan-start watermark survive restart.
@@ -358,6 +359,48 @@ Migration: switching an untiered policy to tiers renames its matrix checks (the 
 `mac-evidence/<profile>/<shard>` names stop updating on open heads); bump `policy_revision`, activate with an empty
 queue, then add the four `mac-evidence/full/*` names to branch protection. Open drafts then stay unmergeable until
 they are ready or labelled, which is intended.
+
+#### Build once: shards run from their build's test products
+
+A UI or unit test matrix entry may name a `build`: a build template profile of the same policy (no Flutter pin, no
+matrix entries of its own) that pins the entry's template's Xcode (the keyholder signs a consumer only for products
+its own Xcode built). Script entries cannot, since their script owns its xcodebuild calls, and keep building
+themselves. Naming it makes that profile's run at each head a build-for-testing producer (`build_for_testing`:
+an arm64 `build-for-testing` whose sealed `test-products.tar` the controller retains), still published as
+`mac-evidence/<build profile>`, and every entry naming it a consumer that runs `test-without-building` from those
+products instead of building:
+
+```json
+"matrix": [
+ {"profile": "org-ios-sim-uitest-v1", "shard": "smoke", "tier": "fast", "build": "org-ios-sim-build-v1", "simulator": {…}},
+ {"profile": "org-ios-sim-uitest-v1", "shard": "ipad", "tier": "full", "build": "org-ios-sim-build-v1", "simulator": {…}},
+ {"profile": "org-ios-sim-script-v1", "shard": "ipad-script", "tier": "full", "simulator": {…}}]
+```
+
+The dependency lives in the poller, not the job queue: no consumer job exists until its producer has succeeded.
+
+- Until then a consumer run is recorded **waiting**: no job, the producer's run key in `github_runs.awaits`, and a
+  `queued` check titled "Waiting for build `<job>`", which is not evidence. A new producer attempt republishes it.
+- The poll after the producer succeeds admits each waiting consumer whose entry is admitted at that head (tiers and
+  `matrix_skip_drafts` apply as above) with the request's `products`: the producer's job ID, the SHA-256 of its
+  `test-products.tar` and its `.xctestrun`. The run is the same run (key and check) it waited as, whichever
+  producer attempt's products its job names; its key binds the entry's `build` and the producer's run key (so its
+  recipe digest and pins, never an attempt or its products), and a producer's key binds `build_for_testing`: adding
+  or removing a `build`, or changing the build's recipe, admits new runs, and the old consumer jobs stop being
+  current.
+- A producer that failed, timed out, was cancelled or expired, or succeeded without sealed products, **blocks**
+  every waiting consumer (`action_required`, "Build job `<job>` failed; no test products …"). Each poll re-evaluates,
+  so a successful rerun of the build (owner rerun API or `/mac-evidence` comment) makes them wait again and then
+  admits them. A consumer that already has a job keeps it.
+- Products evicted from the products pool (a draft's held-back shards, say, outlived their seven-day retention)
+  when a consumer is due (no job yet, or a service-ended attempt to rerun) start a producer **rebuild** and the
+  consumers keep waiting. So does a producer whose job record retention pruned (a draft held at one head past the
+  90-day metadata window), and an owner rerun of such a build starts a new attempt too. Rebuilds are bounded at two per run per hour, apart from requested and automatic reruns;
+  at the bound waiting consumers are blocked until a later poll may rebuild again.
+- The owner rerun API reruns a consumer from its build's current retained products, or answers 409
+  `no_test_products` when there are none.
+- A new push supersedes the old head as before: its producer and consumer jobs are cancelled, its waiting runs drop
+  out of the current runs, and its products are unpinned once no consumer job names them.
 
 ## Signer receipts
 

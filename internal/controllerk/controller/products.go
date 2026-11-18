@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"sort"
@@ -188,9 +189,13 @@ func (c *Controller) productFiles() (map[string]int64, error) {
 // ledger digest whose bytes are gone, removes bytes the ledger does not
 // record and bytes unused for maxProductAge, then the least recently used
 // until the pool fits limit (maxProductsPoolBytes in production). It never
-// evicts a digest any active producer job uploaded (activeProducts): its
-// completion still verifies those bytes, whichever producer the ledger
-// names.
+// evicts a pinned digest: one any active producer job uploaded
+// (activeProducts), whose completion still verifies those bytes, whichever
+// producer the ledger names; one an unfinished consumer job names; or one
+// of a succeeded producer that is the current attempt of a current eligible
+// GitHub run (store.PinnedProducts), whose head's consumer runs wait for,
+// run from or may later run from it. Active producers are read first, so a
+// producer that succeeds between the two reads is pinned by the second.
 func (c *Controller) trimProducts(ctx context.Context, reservation, limit int64) error {
 	now := c.options.Now()
 	files, err := c.productFiles()
@@ -214,6 +219,11 @@ func (c *Controller) trimProducts(ctx context.Context, reservation, limit int64)
 	if err != nil {
 		return err
 	}
+	pinned, err := c.options.Store.PinnedProducts(ctx)
+	if err != nil {
+		return err
+	}
+	maps.Copy(protected, pinned)
 	recorded := make(map[string]store.Product, len(records))
 	for _, r := range records {
 		recorded[r.SHA256] = r
@@ -268,11 +278,15 @@ func (c *Controller) trimProducts(ctx context.Context, reservation, limit int64)
 
 // evictProduct removes the pool's bytes of digest and, for a ledger digest,
 // records the eviction, unless a download used them after used, the use
-// time the trim's candidate snapshot read. It holds productsMu, which a
-// download holds while it opens and touches a product, so a download either
-// refreshes the use time before this check (and the bytes stay) or opens
-// them after the removal (and finds them gone); a download that opened them
-// before keeps reading its descriptor.
+// time the trim's candidate snapshot read, or the digest is pinned when the
+// eviction commits. It holds productsMu, which a download holds while it
+// opens and touches a product, so a download either refreshes the use time
+// before this check (and the bytes stay) or opens them after the removal
+// (and finds them gone); a download that opened them before keeps reading
+// its descriptor. A ledger digest's eviction is recorded first, in the
+// store transaction that rechecks its pins (Store.EvictUnpinnedProduct): a
+// consumer admitted after the trim's snapshot either pinned it first (the
+// bytes stay) or is refused, never acknowledged with bytes about to go.
 func (c *Controller) evictProduct(ctx context.Context, digest string, ledger bool, used, now time.Time) (bool, error) {
 	c.productsMu.Lock()
 	defer c.productsMu.Unlock()
@@ -284,14 +298,13 @@ func (c *Controller) evictProduct(ctx context.Context, digest string, ledger boo
 		if err == nil && current.EvictedAt == nil && current.UsedAt.After(used) {
 			return false, nil
 		}
+		evicted, err := c.options.Store.EvictUnpinnedProduct(ctx, digest, now)
+		if err != nil || !evicted {
+			return false, err
+		}
 	}
 	if err := c.root.Remove(productsDir + "/" + productFile(digest)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return false, err
-	}
-	if ledger {
-		if err := c.options.Store.EvictProduct(ctx, digest, now); err != nil {
-			return false, err
-		}
 	}
 	return true, nil
 }

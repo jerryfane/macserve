@@ -15,13 +15,15 @@ import (
 // remain immutable when the current attempt changes. Shard is a policy matrix
 // entry's shard, part of the run's check name; empty for every other run.
 // Skipped is why a jobless matrix run was not run (SkipGitHub), published as
-// a neutral check; Blocked, a refusal published as action_required.
+// a neutral check; Blocked, a refusal published as action_required. Awaits
+// is the run key of the build-for-testing producer run a jobless matrix run
+// waits for (AwaitGitHub), "" otherwise.
 type GitHubRun struct {
-	Key, Repository, SHA, Profile, Shard, JobID, AttemptID, Blocked, Skipped string
-	RepositoryID                                                             int64
-	PolicyRevision                                                           int
-	CheckID                                                                  int64
-	PullRequests                                                             []int
+	Key, Repository, SHA, Profile, Shard, JobID, AttemptID, Blocked, Skipped, Awaits string
+	RepositoryID                                                                     int64
+	PolicyRevision                                                                   int
+	CheckID                                                                          int64
+	PullRequests                                                                     []int
 }
 
 type GitHubRequest struct {
@@ -57,13 +59,16 @@ var ErrCorrelationLimit = errors.New("GitHub request correlation limit reached")
 
 // github_attempts.rerun records why an attempt was created: the run's first
 // attempt (0), a requested rerun (1: comment mode=rerun or the owner API
-// POST /v1/admin/github/rerun) or an automatic rerun (2) of an attempt the
-// service ended. Requested and automatic reruns are bounded separately, each
-// at two per run in any hour.
+// POST /v1/admin/github/rerun), an automatic rerun (2) of an attempt the
+// service ended, or a rebuild (3: mode rebuild) of a build-for-testing
+// producer whose test products a waiting consumer needs but the products
+// pool evicted. Requested reruns, automatic reruns and rebuilds are bounded
+// separately, each at two per run in any hour.
 const (
 	attemptInitial   = 0
 	attemptRerun     = 1
 	attemptAutomatic = 2
+	attemptRebuild   = 3
 )
 
 // serviceEnded reports a GitHub attempt that ended because of the service or
@@ -109,8 +114,9 @@ func (s *Store) InitializeGitHub(ctx context.Context) error {
 	if _, err = tx.ExecContext(ctx, githubSchema); err != nil {
 		return err
 	}
-	// Runs admitted before policy matrices have no shard and were not skipped.
-	for _, column := range []string{"shard", "skipped"} {
+	// Runs admitted before policy matrices have no shard and were not
+	// skipped; runs admitted before build-for-testing producers await none.
+	for _, column := range []string{"shard", "skipped", "awaits"} {
 		var exists bool
 		if err = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM pragma_table_info('github_runs') WHERE name=?)", column).Scan(&exists); err != nil {
 			return err
@@ -120,6 +126,11 @@ func (s *Store) InitializeGitHub(ctx context.Context) error {
 				return err
 			}
 		}
+	}
+	// A waiting run's check names its producer's current job: each new job
+	// of the producer run republishes it.
+	if _, err = tx.ExecContext(ctx, githubAwaitsTrigger); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
@@ -176,11 +187,27 @@ BEGIN
 END;
 `
 
-const githubRunColumns = "run_key,repository_id,repository,sha,profile,shard,policy_revision,current_job,attempt_id,check_id,blocked,skipped"
+// githubAwaitsTrigger makes publication work of each jobless, unblocked,
+// unskipped run awaiting a producer run whose current job changed (its
+// first attempt, a rerun or a rebuild): the waiting check names that job.
+// It is created after the awaits column, which stores from before
+// build-for-testing producers lack.
+const githubAwaitsTrigger = `
+CREATE INDEX IF NOT EXISTS github_runs_awaits ON github_runs(awaits) WHERE awaits<>'';
+CREATE TRIGGER IF NOT EXISTS github_awaits_publication AFTER UPDATE OF current_job ON github_runs
+WHEN NEW.current_job<>OLD.current_job
+BEGIN
+ INSERT INTO github_outbox(run_key)
+ SELECT run_key FROM github_runs WHERE awaits=NEW.run_key AND current_job='' AND blocked='' AND skipped=''
+ ON CONFLICT(run_key) DO UPDATE SET generation=generation+1;
+END;
+`
+
+const githubRunColumns = "run_key,repository_id,repository,sha,profile,shard,policy_revision,current_job,attempt_id,check_id,blocked,skipped,awaits"
 
 func scanGitHubRun(row scanner) (GitHubRun, error) {
 	var run GitHubRun
-	err := row.Scan(&run.Key, &run.RepositoryID, &run.Repository, &run.SHA, &run.Profile, &run.Shard, &run.PolicyRevision, &run.JobID, &run.AttemptID, &run.CheckID, &run.Blocked, &run.Skipped)
+	err := row.Scan(&run.Key, &run.RepositoryID, &run.Repository, &run.SHA, &run.Profile, &run.Shard, &run.PolicyRevision, &run.JobID, &run.AttemptID, &run.CheckID, &run.Blocked, &run.Skipped, &run.Awaits)
 	if errors.Is(err, sql.ErrNoRows) {
 		err = ErrNotFound
 	}
@@ -199,7 +226,7 @@ func githubDirty(ctx context.Context, tx *sql.Tx, key string) error {
 // ErrFull; a later admission of the run starts its first attempt.
 func (s *Store) AdmitGitHub(ctx context.Context, input GitHubAdmission, now time.Time) (GitHubRun, error) {
 	r := input.Run
-	if !validOpaque(r.Key, 256) || r.RepositoryID <= 0 || r.PolicyRevision <= 0 || input.PullRequest <= 0 || !validTime(now) || (input.Mode != "ensure" && input.Mode != "rerun") || r.Repository != input.Admission.Request.Repo || r.SHA != input.Admission.Request.SHA || r.Profile != input.Admission.Request.Profile || r.Shard != input.Admission.Request.Shard {
+	if !validOpaque(r.Key, 256) || r.RepositoryID <= 0 || r.PolicyRevision <= 0 || input.PullRequest <= 0 || !validTime(now) || (input.Mode != "ensure" && input.Mode != "rerun" && input.Mode != "rebuild") || input.Mode == "rebuild" && (input.Request != nil || !input.Admission.Request.BuildForTesting) || r.Repository != input.Admission.Request.Repo || r.SHA != input.Admission.Request.SHA || r.Profile != input.Admission.Request.Profile || r.Shard != input.Admission.Request.Shard {
 		return GitHubRun{}, ErrInvalid
 	}
 	if q := input.Request; q != nil && (q.CommentID <= 0 || !validOpaque(q.RequestID, 128) || len(q.BodySHA256) != 64) {
@@ -252,6 +279,13 @@ func (s *Store) AdmitGitHub(ctx context.Context, input GitHubAdmission, now time
 	kind := attemptInitial
 	if !create {
 		job, err := getTx(ctx, tx, r.JobID)
+		if errors.Is(err, ErrNotFound) {
+			// Retention pruned the attempt's ended job (Prune deletes only
+			// terminal jobs): an ensure keeps the run as it is, while a
+			// requested rerun or a rebuild starts a new attempt of the
+			// unchanged run.
+			job, err = model.Job{ID: r.JobID, State: model.Expired}, nil
+		}
 		if err != nil {
 			return GitHubRun{}, err
 		}
@@ -261,6 +295,8 @@ func (s *Store) AdmitGitHub(ctx context.Context, input GitHubAdmission, now time
 		}
 		if input.Mode == "rerun" && job.State.Terminal() {
 			create, kind = true, attemptRerun
+		} else if input.Mode == "rebuild" && job.State.Terminal() {
+			create, kind = true, attemptRebuild
 		} else if input.Mode == "ensure" && serviceEnded(job, current == attemptAutomatic) {
 			create, kind = true, attemptAutomatic
 		}
@@ -318,8 +354,8 @@ func (s *Store) AdmitGitHub(ctx context.Context, input GitHubAdmission, now time
 			return GitHubRun{}, err
 		}
 	}
-	r.Blocked, r.Skipped = "", ""
-	_, err = tx.ExecContext(ctx, "UPDATE github_runs SET current_job=?,attempt_id=?,blocked='',skipped='' WHERE run_key=?", r.JobID, r.AttemptID, r.Key)
+	r.Blocked, r.Skipped, r.Awaits = "", "", ""
+	_, err = tx.ExecContext(ctx, "UPDATE github_runs SET current_job=?,attempt_id=?,blocked='',skipped='',awaits='' WHERE run_key=?", r.JobID, r.AttemptID, r.Key)
 	if err != nil {
 		return GitHubRun{}, err
 	}
@@ -345,14 +381,15 @@ func (s *Store) AdmitGitHub(ctx context.Context, input GitHubAdmission, now time
 }
 
 // awaitQueueTx records r, whose first job the queue has no space for, as
-// waiting: a run of pull without a job, blocked or skipped reason, whose
-// check says it waits for queue space. Only a new run or a change from
-// blocked or skipped is publication work, so a run that keeps waiting is not
-// republished every poll. The queue expiry enqueueTx applied commits too.
+// waiting: a run of pull without a job, blocked or skipped reason or awaited
+// producer, whose check says it waits for queue space. Only a new run or a
+// change from blocked, skipped or awaiting a producer is publication work,
+// so a run that keeps waiting is not republished every poll. The queue
+// expiry enqueueTx applied commits too.
 func awaitQueueTx(ctx context.Context, tx *sql.Tx, r GitHubRun, found bool, pull int) error {
-	changed := !found || r.Blocked != "" || r.Skipped != ""
+	changed := !found || r.Blocked != "" || r.Skipped != "" || r.Awaits != ""
 	if found && changed {
-		if _, err := tx.ExecContext(ctx, "UPDATE github_runs SET blocked='',skipped='' WHERE run_key=?", r.Key); err != nil {
+		if _, err := tx.ExecContext(ctx, "UPDATE github_runs SET blocked='',skipped='',awaits='' WHERE run_key=?", r.Key); err != nil {
 			return err
 		}
 	}
@@ -368,6 +405,59 @@ func awaitQueueTx(ctx context.Context, tx *sql.Tx, r GitHubRun, found bool, pull
 		return err
 	}
 	return ErrFull
+}
+
+// AwaitGitHub records r, a matrix run of pull request pull, as waiting for
+// the build-for-testing producer run awaits: a run without a job, blocked or
+// skipped reason, whose check says it waits for that build. No job exists
+// until the poller admits the run with the producer's test products. Only a
+// new run or a change (another producer run, or from blocked or skipped) is
+// publication work; a new job of the producer run republishes it
+// (githubAwaitsTrigger). Only a run without an attempt can wait:
+// ErrConflict refuses a run that already has a job.
+func (s *Store) AwaitGitHub(ctx context.Context, r GitHubRun, awaits string, pull int, now time.Time) error {
+	if !validOpaque(r.Key, 256) || !validOpaque(awaits, 256) || awaits == r.Key || r.RepositoryID <= 0 || !controllerconfig.ValidRepository(r.Repository) || !validSHA(r.SHA) || !validOpaque(r.Profile, 256) || !validOpaque(r.Shard, 32) || r.PolicyRevision <= 0 || pull <= 0 || !validTime(now) {
+		return ErrInvalid
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	changed := true
+	old, err := scanGitHubRun(tx.QueryRowContext(ctx, "SELECT "+githubRunColumns+" FROM github_runs WHERE run_key=?", r.Key))
+	if errors.Is(err, ErrNotFound) {
+		_, err = tx.ExecContext(ctx, "INSERT INTO github_runs(run_key,repository_id,repository,sha,profile,shard,policy_revision,awaits) VALUES(?,?,?,?,?,?,?,?)", r.Key, r.RepositoryID, r.Repository, r.SHA, r.Profile, r.Shard, r.PolicyRevision, awaits)
+	} else if err == nil {
+		if old.JobID != "" {
+			return ErrConflict
+		}
+		changed = old.Awaits != awaits || old.Blocked != "" || old.Skipped != ""
+		if changed {
+			// Keep the check's update ordered after a live publication,
+			// as BlockGitHub and SkipGitHub do.
+			var publishing bool
+			if err = tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM github_outbox WHERE run_key=? AND lease_until>?)", r.Key, now.UnixNano()).Scan(&publishing); err != nil {
+				return err
+			}
+			if publishing {
+				return ErrFull
+			}
+			_, err = tx.ExecContext(ctx, "UPDATE github_runs SET awaits=?,blocked='',skipped='' WHERE run_key=?", awaits, r.Key)
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, "INSERT OR IGNORE INTO github_run_pulls(run_key,pull_request) VALUES(?,?)", r.Key, pull); err != nil {
+		return err
+	}
+	if changed {
+		if err = githubDirty(ctx, tx, r.Key); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // GitHubRun returns the run of key, ErrNotFound when none was recorded.
@@ -541,10 +631,10 @@ func (s *Store) BlockGitHub(ctx context.Context, r GitHubRun, reason string, now
 	if errors.Is(err, ErrNotFound) {
 		_, err = tx.ExecContext(ctx, "INSERT INTO github_runs(run_key,repository_id,repository,sha,profile,shard,policy_revision,blocked) VALUES(?,?,?,?,?,?,?,?)", r.Key, r.RepositoryID, r.Repository, r.SHA, r.Profile, r.Shard, r.PolicyRevision, reason)
 	} else if err == nil {
-		if old.Blocked == reason && old.Skipped == "" {
+		if old.Blocked == reason && old.Skipped == "" && old.Awaits == "" {
 			return nil
 		}
-		_, err = tx.ExecContext(ctx, "UPDATE github_runs SET blocked=?,skipped='' WHERE run_key=?", reason, r.Key)
+		_, err = tx.ExecContext(ctx, "UPDATE github_runs SET blocked=?,skipped='',awaits='' WHERE run_key=?", reason, r.Key)
 		if err == nil && old.JobID != "" {
 			cancelled, err = getTx(ctx, tx, old.JobID)
 			if err == nil {
@@ -596,9 +686,9 @@ func (s *Store) SkipGitHub(ctx context.Context, r GitHubRun, pull int, summary s
 		if old.JobID != "" {
 			return ErrConflict
 		}
-		changed = old.Skipped != summary || old.Blocked != ""
+		changed = old.Skipped != summary || old.Blocked != "" || old.Awaits != ""
 		if changed {
-			_, err = tx.ExecContext(ctx, "UPDATE github_runs SET skipped=?,blocked='' WHERE run_key=?", summary, r.Key)
+			_, err = tx.ExecContext(ctx, "UPDATE github_runs SET skipped=?,blocked='',awaits='' WHERE run_key=?", summary, r.Key)
 		}
 	}
 	if err != nil {

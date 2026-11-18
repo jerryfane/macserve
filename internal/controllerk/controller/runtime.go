@@ -165,6 +165,13 @@ type Controller struct {
 	// afterProductsSnapshot runs in trimProducts between candidate
 	// selection and eviction; tests use it to interleave a download.
 	afterProductsSnapshot func()
+	// productsBudget is the products pool's budget, maxProductsPoolBytes
+	// unless a test lowers it.
+	productsBudget int64
+	// productsRefused names the producer jobs whose test products the pool
+	// had no room for (putArtifact), so completion fails them with that
+	// reason; protected by evidenceMu.
+	productsRefused map[string]bool
 }
 
 func New(options Options) (*Controller, error) {
@@ -261,7 +268,7 @@ func New(options Options) (*Controller, error) {
 		return fail(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	c := &Controller{options: options, root: root, lock: lock, ctx: ctx, cancel: cancel, requestTimeout: 2 * time.Minute}
+	c := &Controller{options: options, root: root, lock: lock, ctx: ctx, cancel: cancel, requestTimeout: 2 * time.Minute, productsBudget: maxProductsPoolBytes, productsRefused: map[string]bool{}}
 	options.Store.OnCancel(c.cancelRequested)
 	service, serviceErr := options.Store.ServiceState(ctx)
 	gate, gateErr := options.Gate(ctx)

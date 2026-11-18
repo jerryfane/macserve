@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"mime"
 	"os"
 	"path"
@@ -263,7 +264,19 @@ func (c *Controller) putArtifact(ctx context.Context, job model.Job, a evidence.
 		if products {
 			// Test products live in their own pool, never the evidence
 			// pool, where they would evict test evidence.
-			if err := c.trimProducts(ctx, a.SizeBytes, maxProductsPoolBytes); err != nil {
+			err := c.trimProducts(ctx, a.SizeBytes, c.productsBudget)
+			if errors.Is(err, evidence.ErrArtifactLimit) {
+				// Pinned products fill the pool. The upload is answered,
+				// so the worker delivers its completion and stays up, but
+				// nothing is stored or recorded as uploaded: completion
+				// fails the producer with this reason, a durable job
+				// outcome. Its consumers are blocked until a rerun of the
+				// build fits.
+				c.productsRefused[job.ID] = true
+				log.Printf("controller products pool full: job=%s bytes=%d: pinned test products leave no room; the producer fails", job.ID, a.SizeBytes)
+				return nil
+			}
+			if err != nil {
 				return err
 			}
 			if err := c.root.Rename(temporary, productsDir+"/"+productFile(a.SHA256)); err != nil {
