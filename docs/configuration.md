@@ -269,8 +269,9 @@ products: `. Sealing and export share the 15-minute archive evidence bound, and 
 it. The worker's build seal names the tar's SHA-256 (`products_sha256`) and the `.xctestrun`'s name
 (`xctestrun`, also in the result observation); the keyholder refuses a producer's success receipt whose seal
 lacks them or differs from the result's artifact, and any other job's seal that names products. The receipt's
-request carries `build_for_testing`, and validation requires the expected flag. The GitHub policy field that
-admits the producer is part of the poller's build-once support.
+request carries `build_for_testing`, and validation requires the expected flag. GitHub pull mode admits a
+build profile as a producer when a policy matrix entry names it as its `build`, and admits that entry's shards
+from its products ([Build once](receipts-and-github.md#build-once-shards-run-from-their-builds-test-products)).
 
 **Test-products consumers.** A `unit_test` or `simulator_ui_test` template request without a Flutter pin may
 name a producer's sealed products: `"products": {"producer_job_id": J, "sha256": D, "xctestrun": N}` (any other
@@ -380,7 +381,10 @@ The retained evidence pool reserves 1 GiB for store log
 rows and 14 GiB for artifacts, with seven-day expiry/oldest-terminal eviction. Producers' `test-products.tar`
 files live in a separate 16 GiB products pool (`var/controller/products/<sha256>.tar`, content-addressed, so a
 rebuild of identical bytes is stored once), never in the evidence pool: bytes unused for seven days are evicted,
-then the least recently used until the pool fits, never those of a producer still running. The store's
+then the least recently used until the pool fits, never pinned ones: those of a producer still running, those an
+unfinished (queued or active) consumer job names, and those of each succeeded producer that is the current attempt
+of a current eligible GitHub run, whose shards wait for, run from or may later rerun from them (a draft head's
+shards included). A superseded or closed head's products are unpinned once its consumers end. The store's
 `products` table (schema version 9) records each retained digest and, for each eviction, its proof (digest,
 bytes, evicted_at), kept as long as job metadata. Metadata persists for 90 days;
 expired downloads, log pages and newly opened log streams return `410`.

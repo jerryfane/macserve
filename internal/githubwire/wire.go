@@ -104,7 +104,13 @@ type MatrixEntry struct {
 	Shard   string `json:"shard"`
 	// Tier is TierFast, TierFull or "" (an untiered entry, named as before
 	// tiers existed). A policy's entries are all tiered or all untiered.
-	Tier      string          `json:"tier,omitempty"`
+	Tier string `json:"tier,omitempty"`
+	// Build names the policy's build profile that produces this entry's
+	// test products, "" for an entry that builds its own. Naming it makes
+	// that profile's run at each head a build-for-testing producer, and the
+	// entry's run waits for the producer's success, then runs its tests from
+	// the producer's sealed test products without building.
+	Build     string          `json:"build,omitempty"`
 	Simulator model.Simulator `json:"simulator"`
 }
 
@@ -142,6 +148,24 @@ func (p Policy) Tier(profile, shard string) string {
 	return ""
 }
 
+// Build is the build of the policy's matrix entry for profile and shard,
+// "" for an entry that builds its own products, a shard "" run or no such
+// entry.
+func (p Policy) Build(profile, shard string) string {
+	for _, entry := range p.Matrix {
+		if entry.Profile == profile && entry.Shard == shard {
+			return entry.Build
+		}
+	}
+	return ""
+}
+
+// Producer reports whether profile is the build-for-testing producer of
+// one or more of the policy's matrix entries (their Build).
+func (p Policy) Producer(profile string) bool {
+	return profile != "" && slices.ContainsFunc(p.Matrix, func(entry MatrixEntry) bool { return entry.Build == profile })
+}
+
 // HoldsBack reports whether matrix_skip_drafts keeps a head of a pull request
 // that is draft and carries labels from admitting a matrix entry of tier: a
 // draft head admits fast entries, and full entries only with the policy's
@@ -175,12 +199,15 @@ const maxLabelRunes = 50
 // matrix entry that is not one of the policy's profiles, has an invalid shard
 // name, an incomplete simulator or a tier other than fast or full, or repeats
 // a profile and shard, tiered and untiered entries in one matrix, two entries
-// with one tier and shard (one check name), a matrix_full_label without
-// matrix_skip_drafts and a full entry or that is not a GitHub label name, and
-// skip paths without an include glob, with more than MaxSkipPaths globs in a
-// list, or with an invalid (ValidSkipPath) or repeated glob. Whether the
-// profile is a simulator template pinning that simulator is checked against
-// the profile registry when the controller starts.
+// with one tier and shard (one check name), an entry whose build is not one
+// of the policy's profiles or is a profile with matrix entries, a
+// matrix_full_label without matrix_skip_drafts and a full entry or that is
+// not a GitHub label name, and skip paths without an include glob, with more
+// than MaxSkipPaths globs in a list, or with an invalid (ValidSkipPath) or
+// repeated glob. Whether the profile is a simulator template pinning that
+// simulator, and whether a build is a build template that can produce test
+// products for the entry's kind, is checked against the profile registry
+// when the controller starts.
 func (p Policy) CheckMatrix() error {
 	options := p.MatrixSkipDrafts || p.MatrixSkipPaths != nil || p.MatrixFullLabel != ""
 	if p.OwnerScoped() && (len(p.Matrix) != 0 || options) || options && len(p.Matrix) == 0 {
@@ -208,6 +235,9 @@ func (p Policy) CheckMatrix() error {
 		}
 		names[name] = true
 		full = full || entry.Tier == TierFull
+		if entry.Build != "" && (!slices.Contains(p.Profiles, entry.Build) || slices.ContainsFunc(p.Matrix, func(other MatrixEntry) bool { return other.Profile == entry.Build })) {
+			return fmt.Errorf("GitHub policy matrix entry build %q is not one of its profiles without matrix entries", entry.Build)
+		}
 	}
 	if label := p.MatrixFullLabel; label != "" {
 		if !p.MatrixSkipDrafts || !full {

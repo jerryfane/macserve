@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"sort"
@@ -188,9 +189,13 @@ func (c *Controller) productFiles() (map[string]int64, error) {
 // ledger digest whose bytes are gone, removes bytes the ledger does not
 // record and bytes unused for maxProductAge, then the least recently used
 // until the pool fits limit (maxProductsPoolBytes in production). It never
-// evicts a digest any active producer job uploaded (activeProducts): its
-// completion still verifies those bytes, whichever producer the ledger
-// names.
+// evicts a pinned digest: one any active producer job uploaded
+// (activeProducts), whose completion still verifies those bytes, whichever
+// producer the ledger names; one an unfinished consumer job names; or one
+// of a succeeded producer that is the current attempt of a current eligible
+// GitHub run (store.PinnedProducts), whose head's consumer runs wait for,
+// run from or may later run from it. Active producers are read first, so a
+// producer that succeeds between the two reads is pinned by the second.
 func (c *Controller) trimProducts(ctx context.Context, reservation, limit int64) error {
 	now := c.options.Now()
 	files, err := c.productFiles()
@@ -214,6 +219,11 @@ func (c *Controller) trimProducts(ctx context.Context, reservation, limit int64)
 	if err != nil {
 		return err
 	}
+	pinned, err := c.options.Store.PinnedProducts(ctx)
+	if err != nil {
+		return err
+	}
+	maps.Copy(protected, pinned)
 	recorded := make(map[string]store.Product, len(records))
 	for _, r := range records {
 		recorded[r.SHA256] = r

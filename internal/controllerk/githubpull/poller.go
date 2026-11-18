@@ -43,6 +43,10 @@ var shaPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 var profilePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 var ErrIneligible = errors.New("GitHub head is superseded or no longer eligible")
 
+// ErrNoProducts refuses an owner rerun of a matrix run whose entry has a
+// build while that build has no retained test products to run from.
+var ErrNoProducts = errors.New("the run's build has no retained test products to run from; rerun the build")
+
 // commentLookupError is remote lookup failure, never durable admission failure.
 type commentLookupError struct{ err error }
 
@@ -153,6 +157,17 @@ func New(options Options) (*Poller, error) {
 			snapshot, _ := p.recipe(policy, entry.Profile)
 			if !slices.Contains(snapshot.Template.Simulators, entry.Simulator) {
 				return nil, fmt.Errorf("invalid GitHub policy matrix: template %s pins no simulator %+v", entry.Profile, entry.Simulator)
+			}
+			// A producer is a build template without a Flutter pin (the
+			// only recipe build_for_testing admits), and only entries of a
+			// test template without a Flutter pin consume products: a script
+			// shard owns its xcodebuild calls and keeps its own build.
+			if entry.Build == "" {
+				continue
+			}
+			build, ok := p.recipe(policy, entry.Build)
+			if !snapshot.Kind.Tests() || snapshot.Template.Flutter != nil || !ok || build.Template == nil || build.Kind != model.Build || build.Template.Flutter != nil {
+				return nil, fmt.Errorf("invalid GitHub policy matrix: entry %s shard %s names build %s, but only a test template entry consumes test products, from a build template, neither with a Flutter pin", entry.Profile, entry.Shard, entry.Build)
 			}
 		}
 		p.policies[policy.Repository] = policy
@@ -542,8 +557,13 @@ func matrixTemplate(recipe model.Profile) bool {
 // policy's matrix entries for it, whose simulator the job runs on. Any other
 // combination is ErrIneligible. A matrix run's job gets the template's
 // maximum timeout, the owner-approved bound, not its default: one shard of
-// UI tests or a script runs far longer than a build.
-func (p *Poller) admission(policy githubwire.Policy, pull githubapi.PullRequest, profileID, shard string) (store.GitHubAdmission, error) {
+// UI tests or a script runs far longer than a build. A profile some matrix
+// entry names as its build (Policy.Producer) is admitted as a
+// build-for-testing producer. products is the test products the job of an
+// entry with a build runs from (nil for any other run, and to compute only
+// the run): the run is the same whichever producer attempt's products its
+// job names, so its key binds the entry's build but not the products.
+func (p *Poller) admission(policy githubwire.Policy, pull githubapi.PullRequest, profileID, shard string, products *model.ProductsRef) (store.GitHubAdmission, error) {
 	profile, ok := p.recipe(policy, profileID)
 	if !ok || !slices.Contains(policy.Profiles, profileID) || matrixTemplate(profile) != (shard != "") {
 		return store.GitHubAdmission{}, ErrIneligible
@@ -558,6 +578,11 @@ func (p *Poller) admission(policy githubwire.Policy, pull githubapi.PullRequest,
 		entry = policy.Matrix[i]
 		request.Shard, request.Simulator = shard, &entry.Simulator
 		request.TimeoutSeconds = profile.MaxTimeoutSeconds
+	} else {
+		request.BuildForTesting = policy.Producer(profileID)
+	}
+	if products != nil && entry.Build == "" {
+		return store.GitHubAdmission{}, ErrIneligible
 	}
 	admission, err := p.options.Profiles.Resolve(request)
 	if err != nil {
@@ -575,6 +600,11 @@ func (p *Poller) admission(policy githubwire.Policy, pull githubapi.PullRequest,
 		// or rename admits a new run instead of continuing a stale one.
 		fields = append(fields, "owner", policy.Owner, policy.OwnerID, policy.Repository)
 	}
+	if request.BuildForTesting {
+		// A producer is another run than the plain build of the profile:
+		// naming a build in the matrix (or no longer) admits it afresh.
+		fields = append(fields, "build_for_testing")
+	}
 	if shard != "" {
 		// A matrix run binds its entry: another shard or simulator is
 		// another run with its own check. It binds its job's timeout too, so
@@ -586,12 +616,25 @@ func (p *Poller) admission(policy githubwire.Policy, pull githubapi.PullRequest,
 			// moved to the other tier is another run, never a renamed one.
 			fields = append(fields, "tier", entry.Tier)
 		}
+		if entry.Build != "" {
+			// A consumer binds its producer profile: an entry that starts or
+			// stops consuming test products is another run.
+			fields = append(fields, "build", entry.Build)
+		}
 	}
 	data, err := json.Marshal(fields)
 	if err != nil {
 		return store.GitHubAdmission{}, err
 	}
 	digest := sha256.Sum256(data)
+	if products != nil {
+		// The job runs from the products: its recipe and digests are those
+		// of the request naming them.
+		request.Products = products
+		if admission, err = p.options.Profiles.Resolve(request); err != nil {
+			return store.GitHubAdmission{}, err
+		}
+	}
 	return store.GitHubAdmission{Run: store.GitHubRun{Key: hex.EncodeToString(digest[:]), RepositoryID: policy.RepositoryID, Repository: policy.Repository, SHA: pull.HeadSHA, Profile: profile.ID, Shard: shard, PolicyRevision: policy.PolicyRevision}, Admission: admission, PullRequest: pull.Number, Mode: "ensure"}, nil
 }
 
@@ -642,7 +685,7 @@ func (p *Poller) pollOwnerRepository(ctx context.Context, policy githubwire.Poli
 		if profile == "" {
 			continue
 		}
-		input, err := p.admission(policy, pull, profile, "")
+		input, err := p.admission(policy, pull, profile, "", nil)
 		if err != nil {
 			return atHead(pull, githubwire.MatrixEntry{Profile: profile}, err)
 		}
@@ -776,12 +819,12 @@ func (p *Poller) pollRepository(ctx context.Context, policy githubwire.Policy, o
 			continue
 		}
 		for _, run := range policyRuns(policy) {
-			input, err := p.admission(policy, pull, run.Profile, run.Shard)
+			input, err := p.admission(policy, pull, run.Profile, run.Shard, nil)
 			if err != nil {
 				return atHead(pull, run, err)
 			}
 			if run.Shard != "" && allowed {
-				failure, err := p.admitMatrix(ctx, policy, pull, run.Tier, input, observed, currentKeys, now)
+				failure, err := p.admitMatrix(ctx, policy, pull, run, input, observed, currentKeys, now)
 				if err != nil {
 					return atHead(pull, run, err)
 				}
@@ -883,7 +926,7 @@ func policyRuns(policy githubwire.Policy) []githubwire.MatrixEntry {
 	return append(runs, policy.Matrix...)
 }
 
-// admitMatrix admits one matrix entry's run, of tier, at an eligible head.
+// admitMatrix admits one matrix entry's run at an eligible head.
 // When matrix_skip_drafts holds a draft head back from the entry
 // (Policy.HoldsBack: an untiered or full entry, unless the head carries the
 // full-tier label) it admits nothing, but keeps a run it already has current
@@ -892,12 +935,13 @@ func policyRuns(policy githubwire.Policy) []githubwire.MatrixEntry {
 // worker could not derive the entry's recipe, gets the run blocked: an
 // action_required check and no job. A head matrix_skip_paths skips gets the
 // run skipped, a neutral check and no job, unless the run already has a job
-// (admitted before, or by an owner rerun), which it keeps. failure is a store
-// refusal the poll reports and continues past; err ends the repository's
-// poll.
-func (p *Poller) admitMatrix(ctx context.Context, policy githubwire.Policy, pull githubapi.PullRequest, tier string, input store.GitHubAdmission, observed map[string]bool, currentKeys map[string]bool, now time.Time) (failure, err error) {
+// (admitted before, or by an owner rerun), which it keeps. An entry with a
+// build is admitted from its producer's test products (admitConsumer).
+// failure is a store refusal the poll reports and continues past; err ends
+// the repository's poll.
+func (p *Poller) admitMatrix(ctx context.Context, policy githubwire.Policy, pull githubapi.PullRequest, entry githubwire.MatrixEntry, input store.GitHubAdmission, observed map[string]bool, currentKeys map[string]bool, now time.Time) (failure, err error) {
 	key := input.Run.Key
-	if policy.HoldsBack(tier, pull.Draft, pull.Labels) {
+	if policy.HoldsBack(entry.Tier, pull.Draft, pull.Labels) {
 		existing, err := p.options.Store.GitHubRun(ctx, key)
 		if errors.Is(err, store.ErrNotFound) {
 			return nil, nil
@@ -926,8 +970,134 @@ func (p *Poller) admitMatrix(ctx context.Context, policy githubwire.Policy, pull
 			return p.options.Store.SkipGitHub(ctx, input.Run, pull.Number, summary, now), nil
 		}
 	}
+	if entry.Build != "" {
+		return p.admitConsumer(ctx, policy, pull, entry, input, now)
+	}
 	_, failure = p.options.Store.AdmitGitHub(ctx, input, now)
 	return failure, nil
+}
+
+// supply is a consumer entry's view of its build-for-testing producer run
+// at a head. Exactly one holds: products is the retained test products of
+// the run's succeeded current job, ready to run from; evicted, that job
+// succeeded but the products pool no longer holds its products; blocked,
+// why its consumers cannot run (the job failed, timed out, was cancelled or
+// expired, succeeded without sealed products or is no longer retained, or
+// the run is blocked); otherwise the consumers wait for the producer (no
+// run or job yet, or an unfinished job).
+type supply struct {
+	producer store.GitHubAdmission
+	run      store.GitHubRun
+	products *model.ProductsRef
+	evicted  bool
+	blocked  string
+}
+
+// supply reads the producer run of build at pull's head.
+func (p *Poller) supply(ctx context.Context, policy githubwire.Policy, pull githubapi.PullRequest, build string) (supply, error) {
+	producer, err := p.admission(policy, pull, build, "", nil)
+	if err != nil {
+		return supply{}, err
+	}
+	s := supply{producer: producer, run: producer.Run}
+	run, err := p.options.Store.GitHubRun(ctx, producer.Run.Key)
+	if errors.Is(err, store.ErrNotFound) {
+		return s, nil
+	}
+	if err != nil {
+		return s, err
+	}
+	s.run = run
+	name := githubwire.CheckName(build, "", "")
+	if run.Blocked != "" {
+		s.blocked = fmt.Sprintf("Build %s is blocked (%s), so there are no test products to run this shard from.", name, run.Blocked)
+		return s, nil
+	}
+	if run.JobID == "" {
+		return s, nil
+	}
+	job, err := p.options.Store.Get(ctx, run.JobID)
+	if errors.Is(err, store.ErrNotFound) {
+		// Its record was pruned, and with it the products' provenance; the
+		// store cannot rerun a run whose job it no longer has.
+		s.blocked = fmt.Sprintf("Build job %s (%s) is no longer retained; no test products to run this shard from.", run.JobID, name)
+		return s, nil
+	}
+	if err != nil {
+		return s, err
+	}
+	switch {
+	case !job.State.Terminal():
+	case job.State != model.Succeeded:
+		s.blocked = fmt.Sprintf("Build job %s %s (%s); no test products to run this shard from. A successful rerun of the build unblocks it.", job.ID, job.State, name)
+	default:
+		ref, err := store.ProducerProducts(job)
+		if err != nil {
+			s.blocked = fmt.Sprintf("Build job %s (%s) succeeded without sealed test products; no test products to run this shard from.", job.ID, name)
+			return s, nil
+		}
+		product, err := p.options.Store.GetProduct(ctx, ref.SHA256)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return s, err
+		}
+		if err != nil || product.EvictedAt != nil {
+			s.evicted = true
+			return s, nil
+		}
+		s.products = &ref
+	}
+	return s, nil
+}
+
+// admitConsumer admits the run (input) of a matrix entry with a build from
+// its producer's test products. With the products ready the run is admitted
+// with them, which starts its first attempt or an automatic rerun. Without
+// them a run that has an attempt keeps it; one that has none waits for the
+// producer (a queued "Waiting for build" check and no job) or, when the
+// producer failed, is blocked (action_required); every poll re-evaluates,
+// so a successful build rerun unblocks it. When products a due run
+// (GitHubRunDue) needs were evicted, the producer is rebuilt (bounded at two
+// rebuilds per run in any hour); at the bound a jobless run is blocked until
+// a rebuild is allowed again or the owner reruns the build.
+func (p *Poller) admitConsumer(ctx context.Context, policy githubwire.Policy, pull githubapi.PullRequest, entry githubwire.MatrixEntry, input store.GitHubAdmission, now time.Time) (failure, err error) {
+	s, err := p.supply(ctx, policy, pull, entry.Build)
+	if err != nil {
+		return nil, err
+	}
+	if s.products != nil {
+		input, err = p.admission(policy, pull, entry.Profile, entry.Shard, s.products)
+		if err != nil {
+			return nil, err
+		}
+		_, failure = p.options.Store.AdmitGitHub(ctx, input, now)
+		return failure, nil
+	}
+	due, err := p.options.Store.GitHubRunDue(ctx, input.Run.Key)
+	if err != nil || !due {
+		return nil, err
+	}
+	if s.evicted {
+		rebuild := s.producer
+		rebuild.Mode = "rebuild"
+		if _, err := p.options.Store.AdmitGitHub(ctx, rebuild, now); errors.Is(err, store.ErrRerunLimit) {
+			s.blocked = fmt.Sprintf("Build job %s's test products were evicted from the products pool and its automatic rebuilds reached their limit of two per hour; a later poll rebuilds it, or rerun the build.", s.run.JobID)
+		} else if err != nil && !errors.Is(err, store.ErrFull) {
+			failure = err
+		}
+	}
+	existing, err := p.options.Store.GitHubRun(ctx, input.Run.Key)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return nil, err
+	}
+	if err == nil && existing.JobID != "" {
+		// A service-ended attempt stays current until the products are
+		// ready, when an ensure admission reruns it.
+		return failure, nil
+	}
+	if s.blocked != "" {
+		return errors.Join(failure, p.options.Store.BlockGitHub(ctx, input.Run, s.blocked, now)), nil
+	}
+	return errors.Join(failure, p.options.Store.AwaitGitHub(ctx, input.Run, s.producer.Run.Key, pull.Number, now)), nil
 }
 
 // skipSummary is why matrix_skip_paths skips the policy's matrix at pull's
@@ -1011,7 +1181,7 @@ func (p *Poller) acceptComment(ctx context.Context, policy githubwire.Policy, co
 	if !eligible(policy, pull) || pull.Number != comment.PullRequest || pull.HeadSHA != request.SHA {
 		return ErrIneligible
 	}
-	input, err := p.admission(policy, pull, request.Profile, "")
+	input, err := p.admission(policy, pull, request.Profile, "", nil)
 	if err != nil {
 		return err
 	}
@@ -1034,7 +1204,9 @@ func (p *Poller) acceptComment(ctx context.Context, policy githubwire.Policy, co
 // the run's check name. It returns the run and whether a new attempt started
 // (false: the latest attempt is still queued or active). An unknown run is
 // store.ErrNotFound, a head no longer eligible (or a draft, as above)
-// ErrIneligible, the bound store.ErrRerunLimit.
+// ErrIneligible, the bound store.ErrRerunLimit. A matrix run whose entry
+// has a build reruns from its producer's retained test products:
+// ErrNoProducts while the producer has none (unfinished, failed or evicted).
 func (p *Poller) Rerun(ctx context.Context, repositoryID int64, repository, sha, profile, shard string, now time.Time) (store.GitHubRun, bool, error) {
 	runs, err := p.options.Store.GitHubRunsByHead(ctx, repositoryID, repository, sha, profile, shard)
 	if err != nil {
@@ -1061,7 +1233,18 @@ func (p *Poller) Rerun(ctx context.Context, repositoryID int64, repository, sha,
 			if !eligible(policy, pull) || pull.Number != number || pull.HeadSHA != run.SHA || run.Shard != "" && policy.HoldsBack(policy.Tier(run.Profile, run.Shard), pull.Draft, pull.Labels) {
 				continue
 			}
-			input, err := p.admission(policy, pull, run.Profile, run.Shard)
+			var products *model.ProductsRef
+			if build := policy.Build(run.Profile, run.Shard); build != "" {
+				s, err := p.supply(ctx, policy, pull, build)
+				if err != nil {
+					return store.GitHubRun{}, false, err
+				}
+				if s.products == nil {
+					return store.GitHubRun{}, false, ErrNoProducts
+				}
+				products = s.products
+			}
+			input, err := p.admission(policy, pull, run.Profile, run.Shard, products)
 			if errors.Is(err, ErrIneligible) {
 				continue
 			} else if err != nil {
@@ -1138,7 +1321,9 @@ func (p *Poller) checkDispatch(ctx context.Context, job model.Job) error {
 			return err
 		}
 		if eligible(policy, pull) && pull.Number == number && pull.HeadSHA == job.Request.SHA {
-			input, err := p.admission(policy, pull, job.Request.Profile, job.Request.Shard)
+			// A consumer's recipe and digests are those of the products
+			// its request names; the run is the same with any products.
+			input, err := p.admission(policy, pull, job.Request.Profile, job.Request.Shard, job.Request.Products)
 			if err != nil {
 				return err
 			}
