@@ -508,13 +508,15 @@ lane mode it is also attached to the tracker; its `launchd_sim` (its arguments n
 children are then the job's, charged to its memory budget and stopped by its lane quiesce, not unattributed residue
 beside a sibling. A discovery listing that merely fails is retried; one whose process cleanup failed or found
 contamination, or a failed manifest save, fails the job when the run ends, with the same quarantine authority as the
-job's own commands, and a later successful listing never clears it. At finalization, before the lane quiesce, every
-such clone still listed is adopted too, and all of the job's `test_clones` are shut down, deleted and proven absent
-with the job's own simulator; a second pass after the quiesce, and recovery after a restart, do the same from the
-manifest, and a survivor is contamination. Name and inventory together decide what is discovered: a clone of another
-job's simulator (another job ID) or one listed before the run is never the job's. A parallel-testing run boots its
-clones at once, after the build, which the controller's start stagger does not cover; in lane mode the engine
-therefore starts the run only once 30 s have passed since the latest simulator boot or parallel-testing run start of
-any lane, checking again after every wait, so a boot during the wait restarts it. This gate is the last step before
-the run, after the clone inventory, so no work between the gate and the run can miss a boot.
+job's own commands, and a later successful listing never clears it. When the run ends the watch starts no new
+listing and waits for the one in flight, which the run's end never cancels: a listing cut short while its launcher
+still ran as root is the suspected cause of a smoke run's quarantine (#196). At finalization, before the lane
+quiesce, every such clone still listed is adopted too, and all of the job's `test_clones` are shut down, deleted and
+proven absent with the job's own simulator; a second pass after the quiesce, and recovery after a restart, do the
+same from the manifest, and a survivor is contamination. Name and inventory together decide what is discovered: a
+clone of another job's simulator (another job ID) or one listed before the run is never the job's. A parallel-testing
+run boots its clones at once, after the build, which the controller's start stagger does not cover; in lane mode the
+engine therefore starts the run only once 30 s have passed since the latest simulator boot or parallel-testing run
+start of any lane, checking again after every wait, so a boot during the wait restarts it. This gate is the last step
+before the run, after the clone inventory, so no work between the gate and the run can miss a boot.
 

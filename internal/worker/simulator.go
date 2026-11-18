@@ -559,10 +559,16 @@ func safetyFailure(err error) bool {
 // they are not recorded in its result. A listing that failed only is
 // retried; one whose process cleanup failed or found contamination
 // (safetyFailure), and a failed manifest save, are kept and returned by
-// stop, which ends the watch and waits for it; a later successful pass never
-// clears them.
+// stop; a later successful pass never clears them. stop ends the watch: it
+// starts no new pass and waits for the one in flight, which runs under the
+// job's context (ctx, and its listing's CleanupTimeout), never cut short by
+// the end of the run. Until #196 stop cancelled it: a listing cancelled
+// while `launchctl asuser` or `_job-exec` still ran as root under its PID
+// had its cleanup refuse that launcher as a foreign UID, the hypothesis for
+// the herdrup smoke run whose clone listing quarantined the worker on 18
+// Nov 13:43Z.
 func (e *Engine) watchTestClones(ctx context.Context, m *manifest) (stop func() error) {
-	ctx, cancel := context.WithCancel(ctx)
+	watching, cancel := context.WithCancel(ctx)
 	w := &cloneWatch{refresh: make(chan chan struct{}), done: make(chan struct{})}
 	e.mu.Lock()
 	if e.cloneWatches == nil {
@@ -572,10 +578,10 @@ func (e *Engine) watchTestClones(ctx context.Context, m *manifest) (stop func() 
 	e.mu.Unlock()
 	tick := make(chan struct{})
 	go func() {
-		for e.pause(ctx, testCloneWatchInterval) == nil {
+		for e.pause(watching, testCloneWatchInterval) == nil {
 			select {
 			case tick <- struct{}{}:
-			case <-ctx.Done():
+			case <-watching.Done():
 				return
 			}
 		}
@@ -599,12 +605,16 @@ func (e *Engine) watchTestClones(ctx context.Context, m *manifest) (stop func() 
 		defer close(w.done)
 		for {
 			select {
-			case <-ctx.Done():
+			case <-watching.Done():
 				return
 			case <-tick:
-				pass()
+				if watching.Err() == nil {
+					pass()
+				}
 			case reply := <-w.refresh:
-				pass()
+				if watching.Err() == nil {
+					pass()
+				}
 				close(reply)
 			}
 		}
