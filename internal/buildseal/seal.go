@@ -57,25 +57,29 @@ type Resolution struct {
 // extracted, empty unless extraction verified it. ProductsSHA256 and
 // Xctestrun are set for a build-for-testing job only: the digest of its
 // test-products.tar artifact and the name of the one .xctestrun it holds.
+// ImportedProductsSHA256 is set for a consumer job only, once the worker
+// verified the products it downloaded against the request's digest and
+// imported them: the digest it verified.
 type Seal struct {
-	Schema                string        `json:"schema"`
-	JobID                 string        `json:"job_id"`
-	WorkerEpoch           string        `json:"worker_epoch"`
-	Request               model.Request `json:"request"`
-	RequestDigest         string        `json:"request_digest"`
-	SnapshotDigest        string        `json:"snapshot_digest"`
-	Resolution            *Resolution   `json:"resolution,omitempty"`
-	RecipeDigest          string        `json:"recipe_digest,omitempty"`
-	Source                worker.Source `json:"source"`
-	SourceTree            string        `json:"source_tree,omitempty"`
-	State                 model.State   `json:"state"`
-	ResultDigest          string        `json:"result_digest"`
-	ArtifactsDigest       string        `json:"artifacts_digest"`
-	ArchiveSHA256         string        `json:"archive_sha256,omitempty"`
-	SigningManifestSHA256 string        `json:"signing_manifest_sha256,omitempty"`
-	ProductsSHA256        string        `json:"products_sha256,omitempty"`
-	Xctestrun             string        `json:"xctestrun,omitempty"`
-	SealedAt              time.Time     `json:"sealed_at"`
+	Schema                 string        `json:"schema"`
+	JobID                  string        `json:"job_id"`
+	WorkerEpoch            string        `json:"worker_epoch"`
+	Request                model.Request `json:"request"`
+	RequestDigest          string        `json:"request_digest"`
+	SnapshotDigest         string        `json:"snapshot_digest"`
+	Resolution             *Resolution   `json:"resolution,omitempty"`
+	RecipeDigest           string        `json:"recipe_digest,omitempty"`
+	Source                 worker.Source `json:"source"`
+	SourceTree             string        `json:"source_tree,omitempty"`
+	State                  model.State   `json:"state"`
+	ResultDigest           string        `json:"result_digest"`
+	ArtifactsDigest        string        `json:"artifacts_digest"`
+	ArchiveSHA256          string        `json:"archive_sha256,omitempty"`
+	SigningManifestSHA256  string        `json:"signing_manifest_sha256,omitempty"`
+	ProductsSHA256         string        `json:"products_sha256,omitempty"`
+	Xctestrun              string        `json:"xctestrun,omitempty"`
+	ImportedProductsSHA256 string        `json:"imported_products_sha256,omitempty"`
+	SealedAt               time.Time     `json:"sealed_at"`
 }
 
 // Envelope carries the exact signed seal bytes and the Ed25519 signature.
@@ -136,6 +140,9 @@ func New(job model.Job, resolution *Resolution, sourceTree string, result worker
 	}
 	if job.Request.BuildForTesting {
 		s.Xctestrun = result.Observation.Xctestrun
+	}
+	if job.Request.Products != nil {
+		s.ImportedProductsSHA256 = result.Observation.ImportedProducts
 	}
 	return s, nil
 }

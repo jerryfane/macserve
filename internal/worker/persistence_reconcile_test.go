@@ -131,7 +131,7 @@ func TestAdmissionRefusalSurvivesRestartAndBlocksExecution(t *testing.T) {
 	engine := engineFixture(t, runner)
 	job := fixtureJob(t, model.Build)
 	source, archive := sourceFixture(t)
-	if _, err := engine.Execute(context.Background(), job, source, bytes.NewReader(archive), nil); !errors.Is(err, ErrRecovery) {
+	if _, err := engine.Execute(context.Background(), job, source, bytes.NewReader(archive), nil, nil); !errors.Is(err, ErrRecovery) {
 		t.Fatalf("admission: %v", err)
 	}
 	if len(runner.commands) != 0 {
@@ -275,7 +275,7 @@ func TestTransientAdmissionDoesNotQuarantine(t *testing.T) {
 			}
 			job := fixtureJob(t, model.Build)
 			source, archive := sourceFixture(t)
-			if _, err := engine.Execute(context.Background(), job, source, bytes.NewReader(archive), nil); !errors.Is(err, failure) {
+			if _, err := engine.Execute(context.Background(), job, source, bytes.NewReader(archive), nil, nil); !errors.Is(err, failure) {
 				t.Fatalf("transient admission cause lost: %v", err)
 			}
 			if _, err := engine.root.Lstat(quarantineRecord); !os.IsNotExist(err) {

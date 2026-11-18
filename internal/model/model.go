@@ -146,9 +146,23 @@ type Request struct {
 	// artifact. It is refused for every other recipe, Flutter templates
 	// included. It is omitted when false, so other requests keep their
 	// digest.
-	BuildForTesting bool           `json:"build_for_testing,omitempty"`
-	TimeoutSeconds  int            `json:"timeout_seconds,omitempty"`
-	Context         RequestContext `json:"context,omitempty"`
+	BuildForTesting bool `json:"build_for_testing,omitempty"`
+	// Products makes a test template job a consumer of a build-for-testing
+	// producer's sealed test products: it runs test-without-building from
+	// them, with no build of its own. It is refused for every other recipe
+	// and omitted when nil, so other requests keep their digest.
+	Products       *ProductsRef   `json:"products,omitempty"`
+	TimeoutSeconds int            `json:"timeout_seconds,omitempty"`
+	Context        RequestContext `json:"context,omitempty"`
+}
+
+// ProductsRef names the sealed test products a consumer job runs: the
+// build-for-testing producer job, the SHA-256 of its test-products.tar
+// artifact and the name of the one .xctestrun file the tar holds.
+type ProductsRef struct {
+	ProducerJobID string `json:"producer_job_id"`
+	SHA256        string `json:"sha256"`
+	Xctestrun     string `json:"xctestrun"`
 }
 
 // ReleaseRequest is an ios_archive job's release: the marketing version
@@ -253,6 +267,10 @@ type Profile struct {
 	// template job snapshot, from which its build-for-testing recipe
 	// derives; configured profiles never carry it.
 	BuildForTesting bool `json:"build_for_testing,omitempty"`
+	// Products is the admitted request's Products on a test template job
+	// snapshot, from which its test-without-building recipe derives;
+	// configured profiles never carry it.
+	Products *ProductsRef `json:"products,omitempty"`
 }
 
 // Concurrent reports whether p is the snapshot of a simulator_script

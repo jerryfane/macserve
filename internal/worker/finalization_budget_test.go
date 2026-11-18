@@ -39,7 +39,7 @@ func TestFinalizationSharesOneBudgetAcrossWriterBarriers(t *testing.T) {
 	engine.options.CleanupTimeout = 30 * time.Millisecond
 	job := fixtureJob(t, model.Build)
 	source, data := sourceFixture(t)
-	result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil, nil)
 	if !ran.Load() || !errors.Is(err, context.DeadlineExceeded) || result.State != model.TimedOut {
 		t.Fatalf("separate stages extended finalization budget: result=%+v err=%v ran=%v", result, err, ran.Load())
 	}

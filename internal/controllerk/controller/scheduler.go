@@ -337,6 +337,22 @@ func (c *Controller) prepare(ctx context.Context, a *execution) {
 			return
 		}
 	}
+	// A consumer whose test products left the pool ends here, cleanly and
+	// before anything is created for it: there is nothing to run.
+	if ref := a.job.Request.Products; ref != nil {
+		product, err := c.options.Store.GetProduct(ctx, ref.SHA256)
+		if errors.Is(err, store.ErrNotFound) || err == nil && product.EvictedAt != nil {
+			a.cancel()
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			if c.holds(a) {
+				if failErr := c.options.Store.FailPreparation(context.Background(), a.job.ID, a.job.LeaseToken, model.Failed, true, store.ErrProductsUnavailable.Error(), c.options.Now()); failErr == nil {
+					c.release(a)
+				}
+			}
+			return
+		}
+	}
 	// Authorize before recording source debt, but persist the intent before
 	// Prepare can create anything. Recovery therefore still covers crashes.
 	if err := c.options.Store.RequireSourceCleanup(ctx, a.job.ID); err != nil {

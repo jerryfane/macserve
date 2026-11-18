@@ -263,6 +263,8 @@ func writeError(w http.ResponseWriter, err error) {
 		status, code, message = 400, "invalid_request", "malformed or invalid request"
 	case errors.Is(err, profiles.ErrUnsupported):
 		status, code, message = 422, "unsupported_request", "unsupported profile, toolchain or kind"
+	case errors.Is(err, store.ErrProductsUnavailable):
+		status, code, message = 409, "products_unavailable", store.ErrProductsUnavailable.Error()
 	case errors.Is(err, store.ErrConflict), errors.Is(err, store.ErrTransition):
 		status, code, message = 409, "conflict", "request conflicts with existing state"
 	case errors.Is(err, controller.ErrNotReady):

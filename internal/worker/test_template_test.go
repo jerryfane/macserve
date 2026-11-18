@@ -109,7 +109,7 @@ func TestTemplateUITestRunsBuildForTestingThenTestWithoutBuilding(t *testing.T) 
 			}
 			engine := engineFixture(t, runner)
 			source, data := checkoutFixture(t, map[string]string{".macserve.json": config})
-			result, err := engine.Execute(context.Background(), testTemplateJob(t, tc.kind, tc.shard), source, bytes.NewReader(data), nil)
+			result, err := engine.Execute(context.Background(), testTemplateJob(t, tc.kind, tc.shard), source, bytes.NewReader(data), nil, nil)
 			if err != nil || result.State != model.Succeeded || !result.CleanupOK {
 				t.Fatalf("template test job failed: %+v %v", result, err)
 			}
@@ -190,7 +190,7 @@ func TestTemplateUITestRequiresEveryShardSelector(t *testing.T) {
 	runner := &fakeRunner{}
 	engine := engineFixture(t, runner)
 	source, data := checkoutFixture(t, map[string]string{".macserve.json": config})
-	result, err := engine.Execute(context.Background(), testTemplateJob(t, model.SimulatorUITest, "smoke"), source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), testTemplateJob(t, model.SimulatorUITest, "smoke"), source, bytes.NewReader(data), nil, nil)
 	if err == nil || result.State != model.Failed || !result.CleanupOK {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
@@ -243,7 +243,7 @@ func TestSimulatorBootRetriedOnceThenFails(t *testing.T) {
 			}
 			engine := engineFixture(t, runner)
 			source, data := sourceFixture(t)
-			result, err := engine.Execute(context.Background(), fixtureJob(t, model.SimulatorUITest), source, bytes.NewReader(data), nil)
+			result, err := engine.Execute(context.Background(), fixtureJob(t, model.SimulatorUITest), source, bytes.NewReader(data), nil, nil)
 			if tc.succeed != (err == nil && result.State == model.Succeeded) || !tc.succeed && result.State != model.Failed {
 				t.Fatalf("result=%+v err=%v", result, err)
 			}
@@ -319,7 +319,7 @@ func TestTestKindPrepareBudget(t *testing.T) {
 			}
 			engine := engineFixture(t, runner)
 			source, data := sourceFixture(t)
-			result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil)
+			result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil, nil)
 			if err != nil || result.State != model.Succeeded {
 				t.Fatalf("result=%+v err=%v", result, err)
 			}
@@ -359,7 +359,7 @@ func TestSimulatorBootRetryPausesBeforeTheNewDevice(t *testing.T) {
 			return ctx.Err()
 		}
 		source, data := sourceFixture(t)
-		result, err := engine.Execute(context.Background(), fixtureJob(t, model.SimulatorUITest), source, bytes.NewReader(data), nil)
+		result, err := engine.Execute(context.Background(), fixtureJob(t, model.SimulatorUITest), source, bytes.NewReader(data), nil, nil)
 		if len(pauses) != 1 || pauses[0] < 10*time.Second {
 			t.Fatalf("pauses %v, want one of at least 10s", pauses)
 		}

@@ -800,7 +800,7 @@ func TestRealHostEndToEnd(t *testing.T) {
 			t.Fatal(err)
 		}
 		h.setPhase("execute:" + p.ID)
-		result, err := engine.Execute(ctx, job, Source{Commit: pin.Commit, Tree: pin.Tree, SHA256: pin.SHA256, SizeBytes: pin.SizeBytes}, archive, nil)
+		result, err := engine.Execute(ctx, job, Source{Commit: pin.Commit, Tree: pin.Tree, SHA256: pin.SHA256, SizeBytes: pin.SizeBytes}, archive, nil, nil)
 		archive.Close()
 		run.Result = &result
 		if err != nil {

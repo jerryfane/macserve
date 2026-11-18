@@ -530,7 +530,7 @@ func TestArchiveJobExportsSealedArchiveAndSigningManifest(t *testing.T) {
 	engine := archiveEngine(t, runner)
 	job := archiveTemplateJob(t)
 	source, data := checkoutFixture(t, map[string]string{".macserve.json": archiveConfig})
-	result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil, nil)
 	if err != nil || result.State != model.Succeeded || !result.CleanupOK {
 		t.Fatalf("archive job failed: %+v %v", result, err)
 	}
@@ -597,7 +597,7 @@ func TestArchiveJobWithoutSignableArchiveFails(t *testing.T) {
 			runner.hook = archiveHook(t, tc.files, &archive)
 			engine := archiveEngine(t, runner)
 			source, data := checkoutFixture(t, map[string]string{".macserve.json": archiveConfig})
-			result, err := engine.Execute(context.Background(), archiveTemplateJob(t), source, bytes.NewReader(data), nil)
+			result, err := engine.Execute(context.Background(), archiveTemplateJob(t), source, bytes.NewReader(data), nil, nil)
 			if err == nil || !strings.Contains(err.Error(), tc.want) || result.State != model.Failed || !result.CleanupOK {
 				t.Fatalf("archive job without a signable archive: %+v %v", result, err)
 			}
@@ -623,7 +623,7 @@ func TestNonArchiveJobsNeverSealArchives(t *testing.T) {
 	}
 	engine := archiveEngine(t, runner)
 	source, data := checkoutFixture(t, map[string]string{".macserve.json": archiveConfig})
-	result, err := engine.Execute(context.Background(), templateJob(t), source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), templateJob(t), source, bytes.NewReader(data), nil, nil)
 	if err != nil || result.State != model.Succeeded {
 		t.Fatalf("build job failed: %+v %v", result, err)
 	}

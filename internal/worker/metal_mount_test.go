@@ -167,7 +167,7 @@ func TestJobMetalToolchainImageIsUnmountedNotContamination(t *testing.T) {
 	image.mu.Unlock()
 	job := fixtureJob(t, model.Build)
 	source, data := sourceFixture(t)
-	result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil, nil)
 	if err != nil || result.State != model.Succeeded || !result.CleanupOK {
 		t.Fatalf("job with Xcode's Metal toolchain image: %+v %v", result, err)
 	}

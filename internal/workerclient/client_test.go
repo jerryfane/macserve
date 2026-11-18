@@ -23,12 +23,16 @@ import (
 )
 
 type fakeExecutor struct {
-	execute    func(context.Context, model.Job, worker.Source, io.Reader, worker.Sink) (worker.Result, error)
-	artifacts  map[string]string
-	removed    []string
-	recoverErr error
-	recover    func(context.Context) error
-	laneReady  func(context.Context) error
+	execute func(context.Context, model.Job, worker.Source, io.Reader, worker.Sink) (worker.Result, error)
+	// products and productsErr record what the engine read of a
+	// consumer's test products.
+	products    []byte
+	productsErr error
+	artifacts   map[string]string
+	removed     []string
+	recoverErr  error
+	recover     func(context.Context) error
+	laneReady   func(context.Context) error
 }
 
 func (e *fakeExecutor) LaneReady(ctx context.Context) error {
@@ -44,7 +48,10 @@ func (e *fakeExecutor) Recover(ctx context.Context) error {
 	}
 	return e.recoverErr
 }
-func (e *fakeExecutor) Execute(ctx context.Context, job model.Job, source worker.Source, r io.Reader, sink worker.Sink) (worker.Result, error) {
+func (e *fakeExecutor) Execute(ctx context.Context, job model.Job, source worker.Source, r, products io.Reader, sink worker.Sink) (worker.Result, error) {
+	if products != nil {
+		e.products, e.productsErr = io.ReadAll(products)
+	}
 	return e.execute(ctx, job, source, r, sink)
 }
 func (e *fakeExecutor) ArtifactPath(job, id string) (string, error) {

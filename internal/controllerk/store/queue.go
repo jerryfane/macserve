@@ -14,6 +14,7 @@ import (
 
 	"github.com/jerryfane/macserve/internal/controllerconfig"
 	"github.com/jerryfane/macserve/internal/model"
+	"github.com/jerryfane/macserve/internal/profiles"
 )
 
 func requestBytes(request model.Request) ([]byte, string, error) {
@@ -92,6 +93,11 @@ func profileBytes(admission model.Admission) ([]byte, error) {
 	// A build-for-testing producer is a non-Flutter build template job whose
 	// snapshot carries the request's flag.
 	if profile.BuildForTesting != request.BuildForTesting || request.BuildForTesting && (profile.Template == nil || profile.Kind != model.Build || profile.Template.Flutter != nil) {
+		return nil, ErrInvalid
+	}
+	// A consumer of sealed test products is a non-Flutter test template job
+	// whose snapshot carries the request's reference.
+	if (profile.Products == nil) != (request.Products == nil) || request.Products != nil && (*profile.Products != *request.Products || profile.Template == nil || !profile.Kind.Tests() || profile.Template.Flutter != nil || request.BuildForTesting || !profiles.ValidProductsRef(*request.Products)) {
 		return nil, ErrInvalid
 	}
 	data, err := json.Marshal(profile)
@@ -185,6 +191,11 @@ func (s *Store) enqueueTx(ctx context.Context, tx *sql.Tx, principal, key string
 	provenance, err := releaseBytes(admission)
 	if err != nil {
 		return model.Job{}, false, err
+	}
+	if ref := admission.Request.Products; ref != nil {
+		if err := consumableProducts(ctx, tx, admission.Request, *ref); err != nil {
+			return model.Job{}, false, err
+		}
 	}
 	if _, err := s.expire(ctx, tx, now); err != nil {
 		return model.Job{}, false, err

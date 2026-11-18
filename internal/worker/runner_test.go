@@ -143,7 +143,7 @@ func TestSimulatorRetryTeardownAcceptsAlreadyShutdownFromNativeRunner(t *testing
 			}
 			engine := engineFixture(t, runner)
 			source, data := sourceFixture(t)
-			result, err := engine.Execute(context.Background(), fixtureJob(t, model.SimulatorUITest), source, bytes.NewReader(data), nil)
+			result, err := engine.Execute(context.Background(), fixtureJob(t, model.SimulatorUITest), source, bytes.NewReader(data), nil, nil)
 			if tc.succeed != (err == nil && result.State == model.Succeeded) || !result.CleanupOK {
 				t.Fatalf("result=%+v err=%v", result, err)
 			}

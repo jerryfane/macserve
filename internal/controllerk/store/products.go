@@ -3,9 +3,92 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"time"
+
+	"github.com/jerryfane/macserve/internal/model"
+	"github.com/jerryfane/macserve/internal/profiles"
 )
+
+// ErrProductsUnavailable refuses a consumer whose producer did not seal
+// usable test products, or whose bytes left the products pool: its job ID
+// is unknown or pruned, it has not succeeded, it is no build-for-testing
+// job, its result names no products, or the bytes were evicted.
+var ErrProductsUnavailable = errors.New("test products unavailable")
+
+// ProducerProducts returns the reference a consumer of producer names: the
+// producer's job ID, the SHA-256 of its test-products.tar artifact and the
+// .xctestrun its worker observed, from its stored (normalized) result. It
+// fails with ErrProductsUnavailable unless producer is a succeeded
+// build-for-testing job whose result holds both.
+func ProducerProducts(producer model.Job) (model.ProductsRef, error) {
+	if producer.State != model.Succeeded || !producer.Request.BuildForTesting || len(producer.Result) == 0 {
+		return model.ProductsRef{}, ErrProductsUnavailable
+	}
+	// The stored result is the controller's completion record, whose
+	// "result" is the normalized worker result.
+	var completion struct {
+		Result struct {
+			State     model.State `json:"state"`
+			Artifacts []struct {
+				Name   string `json:"name"`
+				SHA256 string `json:"sha256"`
+			} `json:"artifacts"`
+			Observation struct {
+				Xctestrun string `json:"xctestrun"`
+			} `json:"observation"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(producer.Result, &completion); err != nil || completion.Result.State != model.Succeeded {
+		return model.ProductsRef{}, ErrProductsUnavailable
+	}
+	result := completion.Result
+	ref := model.ProductsRef{ProducerJobID: producer.ID, Xctestrun: result.Observation.Xctestrun}
+	for _, a := range result.Artifacts {
+		if a.Name == profiles.TestProductsArtifact {
+			ref.SHA256 = a.SHA256
+			break
+		}
+	}
+	if !profiles.ValidProductsRef(ref) {
+		return model.ProductsRef{}, ErrProductsUnavailable
+	}
+	return ref, nil
+}
+
+// consumableProducts admits the products reference of request, a consumer
+// job: its producer must be a succeeded build-for-testing job of the same
+// repository and commit whose sealed products ref names exactly, and the
+// products pool must still hold those bytes. A reference to another
+// commit's or repository's products, or to other bytes, is invalid; a
+// producer that has none to offer, or whose bytes were evicted, leaves the
+// products unavailable.
+func consumableProducts(ctx context.Context, tx *sql.Tx, request model.Request, ref model.ProductsRef) error {
+	producer, err := getTx(ctx, tx, ref.ProducerJobID)
+	if errors.Is(err, ErrNotFound) {
+		return ErrProductsUnavailable
+	}
+	if err != nil {
+		return err
+	}
+	if producer.Request.Repo != request.Repo || producer.Request.SHA != request.SHA {
+		return ErrInvalid
+	}
+	sealed, err := ProducerProducts(producer)
+	if err != nil {
+		return err
+	}
+	if sealed != ref {
+		return ErrInvalid
+	}
+	var retained bool
+	err = tx.QueryRowContext(ctx, "SELECT evicted_at IS NULL FROM products WHERE sha256=?", ref.SHA256).Scan(&retained)
+	if errors.Is(err, sql.ErrNoRows) || err == nil && !retained {
+		return ErrProductsUnavailable
+	}
+	return err
+}
 
 // productsSchema is the products pool's ledger (schema version 9): one row
 // per content-addressed test-products.tar the controller retains for

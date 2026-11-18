@@ -147,6 +147,7 @@ func newKeyholderEngine(ctx context.Context, config keyholder.Config) (*keyholde
 			return receipt.Repository{ID: id, Name: job.Request.Repo}, nil
 		},
 		Approval: keyholder.ApprovalFromContext,
+		Products: keyholder.ProductsFromContext,
 	})
 	if err != nil {
 		return nil, err

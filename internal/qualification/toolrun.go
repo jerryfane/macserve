@@ -369,7 +369,7 @@ func runProfile(ctx context.Context, engine *worker.Engine, c Challenge, p model
 		return run, err
 	}
 	defer f.Close()
-	result, err := engine.Execute(ctx, job, worker.Source{Commit: pin.Commit, Tree: pin.Tree, SHA256: pin.SHA256, SizeBytes: pin.SizeBytes}, f, discardSink{})
+	result, err := engine.Execute(ctx, job, worker.Source{Commit: pin.Commit, Tree: pin.Tree, SHA256: pin.SHA256, SizeBytes: pin.SizeBytes}, f, nil, discardSink{})
 	run.Result = result
 	if result.State != model.Succeeded {
 		run.Failure = recipeFailure(result, func(id string) (string, error) {

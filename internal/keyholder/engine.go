@@ -243,6 +243,10 @@ func (e *Engine) Seal(ctx context.Context, req SealRequest) (json.RawMessage, er
 	if err := bindProducts(job, seal, req.Result); err != nil {
 		return nil, err
 	}
+	products, err := e.bindConsumer(job, seal, req.Result)
+	if err != nil {
+		return nil, err
+	}
 	// Controller-supplied release provenance never reaches a receipt: a
 	// succeeded ios_archive job carries only the keyholder's own.
 	job.ReleaseProvenance = nil
@@ -253,12 +257,25 @@ func (e *Engine) Seal(ctx context.Context, req SealRequest) (json.RawMessage, er
 		}
 		job.ReleaseProvenance = provenance
 	}
-	raw, err := e.options.Signer.Seal(context.WithValue(ctx, approvalKey{}, req.Approval), job, req.Result)
+	ctx = context.WithValue(context.WithValue(ctx, approvalKey{}, req.Approval), productsKey{}, products)
+	raw, err := e.options.Signer.Seal(ctx, job, req.Result)
 	if errors.Is(err, receipt.ErrInvalid) {
 		// Evidence the signer will never sign as presented: definitive.
 		return nil, refusal("receipt: %v", err)
 	}
-	return raw, err
+	if err != nil {
+		return nil, err
+	}
+	// A signed producer success is recorded only after its receipt: a
+	// consumer binds only a producer whose success the keyholder signed.
+	// A failed record write fails the call, and the controller's retry
+	// replays the receipt and records it.
+	if job.Request.BuildForTesting && req.Result.State == model.Succeeded {
+		if err := e.recordProducer(seal, req.Seal.SealDigest()); err != nil {
+			return nil, err
+		}
+	}
+	return raw, nil
 }
 
 // bindSeal checks that the seal is the worker's report of exactly this job
@@ -400,7 +417,7 @@ func (e *Engine) verifyRelease(ctx context.Context, job model.Job, seal buildsea
 		return nil, refusal("commit tree %s is not the tree %s the worker computed from the source it built", tree, seal.SourceTree)
 	}
 	provenance := &model.ReleaseProvenance{RepositoryID: head.RepositoryID, DefaultBranch: head.Branch, HeadSHA: strings.ToLower(head.SHA), ResolvedAt: e.options.Now().UTC(), Source: model.ProvenanceGitHubApp}
-	if err := e.saveProvenance(name, provenance); err != nil {
+	if err := e.saveRecord(name, provenance); err != nil {
 		return nil, err
 	}
 	return provenance, nil
@@ -409,24 +426,30 @@ func (e *Engine) verifyRelease(ctx context.Context, job model.Job, seal buildsea
 var sha40 = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 func (e *Engine) loadProvenance(name string) (*model.ReleaseProvenance, error) {
-	f, err := e.release.Open(name)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	raw, err := io.ReadAll(io.LimitReader(f, 64<<10))
-	if err != nil {
-		return nil, err
-	}
 	var p model.ReleaseProvenance
-	if err := decodeStrict(raw, &p); err != nil {
+	if err := e.loadRecord(name, &p); err != nil {
 		return nil, err
 	}
 	return &p, nil
 }
 
-func (e *Engine) saveProvenance(name string, p *model.ReleaseProvenance) error {
-	raw, err := json.Marshal(p)
+// loadRecord decodes the private record name strictly into target.
+func (e *Engine) loadRecord(name string, target any) error {
+	f, err := e.release.Open(name)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	raw, err := io.ReadAll(io.LimitReader(f, 64<<10))
+	if err != nil {
+		return err
+	}
+	return decodeStrict(raw, target)
+}
+
+// saveRecord writes the private record name durably and atomically.
+func (e *Engine) saveRecord(name string, value any) error {
+	raw, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}

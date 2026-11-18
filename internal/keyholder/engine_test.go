@@ -74,6 +74,7 @@ func (g *fakeGitHub) CommitTree(_ context.Context, _, sha string) (string, error
 type fakeSigner struct {
 	jobs      []model.Job
 	approvals []receipt.Approval
+	products  []*receipt.Products
 }
 
 func (s *fakeSigner) Seal(ctx context.Context, job model.Job, _ worker.Result) (json.RawMessage, error) {
@@ -81,8 +82,10 @@ func (s *fakeSigner) Seal(ctx context.Context, job model.Job, _ worker.Result) (
 	if err != nil {
 		return nil, err
 	}
+	products, _ := ProductsFromContext(ctx, job)
 	s.jobs = append(s.jobs, job)
 	s.approvals = append(s.approvals, a)
+	s.products = append(s.products, products)
 	return json.RawMessage(`{"signed":true}`), nil
 }
 func (s *fakeSigner) Manifest(context.Context, string, string) (json.RawMessage, error) {

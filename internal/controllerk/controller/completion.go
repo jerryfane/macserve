@@ -372,5 +372,10 @@ func verifyObservation(job model.Job, o worker.Observation) error {
 			return errors.New("generated file digest mismatch")
 		}
 	}
+	// A consumer ran only after the worker verified and imported the
+	// request's test products; no other job imports any.
+	if ref := job.Request.Products; ref == nil && o.ImportedProducts != "" || ref != nil && o.ImportedProducts != ref.SHA256 {
+		return errors.New("imported test products do not match the request")
+	}
 	return nil
 }

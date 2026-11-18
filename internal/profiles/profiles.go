@@ -181,6 +181,9 @@ func (r *Registry) Resolve(request model.Request) (model.Admission, error) {
 	if request.BuildForTesting {
 		return model.Admission{}, fmt.Errorf("%w: only build templates without a Flutter pin build for testing", ErrUnsupported)
 	}
+	if request.Products != nil {
+		return model.Admission{}, fmt.Errorf("%w: only test templates without a Flutter pin run sealed test products", ErrUnsupported)
+	}
 	if request.TimeoutSeconds == 0 {
 		request.TimeoutSeconds = p.DefaultTimeoutSeconds
 	}
@@ -231,6 +234,17 @@ func (r *Registry) resolveTemplate(request model.Request) (model.Admission, erro
 	if request.BuildForTesting && (t.Kind != model.Build || t.Flutter != nil) {
 		return model.Admission{}, fmt.Errorf("%w: only build templates without a Flutter pin build for testing", ErrUnsupported)
 	}
+	// A consumer of sealed test products is a test template job; the
+	// producer builds no Flutter app, and a producer consumes nothing.
+	if request.Products != nil {
+		if !t.Kind.Tests() || t.Flutter != nil || request.BuildForTesting {
+			return model.Admission{}, fmt.Errorf("%w: only test templates without a Flutter pin run sealed test products", ErrUnsupported)
+		}
+		if !ValidProductsRef(*request.Products) {
+			return model.Admission{}, fmt.Errorf("%w: products reference", ErrInvalid)
+		}
+	}
+	request.Products = cloneProductsRef(request.Products)
 	if !t.Kind.UsesSimulator() {
 		if request.Simulator != nil {
 			return model.Admission{}, fmt.Errorf("%w: repository, kind or toolchain pins", ErrUnsupported)
@@ -263,7 +277,7 @@ func (r *Registry) resolveTemplate(request model.Request) (model.Admission, erro
 		return model.Admission{}, fmt.Errorf("%w: timeout exceeds profile maximum", ErrInvalid)
 	}
 	snapshot := TemplateSnapshot(t, request.Repo)
-	snapshot.Simulator, snapshot.Shard, snapshot.Release, snapshot.BuildForTesting = cloneSimulator(request.Simulator), request.Shard, cloneRelease(request.Release), request.BuildForTesting
+	snapshot.Simulator, snapshot.Shard, snapshot.Release, snapshot.BuildForTesting, snapshot.Products = cloneSimulator(request.Simulator), request.Shard, cloneRelease(request.Release), request.BuildForTesting, cloneProductsRef(request.Products)
 	return model.Admission{Request: request, Profile: snapshot, ProfileDigest: e.digest}, nil
 }
 
@@ -397,8 +411,8 @@ func normalizeParallelTesting(t *model.Template) error {
 }
 
 func normalizeProfile(p *model.Profile) error {
-	if p.Template != nil || p.Shard != "" || p.Release != nil || p.BuildForTesting {
-		return fmt.Errorf("%w: configured profiles cannot embed a template, shard, release or build-for-testing", ErrInvalid)
+	if p.Template != nil || p.Shard != "" || p.Release != nil || p.BuildForTesting || p.Products != nil {
+		return fmt.Errorf("%w: configured profiles cannot embed a template, shard, release, build-for-testing or test products", ErrInvalid)
 	}
 	if !idPattern.MatchString(p.ID) || p.Version <= 0 || !validRepo(p.Repo) {
 		return fmt.Errorf("%w: ID, version or repository", ErrInvalid)
@@ -525,7 +539,8 @@ func safePath(value string) bool {
 }
 
 // Command arguments support only these literal worker substitutions: CHECKOUT,
-// WORKSPACE, DERIVED_DATA, RESULT_BUNDLE, SIMULATOR_ID, JOB_ID and DEVELOPER_DIR,
+// WORKSPACE, DERIVED_DATA, RESULT_BUNDLE, SIMULATOR_ID, JOB_ID, DEVELOPER_DIR
+// and PRODUCTS (a consumer job's imported test products, ProductsDir),
 // each spelled ${NAME}. There is no shell expansion or inherited environment
 // substitution. Executables themselves must be trusted absolute paths.
 func validateCommand(command model.Command) error {
@@ -550,7 +565,7 @@ func validateCommand(command model.Command) error {
 				return fmt.Errorf("%w: unterminated command placeholder", ErrInvalid)
 			}
 			switch arg[2:end] {
-			case "CHECKOUT", "WORKSPACE", "DERIVED_DATA", "RESULT_BUNDLE", "SIMULATOR_ID", "JOB_ID", "DEVELOPER_DIR":
+			case "CHECKOUT", "WORKSPACE", "DERIVED_DATA", "RESULT_BUNDLE", "SIMULATOR_ID", "JOB_ID", "DEVELOPER_DIR", "PRODUCTS":
 			default:
 				return fmt.Errorf("%w: command placeholder", ErrInvalid)
 			}
@@ -586,6 +601,7 @@ func cloneProfile(p model.Profile) model.Profile {
 	p.Artifacts = append([]model.ArtifactRule(nil), p.Artifacts...)
 	p.RequiredTests = append([]string(nil), p.RequiredTests...)
 	p.Release = cloneRelease(p.Release)
+	p.Products = cloneProductsRef(p.Products)
 	if p.Template != nil {
 		t := cloneTemplate(*p.Template)
 		p.Template = &t

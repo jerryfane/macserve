@@ -114,6 +114,7 @@ func (c *Controller) handler() http.Handler {
 		}
 	})
 	mux.HandleFunc("GET "+protocol.Prefix+"/jobs/{job}/source", c.serveSource)
+	mux.HandleFunc("GET "+protocol.Prefix+"/jobs/{job}/products", c.serveProducts)
 	mux.HandleFunc("POST "+protocol.Prefix+"/jobs/{job}/heartbeat", c.heartbeat)
 	mux.HandleFunc("POST "+protocol.Prefix+"/jobs/{job}/stage", c.stage)
 	mux.HandleFunc("POST "+protocol.Prefix+"/jobs/{job}/logs", c.logs)

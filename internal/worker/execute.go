@@ -150,7 +150,11 @@ const FinalizationTimeout = DefaultCleanupTimeout + finalVerificationWindow
 // still wait out a tolerated launch's child.
 const finalInspectionTimeout = 45 * time.Second
 
-func (e *Engine) Execute(parent context.Context, job model.Job, source Source, archive io.Reader, sink Sink) (result Result, returned error) {
+// Execute runs job from source's archive. products is a consumer job's
+// test products as the controller streams them (nil for any other job):
+// the worker verifies and imports them before anything else of the job
+// (importTestProducts).
+func (e *Engine) Execute(parent context.Context, job model.Job, source Source, archive, products io.Reader, sink Sink) (result Result, returned error) {
 	result = Result{State: model.Failed, Source: source, StartedAt: e.options.Now()}
 	solo, err := e.enter(parent, job)
 	if err != nil {
@@ -424,6 +428,18 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 	x.stdout = &logWriter{state: x.logs, file: stdout, stream: "stdout", sink: sink, cancel: cancel}
 	x.stderr = &logWriter{state: x.logs, file: stderr, stream: "stderr", sink: sink, cancel: cancel}
 	prepareCtx, prepareCancel := context.WithTimeout(ctx, prepareBudget(job.Request.Kind, flutterPin(job.Profile) != nil))
+	if job.Request.Products != nil {
+		// The sealed products are verified before any extraction and
+		// imported before any job command; a job that consumes none is
+		// given none.
+		if err := x.importTestProducts(prepareCtx, products); err != nil {
+			prepareCancel()
+			return result, err
+		}
+	} else if products != nil {
+		prepareCancel()
+		return result, errors.New("test products for a job that consumes none")
+	}
 	checkout, err := x.root.OpenRoot("checkout")
 	if err != nil {
 		prepareCancel()
@@ -702,7 +718,7 @@ func (x *execution) observe(ctx context.Context) error {
 // recipe runs one recipe command in the work directory with the job
 // environment plus env.
 func (x *execution) recipe(ctx context.Context, recipe model.Command, env ...string) error {
-	replacement := strings.NewReplacer("${CHECKOUT}", filepath.Join(x.workspace, "checkout"), "${WORKSPACE}", x.workspace, "${DERIVED_DATA}", filepath.Join(x.workspace, "derived-data"), "${RESULT_BUNDLE}", filepath.Join(x.workspace, "results.xcresult"), "${SIMULATOR_ID}", x.manifest.DeviceUDID, "${JOB_ID}", x.job.ID, "${DEVELOPER_DIR}", x.job.Profile.DeveloperDir)
+	replacement := strings.NewReplacer("${CHECKOUT}", filepath.Join(x.workspace, "checkout"), "${WORKSPACE}", x.workspace, "${DERIVED_DATA}", filepath.Join(x.workspace, "derived-data"), "${RESULT_BUNDLE}", filepath.Join(x.workspace, "results.xcresult"), "${SIMULATOR_ID}", x.manifest.DeviceUDID, "${JOB_ID}", x.job.ID, "${DEVELOPER_DIR}", x.job.Profile.DeveloperDir, "${PRODUCTS}", filepath.Join(x.workspace, profiles.ProductsDir))
 	args := make([]string, len(recipe.Args))
 	for i, arg := range recipe.Args {
 		args[i] = replacement.Replace(arg)

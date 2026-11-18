@@ -117,7 +117,7 @@ func TestTemplateJobRunsTheDerivedRecipe(t *testing.T) {
 			job := templateJob(t)
 			snapshot := job.Profile
 			source, data := checkoutFixture(t, map[string]string{".macserve.json": tc.config, "ios/project.yml": "name: App\n"})
-			result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil)
+			result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil, nil)
 			if err != nil || result.State != model.Succeeded {
 				t.Fatalf("template job failed: %+v %v", result, err)
 			}
@@ -178,7 +178,7 @@ func TestTemplateJobRefusesRepoConfigBeforeAnyCommand(t *testing.T) {
 			runner := &fakeRunner{}
 			engine := engineFixture(t, runner)
 			source, data := checkoutFixture(t, files)
-			result, err := engine.Execute(context.Background(), templateJob(t), source, bytes.NewReader(data), nil)
+			result, err := engine.Execute(context.Background(), templateJob(t), source, bytes.NewReader(data), nil, nil)
 			if err == nil || result.State != model.Failed || !strings.Contains(err.Error(), "repository has no valid .macserve.json") || !strings.Contains(result.Reason, "repository has no valid .macserve.json") {
 				t.Fatalf("invalid repository configuration accepted: %+v %v", result, err)
 			}
@@ -225,7 +225,7 @@ func TestTemplateSnapshotCannotCarryCommands(t *testing.T) {
 			job := templateJob(t)
 			mutate(&job)
 			source, data := checkoutFixture(t, map[string]string{".macserve.json": `{"version":1,"work_dir":".","project":"App.xcodeproj","scheme":"App"}`})
-			if result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil); err == nil || result.State == model.Succeeded {
+			if result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil, nil); err == nil || result.State == model.Succeeded {
 				t.Fatalf("tampered template snapshot executed: %+v", result)
 			}
 			if len(checkoutCommands(runner)) != 0 {
