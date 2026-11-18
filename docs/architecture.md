@@ -79,8 +79,15 @@ PF enforcement may be a separately reviewed future opt-in; it is not implemented
   SIGKILL has reached gets one more 30 s SIGKILL round and 1 s to go before the verdict. The bound is hard, and
   cleanup is confirmed only when a listing shows no live group member and the direct child is reaped. A member still
   listed after a SIGKILL was delivered to it, a foreign UID or a GUI baseline PID in the group (checked in every
-  listing, the final one included) is contamination. A member no SIGKILL reached within the bound leaves that
-  command's cleanup unconfirmed instead: no quarantine marker, and the command fails. The job's finalization then
+  listing, the final one included) is contamination. That refusal names the refused members (eight at most, then a
+  count) by PID, UID, parent, process group, kernel start time and kernel command name (never arguments or the
+  environment) in the broker's log and the quarantine record; the job's reason keeps only the refusal and the count
+  (#196). The one UID 0 member that is not foreign is the command's own launcher: its unreaped direct child while
+  still `launchctl asuser` or `_job-exec` before the drop, with the PID and start time recorded at spawn, leading
+  its group. The kernel gives no other process that PID until it is reaped, so the worker SIGTERMs and SIGKILLs it
+  by PID as root and judges it like any member; any other UID 0 member, or one whose PID or start time differs, is
+  contamination. A member no SIGKILL reached within the bound leaves that command's cleanup unconfirmed instead: no
+  quarantine marker, and the command fails. The job's finalization then
   tries to repair it: its account or lane quiesce SIGKILLs and judges what is left. Only if the job's final cleanup
   is still unconfirmed does the job end with `cleanup_ok=false`, which fences the epoch and drains the worker to the
   idle check, whose full-account quiesce and admission let it register again without an owner. At load 53 a 100 ms
@@ -505,13 +512,15 @@ lane mode it is also attached to the tracker; its `launchd_sim` (its arguments n
 children are then the job's, charged to its memory budget and stopped by its lane quiesce, not unattributed residue
 beside a sibling. A discovery listing that merely fails is retried; one whose process cleanup failed or found
 contamination, or a failed manifest save, fails the job when the run ends, with the same quarantine authority as the
-job's own commands, and a later successful listing never clears it. At finalization, before the lane quiesce, every
-such clone still listed is adopted too, and all of the job's `test_clones` are shut down, deleted and proven absent
-with the job's own simulator; a second pass after the quiesce, and recovery after a restart, do the same from the
-manifest, and a survivor is contamination. Name and inventory together decide what is discovered: a clone of another
-job's simulator (another job ID) or one listed before the run is never the job's. A parallel-testing run boots its
-clones at once, after the build, which the controller's start stagger does not cover; in lane mode the engine
-therefore starts the run only once 30 s have passed since the latest simulator boot or parallel-testing run start of
-any lane, checking again after every wait, so a boot during the wait restarts it. This gate is the last step before
-the run, after the clone inventory, so no work between the gate and the run can miss a boot.
+job's own commands, and a later successful listing never clears it. When the run ends the watch starts no new
+listing and waits for the one in flight, which the run's end never cancels: a listing cut short while its launcher
+still ran as root is the suspected cause of a smoke run's quarantine (#196). At finalization, before the lane
+quiesce, every such clone still listed is adopted too, and all of the job's `test_clones` are shut down, deleted and
+proven absent with the job's own simulator; a second pass after the quiesce, and recovery after a restart, do the
+same from the manifest, and a survivor is contamination. Name and inventory together decide what is discovered: a
+clone of another job's simulator (another job ID) or one listed before the run is never the job's. A parallel-testing
+run boots its clones at once, after the build, which the controller's start stagger does not cover; in lane mode the
+engine therefore starts the run only once 30 s have passed since the latest simulator boot or parallel-testing run
+start of any lane, checking again after every wait, so a boot during the wait restarts it. This gate is the last step
+before the run, after the clone inventory, so no work between the gate and the run can miss a boot.
 

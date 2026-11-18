@@ -439,6 +439,65 @@ func TestLaneCensusRefreshesCloneOwnershipFirst(t *testing.T) {
 	}
 }
 
+// The end of a parallel-testing run stops its clone watch without cutting
+// short the listing in flight: stop starts no new pass and waits for that
+// one, which finishes under the job's context and is judged as it ends.
+// Before, stop cancelled it, and the native runner's cleanup of a listing
+// cancelled while its launcher still ran as root refused that launcher as
+// a foreign UID and quarantined the worker (#196, the suspected cause of
+// the herdrup smoke run's quarantine on 18 Nov 13:43Z).
+func TestCloneWatchStopLetsTheListingInFlightFinish(t *testing.T) {
+	runner := newLaneFake()
+	set := &testingSet{devices: map[string]string{cloneOne: "Clone 1 of macserve-job-1"}}
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	var listings atomic.Int32
+	runner.fakeRunner.hook = func(ctx context.Context, c Command, out, stderr io.Writer) (bool, ProcessResult, error) {
+		if testingListing(c) {
+			listings.Add(1)
+			once.Do(func() { close(entered) })
+			select {
+			case <-ctx.Done():
+				// What the native runner reported for a listing cancelled
+				// while its launcher was still root.
+				return true, ProcessResult{ExitCode: -1}, errors.Join(ctx.Err(), ErrCleanup, ErrContamination, errors.New("protected cleanup: job group contains a foreign UID"))
+			case <-release:
+			}
+		}
+		return set.hook(ctx, c, out, stderr)
+	}
+	engine := laneEngine(t, runner, 3)
+	// One periodic pass at once, then none.
+	var pauses atomic.Int32
+	engine.pause = func(ctx context.Context, _ time.Duration) error {
+		if pauses.Add(1) == 1 {
+			return nil
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	m := manifest{JobID: "job-1", DeveloperDir: "/Applications/Xcode.app/Contents/Developer", TestClonesPending: true}
+	stop := engine.watchTestClones(context.Background(), &m)
+	<-entered
+	stopped := make(chan error, 1)
+	go func() { stopped <- stop() }()
+	select {
+	case err := <-stopped:
+		t.Fatalf("stop returned with a listing in flight: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	if err := <-stopped; err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if !slices.Equal(m.TestClones, []string{cloneOne}) {
+		t.Fatalf("the listing in flight did not finish: manifest clones %v", m.TestClones)
+	}
+	if n := listings.Load(); n != 1 {
+		t.Fatalf("%d listings, want only the one in flight", n)
+	}
+}
+
 // The native lane census claims clones at its own boundary: it runs the
 // census refresh before it labels and judges its sample, so a clone made
 // just before that sample (here, found only by the refresh) is its job's,

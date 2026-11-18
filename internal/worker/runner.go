@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -318,6 +319,14 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 	_ = errWrite.Close()
 	pid := cmd.Process.Pid
 	uid := r.uid
+	// The direct child as spawned: until it is reaped (reap, below) the
+	// kernel gives no other process its PID, so its start time read now is
+	// its own, whether it is still launchctl asuser or _job-exec as root or
+	// has already become the job's tool (cleanupProtectedGroup's launcher).
+	child := processInstance{pid: pid}
+	if p, _, ok := kernelProcess(pid); ok {
+		child.start = p.start
+	}
 	defer cmd.Process.Release()
 	if tracker != nil {
 		// The root keeps this PID through launchctl asuser, _job-exec and
@@ -492,7 +501,7 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 		runErr = errors.Join(runErr, ctx.Err())
 	}
 
-	cleanupErr := r.cleanupGroup(pid, uid, reap, func() bool { return reaped }, func() bool { return waitFailed })
+	cleanupErr := r.cleanupGroup(child, uid, reap, func() bool { return reaped }, func() bool { return waitFailed })
 	result.CleanupOK = cleanupErr == nil
 	if cleanupErr != nil {
 		cleanupErr = fmt.Errorf("%s: %w", label, cleanupErr)
@@ -559,10 +568,11 @@ func cleanupFailure(phase string, errs ...error) error {
 	return fmt.Errorf("%s: %w", phase, errors.Join(errs...))
 }
 
-func (r *nativeRunner) cleanupGroup(group, uid int, reap func(), reaped, waitFailed func() bool) error {
+func (r *nativeRunner) cleanupGroup(child processInstance, uid int, reap func(), reaped, waitFailed func() bool) error {
 	if r.signalProcess != nil {
-		return r.cleanupProtectedGroup(group, uid, reap, reaped)
+		return r.cleanupProtectedGroup(child, uid, reap, reaped)
 	}
+	group := child.pid
 	if group <= 1 || group == syscall.Getpgrp() {
 		return errors.Join(ErrCleanup, cleanupFailure("cleanup", errors.New("refusing to signal the owner process group")))
 	}
@@ -647,8 +657,21 @@ func (r *nativeRunner) cleanupGroup(group, uid int, reap func(), reaped, waitFai
 	return nil
 }
 
-// No root kill(2) operation is permitted, even after inspecting a group: a
-// member can change UID or a PID can be reused between inspection and signal.
+// No root kill(2) operation is permitted on a listed member, even after
+// inspecting a group: a member can change UID or a PID can be reused between
+// inspection and signal. The one exception is the command's own launcher:
+// the direct child while it is still root (launchctl asuser, then _job-exec
+// until it drops to the job UID). It is a member with the PID and start
+// time recorded at spawn (child), UID 0, leading its own group, while the
+// child is not reaped. Until it is reaped the kernel gives no other process
+// that PID, so a root kill(2) of it reaches only the process the runner
+// forked, whatever it has become since. It is signalled that way and judged
+// like any member. A cleanup that began while the launcher still ran (a
+// command cancelled or timed out at once; until #196 a clone listing
+// cancelled by the end of its run) refused it as a foreign UID and
+// quarantined the worker. Any other member of another UID, UID 0 included,
+// and one whose PID, start time, group or reaping does not match, stays a
+// foreign UID: contamination at once.
 //
 // The window (termGrace, then killGrace) bounds signalling: each listed
 // member is sent SIGTERM within termGrace and SIGKILL after. Under load
@@ -679,7 +702,11 @@ func (r *nativeRunner) cleanupGroup(group, uid int, reap func(), reaped, waitFai
 // escalation. Only if the job's final cleanup is still unconfirmed does the
 // job end with cleanup_ok false, which fences the epoch and drains to the
 // idle check (#195 review F1). A listing that still fails is unconfirmed.
-func (r *nativeRunner) cleanupProtectedGroup(group, uid int, reap func(), reaped func() bool) error {
+func (r *nativeRunner) cleanupProtectedGroup(child processInstance, uid int, reap func(), reaped func() bool) error {
+	group := child.pid
+	launcher := func(p processSample) bool {
+		return child.start != "" && p.pid == child.pid && p.start == child.start && p.uid == 0 && p.group == p.pid && !reaped()
+	}
 	begun := time.Now()
 	termUntil := begun.Add(r.termGrace)
 	window := begun.Add(r.termGrace + r.killGrace)
@@ -689,7 +716,7 @@ func (r *nativeRunner) cleanupProtectedGroup(group, uid int, reap func(), reaped
 	var listErr, signalErr error
 	for time.Now().Before(until) {
 		reap()
-		members, err, refused := r.listGroup(min(time.Until(until), r.sampleTimeout), group, uid)
+		members, err, refused := r.listGroup(min(time.Until(until), r.sampleTimeout), group, uid, launcher)
 		if refused != nil {
 			return refused
 		}
@@ -698,7 +725,7 @@ func (r *nativeRunner) cleanupProtectedGroup(group, uid int, reap func(), reaped
 			return nil
 		}
 		if len(members) > 0 {
-			signalErr = r.signalMembers(members, termUntil, min(time.Until(until), r.signalTimeout), killed)
+			signalErr = r.signalMembers(members, launcher, termUntil, min(time.Until(until), r.signalTimeout), killed)
 		}
 		if !time.Now().Before(window) {
 			pause = min(2*pause, cleanupBackoffMax)
@@ -706,7 +733,7 @@ func (r *nativeRunner) cleanupProtectedGroup(group, uid int, reap func(), reaped
 		time.Sleep(max(0, min(pause, time.Until(until))))
 	}
 	reap()
-	if members, err, refused := r.listGroup(r.sampleTimeout, group, uid); refused != nil {
+	if members, err, refused := r.listGroup(r.sampleTimeout, group, uid, launcher); refused != nil {
 		return refused
 	} else if err == nil {
 		var pending []processSample
@@ -716,10 +743,10 @@ func (r *nativeRunner) cleanupProtectedGroup(group, uid int, reap func(), reaped
 			}
 		}
 		if len(pending) > 0 {
-			signalErr = r.signalMembers(pending, termUntil, r.signalTimeout, killed)
+			signalErr = r.signalMembers(pending, launcher, termUntil, r.signalTimeout, killed)
 			for settle := time.Now().Add(r.killGrace); time.Now().Before(settle); time.Sleep(min(r.pollInterval, time.Until(settle))) {
 				reap()
-				if members, err, _ := r.listGroup(time.Until(settle), group, uid); err == nil && len(members) == 0 && reaped() {
+				if members, err, _ := r.listGroup(time.Until(settle), group, uid, launcher); err == nil && len(members) == 0 && reaped() {
 					break
 				}
 			}
@@ -730,14 +757,11 @@ func (r *nativeRunner) cleanupProtectedGroup(group, uid int, reap func(), reaped
 	if err != nil {
 		return errors.Join(ErrCleanup, cleanupFailure("protected cleanup: final listing", listErr, signalErr, err))
 	}
-	if _, err := ownedGroup(samples, group, uid); err != nil {
-		return errors.Join(ErrCleanup, ErrContamination, cleanupFailure("protected cleanup: final listing", err))
-	}
-	// The same foreign-UID and GUI-baseline checks as every listing, before
-	// members are split into survivors and unescalated ones: a baseline PID
-	// first seen here is contamination at once, never unconfirmed (#195
-	// review round 3).
-	members, refused := r.groupMembers(samples, group, uid)
+	// The same foreign-UID and GUI-baseline checks as every listing, and a
+	// zombie of another UID too, before members are split into survivors
+	// and unescalated ones: a baseline PID first seen here is contamination
+	// at once, never unconfirmed (#195 review round 3).
+	members, refused := r.groupMembers(samples, group, uid, true, launcher)
 	if refused != nil {
 		return refused
 	}
@@ -762,40 +786,49 @@ func (r *nativeRunner) cleanupProtectedGroup(group, uid int, reap func(), reaped
 }
 
 // listGroup lists the live members of group within timeout (groupMembers).
-func (r *nativeRunner) listGroup(timeout time.Duration, group, uid int) (members []processSample, err, refused error) {
+func (r *nativeRunner) listGroup(timeout time.Duration, group, uid int, launcher func(processSample) bool) (members []processSample, err, refused error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	samples, err := r.scope.sample(ctx)
-	members, refused = r.groupMembers(samples, group, uid)
+	members, refused = r.groupMembers(samples, group, uid, false, launcher)
 	return members, err, refused
 }
 
-// groupMembers returns the live members of group in samples. refused is the
-// contamination verdict for a member of another UID or a GUI baseline PID.
-func (r *nativeRunner) groupMembers(samples []processSample, group, uid int) (members []processSample, refused error) {
+// groupMembers returns the live members of group in samples: those of uid
+// and the command's own launcher (cleanupProtectedGroup). refused is the
+// contamination verdict for any other member of another UID or a member
+// with a GUI baseline PID, and with zombies (the final listing) for a zombie
+// of another UID too. It names every refused member (groupRefusal).
+func (r *nativeRunner) groupMembers(samples []processSample, group, uid int, zombies bool, launcher func(processSample) bool) (members []processSample, refused error) {
+	var foreign, baseline []processSample
 	for _, p := range samples {
-		if p.group != group || p.zombie {
+		if p.group != group || (p.zombie && !zombies) {
 			continue
 		}
-		if p.uid != uid {
-			return nil, errors.Join(ErrCleanup, ErrContamination, cleanupFailure("protected cleanup", errors.New("job group contains a foreign UID")))
+		switch {
+		case p.uid != uid && !launcher(p):
+			foreign = append(foreign, p)
+		case p.zombie:
+		case slices.ContainsFunc(r.scope.baseline.Processes, func(trusted ProcessIdentity) bool { return trusted.PID == p.pid }):
+			baseline = append(baseline, p)
+		default:
+			members = append(members, p)
 		}
-		for _, trusted := range r.scope.baseline.Processes {
-			if trusted.PID == p.pid {
-				return nil, errors.Join(ErrCleanup, ErrContamination, cleanupFailure("protected cleanup", errors.New("refusing to signal a GUI baseline PID")))
-			}
-		}
-		members = append(members, p)
+	}
+	if len(foreign) > 0 || len(baseline) > 0 {
+		return nil, groupRefusal(foreign, baseline)
 	}
 	return members, nil
 }
 
 // signalMembers sends one protected cleanup round to members within timeout:
 // SIGTERM to each member it reaches before termUntil, SIGKILL after, choosing
-// as it goes so a slow SIGTERM does not hold back SIGKILL from the rest. It
-// records each member a SIGKILL reached in killed and returns the last failed
-// signal, which the next round retries.
-func (r *nativeRunner) signalMembers(members []processSample, termUntil time.Time, timeout time.Duration, killed map[processInstance]bool) error {
+// as it goes so a slow SIGTERM does not hold back SIGKILL from the rest. The
+// command's own launcher is signalled by its PID as root (r.kill), every
+// other member through the job-UID signal helper. It records each member a
+// SIGKILL reached in killed and returns the last failed signal, which the
+// next round retries.
+func (r *nativeRunner) signalMembers(members []processSample, launcher func(processSample) bool, termUntil time.Time, timeout time.Duration, killed map[processInstance]bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	var failed error
@@ -807,7 +840,17 @@ func (r *nativeRunner) signalMembers(members []processSample, termUntil time.Tim
 		if !time.Now().Before(termUntil) {
 			sig = syscall.SIGKILL
 		}
-		if err := r.signalProcess(ctx, p, sig); err != nil {
+		var err error
+		if launcher(p) {
+			if err = r.kill(p.pid, sig); errors.Is(err, syscall.ESRCH) {
+				err = nil
+			} else if err != nil {
+				err = fmt.Errorf("signal launcher pid=%d start=%q signal=%d: %w", p.pid, p.start, sig, err)
+			}
+		} else {
+			err = r.signalProcess(ctx, p, sig)
+		}
+		if err != nil {
 			failed = cleanupFailure("protected cleanup: signal", err)
 		} else if sig == syscall.SIGKILL {
 			killed[processInstance{p.pid, p.start}] = true

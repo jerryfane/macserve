@@ -31,39 +31,59 @@ func identityProcesses(ctx context.Context) ([]processSample, error) {
 		if err != nil || pid <= 0 {
 			continue
 		}
-		path := filepath.Join("/proc", entry.Name(), "stat")
-		file, err := os.Open(path)
-		if os.IsNotExist(err) {
-			continue
-		}
+		p, _, ok, err := readStat(pid)
 		if err != nil {
 			return nil, err
 		}
-		info, statErr := file.Stat()
-		data := make([]byte, 8192)
-		n, readErr := file.Read(data)
-		file.Close()
-		if statErr != nil || readErr != nil {
-			continue
-		} // exited during the snapshot
-		stat, ok := info.Sys().(*syscall.Stat_t)
-		end := strings.LastIndexByte(string(data[:n]), ')')
-		if !ok || end < 0 {
-			return nil, errors.New("invalid kernel process stat")
+		if ok {
+			samples = append(samples, p)
 		}
-		fields := strings.Fields(string(data[end+1 : n]))
-		if len(fields) < 20 {
-			return nil, errors.New("short kernel process stat")
-		}
-		parent, err := strconv.Atoi(fields[1])
-		if err != nil {
-			return nil, err
-		}
-		group, err := strconv.Atoi(fields[2])
-		if err != nil {
-			return nil, err
-		}
-		samples = append(samples, processSample{pid: pid, parent: parent, group: group, uid: int(stat.Uid), zombie: fields[0] == "Z", start: fields[19]})
 	}
 	return samples, nil
+}
+
+// kernelProcess is pid's kernel record and its command name (comm: its
+// executable's name, at most 15 bytes; never an argument or the
+// environment); ok is false once no process has pid.
+func kernelProcess(pid int) (p processSample, command string, ok bool) {
+	p, command, ok, err := readStat(pid)
+	return p, command, ok && err == nil
+}
+
+// readStat reads pid's /proc stat record and its command name; ok is false
+// for a process that exited during the read.
+func readStat(pid int) (p processSample, command string, ok bool, err error) {
+	file, err := os.Open(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if os.IsNotExist(err) {
+		return p, "", false, nil
+	}
+	if err != nil {
+		return p, "", false, err
+	}
+	info, statErr := file.Stat()
+	data := make([]byte, 8192)
+	n, readErr := file.Read(data)
+	file.Close()
+	if statErr != nil || readErr != nil {
+		return p, "", false, nil // exited during the read
+	}
+	text := string(data[:n])
+	stat, isStat := info.Sys().(*syscall.Stat_t)
+	begin, end := strings.IndexByte(text, '('), strings.LastIndexByte(text, ')')
+	if !isStat || begin < 0 || end < begin {
+		return p, "", false, errors.New("invalid kernel process stat")
+	}
+	fields := strings.Fields(text[end+1:])
+	if len(fields) < 20 {
+		return p, "", false, errors.New("short kernel process stat")
+	}
+	parent, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return p, "", false, err
+	}
+	group, err := strconv.Atoi(fields[2])
+	if err != nil {
+		return p, "", false, err
+	}
+	return processSample{pid: pid, parent: parent, group: group, uid: int(stat.Uid), zombie: fields[0] == "Z", start: fields[19]}, text[begin+1 : end], true, nil
 }
