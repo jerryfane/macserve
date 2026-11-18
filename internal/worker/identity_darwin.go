@@ -38,6 +38,17 @@ func identityProcesses(ctx context.Context) ([]processSample, error) {
 	return samples, ctx.Err()
 }
 
+// processCommand is pid's kernel command name (p_comm: its executable's
+// name, at most 16 bytes; never an argument or the environment) while pid
+// still names the process started at start.
+func processCommand(pid int, start string) (string, bool) {
+	k, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
+	if err != nil || int(k.Proc.P_pid) != pid || startToken(&k.Proc) != start {
+		return "", false
+	}
+	return unix.ByteSliceToString(k.Proc.P_comm[:]), true
+}
+
 // memoryProcesses reads the live processes of uid and charges each its
 // phys_footprint, with the resident size alongside for diagnostics. Both come
 // from the kernel in-process, so a sample never waits on a subprocess, however

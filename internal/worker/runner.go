@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -730,14 +731,11 @@ func (r *nativeRunner) cleanupProtectedGroup(group, uid int, reap func(), reaped
 	if err != nil {
 		return errors.Join(ErrCleanup, cleanupFailure("protected cleanup: final listing", listErr, signalErr, err))
 	}
-	if _, err := ownedGroup(samples, group, uid); err != nil {
-		return errors.Join(ErrCleanup, ErrContamination, cleanupFailure("protected cleanup: final listing", err))
-	}
-	// The same foreign-UID and GUI-baseline checks as every listing, before
-	// members are split into survivors and unescalated ones: a baseline PID
-	// first seen here is contamination at once, never unconfirmed (#195
-	// review round 3).
-	members, refused := r.groupMembers(samples, group, uid)
+	// The same foreign-UID and GUI-baseline checks as every listing, and a
+	// zombie of another UID too, before members are split into survivors
+	// and unescalated ones: a baseline PID first seen here is contamination
+	// at once, never unconfirmed (#195 review round 3).
+	members, refused := r.groupMembers(samples, group, uid, true)
 	if refused != nil {
 		return refused
 	}
@@ -766,26 +764,32 @@ func (r *nativeRunner) listGroup(timeout time.Duration, group, uid int) (members
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	samples, err := r.scope.sample(ctx)
-	members, refused = r.groupMembers(samples, group, uid)
+	members, refused = r.groupMembers(samples, group, uid, false)
 	return members, err, refused
 }
 
 // groupMembers returns the live members of group in samples. refused is the
-// contamination verdict for a member of another UID or a GUI baseline PID.
-func (r *nativeRunner) groupMembers(samples []processSample, group, uid int) (members []processSample, refused error) {
+// contamination verdict for a member of another UID or a GUI baseline PID,
+// and with zombies (the final listing) for a zombie of another UID too. It
+// names every refused member (groupRefusal).
+func (r *nativeRunner) groupMembers(samples []processSample, group, uid int, zombies bool) (members []processSample, refused error) {
+	var foreign, baseline []processSample
 	for _, p := range samples {
-		if p.group != group || p.zombie {
+		if p.group != group || (p.zombie && !zombies) {
 			continue
 		}
-		if p.uid != uid {
-			return nil, errors.Join(ErrCleanup, ErrContamination, cleanupFailure("protected cleanup", errors.New("job group contains a foreign UID")))
+		switch {
+		case p.uid != uid:
+			foreign = append(foreign, p)
+		case p.zombie:
+		case slices.ContainsFunc(r.scope.baseline.Processes, func(trusted ProcessIdentity) bool { return trusted.PID == p.pid }):
+			baseline = append(baseline, p)
+		default:
+			members = append(members, p)
 		}
-		for _, trusted := range r.scope.baseline.Processes {
-			if trusted.PID == p.pid {
-				return nil, errors.Join(ErrCleanup, ErrContamination, cleanupFailure("protected cleanup", errors.New("refusing to signal a GUI baseline PID")))
-			}
-		}
-		members = append(members, p)
+	}
+	if len(foreign) > 0 || len(baseline) > 0 {
+		return nil, groupRefusal(foreign, baseline)
 	}
 	return members, nil
 }

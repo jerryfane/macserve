@@ -79,7 +79,10 @@ PF enforcement may be a separately reviewed future opt-in; it is not implemented
   SIGKILL has reached gets one more 30 s SIGKILL round and 1 s to go before the verdict. The bound is hard, and
   cleanup is confirmed only when a listing shows no live group member and the direct child is reaped. A member still
   listed after a SIGKILL was delivered to it, a foreign UID or a GUI baseline PID in the group (checked in every
-  listing, the final one included) is contamination. A member no SIGKILL reached within the bound leaves that
+  listing, the final one included) is contamination. That refusal names the refused members (eight at most, then a
+  count) by PID, UID, parent, process group, kernel start time and kernel command name (never arguments or the
+  environment) in the broker's log and the quarantine record; the job's reason keeps only the refusal and the count
+  (#196). A member no SIGKILL reached within the bound leaves that
   command's cleanup unconfirmed instead: no quarantine marker, and the command fails. The job's finalization then
   tries to repair it: its account or lane quiesce SIGKILLs and judges what is left. Only if the job's final cleanup
   is still unconfirmed does the job end with `cleanup_ok=false`, which fences the epoch and drains the worker to the
