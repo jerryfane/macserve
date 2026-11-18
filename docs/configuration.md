@@ -252,6 +252,27 @@ written to the protected evidence directory and exported from there, never from 
 Sealing and export have their own 15-minute bound, and the controller's finalizing window grows by it for this
 kind; the request's `timeout_seconds` must still leave room for them. Signing and upload are not part of this kind.
 
+**Build-for-testing producers.** A `build` request of a build template without a Flutter pin may set `"build_for_testing": true` (any other recipe,
+an explicit profile or a Flutter template refuses it; the field is omitted when false, so other requests keep
+their digest). The job keeps its profile, so a GitHub check named after it keeps its name; its run is
+`xcrun xcodebuild (-project P | -workspace W) -scheme S -configuration Debug -sdk iphonesimulator -destination
+'generic/platform=iOS Simulator' -derivedDataPath ${DERIVED_DATA} CODE_SIGNING_ALLOWED=NO ARCHS=arm64
+build-for-testing` (no `-only-testing`), after the optional XcodeGen and package steps. After the run, once every
+job process has stopped, the worker (as root) opens `derived-data/Build/Products` descriptor-relative and scans
+`Debug-iphonesimulator/**` and the top-level `*.xctestrun` (nothing else there is exported). It refuses symlinks,
+hard links, special files, mount crossings, unsafe names, more than 100 000 entries and more than 4 GiB, and
+requires the platform directory and exactly one regular `.xctestrun`. It writes the deterministic tar (sorted
+entries, owner 0, mtime 0, directories 0755, files 0755 if executable else 0644; paths relative to
+`Build/Products`, the `.xctestrun`'s `__TESTROOT__`) as the one required artifact `test-products.tar`, into the
+protected evidence directory, never from the workspace. A failure fails the job with a reason starting `test
+products: `. Sealing and export share the 15-minute archive evidence bound, and the finalizing window grows by
+it. The worker's build seal names the tar's SHA-256 (`products_sha256`) and the `.xctestrun`'s name
+(`xctestrun`, also in the result observation); the keyholder refuses a producer's success receipt whose seal
+lacks them or differs from the result's artifact, and any other job's seal that names products. The receipt's
+request carries `build_for_testing`, and validation requires the expected flag. Consumers of the products (test
+shards that run `test-without-building`) and the GitHub policy field that admits the producer are not part of
+this release step.
+
 The controller requires schema-3 root-owned health attestation bound to job UID and qualified profile
 digests, not interface inventory or PF policy/rules. VM bridge/address churn does not invalidate health
 or cancel work. Health expires within 45 seconds; missing, stale or changed non-network host/tool
@@ -324,7 +345,12 @@ controller read `max_concurrent_jobs` from `controller.json` (lowered by `lanes.
 | 6     | 230 GiB          | 300 GiB                          | at most 50 GiB                   |
 
 The retained evidence pool reserves 1 GiB for store log
-rows and 14 GiB for artifacts, with seven-day expiry/oldest-terminal eviction. Metadata persists for 90 days;
+rows and 14 GiB for artifacts, with seven-day expiry/oldest-terminal eviction. Producers' `test-products.tar`
+files live in a separate 16 GiB products pool (`var/controller/products/<sha256>.tar`, content-addressed, so a
+rebuild of identical bytes is stored once), never in the evidence pool: bytes unused for seven days are evicted,
+then the least recently used until the pool fits, never those of a producer still running. The store's
+`products` table (schema version 9) records each retained digest and, for each eviction, its proof (digest,
+bytes, evicted_at), kept as long as job metadata. Metadata persists for 90 days;
 expired downloads, log pages and newly opened log streams return `410`.
 These are monitored application budgets, not filesystem quotas. Controller test parsing uses sealed JSON
 exported by the pinned worker tool; it does not execute repository-provided parsers.

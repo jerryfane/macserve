@@ -214,6 +214,13 @@ func openPathAt(root *os.File, rel string, device uint64) (*os.File, error) {
 // collide case-insensitively within a directory, paths over maxArchivePath,
 // and more entries or regular-file bytes than limits.
 func scanArchive(ctx context.Context, root *os.File, device uint64, limits archiveLimits, statat statAt) (*archiveTree, error) {
+	return scanTree(ctx, root, device, limits, statat, nil)
+}
+
+// scanTree is scanArchive of the entries keep accepts by slash path: an
+// entry it refuses is neither listed, descended nor checked. A nil keep
+// accepts every entry.
+func scanTree(ctx context.Context, root *os.File, device uint64, limits archiveLimits, statat statAt, keep func(rel string) bool) (*archiveTree, error) {
 	var top unix.Stat_t
 	if err := fstatFD(int(root.Fd()), &top); err != nil {
 		return nil, err
@@ -222,6 +229,9 @@ func scanArchive(ctx context.Context, root *os.File, device uint64, limits archi
 	folded := map[string]string{}
 	var total int64
 	err := walkDescriptors(ctx, root, device, limits.entries-1, statat, func(_ *os.File, name, rel string, stat *unix.Stat_t) (bool, error) {
+		if keep != nil && !keep(rel) {
+			return false, nil
+		}
 		if !validArchiveName(name) {
 			return false, archiveRefusal("entry name %s", strconv.Quote(rel))
 		}

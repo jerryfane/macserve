@@ -300,6 +300,14 @@ func validateShards(key string, s *model.TestShards) error {
 // tests, and its one required artifact is the workspace output directory
 // (exported as output.tar.gz).
 //
+// A build template's run is the Debug simulator build for any iOS simulator.
+// For a build-for-testing snapshot it is build-for-testing for arm64 instead
+// (see buildForTestingRun), with no test selection, and its one required
+// artifact is test-products.tar, which the worker's trusted export step
+// writes from the derived products after the job has stopped (nothing the
+// job writes is exported under that name). A Flutter template serves no
+// build-for-testing snapshot.
+//
 // An archive template's run is the unsigned Release xcodebuild archive for
 // any iOS device (see archiveRun) into ${WORKSPACE}/App.xcarchive at the
 // snapshot release's MARKETING_VERSION and CURRENT_PROJECT_VERSION. It has no
@@ -330,6 +338,8 @@ func Derive(snapshot model.Profile, c model.RepoConfig) (model.Profile, error) {
 		return model.Profile{}, fmt.Errorf("%w: .macserve.json has a flutter section but template %s has no Flutter pin", ErrUnsupported, snapshot.Template.ID)
 	case flutter != nil && (!validFlutterPin(*flutter) || snapshot.Kind == model.SimulatorScript):
 		return model.Profile{}, fmt.Errorf("%w: invalid Flutter template snapshot", ErrInvalid)
+	case snapshot.BuildForTesting && snapshot.Kind != model.Build:
+		return model.Profile{}, fmt.Errorf("%w: only a build template snapshot may build for testing", ErrInvalid)
 	}
 	container := []string{"-project", c.Project}
 	if c.Workspace != "" {
@@ -363,6 +373,14 @@ func Derive(snapshot model.Profile, c model.RepoConfig) (model.Profile, error) {
 	case model.Build:
 		if snapshot.Shard != "" {
 			return model.Profile{}, fmt.Errorf("%w: build template snapshot has a shard", ErrInvalid)
+		}
+		if snapshot.BuildForTesting {
+			if flutter != nil {
+				return model.Profile{}, fmt.Errorf("%w: a Flutter template serves no build-for-testing snapshot", ErrInvalid)
+			}
+			p.Run = xcodebuild(buildForTestingRun(c.Scheme)...)
+			p.Artifacts = []model.ArtifactRule{{Path: TestProductsArtifact, Required: true}}
+			break
 		}
 		build := []string{"-scheme", c.Scheme, "-configuration", "Debug", "-sdk", "iphonesimulator", "-destination", "generic/platform=iOS Simulator", "-derivedDataPath", "${DERIVED_DATA}", "CODE_SIGNING_ALLOWED=NO", "build"}
 		if flutter != nil {

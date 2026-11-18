@@ -45,23 +45,47 @@ func archiveTarName(n archiveNode) string {
 	return name
 }
 
-// sealArchive writes the deterministic tar of a scanned tree to out, at most
-// maxBytes of it, and returns its identity and the paths it stores with mode
-// 0755. Entries are in byte order of their tar names (a directory precedes
-// its contents), owned by uid and gid 0 with empty owner names, mtime the
-// Unix epoch and no access or change times; directories are 0755, regular
-// files 0755 when any execute bit is set and 0644 otherwise. Each file is
-// re-opened and must be the scanned inode, unchanged. The same tree always
-// yields the same bytes.
+// sealArchive writes the deterministic tar of a scanned .xcarchive tree to
+// out, at most maxBytes of it, below the single top-level directory
+// profiles.ArchivePath (see sealTree), and returns its identity and the
+// paths it stores with mode 0755.
 func sealArchive(ctx context.Context, tree *archiveTree, out io.Writer, maxBytes int64) (SealedArchive, []string, error) {
 	sealed := SealedArchive{Name: profiles.ArchiveArtifact, Root: profiles.ArchivePath}
+	t, err := sealTree(ctx, tree, out, maxBytes, archiveTarName)
+	if err != nil {
+		return sealed, nil, err
+	}
+	sealed.SHA256, sealed.SizeBytes, sealed.Entries = t.sha256, t.sizeBytes, t.entries
+	return sealed, t.executables, nil
+}
+
+// sealedTar is the identity of a tar sealTree wrote: its SHA-256, size,
+// entry count and the paths it stores with mode 0755, sorted.
+type sealedTar struct {
+	sha256      string
+	sizeBytes   int64
+	entries     int
+	executables []string
+}
+
+// sealTree writes the deterministic tar of a scanned tree to out, at most
+// maxBytes of it, each node named by tarName (directories with a slash; a
+// node named "" is left out). Entries are in byte order of their tar names
+// (a directory precedes its contents), owned by uid and gid 0 with empty
+// owner names, mtime the Unix epoch and no access or change times;
+// directories are 0755, regular files 0755 when any execute bit is set and
+// 0644 otherwise. Each file is re-opened and must be the scanned inode,
+// unchanged. The same tree always yields the same bytes.
+func sealTree(ctx context.Context, tree *archiveTree, out io.Writer, maxBytes int64, tarName func(archiveNode) string) (sealedTar, error) {
 	type entry struct {
 		name string
 		node archiveNode
 	}
-	entries := make([]entry, len(tree.nodes))
-	for i, n := range tree.nodes {
-		entries[i] = entry{archiveTarName(n), n}
+	entries := make([]entry, 0, len(tree.nodes))
+	for _, n := range tree.nodes {
+		if name := tarName(n); name != "" {
+			entries = append(entries, entry{name, n})
+		}
 	}
 	slices.SortFunc(entries, func(a, b entry) int { return strings.Compare(a.name, b.name) })
 	hash := sha256.New()
@@ -73,13 +97,13 @@ func sealArchive(ctx context.Context, tree *archiveTree, out io.Writer, maxBytes
 	epoch := time.Unix(0, 0)
 	for _, e := range entries {
 		if err := ctx.Err(); err != nil {
-			return sealed, nil, err
+			return sealedTar{}, err
 		}
 		header := &tar.Header{Name: e.name, Mode: 0o755, ModTime: epoch, Format: tar.FormatPAX}
 		if e.node.dir {
 			header.Typeflag = tar.TypeDir
 			if err := tw.WriteHeader(header); err != nil {
-				return sealed, nil, err
+				return sealedTar{}, err
 			}
 			continue
 		}
@@ -91,17 +115,14 @@ func sealArchive(ctx context.Context, tree *archiveTree, out io.Writer, maxBytes
 			header.Mode = 0o644
 		}
 		if err := sealFile(ctx, tree, tw, header, e.node, buffer); err != nil {
-			return sealed, nil, err
+			return sealedTar{}, err
 		}
 	}
 	if err := errors.Join(tw.Close(), buffered.Flush()); err != nil {
-		return sealed, nil, err
+		return sealedTar{}, err
 	}
 	slices.Sort(executables)
-	sealed.SHA256 = hex.EncodeToString(hash.Sum(nil))
-	sealed.SizeBytes = counted.count
-	sealed.Entries = len(entries)
-	return sealed, executables, nil
+	return sealedTar{sha256: hex.EncodeToString(hash.Sum(nil)), sizeBytes: counted.count, entries: len(entries), executables: executables}, nil
 }
 
 func sealFile(ctx context.Context, tree *archiveTree, tw *tar.Writer, header *tar.Header, n archiveNode, buffer []byte) error {

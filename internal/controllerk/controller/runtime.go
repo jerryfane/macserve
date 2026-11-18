@@ -222,15 +222,17 @@ func New(options Options) (*Controller, error) {
 	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		return fail(fmt.Errorf("controller already owns root: %w", err))
 	}
-	if err := root.Mkdir("artifacts", 0700); err != nil && !errors.Is(err, os.ErrExist) {
-		return fail(err)
-	}
-	artifactInfo, err := root.Lstat("artifacts")
-	if err != nil {
-		return fail(err)
-	}
-	if !artifactInfo.IsDir() || artifactInfo.Mode().Perm()&0077 != 0 {
-		return fail(errors.New("unsafe artifact root"))
+	for _, name := range []string{"artifacts", productsDir} {
+		if err := root.Mkdir(name, 0700); err != nil && !errors.Is(err, os.ErrExist) {
+			return fail(err)
+		}
+		info, err := root.Lstat(name)
+		if err != nil {
+			return fail(err)
+		}
+		if !info.IsDir() || info.Mode().Perm()&0077 != 0 {
+			return fail(fmt.Errorf("unsafe %s root", name))
+		}
 	}
 	previous, err := options.Store.ActiveJobs(context.Background())
 	if err != nil {
@@ -282,17 +284,18 @@ func (o *Options) defaultBudgets() {
 	}
 }
 
-// FinalizingWindow is how long a delivered lease of kind lives once it began
-// finalizing or its cancellation was requested, under options (unset
+// FinalizingWindow is how long a delivered lease of request lives once it
+// began finalizing or its cancellation was requested, under options (unset
 // budgets take their defaults): the worker's finalization, its delivery and
-// heartbeat grace, and an ios_archive job's archive evidence window. Neither
-// heartbeats nor repeated stage requests extend it.
-func FinalizingWindow(options Options, kind model.Kind) time.Duration {
+// heartbeat grace, and an ios_archive job's archive evidence or a
+// build-for-testing job's test products window. Neither heartbeats nor
+// repeated stage requests extend it.
+func FinalizingWindow(options Options, request model.Request) time.Duration {
 	options.defaultBudgets()
 	window := options.CleanupTimeout + options.DeliveryTimeout + options.HeartbeatTimeout
-	if kind == model.IOSArchive {
-		// The worker builds, seals and exports the archive evidence in
-		// its own window after the job has stopped.
+	if request.Kind == model.IOSArchive || request.BuildForTesting {
+		// The worker seals and exports the archive evidence or test
+		// products in its own window after the job has stopped.
 		window += worker.ArchiveEvidenceTimeout
 	}
 	return window

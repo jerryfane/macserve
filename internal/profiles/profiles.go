@@ -178,6 +178,9 @@ func (r *Registry) Resolve(request model.Request) (model.Admission, error) {
 	if request.Release != nil {
 		return model.Admission{}, fmt.Errorf("%w: only ios_archive templates accept a release", ErrUnsupported)
 	}
+	if request.BuildForTesting {
+		return model.Admission{}, fmt.Errorf("%w: only build templates without a Flutter pin build for testing", ErrUnsupported)
+	}
 	if request.TimeoutSeconds == 0 {
 		request.TimeoutSeconds = p.DefaultTimeoutSeconds
 	}
@@ -223,6 +226,11 @@ func (r *Registry) resolveTemplate(request model.Request) (model.Admission, erro
 		return model.Admission{}, fmt.Errorf("%w: only ios_archive templates accept a release", ErrUnsupported)
 	}
 	request.Release = cloneRelease(request.Release)
+	// A build-for-testing producer is a build template job; Flutter
+	// templates have none.
+	if request.BuildForTesting && (t.Kind != model.Build || t.Flutter != nil) {
+		return model.Admission{}, fmt.Errorf("%w: only build templates without a Flutter pin build for testing", ErrUnsupported)
+	}
 	if !t.Kind.UsesSimulator() {
 		if request.Simulator != nil {
 			return model.Admission{}, fmt.Errorf("%w: repository, kind or toolchain pins", ErrUnsupported)
@@ -255,7 +263,7 @@ func (r *Registry) resolveTemplate(request model.Request) (model.Admission, erro
 		return model.Admission{}, fmt.Errorf("%w: timeout exceeds profile maximum", ErrInvalid)
 	}
 	snapshot := TemplateSnapshot(t, request.Repo)
-	snapshot.Simulator, snapshot.Shard, snapshot.Release = cloneSimulator(request.Simulator), request.Shard, cloneRelease(request.Release)
+	snapshot.Simulator, snapshot.Shard, snapshot.Release, snapshot.BuildForTesting = cloneSimulator(request.Simulator), request.Shard, cloneRelease(request.Release), request.BuildForTesting
 	return model.Admission{Request: request, Profile: snapshot, ProfileDigest: e.digest}, nil
 }
 
@@ -389,8 +397,8 @@ func normalizeParallelTesting(t *model.Template) error {
 }
 
 func normalizeProfile(p *model.Profile) error {
-	if p.Template != nil || p.Shard != "" || p.Release != nil {
-		return fmt.Errorf("%w: configured profiles cannot embed a template, shard or release", ErrInvalid)
+	if p.Template != nil || p.Shard != "" || p.Release != nil || p.BuildForTesting {
+		return fmt.Errorf("%w: configured profiles cannot embed a template, shard, release or build-for-testing", ErrInvalid)
 	}
 	if !idPattern.MatchString(p.ID) || p.Version <= 0 || !validRepo(p.Repo) {
 		return fmt.Errorf("%w: ID, version or repository", ErrInvalid)

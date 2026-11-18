@@ -257,7 +257,7 @@ func (c *Controller) verifyResult(ctx context.Context, job model.Job, result wor
 			reject("artifact not uploaded")
 			continue
 		}
-		file, err := c.openArtifact(job.ID, artifact.ID)
+		file, err := c.openJobArtifact(job, artifact)
 		if err != nil {
 			reject("artifact bytes unavailable")
 			continue

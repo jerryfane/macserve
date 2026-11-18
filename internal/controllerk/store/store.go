@@ -173,7 +173,7 @@ func (s *Store) Close() error { return s.db.Close() }
 
 // SchemaVersion is the SQLite user_version this build migrates to and the
 // newest it opens.
-const SchemaVersion = 8
+const SchemaVersion = 9
 
 func (s *Store) initialize(ctx context.Context) error {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -225,6 +225,11 @@ func (s *Store) initialize(ctx context.Context) error {
 	}
 	if version < 8 {
 		if _, err := tx.ExecContext(ctx, workerLogSeqSchema); err != nil {
+			return err
+		}
+	}
+	if version < 9 {
+		if _, err := tx.ExecContext(ctx, productsSchema); err != nil {
 			return err
 		}
 	}

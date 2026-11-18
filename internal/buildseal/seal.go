@@ -54,7 +54,9 @@ type Resolution struct {
 // the effective recipe (the snapshot, or a template job's derivation from
 // its reported repository configuration), empty when none derives.
 // SourceTree is the Git tree the worker computed from the bytes it
-// extracted, empty unless extraction verified it.
+// extracted, empty unless extraction verified it. ProductsSHA256 and
+// Xctestrun are set for a build-for-testing job only: the digest of its
+// test-products.tar artifact and the name of the one .xctestrun it holds.
 type Seal struct {
 	Schema                string        `json:"schema"`
 	JobID                 string        `json:"job_id"`
@@ -71,6 +73,8 @@ type Seal struct {
 	ArtifactsDigest       string        `json:"artifacts_digest"`
 	ArchiveSHA256         string        `json:"archive_sha256,omitempty"`
 	SigningManifestSHA256 string        `json:"signing_manifest_sha256,omitempty"`
+	ProductsSHA256        string        `json:"products_sha256,omitempty"`
+	Xctestrun             string        `json:"xctestrun,omitempty"`
 	SealedAt              time.Time     `json:"sealed_at"`
 }
 
@@ -121,12 +125,17 @@ func New(job model.Job, resolution *Resolution, sourceTree string, result worker
 		return Seal{}, err
 	}
 	for _, a := range result.Artifacts {
-		switch a.Name {
-		case profiles.ArchiveArtifact:
+		switch {
+		case a.Name == profiles.ArchiveArtifact:
 			s.ArchiveSHA256 = a.SHA256
-		case profiles.SigningManifestArtifact:
+		case a.Name == profiles.SigningManifestArtifact:
 			s.SigningManifestSHA256 = a.SHA256
+		case a.Name == profiles.TestProductsArtifact && job.Request.BuildForTesting:
+			s.ProductsSHA256 = a.SHA256
 		}
+	}
+	if job.Request.BuildForTesting {
+		s.Xctestrun = result.Observation.Xctestrun
 	}
 	return s, nil
 }

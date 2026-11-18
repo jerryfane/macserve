@@ -9,7 +9,7 @@ import (
 
 // undoWorkerLogSeqSchema returns a current database to the version 7 jobs
 // table, for tests that emulate an older database.
-const undoWorkerLogSeqSchema = "ALTER TABLE jobs DROP COLUMN worker_log_seq; ALTER TABLE jobs DROP COLUMN worker_log_lease;"
+const undoWorkerLogSeqSchema = undoProductsSchema + "ALTER TABLE jobs DROP COLUMN worker_log_seq; ALTER TABLE jobs DROP COLUMN worker_log_lease;"
 
 // logTexts is every record of id, in order.
 func logTexts(t *testing.T, s *Store, id string) []string {
@@ -117,7 +117,7 @@ func TestWorkerLogSeqMigrationFromVersion7(t *testing.T) {
 	s = openStore(t, path, Options{})
 	var version int
 	requireError(t, s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version), nil)
-	if version != SchemaVersion || SchemaVersion != 8 {
+	if version != SchemaVersion || SchemaVersion != 9 {
 		t.Fatalf("user_version = %d, SchemaVersion = %d", version, SchemaVersion)
 	}
 	for range 2 {

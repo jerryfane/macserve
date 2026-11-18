@@ -59,6 +59,8 @@ type Expected struct {
 	RequiredTests                     []string
 	// Release is an ios_archive job's admitted release; nil for other kinds.
 	Release *model.ReleaseRequest
+	// BuildForTesting is the admitted request's build-for-testing flag.
+	BuildForTesting bool
 }
 
 type Signature struct {

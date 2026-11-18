@@ -270,7 +270,8 @@ That rests on B processes, not on the controller:
 - **Worker build seal.** The root worker signs, with a root-only Ed25519 key (`/Library/macserve/var/broker/seal-key.pem`,
   public key pinned in `keyholder.json`), a canonical record of what it built: the request, its own registry
   resolution (profile id/version/digest, Xcode and DeveloperDir, Flutter pin), the snapshot and recipe digests, the
-  Git tree it computed from the bytes it extracted, the result digest and the archive and signing-manifest digests.
+  Git tree it computed from the bytes it extracted, the result digest and the archive and signing-manifest digests,
+  and for a build-for-testing producer its `test-products.tar` digest and `.xctestrun` name.
   The seal travels through the controller with the completion; a signature, not a channel, authenticates it, so K
   can withhold it but not forge or alter it, and a pending completion survives a worker restart sealed.
 - **Keyholder.** `org.macserve.keyholder` runs as the non-login `_macserve_key`, holds the receipt and GitHub App
@@ -279,7 +280,8 @@ That rests on B processes, not on the controller:
   (`controller.json` `receipt.repositories` and `receipt.owners`). It signs a receipt only after verifying the worker
   seal and that the job record and result are the sealed ones (the controller may only drop unverified artifacts,
   shorten expiry, mark logs truncated, add a test summary or downgrade the state). A success receipt needs the
-  worker's registry resolution. A **release** receipt additionally needs the root-owned
+  worker's registry resolution, and a build-for-testing producer's the sealed products digest equal to its
+  `test-products.tar` artifact's (no other seal may name products). A **release** receipt additionally needs the root-owned
   `/Library/macserve/config/release-scope.json` entry for the repository to match the seal exactly (profile
   id/version/digest, Xcode and Flutter pins, the exact Dart defines map; BuildName `^[0-9]+(\.[0-9]+){0,2}$`,
   BuildNumber `^[0-9]{1,9}$`), and the keyholder's own GitHub check that the repository ID is the scoped one, the

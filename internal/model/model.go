@@ -139,9 +139,16 @@ type Request struct {
 	Flutter *FlutterRequest `json:"flutter,omitempty"`
 	// Release is an ios_archive job's version and Dart defines; it is
 	// required for that kind and refused for every other.
-	Release        *ReleaseRequest `json:"release,omitempty"`
-	TimeoutSeconds int             `json:"timeout_seconds,omitempty"`
-	Context        RequestContext  `json:"context,omitempty"`
+	Release *ReleaseRequest `json:"release,omitempty"`
+	// BuildForTesting makes a build template job a build-for-testing
+	// producer: it builds the scheme's tests for arm64 simulators, and a
+	// trusted worker step seals the products as its test-products.tar
+	// artifact. It is refused for every other recipe, Flutter templates
+	// included. It is omitted when false, so other requests keep their
+	// digest.
+	BuildForTesting bool           `json:"build_for_testing,omitempty"`
+	TimeoutSeconds  int            `json:"timeout_seconds,omitempty"`
+	Context         RequestContext `json:"context,omitempty"`
 }
 
 // ReleaseRequest is an ios_archive job's release: the marketing version
@@ -242,6 +249,10 @@ type Profile struct {
 	// job snapshot, from which its recipe derives; configured profiles never
 	// carry it.
 	Release *ReleaseRequest `json:"release,omitempty"`
+	// BuildForTesting is the admitted request's BuildForTesting on a build
+	// template job snapshot, from which its build-for-testing recipe
+	// derives; configured profiles never carry it.
+	BuildForTesting bool `json:"build_for_testing,omitempty"`
 }
 
 // Concurrent reports whether p is the snapshot of a simulator_script

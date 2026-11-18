@@ -555,11 +555,12 @@ func (c *Controller) alive(a *execution, job model.Job, now time.Time) bool {
 	if finishing.IsZero() {
 		return now.Sub(beat) <= c.options.HeartbeatTimeout
 	}
-	return now.Sub(finishing) <= FinalizingWindow(c.options, job.Request.Kind)
+	return now.Sub(finishing) <= FinalizingWindow(c.options, job.Request)
 }
 
-// sweep removes only ID-addressed private exports, then prunes their metadata.
-// Artifact expiry remains enforced by getters even between sweep intervals.
+// sweep removes only ID-addressed private exports and trims the products
+// pool (unused test products expire), then prunes their metadata. Artifact
+// expiry remains enforced by getters even between sweep intervals.
 // A sweep or prune slower than slowMaintenance is logged with its counts.
 func (c *Controller) sweep(ctx context.Context) error {
 	started := time.Now()
@@ -620,6 +621,9 @@ func (c *Controller) sweep(ctx context.Context) error {
 		}
 	}
 	if err := c.trimPool(ctx, 0, maxArtifactPoolBytes); err != nil {
+		return err
+	}
+	if err := c.trimProducts(ctx, 0, maxProductsPoolBytes); err != nil {
 		return err
 	}
 	pruneStarted := time.Now()
