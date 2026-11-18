@@ -327,34 +327,74 @@ func (s *processScope) residual(ctx context.Context, samples []processSample) ([
 }
 
 // quiesceSettleGraces bounds one quiesce: residual processes still listed
-// this many graces after it began are contamination however recently each
-// instance appeared (a job that keeps starting new processes).
+// this many graces after it began, plus the time spent signalling, are
+// contamination however recently each instance appeared (a job that keeps
+// starting new processes).
 const quiesceSettleGraces = 10
 
-// quiesce terminates residual job processes. Every residual instance (PID
-// and start) has two graces from the snapshot that first listed it: SIGTERM
-// while the quiesce is within its first grace, SIGKILL after, and listed in a
-// snapshot taken two graces after its first one, it is a survivor. An
-// instance that first appears late, such as the DeviceFS extension of an
-// fskit_agent this quiesce killed (launchd tears that pid domain down with a
-// SIGTERM and a 5 s cleanup delay, v0.1.15 tool evidence), is SIGKILLed when
-// first seen and judged on its own time, not the quiesce's. Survivors are
-// contamination evidence only when every audited process is present or
-// verifiably relaunched. If one is gone without a verified relaunch, a
-// survivor may be launchd bringing it back (KeepAlive) in a way this host
-// could not verify, so cleanup fails without durable quarantine, as in v0.1.8.
-// Tolerated launches are signalled with the residual processes but never
-// awaited: launchd may start them again at once (heard respawns every second,
-// the CoreSimulator/CoreDevice stack within seconds).
-func (s *processScope) quiesce(ctx context.Context) error {
-	begun := time.Now()
-	termUntil := begun.Add(s.grace)
-	settleUntil := begun.Add(quiesceSettleGraces * s.grace)
-	type instance struct {
-		pid   int
-		start string
+// escalation is a quiesce's signalling clock. Each residual instance (PID and
+// start) gets SIGTERM while the quiesce is within its first grace and SIGKILL
+// after, and it is a survivor only when it is still listed a grace after a
+// SIGKILL to it completed. Escalation, not elapsed time, decides: a signal
+// helper slowed by load (retried in signalWithRetry, #194) once judged a
+// process that had only received SIGTERM a survivor (#195 review F2). The
+// settle bound is extended by the time spent signalling for the same reason.
+type escalation struct {
+	grace       time.Duration
+	termUntil   time.Time
+	settleUntil time.Time
+	killed      map[processInstance]time.Time
+}
+
+func newEscalation(begun time.Time, grace time.Duration) *escalation {
+	return &escalation{grace: grace, termUntil: begun.Add(grace), settleUntil: begun.Add(quiesceSettleGraces * grace), killed: map[processInstance]time.Time{}}
+}
+
+// send signals p through signal with SIGTERM within the first grace and
+// SIGKILL after, and records a completed SIGKILL.
+func (e *escalation) send(ctx context.Context, signal func(context.Context, processSample, syscall.Signal) error, p processSample) error {
+	sig := syscall.SIGTERM
+	if !time.Now().Before(e.termUntil) {
+		sig = syscall.SIGKILL
 	}
-	firstSeen := make(map[instance]time.Time)
+	began := time.Now()
+	err := signal(ctx, p, sig)
+	e.settleUntil = e.settleUntil.Add(time.Since(began))
+	if key := (processInstance{p.pid, p.start}); err == nil && sig == syscall.SIGKILL {
+		if _, ok := e.killed[key]; !ok {
+			e.killed[key] = time.Now()
+		}
+	}
+	return err
+}
+
+// survivor reports whether p, listed in a snapshot taken at sampled, was
+// SIGKILLed at least a grace before it.
+func (e *escalation) survivor(p processSample, sampled time.Time) bool {
+	at, ok := e.killed[processInstance{p.pid, p.start}]
+	return ok && !sampled.Before(at.Add(e.grace))
+}
+
+// settled reports whether a snapshot taken at sampled is past the settle
+// bound.
+func (e *escalation) settled(sampled time.Time) bool { return !sampled.Before(e.settleUntil) }
+
+// quiesce terminates residual job processes by escalation: SIGTERM within the
+// first grace, SIGKILL after, and an instance still listed a grace after its
+// SIGKILL completed is a survivor. An instance that first appears late, such
+// as the DeviceFS extension of an fskit_agent this quiesce killed (launchd
+// tears that pid domain down with a SIGTERM and a 5 s cleanup delay, v0.1.15
+// tool evidence), is SIGKILLed when first seen and judged on its own time,
+// not the quiesce's. Survivors are contamination evidence only when every
+// audited process is present or verifiably relaunched. If one is gone without
+// a verified relaunch, a survivor may be launchd bringing it back (KeepAlive)
+// in a way this host could not verify, so cleanup fails without durable
+// quarantine, as in v0.1.8. Tolerated launches are signalled with the
+// residual processes but never awaited: launchd may start them again at once
+// (heard respawns every second, the CoreSimulator/CoreDevice stack within
+// seconds).
+func (s *processScope) quiesce(ctx context.Context) error {
+	e := newEscalation(time.Now(), s.grace)
 	// Require a second empty snapshot after a settling interval. Never waive a
 	// failed observation, signal, changed baseline or deadline as successful cleanup.
 	empty := false
@@ -371,12 +411,8 @@ func (s *processScope) quiesce(ctx context.Context) error {
 		if err != nil {
 			return errors.Join(ErrCleanup, err)
 		}
-		sig := syscall.SIGTERM
-		if !time.Now().Before(termUntil) {
-			sig = syscall.SIGKILL
-		}
 		for _, p := range c.tolerated {
-			if err := s.signal(ctx, p, sig); err != nil {
+			if err := e.send(ctx, s.signal, p); err != nil {
 				return errors.Join(ErrCleanup, err)
 			}
 		}
@@ -390,14 +426,9 @@ func (s *processScope) quiesce(ctx context.Context) error {
 		} else {
 			survivor := false
 			for _, p := range c.residual {
-				first, seen := firstSeen[instance{p.pid, p.start}]
-				if !seen {
-					first = sampled
-					firstSeen[instance{p.pid, p.start}] = first
-				}
-				survivor = survivor || !sampled.Before(first.Add(2*s.grace))
+				survivor = survivor || e.survivor(p, sampled)
 			}
-			if survivor || !sampled.Before(settleUntil) {
+			if survivor || e.settled(sampled) {
 				if c.unresolved {
 					return errors.Join(ErrCleanup, errRelaunchUnverified)
 				}
@@ -408,7 +439,7 @@ func (s *processScope) quiesce(ctx context.Context) error {
 			}
 			empty = false
 			for _, p := range c.residual {
-				if err := s.signal(ctx, p, sig); err != nil {
+				if err := e.send(ctx, s.signal, p); err != nil {
 					return errors.Join(ErrCleanup, err)
 				}
 			}

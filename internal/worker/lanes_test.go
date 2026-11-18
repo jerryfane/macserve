@@ -476,6 +476,57 @@ func TestQuiesceJobLeavesSiblingUntouched(t *testing.T) {
 	}
 }
 
+// #195 review F2: the lane quiesce judges a survivor by completed escalation.
+// SIGTERM helper runs take three graces (a WaitDelay failure and its retry);
+// the job's processes ignore SIGTERM and die of SIGKILL, so the quiesce ends
+// clean.
+func TestQuiesceJobSlowSIGTERMIsNotASurvivor(t *testing.T) {
+	const uid = 600
+	broker := syscall.Getpid()
+	now := time.Now().Unix()
+	var mu sync.Mutex
+	live := map[int]processSample{}
+	for _, p := range []processSample{laneSample(200, broker, uid, now), laneSample(201, 200, uid, now)} {
+		live[p.pid] = p
+	}
+	var sent []syscall.Signal
+	runner := newProcessRunner()
+	runner.uid = uid
+	runner.scope = &processScope{uid: uid, interval: time.Millisecond, grace: 20 * time.Millisecond,
+		sample: func(context.Context) ([]processSample, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			out := make([]processSample, 0, len(live))
+			for _, p := range live {
+				out = append(out, p)
+			}
+			return out, nil
+		},
+		signal: func(_ context.Context, p processSample, sig syscall.Signal) error {
+			mu.Lock()
+			sent = append(sent, sig)
+			mu.Unlock()
+			if sig == syscall.SIGTERM {
+				time.Sleep(60 * time.Millisecond)
+				return nil
+			}
+			mu.Lock()
+			delete(live, p.pid)
+			mu.Unlock()
+			return nil
+		}}
+	runner.lanes = trackerFor(broker, uid, map[int]processDescription{})
+	runner.lanes.begin("a", time.Unix(now-10, 0))
+	runner.lanes.addRoot("a", 200)
+	runner.lanes.update(must(runner.scope.sample(context.Background())))
+	if err := runner.QuiesceJob(context.Background(), "a"); err != nil {
+		t.Fatalf("slow SIGTERM judged a survivor before SIGKILL (sent %v): %v", sent, err)
+	}
+	if len(live) != 0 {
+		t.Fatalf("processes left: %v", live)
+	}
+}
+
 func must[T any](v T, err error) T {
 	if err != nil {
 		panic(err)

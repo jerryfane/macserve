@@ -72,14 +72,19 @@ PF enforcement may be a separately reviewed future opt-in; it is not implemented
   15 s after the failed device's teardown, so the retry does not meet the load that failed the first boot at once.
   A command's process group is cleaned up by SIGTERM to every listed member, SIGKILL after 0.5 s, then a 1 s window;
   each signal is a `_job-signal` helper run as the job UID that re-reads the target's identity, with 8 s and a 1 s
-  output wait per run and up to three runs when one fails only on time. If the group is still listed when the window
-  closes, the worker keeps listing it with backoff (doubling to 5 s) and SIGKILLing what remains for up to
-  `process_cleanup_seconds` in `worker.json` (180 s by default, also the maximum) before its verdict. The verdict
-  is unchanged: cleanup is confirmed only when a listing shows no live group member and the direct child is reaped;
-  a member still listed after the bound, a foreign UID or a GUI baseline PID in the group is contamination. At load
-  53 a 100 ms helper output wait and the 1.5 s window left a cancelled xcodebuild group unconfirmed and quarantined
-  the worker (2026-11-18, #194). A job's finalization budget (`FinalizationTimeout`, which sizes the controller's
-  finalizing and cancelling leases) includes one such cleanup.
+  output wait per run and up to three runs when one fails only on time. Each signalling round chooses SIGTERM or
+  SIGKILL per member as it reaches it and ends with the cleanup's bound. If the group is still listed when the
+  window closes, the worker keeps listing it with backoff (doubling to 5 s) and SIGKILLing what remains for up to
+  `process_cleanup_seconds` in `worker.json` (180 s by default, also the maximum); a member listed then that no
+  SIGKILL has reached gets one more 30 s SIGKILL round and 1 s to go before the verdict. The verdict is unchanged:
+  cleanup is confirmed only when a listing shows no live group member and the direct child is reaped; a member
+  still listed after that, a foreign UID or a GUI baseline PID in the group is contamination. At load 53 a 100 ms
+  helper output wait and the 1.5 s window left a cancelled xcodebuild group unconfirmed and quarantined the worker
+  (2026-11-18, #194). The account and lane quiesces judge a survivor by escalation too: an instance is a survivor
+  only when still listed a grace after a SIGKILL to it completed, and their settle bound excludes time spent
+  signalling. A job's finalization budget (`FinalizationTimeout`, 660 s, which sizes the controller's finalizing
+  and cancelling leases) includes two such cleanups: a cancelled job's recipe command's and the evidence command
+  running when the cleanup budget ends.
 - `internal/evidence`: bounded xcresult test parsing, required-test execution checks, JUnit, deterministic
   artifact archives and content-addressed exports, including a script job's required `output.tar.gz`. Missing or incomplete test evidence cannot report success.
   Failed plans, bundles and suites remain explicit `container` diagnostics and JUnit errors even when child

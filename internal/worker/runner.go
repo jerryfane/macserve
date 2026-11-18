@@ -149,9 +149,10 @@ const outputDrainTimeout = 10 * time.Second
 // after SIGKILL is genuinely stuck.
 const DefaultProcessCleanupTimeout = 3 * time.Minute
 
-// cleanupSignalTimeout is the least time one protected signalling round has,
-// even past the end of the cleanup (signalMembers); the helper bounds each of
-// its runs within it (jobSignalAttempts).
+// cleanupSignalTimeout bounds one protected signalling round (signalMembers),
+// and is the time the round after the bound closes has to SIGKILL members no
+// SIGKILL has reached; the helper bounds each of its runs within it
+// (jobSignalAttempts).
 const cleanupSignalTimeout = 30 * time.Second
 
 // cleanupBackoffMax caps the pause between a protected cleanup's listings
@@ -159,9 +160,12 @@ const cleanupSignalTimeout = 30 * time.Second
 const cleanupBackoffMax = 5 * time.Second
 
 // processCleanupBound bounds one protected cleanup at its defaults: the
-// window, DefaultProcessCleanupTimeout, one signalling round past it and the
-// final listing (sampleTimeout). FinalizationTimeout includes it.
-const processCleanupBound = 2*time.Second + DefaultProcessCleanupTimeout + cleanupSignalTimeout + 5*time.Second
+// window, DefaultProcessCleanupTimeout (listings and rounds inside it end
+// with it, plus at most a helper's output wait), then the listing, SIGKILL
+// round and killGrace settle after it, and the final listing (sampleTimeout
+// each). FinalizationTimeout counts it per command cleanup a finalization
+// can wait for.
+const processCleanupBound = 2*time.Second + DefaultProcessCleanupTimeout + 2*inspectWaitDelay + 5*time.Second + cleanupSignalTimeout + time.Second + 5*time.Second
 
 type pipeResult struct {
 	stream string
@@ -640,59 +644,64 @@ func (r *nativeRunner) cleanupGroup(group, uid int, reap func(), reaped, waitFai
 // so cleanup went unconfirmed and the worker needed an owner restart
 // (Studio 2026-11-18 09:50Z, #194). So after the window the listing is
 // retried with backoff (up to cleanupBackoffMax) for cleanupConfirm,
-// SIGKILLing every member still listed; each signalling round has at least
-// cleanupSignalTimeout however little of the bound is left, and a signal
-// that fails is retried in the next round rather than ending cleanup.
+// SIGKILLing every member still listed; a signal that fails is retried in
+// the next round rather than ending cleanup. Each round chooses SIGTERM or
+// SIGKILL per member as it reaches it and ends with the bound, so a slow
+// SIGTERM round cannot hold back SIGKILL (#195 review F1). When the bound
+// closes, every member still listed that no SIGKILL has reached gets one
+// more round of cleanupSignalTimeout and killGrace to go: no member is judged
+// without a completed SIGKILL attempt.
 //
 // The verdict is unchanged: cleanup is confirmed exactly when a listing shows
 // no live group member and the direct child is reaped. A foreign-UID member or
 // a GUI baseline PID in the group is contamination at once; a member still
-// listed by a fresh bounded listing taken once the bound has passed is
-// contamination; a listing that still fails then is unconfirmed.
+// listed by a fresh bounded listing taken after that is contamination; a
+// listing that still fails then is unconfirmed.
 func (r *nativeRunner) cleanupProtectedGroup(group, uid int, reap func(), reaped func() bool) error {
 	begun := time.Now()
 	termUntil := begun.Add(r.termGrace)
 	window := begun.Add(r.termGrace + r.killGrace)
 	until := window.Add(r.cleanupConfirm)
+	killed := map[processInstance]bool{}
 	pause := r.pollInterval
 	var listErr, signalErr error
 	for time.Now().Before(until) {
 		reap()
-		deadline := time.Now().Add(r.sampleTimeout)
-		if until.Before(deadline) {
-			deadline = until
+		members, err, refused := r.listGroup(min(time.Until(until), r.sampleTimeout), group, uid)
+		if refused != nil {
+			return refused
 		}
-		listCtx, cancel := context.WithDeadline(context.Background(), deadline)
-		samples, err := r.scope.sample(listCtx)
-		cancel()
 		listErr = err
-		live := err != nil
-		var members []processSample
-		for _, p := range samples {
-			if p.group != group || p.zombie {
-				continue
-			}
-			live = true
-			if p.uid != uid {
-				return errors.Join(ErrCleanup, ErrContamination, cleanupFailure("protected cleanup", errors.New("job group contains a foreign UID")))
-			}
-			for _, trusted := range r.scope.baseline.Processes {
-				if trusted.PID == p.pid {
-					return errors.Join(ErrCleanup, ErrContamination, cleanupFailure("protected cleanup", errors.New("refusing to signal a GUI baseline PID")))
-				}
-			}
-			members = append(members, p)
-		}
-		if !live && reaped() {
+		if err == nil && len(members) == 0 && reaped() {
 			return nil
 		}
 		if len(members) > 0 {
-			signalErr = r.signalMembers(members, termUntil, until)
+			signalErr = r.signalMembers(members, termUntil, min(time.Until(until), r.signalTimeout), killed)
 		}
 		if !time.Now().Before(window) {
 			pause = min(2*pause, cleanupBackoffMax)
 		}
 		time.Sleep(max(0, min(pause, time.Until(until))))
+	}
+	reap()
+	if members, err, refused := r.listGroup(r.sampleTimeout, group, uid); refused != nil {
+		return refused
+	} else if err == nil {
+		var pending []processSample
+		for _, p := range members {
+			if !killed[processInstance{p.pid, p.start}] {
+				pending = append(pending, p)
+			}
+		}
+		if len(pending) > 0 {
+			signalErr = r.signalMembers(pending, termUntil, r.signalTimeout, killed)
+			for settle := time.Now().Add(r.killGrace); time.Now().Before(settle); time.Sleep(min(r.pollInterval, time.Until(settle))) {
+				reap()
+				if members, err, _ := r.listGroup(time.Until(settle), group, uid); err == nil && len(members) == 0 && reaped() {
+					break
+				}
+			}
+		}
 	}
 	reap()
 	samples, err := r.snapshot(r.scope.sample)
@@ -712,29 +721,50 @@ func (r *nativeRunner) cleanupProtectedGroup(group, uid int, reap func(), reaped
 	return nil
 }
 
-// signalMembers sends one protected cleanup round's signal to members:
-// SIGTERM before termUntil, SIGKILL after. The round runs until until or, if
-// that is later, cleanupSignalTimeout from now, so a helper slowed by load is
-// not cut short at the end of the window; it stops signalling once that
-// passes. It returns the last failed signal, which the next round retries.
-func (r *nativeRunner) signalMembers(members []processSample, termUntil, until time.Time) error {
-	deadline := time.Now().Add(r.signalTimeout)
-	if until.After(deadline) {
-		deadline = until
-	}
-	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+// listGroup lists the live members of group within timeout. refused is the
+// contamination verdict for a member of another UID or a GUI baseline PID.
+func (r *nativeRunner) listGroup(timeout time.Duration, group, uid int) (members []processSample, err, refused error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	sig := syscall.SIGTERM
-	if !time.Now().Before(termUntil) {
-		sig = syscall.SIGKILL
+	samples, err := r.scope.sample(ctx)
+	for _, p := range samples {
+		if p.group != group || p.zombie {
+			continue
+		}
+		if p.uid != uid {
+			return nil, err, errors.Join(ErrCleanup, ErrContamination, cleanupFailure("protected cleanup", errors.New("job group contains a foreign UID")))
+		}
+		for _, trusted := range r.scope.baseline.Processes {
+			if trusted.PID == p.pid {
+				return nil, err, errors.Join(ErrCleanup, ErrContamination, cleanupFailure("protected cleanup", errors.New("refusing to signal a GUI baseline PID")))
+			}
+		}
+		members = append(members, p)
 	}
+	return members, err, nil
+}
+
+// signalMembers sends one protected cleanup round to members within timeout:
+// SIGTERM to each member it reaches before termUntil, SIGKILL after, choosing
+// as it goes so a slow SIGTERM does not hold back SIGKILL from the rest. It
+// records each member a SIGKILL reached in killed and returns the last failed
+// signal, which the next round retries.
+func (r *nativeRunner) signalMembers(members []processSample, termUntil time.Time, timeout time.Duration, killed map[processInstance]bool) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 	var failed error
 	for _, p := range members {
 		if ctx.Err() != nil {
 			break
 		}
+		sig := syscall.SIGTERM
+		if !time.Now().Before(termUntil) {
+			sig = syscall.SIGKILL
+		}
 		if err := r.signalProcess(ctx, p, sig); err != nil {
 			failed = cleanupFailure("protected cleanup: signal", err)
+		} else if sig == syscall.SIGKILL {
+			killed[processInstance{p.pid, p.start}] = true
 		}
 	}
 	return failed
