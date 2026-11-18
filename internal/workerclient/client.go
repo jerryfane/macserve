@@ -32,7 +32,7 @@ import (
 
 type Executor interface {
 	Recover(context.Context) error
-	Execute(context.Context, model.Job, worker.Source, io.Reader, worker.Sink) (worker.Result, error)
+	Execute(ctx context.Context, job model.Job, source worker.Source, archive, products io.Reader, sink worker.Sink) (worker.Result, error)
 	ArtifactPath(string, string) (string, error)
 	RemoveExport(string) error
 	// VerifiedTree is the Git tree computed from a job's extracted source
@@ -552,6 +552,15 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 	if err != nil {
 		result.Reason = worker.PublicReason(err)
 	} else {
+		// A consumer's sealed test products are requested before the
+		// source and handed to the engine, which verifies them before it
+		// extracts anything. A failed request fails the job cleanly in the
+		// engine (importTestProducts), never here.
+		var products io.Reader
+		closeProducts := func() {}
+		if lease.Job.Request.Products != nil {
+			products, closeProducts = c.products(ctx, lease, epoch)
+		}
 		var req *http.Request
 		req, err = c.request(ctx, http.MethodGet, "/jobs/"+lease.Job.ID+"/source", epoch, lease.Token, nil)
 		if err == nil {
@@ -562,11 +571,12 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 					err = statusError(resp)
 				} else {
 					executed = true
-					result, err = c.engine.Execute(ctx, lease.Job, lease.Source, resp.Body, sink)
+					result, err = c.engine.Execute(ctx, lease.Job, lease.Source, resp.Body, products, sink)
 				}
 				resp.Body.Close()
 			}
 		}
+		closeProducts()
 	}
 	// Every chunk the engine reported is delivered (or the job cancelled)
 	// before the job's end is judged and its completion delivered.

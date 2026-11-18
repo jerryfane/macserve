@@ -35,7 +35,7 @@ func TestMetalToolchainProbeRunsFirstWithTheJobEnvironment(t *testing.T) {
 			engine := engineFixture(t, runner)
 			job := fixtureJob(t, kind)
 			source, data := sourceFixture(t)
-			result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil)
+			result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil, nil)
 			if err != nil || result.State != model.Succeeded {
 				t.Fatalf("%+v %v", result, err)
 			}
@@ -88,7 +88,7 @@ func TestMetalToolchainProbeFailureDoesNotFailTheJob(t *testing.T) {
 			}
 			engine := engineFixture(t, runner)
 			source, data := sourceFixture(t)
-			result, err := engine.Execute(context.Background(), fixtureJob(t, model.Build), source, bytes.NewReader(data), nil)
+			result, err := engine.Execute(context.Background(), fixtureJob(t, model.Build), source, bytes.NewReader(data), nil, nil)
 			if err != nil || result.State != model.Succeeded {
 				t.Fatalf("%+v %v", result, err)
 			}
@@ -115,7 +115,7 @@ func TestMetalToolchainProbeUnconfirmedCleanupFailsTheJob(t *testing.T) {
 	}
 	engine := engineFixture(t, runner)
 	source, data := sourceFixture(t)
-	if result, err := engine.Execute(context.Background(), fixtureJob(t, model.Build), source, bytes.NewReader(data), nil); err == nil && result.State == model.Succeeded {
+	if result, err := engine.Execute(context.Background(), fixtureJob(t, model.Build), source, bytes.NewReader(data), nil, nil); err == nil && result.State == model.Succeeded {
 		t.Fatalf("job succeeded after unconfirmed probe cleanup: %+v", result)
 	}
 }

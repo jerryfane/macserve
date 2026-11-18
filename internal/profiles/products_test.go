@@ -116,3 +116,118 @@ func TestValidXctestrun(t *testing.T) {
 		}
 	}
 }
+
+var consumerRef = model.ProductsRef{ProducerJobID: "j_producer", SHA256: strings.Repeat("c", 64), Xctestrun: "Herdr_iphonesimulator27.1-arm64.xctestrun"}
+
+func consumerRequest(kind model.Kind, profile string) model.Request {
+	ref := consumerRef
+	return model.Request{Repo: "jerryfane/herdrup", SHA: strings.Repeat("a", 40), Kind: kind, Profile: profile, Xcode: model.Xcode{Version: "27.1", Build: "27A9275"}, Shard: "smoke", Products: &ref}
+}
+
+// A test template admits a consumer of sealed test products: the snapshot
+// carries the reference (outside the template digest), and the derived
+// recipe has no prepare at all (no xcodegen, package resolution or build)
+// and runs test-without-building of the imported products' .xctestrun on
+// the job's simulator with the shard's selectors as its required tests.
+func TestDeriveConsumerTestWithoutBuildingGolden(t *testing.T) {
+	r := templatesFile(t, uiTemplate)
+	plainRequest := consumerRequest(model.SimulatorUITest, "org-ios-sim-uitest-v1")
+	plainRequest.Products = nil
+	plain, err := r.Resolve(plainRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := r.Resolve(consumerRequest(model.SimulatorUITest, "org-ios-sim-uitest-v1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *a.Request.Products != consumerRef || *a.Profile.Products != consumerRef || a.ProfileDigest != plain.ProfileDigest {
+		t.Fatalf("admission = %+v", a)
+	}
+	config := model.RepoConfig{Version: 1, WorkDir: ".", Project: "Herdr.xcodeproj", Scheme: "Herdr", XcodeGen: true, ResolvePackages: true, UITest: &model.TestShards{Shards: map[string][]string{"smoke": {"HerdrUITests/ChatUXSmokeTests", "HerdrUITests/TerminalSmokeTests/testOpens"}}}}
+	derived, err := profiles.Derive(a.Profile, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"xcodebuild", "test-without-building", "-xctestrun", "${PRODUCTS}/macserve.xctestrun", "-destination", "id=${SIMULATOR_ID}", "-resultBundlePath", "${RESULT_BUNDLE}", "-only-testing:HerdrUITests/ChatUXSmokeTests", "-only-testing:HerdrUITests/TerminalSmokeTests/testOpens"}
+	if derived.Run.Executable != "/usr/bin/xcrun" || !slices.Equal(derived.Run.Args, want) || len(derived.Prepare) != 0 {
+		t.Fatalf("run = %+v prepare = %+v", derived.Run, derived.Prepare)
+	}
+	if !slices.Equal(derived.RequiredTests, config.UITest.Shards["smoke"]) {
+		t.Fatalf("required tests %v", derived.RequiredTests)
+	}
+	plainDerived, err := profiles.Derive(plain.Profile, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plainDerived.Prepare) != 3 || !slices.Contains(plainDerived.Prepare[2].Args, "build-for-testing") {
+		t.Fatalf("plain shard changed: %+v", plainDerived.Prepare)
+	}
+	// The snapshot's reference drives Effective's derivation check both
+	// ways: a consumer's recipe never passes as a building shard's.
+	recipe := &model.RepoRecipe{ConfigSHA256: strings.Repeat("a", 64), Config: config, WorkDir: derived.WorkDir, Prepare: derived.Prepare, Run: derived.Run, Shard: "smoke", RequiredTests: derived.RequiredTests}
+	if _, err := profiles.Effective(a.Profile, recipe); err != nil {
+		t.Fatalf("effective: %v", err)
+	}
+	if _, err := profiles.Effective(plain.Profile, recipe); err == nil {
+		t.Fatal("a building shard accepted the consumer recipe")
+	}
+	raw, err := json.Marshal(plain.Request)
+	if err != nil || strings.Contains(string(raw), "products") {
+		t.Fatalf("plain request JSON %s %v", raw, err)
+	}
+}
+
+// Only non-Flutter test templates consume products, never with
+// build-for-testing, and only with a well-formed reference; Derive refuses
+// a snapshot that carries one on another kind.
+func TestProductsOnlyForNativeTestTemplates(t *testing.T) {
+	r := templatesFile(t, buildTemplate+","+uiTemplate+","+unitTemplate)
+	explicit := r.List()[0]
+	ref := consumerRef
+	unsupported := map[string]model.Request{
+		"explicit profile": {Repo: explicit.Repo, SHA: strings.Repeat("a", 40), Kind: explicit.Kind, Profile: explicit.ID, Xcode: explicit.Xcode, Products: &ref},
+		"build template":   {Repo: "jerryfane/herdrup", SHA: strings.Repeat("a", 40), Kind: model.Build, Profile: "org-ios-sim-build-v1", Xcode: model.Xcode{Version: "27.1", Build: "27A9275"}, Products: &ref},
+	}
+	producer := consumerRequest(model.SimulatorUITest, "org-ios-sim-uitest-v1")
+	producer.BuildForTesting = true
+	unsupported["consumer that builds for testing"] = producer
+	for name, request := range unsupported {
+		if _, err := r.Resolve(request); !errors.Is(err, profiles.ErrUnsupported) {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	if _, err := r.Resolve(consumerRequest(model.UnitTest, "org-ios-sim-unittest-v1")); err != nil {
+		t.Fatalf("unit test consumer: %v", err)
+	}
+	for name, edit := range map[string]func(*model.ProductsRef){
+		"producer id":    func(p *model.ProductsRef) { p.ProducerJobID = "../j" },
+		"digest":         func(p *model.ProductsRef) { p.SHA256 = strings.Repeat("C", 64) },
+		"xctestrun name": func(p *model.ProductsRef) { p.Xctestrun = "../x.xctestrun" },
+		"empty":          func(p *model.ProductsRef) { *p = model.ProductsRef{} },
+	} {
+		request := consumerRequest(model.SimulatorUITest, "org-ios-sim-uitest-v1")
+		edit(request.Products)
+		if _, err := r.Resolve(request); !errors.Is(err, profiles.ErrInvalid) {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	pin := flutterPin
+	flutter, err := profiles.New(nil, []model.Template{flutterTemplate(model.UnitTest, &pin)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := flutterRequest(model.UnitTest, &model.FlutterRequest{Version: "3.41.9"})
+	request.Products = &ref
+	if _, err := flutter.Resolve(request); !errors.Is(err, profiles.ErrUnsupported) {
+		t.Fatalf("flutter test template: %v", err)
+	}
+	build, err := r.Resolve(model.Request{Repo: "jerryfane/herdrup", SHA: strings.Repeat("a", 40), Kind: model.Build, Profile: "org-ios-sim-build-v1", Xcode: model.Xcode{Version: "27.1", Build: "27A9275"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	build.Profile.Products = &ref
+	if _, err := profiles.Derive(build.Profile, model.RepoConfig{Version: 1, WorkDir: ".", Project: "Herdr.xcodeproj", Scheme: "Herdr"}); !errors.Is(err, profiles.ErrInvalid) {
+		t.Fatalf("derive build snapshot with products: %v", err)
+	}
+}

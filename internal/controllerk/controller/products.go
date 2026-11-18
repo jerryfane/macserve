@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
 	"os"
 	"sort"
 	"strings"
@@ -94,6 +95,58 @@ func (c *Controller) openProductDownload(ctx context.Context, a evidence.Artifac
 		return nil, a, err
 	}
 	return file, a, nil
+}
+
+// serveProducts streams a consumer job's test products, the pool's bytes of
+// its request's products digest, to the worker holding its delivered lease:
+// like the source, only while the lease is offered and not cancelled. A
+// download is a use (openProductDownload). Evicted bytes are gone (410);
+// the worker fails the job without running anything. The worker hashes the
+// stream itself, so the controller's bytes are never trusted.
+func (c *Controller) serveProducts(w http.ResponseWriter, r *http.Request) {
+	c.mu.Lock()
+	job, err := c.requestJob(r, false)
+	if err == nil {
+		a := c.execution(job.ID)
+		if a == nil || !a.ready || !a.offered || job.CancelRequested {
+			err = store.ErrLease
+		} else if job.Request.Products == nil {
+			err = store.ErrNotFound
+		}
+	}
+	c.mu.Unlock()
+	if err != nil {
+		respond(w, r, nil, err)
+		return
+	}
+	digest := job.Request.Products.SHA256
+	product, err := c.options.Store.GetProduct(r.Context(), digest)
+	if errors.Is(err, store.ErrNotFound) || err == nil && product.EvictedAt != nil {
+		err = ErrExpired
+	}
+	if err != nil {
+		respond(w, r, nil, err)
+		return
+	}
+	file, _, err := c.openProductDownload(r.Context(), evidence.Artifact{Name: profiles.TestProductsArtifact, SHA256: digest, SizeBytes: product.Bytes})
+	if err != nil {
+		respond(w, r, nil, err)
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		respond(w, r, nil, err)
+		return
+	}
+	// Like the source, the transfer has the source budget, not the
+	// per-connection RPC deadline.
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(c.options.SourceTimeout + c.options.HeartbeatTimeout)); err != nil {
+		respond(w, r, nil, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-tar")
+	http.ServeContent(w, r, profiles.TestProductsArtifact, info.ModTime(), file)
 }
 
 // productFiles lists the pool's <sha256>.tar files and their sizes. Any

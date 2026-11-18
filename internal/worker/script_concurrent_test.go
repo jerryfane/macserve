@@ -130,7 +130,7 @@ func TestConcurrentScriptRunsBesideTestAndDeletesItsDevices(t *testing.T) {
 
 	script := concurrentScriptJob(t, "job-1")
 	scriptSource, scriptData := checkoutFixture(t, scriptCheckout)
-	result, err := engine.Execute(context.Background(), script, scriptSource, bytes.NewReader(scriptData), nil)
+	result, err := engine.Execute(context.Background(), script, scriptSource, bytes.NewReader(scriptData), nil, nil)
 	if err != nil || result.State != model.Succeeded || !result.CleanupOK {
 		t.Fatalf("concurrent script job: %+v %v", result, err)
 	}
@@ -188,16 +188,16 @@ func TestConcurrentScriptAdmitsOthersButNotAnotherScript(t *testing.T) {
 	source, data := checkoutFixture(t, scriptCheckout)
 	script := runLane(engine, concurrentScriptJob(t, "job-1"), source, data)
 	<-set.started
-	if _, err := engine.Execute(context.Background(), concurrentScriptJob(t, "job-2"), source, bytes.NewReader(data), nil); !errors.Is(err, ErrBusy) {
+	if _, err := engine.Execute(context.Background(), concurrentScriptJob(t, "job-2"), source, bytes.NewReader(data), nil, nil); !errors.Is(err, ErrBusy) {
 		t.Fatalf("second concurrent script started: %v", err)
 	}
 	plain := testTemplateJob(t, model.SimulatorScript, scriptShard)
 	plain.ID, plain.LeaseToken = "job-3", "lease-job-3"
-	if _, err := engine.Execute(context.Background(), plain, source, bytes.NewReader(data), nil); !errors.Is(err, ErrBusy) {
+	if _, err := engine.Execute(context.Background(), plain, source, bytes.NewReader(data), nil, nil); !errors.Is(err, ErrBusy) {
 		t.Fatalf("exclusive script started beside a job: %v", err)
 	}
 	buildSource, buildData := sourceFixture(t)
-	if result, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-b", model.Build), buildSource, bytes.NewReader(buildData), nil); err != nil || !result.CleanupOK {
+	if result, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-b", model.Build), buildSource, bytes.NewReader(buildData), nil, nil); err != nil || !result.CleanupOK {
 		t.Fatalf("build beside a concurrent script: %+v %v", result, err)
 	}
 	close(set.gates["job-1"])
@@ -311,7 +311,7 @@ func TestScriptDeviceCreatedDuringFinalizationIsDeleted(t *testing.T) {
 	}
 	engine := engineFixture(t, runner)
 	source, data := checkoutFixture(t, scriptCheckout)
-	result, err := engine.Execute(context.Background(), concurrentScriptJob(t, "job-1"), source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), concurrentScriptJob(t, "job-1"), source, bytes.NewReader(data), nil, nil)
 	if err != nil || result.State != model.Succeeded || !result.CleanupOK {
 		t.Fatalf("script job: %+v %v", result, err)
 	}

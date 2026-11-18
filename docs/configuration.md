@@ -269,9 +269,41 @@ products: `. Sealing and export share the 15-minute archive evidence bound, and 
 it. The worker's build seal names the tar's SHA-256 (`products_sha256`) and the `.xctestrun`'s name
 (`xctestrun`, also in the result observation); the keyholder refuses a producer's success receipt whose seal
 lacks them or differs from the result's artifact, and any other job's seal that names products. The receipt's
-request carries `build_for_testing`, and validation requires the expected flag. Consumers of the products (test
-shards that run `test-without-building`) and the GitHub policy field that admits the producer are not part of
-this release step.
+request carries `build_for_testing`, and validation requires the expected flag. The GitHub policy field that
+admits the producer is part of the poller's build-once support.
+
+**Test-products consumers.** A `unit_test` or `simulator_ui_test` template request without a Flutter pin may
+name a producer's sealed products: `"products": {"producer_job_id": J, "sha256": D, "xctestrun": N}` (any other
+recipe refuses it, as does `build_for_testing`; it is omitted when absent). Admission requires J to be a succeeded
+build-for-testing job of the same repository and commit whose `test-products.tar` is D with `.xctestrun` N, and
+the products pool to still hold D; otherwise the request is refused with `409 products_unavailable` (unknown,
+unfinished or evicted) or as invalid (another commit, digest or name). The derived recipe has **no prepare** (no
+XcodeGen, package resolution or build); its run is `xcrun xcodebuild test-without-building -xctestrun
+${PRODUCTS}/macserve.xctestrun -destination id=${SIMULATOR_ID} -resultBundlePath ${RESULT_BUNDLE}
+-only-testing:…` with the shard's selectors as required tests. Before the source is extracted or any job command
+runs, the worker (as root) downloads `GET /v1/jobs/{job}/products`, hashes the stream into a root-owned staging
+file and refuses the job unless its SHA-256 is D; it then extracts only the platform tree and the one `.xctestrun`
+N into `${WORKSPACE}/products` (renamed `macserve.xctestrun`), with the export's entry rules, after checking that
+the plist is XML, every bundle path (`TestHostPath`, `TestBundlePath`, `UITargetAppPath`, `DependentProductPaths`,
+`ProductPaths`, `XCInjectBundleInto` unless `unused`) is `__TESTROOT__`/`__TESTHOST__`-relative, and every
+component of every path list (the path-valued dyld variables `DYLD_INSERT_LIBRARIES`, `DYLD_[FALLBACK_|VERSIONED_]LIBRARY_PATH`,
+`DYLD_[FALLBACK_|VERSIONED_]FRAMEWORK_PATH`, `DYLD_ROOT_PATH`, `DYLD_SHARED_CACHE_DIR`, `DYLD_PRINT_TO_FILE`, also
+as `__XPC_DYLD_*`, and any other `*_PATH(S)`/`*Path(s)` key, in any dictionary) is
+`__TESTROOT__`/`__TESTHOST__`/`__PLATFORMS__`/`__SHAREDFRAMEWORKS__`/`__DEVELOPERUSRLIB__`-relative or a clean path
+under the runtime's `/usr/lib/` or `/System/Library/` (Xcode injects `/usr/lib/libRPAC.dylib`); a relative,
+escaping, empty or unknown-placeholder component is refused. Any other dyld variable must be a known flag
+(`DYLD_PRINT_*`, `DYLD_BIND_AT_LAUNCH`, ...; a short alphanumeric value), `DYLD_SHARED_REGION`
+(`avoid`/`use`/`private`) or `DYLD_IMAGE_SUFFIX` (a 1–32 character `[A-Za-z0-9_-]` suffix); an unknown dyld
+variable is refused. Other strings (arguments, ordinary environment values) are not paths and are not checked. Missing,
+evicted or mismatched products fail the job (`test products: …`, cleanup_ok, no quarantine); a consumer
+prepared after its bytes were evicted fails with `test products unavailable` before anything is leased. The
+worker seal names the imported digest (`imported_products_sha256`). The keyholder signs a consumer's success
+only against its **own** record of the producer's signed success (written when it signs the producer, keyed by
+job ID and seal digest): same repository, commit, worker-computed source tree and Xcode, same products and
+`.xctestrun`. The receipt then carries `products: {producer_job_id, producer_seal_sha256, producer_recipe_digest,
+source_tree, products_sha256, xctestrun, selectors_source: "repo_config"}`, and validation requires it exactly
+when the request names products, equal to the request's reference and with `source_tree` equal to the receipt's
+`source.tree`.
 
 The controller requires schema-3 root-owned health attestation bound to job UID and qualified profile
 digests, not interface inventory or PF policy/rules. VM bridge/address churn does not invalidate health

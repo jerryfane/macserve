@@ -211,7 +211,7 @@ func TestJobCommandsNameTheJobAccount(t *testing.T) {
 	t.Setenv("LOGNAME", "caller")
 	job := fixtureJob(t, model.Build)
 	source, data := sourceFixture(t)
-	if result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil); err != nil || result.State != model.Succeeded {
+	if result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil, nil); err != nil || result.State != model.Succeeded {
 		t.Fatalf("%+v %v", result, err)
 	}
 	if len(runner.commands) == 0 {
@@ -254,7 +254,7 @@ func TestBuildExportsSurviveCleanupUntilAcknowledged(t *testing.T) {
 	job := fixtureJob(t, model.Build)
 	source, data := sourceFixture(t)
 	t.Setenv("CONTROLLER_TOKEN", "must-not-leak")
-	result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil, nil)
 	if err != nil || result.State != model.Succeeded || !result.CleanupOK || result.Summary != nil || result.ExitCode == nil || *result.ExitCode != 0 || result.PeakMemoryMiB != 123 {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
@@ -306,7 +306,7 @@ func TestTestJobSealsEvidenceAndDeletesOnlyOwnedDevice(t *testing.T) {
 	engine := engineFixture(t, runner)
 	job := fixtureJob(t, model.UnitTest)
 	source, data := sourceFixture(t)
-	result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil, nil)
 	if err != nil || result.State != model.Succeeded || result.Summary == nil || result.Summary.Passed != 1 || result.Summary.XCResultSHA256 == "" {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
@@ -351,7 +351,7 @@ func TestPinnedObservationsRejectMismatchesBeforeCreatingDevice(t *testing.T) {
 			runner := &fakeRunner{xcode: scenario.xcode, runtimeBuild: scenario.build}
 			engine := engineFixture(t, runner)
 			source, data := sourceFixture(t)
-			result, err := engine.Execute(context.Background(), fixtureJob(t, model.UnitTest), source, bytes.NewReader(data), nil)
+			result, err := engine.Execute(context.Background(), fixtureJob(t, model.UnitTest), source, bytes.NewReader(data), nil, nil)
 			if err == nil || result.State != model.Failed || !result.CleanupOK {
 				t.Fatalf("result=%+v err=%v", result, err)
 			}
@@ -386,7 +386,7 @@ func TestRecipeFailuresAlwaysCleanOwnedSimulator(t *testing.T) {
 			}
 			engine := engineFixture(t, runner)
 			source, data := sourceFixture(t)
-			result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil)
+			result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil, nil)
 			if err == nil || result.State != model.Failed || !result.CleanupOK {
 				t.Fatalf("result=%+v err=%v", result, err)
 			}
@@ -402,7 +402,7 @@ func TestIncompleteTestEvidenceCannotSucceed(t *testing.T) {
 			runner := &fakeRunner{tests: report}
 			engine := engineFixture(t, runner)
 			source, data := sourceFixture(t)
-			result, err := engine.Execute(context.Background(), fixtureJob(t, model.UnitTest), source, bytes.NewReader(data), nil)
+			result, err := engine.Execute(context.Background(), fixtureJob(t, model.UnitTest), source, bytes.NewReader(data), nil, nil)
 			if err == nil || result.State != model.Failed || !result.CleanupOK {
 				t.Fatalf("result=%+v err=%v", result, err)
 			}
@@ -421,7 +421,7 @@ func TestCleanupFailureRetainsOwnershipAndBlocksNextJob(t *testing.T) {
 	engine := engineFixture(t, runner)
 	source, data := sourceFixture(t)
 	job := fixtureJob(t, model.UnitTest)
-	result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil, nil)
 	if err == nil || result.State != model.Failed || result.CleanupOK {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
@@ -436,7 +436,7 @@ func TestCleanupFailureRetainsOwnershipAndBlocksNextJob(t *testing.T) {
 		t.Fatal("uncertain workspace removed", err)
 	}
 	job.ID = "job-2"
-	if _, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil); !errors.Is(err, ErrRecovery) {
+	if _, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil, nil); !errors.Is(err, ErrRecovery) {
 		t.Fatalf("next job admitted: %v", err)
 	}
 	runner.hook = nil
@@ -470,7 +470,7 @@ func TestCancellationDeadlineAndConcurrentRefusal(t *testing.T) {
 				job.Deadline = &end
 			}
 			done := make(chan Result, 1)
-			go func() { result, _ := engine.Execute(ctx, job, source, bytes.NewReader(data), nil); done <- result }()
+			go func() { result, _ := engine.Execute(ctx, job, source, bytes.NewReader(data), nil, nil); done <- result }()
 			select {
 			case <-entered:
 			case result := <-done:
@@ -486,7 +486,7 @@ func TestCancellationDeadlineAndConcurrentRefusal(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("execution neither entered the recipe nor completed")
 			}
-			if _, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil); !errors.Is(err, ErrBusy) {
+			if _, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil, nil); !errors.Is(err, ErrBusy) {
 				t.Fatalf("concurrent Execute: %v", err)
 			}
 			if !deadline {
@@ -543,7 +543,7 @@ func TestImmutableJobSnapshotRejected(t *testing.T) {
 		job := fixtureJob(t, model.Build)
 		change(&job)
 		source, data := sourceFixture(t)
-		if _, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil); err == nil {
+		if _, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil, nil); err == nil {
 			t.Fatal("mutated job admitted")
 		}
 		if len(runner.commands) != 0 {
@@ -575,7 +575,7 @@ func TestSinkFailureCannotReportSuccess(t *testing.T) {
 		runner := &fakeRunner{}
 		engine := engineFixture(t, runner)
 		source, data := sourceFixture(t)
-		result, err := engine.Execute(context.Background(), fixtureJob(t, model.UnitTest), source, bytes.NewReader(data), sink)
+		result, err := engine.Execute(context.Background(), fixtureJob(t, model.UnitTest), source, bytes.NewReader(data), nil, sink)
 		if err == nil || result.State != model.Failed || !result.CleanupOK {
 			t.Fatalf("result=%+v err=%v", result, err)
 		}
@@ -621,7 +621,7 @@ func TestGeneratedDigestsAndTrackedLockfileMutation(t *testing.T) {
 				}
 			}
 			engine := engineFixture(t, runner)
-			result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil)
+			result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil, nil)
 			generated := sha256.Sum256([]byte("safe configuration\n"))
 			original := sha256.Sum256([]byte("hello\n"))
 			if result.Observation.GeneratedDigests["generated.conf"] != hex.EncodeToString(generated[:]) || result.Observation.LockfileDigests["Package.resolved"] != hex.EncodeToString(original[:]) {
@@ -643,7 +643,7 @@ func TestWorkspaceBudgetAndBadArchivePreventSuccess(t *testing.T) {
 	engine := engineFixture(t, runner)
 	source, data := sourceFixture(t)
 	source.SHA256 = strings.Repeat("0", 64)
-	result, err := engine.Execute(context.Background(), fixtureJob(t, model.Build), source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), fixtureJob(t, model.Build), source, bytes.NewReader(data), nil, nil)
 	if err == nil || result.State != model.Failed || !result.CleanupOK || len(runner.commands) != 0 {
 		t.Fatalf("unverified source executed: %+v %v", result, err)
 	}
@@ -694,7 +694,7 @@ func TestVerifiedLiveProcessCleanupIsQuarantined(t *testing.T) {
 	}
 	engine := engineFixture(t, runner)
 	source, data := sourceFixture(t)
-	result, err := engine.Execute(context.Background(), fixtureJob(t, model.Build), source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), fixtureJob(t, model.Build), source, bytes.NewReader(data), nil, nil)
 	if err == nil || result.CleanupOK || result.State != model.Failed {
 		t.Fatalf("uncertain process succeeded: %+v %v", result, err)
 	}
@@ -735,7 +735,7 @@ func TestUnregisteredWorkspaceIsNeverDeleted(t *testing.T) {
 		t.Fatal(err)
 	}
 	source, data := sourceFixture(t)
-	if _, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil); err == nil {
+	if _, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil, nil); err == nil {
 		t.Fatal("existing workspace claimed")
 	}
 	if err := engine.Recover(context.Background()); err != nil {

@@ -57,7 +57,7 @@ func runScriptJob(t *testing.T, runner *fakeRunner, checkout map[string]string) 
 	engine := engineFixture(t, runner)
 	source, data := checkoutFixture(t, checkout)
 	job := testTemplateJob(t, model.SimulatorScript, scriptShard)
-	result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil, nil)
 	return engine, job, result, err
 }
 
@@ -239,7 +239,7 @@ func TestNonScriptJobsHaveNoOutputDirectory(t *testing.T) {
 	}
 	engine := engineFixture(t, runner)
 	source, data := sourceFixture(t)
-	result, err := engine.Execute(context.Background(), fixtureJob(t, model.Build), source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), fixtureJob(t, model.Build), source, bytes.NewReader(data), nil, nil)
 	if err != nil || result.State != model.Succeeded || workspace == "" {
 		t.Fatalf("build job: %+v %v", result, err)
 	}

@@ -205,7 +205,7 @@ func TestToolEvidencePathAfterResetWithNewSIPAgents(t *testing.T) {
 	}
 	job := fixtureJob(t, model.Build)
 	source, archive := sourceFixture(t)
-	if result, err := reopened.Execute(ctx, job, source, bytes.NewReader(archive), nil); err != nil || result.State != model.Succeeded {
+	if result, err := reopened.Execute(ctx, job, source, bytes.NewReader(archive), nil, nil); err != nil || result.State != model.Succeeded {
 		t.Fatalf("recipe after reset: %+v %v", result, err)
 	}
 	if _, err := reopened.root.Lstat(quarantineRecord); !os.IsNotExist(err) {

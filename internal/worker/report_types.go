@@ -48,6 +48,11 @@ type Observation struct {
 	// sealed its test products: the name of the one .xctestrun file its
 	// test-products.tar holds at the top level; see exportTestProducts.
 	Xctestrun string `json:"xctestrun,omitempty"`
+	// ImportedProducts is set for a consumer job whose test products the
+	// worker downloaded, verified against the request's SHA-256 and
+	// imported before any job command ran: that SHA-256; see
+	// importTestProducts.
+	ImportedProducts string `json:"imported_products,omitempty"`
 }
 
 // FlutterObservation is a Flutter job's observed toolchain: the framework and

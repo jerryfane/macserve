@@ -48,7 +48,11 @@ type Options struct {
 	Service    ServiceIdentity
 	Repository func(context.Context, model.Job) (Repository, error)
 	Approval   func(context.Context, model.Job) (Approval, error)
-	Now        func() time.Time
+	// Products returns the producer binding of a consumer job's receipt:
+	// the keyholder's own record of the producer's sealed products (nil
+	// when the receipt binds none). Nil means no receipt binds products.
+	Products func(context.Context, model.Job) (*Products, error)
+	Now      func() time.Time
 }
 type Expected struct {
 	RepositoryID                      int64
@@ -61,6 +65,29 @@ type Expected struct {
 	Release *model.ReleaseRequest
 	// BuildForTesting is the admitted request's build-for-testing flag.
 	BuildForTesting bool
+	// Products is the admitted request's test products reference: set
+	// exactly for a consumer job, whose receipt binds that producer.
+	Products *model.ProductsRef
+}
+
+// SelectorsRepoConfig is the only Products.SelectorsSource today: the
+// consumer's selectors are its shard's in the commit's .macserve.json.
+const SelectorsRepoConfig = "repo_config"
+
+// Products binds a consumer job's receipt to the producer whose sealed test
+// products it ran, from the keyholder's own record of the producer's
+// signing (never the controller's): the producer's job ID, the SHA-256 of
+// its verified seal and its recipe digest, the source tree both jobs
+// computed, the products' SHA-256 the consumer verified and imported, the
+// .xctestrun it ran, and where the consumer's test selectors came from.
+type Products struct {
+	ProducerJobID        string `json:"producer_job_id"`
+	ProducerSealSHA256   string `json:"producer_seal_sha256"`
+	ProducerRecipeDigest string `json:"producer_recipe_digest"`
+	SourceTree           string `json:"source_tree"`
+	ProductsSHA256       string `json:"products_sha256"`
+	Xctestrun            string `json:"xctestrun"`
+	SelectorsSource      string `json:"selectors_source"`
 }
 
 type Signature struct {
@@ -183,33 +210,36 @@ type Payload struct {
 	Release               *model.ReleaseRequest    `json:"release,omitzero"`
 	ReleaseProvenance     *model.ReleaseProvenance `json:"release_provenance,omitzero"`
 	SigningManifestSHA256 string                   `json:"signing_manifest_sha256,omitzero"`
-	RequestDigest         string                   `json:"request_digest"`
-	ProfileDigest         string                   `json:"profile_digest"`
-	ProfileVersion        int                      `json:"profile_version"`
-	Source                worker.Source            `json:"source"`
-	Observation           Observation              `json:"observation"`
-	State                 model.State              `json:"state"`
-	Reason                string                   `json:"reason,omitempty"`
-	ExitCode              *int                     `json:"exit_code,omitempty"`
-	Signal                string                   `json:"signal,omitempty"`
-	CreatedAt             time.Time                `json:"created_at"`
-	StartedAt             time.Time                `json:"started_at"`
-	FinishedAt            time.Time                `json:"finished_at"`
-	Deadline              *time.Time               `json:"deadline,omitempty"`
-	SealedAt              time.Time                `json:"sealed_at"`
-	WorkerEpoch           string                   `json:"worker_epoch"`
-	Resources             ResourcePolicy           `json:"resources"`
-	Concurrency           *Concurrency             `json:"concurrency,omitempty"`
-	Tests                 TestEvidence             `json:"tests"`
-	Logs                  []evidence.Artifact      `json:"logs"`
-	LogsTruncated         bool                     `json:"logs_truncated"`
-	Digests               EvidenceDigests          `json:"digests"`
-	CommandCount          int                      `json:"command_count"`
-	ArtifactCount         int                      `json:"artifact_count"`
-	Complete              bool                     `json:"complete"`
-	Missing               []string                 `json:"missing"`
-	Details               *Details                 `json:"details,omitempty"`
-	Manifest              *ManifestReference       `json:"manifest,omitempty"`
+	// Products is a consumer job's producer binding (see Products); other
+	// receipts omit it.
+	Products       *Products           `json:"products,omitzero"`
+	RequestDigest  string              `json:"request_digest"`
+	ProfileDigest  string              `json:"profile_digest"`
+	ProfileVersion int                 `json:"profile_version"`
+	Source         worker.Source       `json:"source"`
+	Observation    Observation         `json:"observation"`
+	State          model.State         `json:"state"`
+	Reason         string              `json:"reason,omitempty"`
+	ExitCode       *int                `json:"exit_code,omitempty"`
+	Signal         string              `json:"signal,omitempty"`
+	CreatedAt      time.Time           `json:"created_at"`
+	StartedAt      time.Time           `json:"started_at"`
+	FinishedAt     time.Time           `json:"finished_at"`
+	Deadline       *time.Time          `json:"deadline,omitempty"`
+	SealedAt       time.Time           `json:"sealed_at"`
+	WorkerEpoch    string              `json:"worker_epoch"`
+	Resources      ResourcePolicy      `json:"resources"`
+	Concurrency    *Concurrency        `json:"concurrency,omitempty"`
+	Tests          TestEvidence        `json:"tests"`
+	Logs           []evidence.Artifact `json:"logs"`
+	LogsTruncated  bool                `json:"logs_truncated"`
+	Digests        EvidenceDigests     `json:"digests"`
+	CommandCount   int                 `json:"command_count"`
+	ArtifactCount  int                 `json:"artifact_count"`
+	Complete       bool                `json:"complete"`
+	Missing        []string            `json:"missing"`
+	Details        *Details            `json:"details,omitempty"`
+	Manifest       *ManifestReference  `json:"manifest,omitempty"`
 }
 
 type Signer struct {

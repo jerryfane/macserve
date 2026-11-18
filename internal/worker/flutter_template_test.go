@@ -82,7 +82,7 @@ func runFlutterJob(t *testing.T, runner *fakeRunner, kind model.Kind, checkout m
 	t.Helper()
 	engine := engineFixture(t, runner)
 	source, data := checkoutFixture(t, checkout)
-	return engine.Execute(context.Background(), flutterTemplateJob(t, kind), source, bytes.NewReader(data), nil)
+	return engine.Execute(context.Background(), flutterTemplateJob(t, kind), source, bytes.NewReader(data), nil, nil)
 }
 
 func envValue(env []string, key string) string {
@@ -283,7 +283,7 @@ func TestNonFlutterJobsHaveNoFlutterEnvironment(t *testing.T) {
 	}
 	engine := engineFixture(t, runner)
 	source, data := checkoutFixture(t, map[string]string{".macserve.json": `{"version":1,"work_dir":".","project":"App.xcodeproj","scheme":"App"}`, "pubspec.lock": "packages: {}\n"})
-	result, err := engine.Execute(context.Background(), templateJob(t), source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), templateJob(t), source, bytes.NewReader(data), nil, nil)
 	if err != nil || result.State != model.Succeeded {
 		t.Fatalf("build job: %+v %v", result, err)
 	}

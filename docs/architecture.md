@@ -281,7 +281,10 @@ That rests on B processes, not on the controller:
   seal and that the job record and result are the sealed ones (the controller may only drop unverified artifacts,
   shorten expiry, mark logs truncated, add a test summary or downgrade the state). A success receipt needs the
   worker's registry resolution, and a build-for-testing producer's the sealed products digest equal to its
-  `test-products.tar` artifact's (no other seal may name products). A **release** receipt additionally needs the root-owned
+  `test-products.tar` artifact's (no other seal may name products). A test-products consumer's success needs the
+  products its worker verified and imported (`imported_products_sha256`) and the keyholder's own record of the
+  producer's signed success for the same repository, commit, source tree and Xcode; the receipt's `products`
+  block comes only from that record. A **release** receipt additionally needs the root-owned
   `/Library/macserve/config/release-scope.json` entry for the repository to match the seal exactly (profile
   id/version/digest, Xcode and Flutter pins, the exact Dart defines map; BuildName `^[0-9]+(\.[0-9]+){0,2}$`,
   BuildNumber `^[0-9]{1,9}$`), and the keyholder's own GitHub check that the repository ID is the scoped one, the

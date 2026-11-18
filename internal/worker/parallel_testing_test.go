@@ -146,7 +146,7 @@ func TestParallelTestingCleanupDeletesTheJobsClones(t *testing.T) {
 	runner := &fakeRunner{tests: string(report), hook: set.hook}
 	engine := engineFixture(t, runner)
 	source, data := checkoutFixture(t, map[string]string{".macserve.json": parallelConfig})
-	result, err := engine.Execute(context.Background(), parallelUITestJob(t, `"parallel_testing":{"workers":2}`), source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), parallelUITestJob(t, `"parallel_testing":{"workers":2}`), source, bytes.NewReader(data), nil, nil)
 	if err != nil || result.State != model.Succeeded || !result.CleanupOK {
 		t.Fatalf("parallel-testing job: %+v %v", result, err)
 	}
@@ -178,7 +178,7 @@ func TestParallelTestingMemoryLimitCleansUpClonesWithoutQuarantine(t *testing.T)
 	}
 	engine := engineFixture(t, runner)
 	source, data := checkoutFixture(t, map[string]string{".macserve.json": parallelConfig})
-	result, err := engine.Execute(context.Background(), parallelUITestJob(t, `"parallel_testing":{"workers":2},"memory_limit_mib":20480`), source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), parallelUITestJob(t, `"parallel_testing":{"workers":2},"memory_limit_mib":20480`), source, bytes.NewReader(data), nil, nil)
 	if !errors.Is(err, ErrMemoryLimit) || errors.Is(err, ErrContamination) || errors.Is(err, ErrRecovery) || result.State != model.Failed || !result.CleanupOK {
 		t.Fatalf("over-budget job: %+v %v", result, err)
 	}
@@ -227,7 +227,7 @@ func TestParallelTestingClonesAreTheJobsLaneDevices(t *testing.T) {
 	engine := laneEngine(t, runner, 3)
 	clock := newTestClock(engine)
 	source, data := checkoutFixture(t, map[string]string{".macserve.json": parallelConfig})
-	result, err := engine.Execute(context.Background(), parallelUITestJob(t, `"parallel_testing":{"workers":2}`), source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), parallelUITestJob(t, `"parallel_testing":{"workers":2}`), source, bytes.NewReader(data), nil, nil)
 	if err != nil || result.State != model.Succeeded || !result.CleanupOK {
 		t.Fatalf("parallel-testing job: %+v %v", result, err)
 	}
@@ -323,7 +323,7 @@ func TestParallelTestingWatchPersistsCloneOwnership(t *testing.T) {
 	engine = laneEngine(t, runner, 3)
 	newTestClock(engine)
 	source, data := checkoutFixture(t, map[string]string{".macserve.json": parallelConfig})
-	result, err := engine.Execute(context.Background(), parallelUITestJob(t, `"parallel_testing":{"workers":2}`), source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), parallelUITestJob(t, `"parallel_testing":{"workers":2}`), source, bytes.NewReader(data), nil, nil)
 	if err != nil || result.State != model.Succeeded || !result.CleanupOK {
 		t.Fatalf("parallel-testing job: %+v %v", result, err)
 	}
@@ -362,7 +362,7 @@ func TestParallelTestingWatchKeepsCleanupFailures(t *testing.T) {
 	engine := laneEngine(t, runner, 3)
 	newTestClock(engine)
 	source, data := checkoutFixture(t, map[string]string{".macserve.json": parallelConfig})
-	result, err := engine.Execute(context.Background(), parallelUITestJob(t, `"parallel_testing":{"workers":2}`), source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), parallelUITestJob(t, `"parallel_testing":{"workers":2}`), source, bytes.NewReader(data), nil, nil)
 	if !failed.Load() {
 		t.Fatal("the watch never listed during the run")
 	}
@@ -490,7 +490,7 @@ func TestParallelTestingBootDuringCloneInventoryIsSpaced(t *testing.T) {
 	engine = laneEngine(t, runner, 3)
 	clock = newTestClock(engine)
 	source, data := checkoutFixture(t, map[string]string{".macserve.json": parallelConfig})
-	result, err := engine.Execute(context.Background(), parallelUITestJob(t, `"parallel_testing":{"workers":2}`), source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), parallelUITestJob(t, `"parallel_testing":{"workers":2}`), source, bytes.NewReader(data), nil, nil)
 	if err != nil || result.State != model.Succeeded || !result.CleanupOK {
 		t.Fatalf("parallel-testing job: %+v %v", result, err)
 	}
@@ -522,7 +522,7 @@ func TestParallelTestingArguments(t *testing.T) {
 			runner := &fakeRunner{tests: string(report), hook: set.hook}
 			engine := engineFixture(t, runner)
 			source, data := checkoutFixture(t, map[string]string{".macserve.json": parallelConfig})
-			result, err := engine.Execute(context.Background(), parallelUITestJob(t, tc.members), source, bytes.NewReader(data), nil)
+			result, err := engine.Execute(context.Background(), parallelUITestJob(t, tc.members), source, bytes.NewReader(data), nil, nil)
 			if err != nil || result.State != model.Succeeded || !result.CleanupOK {
 				t.Fatalf("job: %+v %v", result, err)
 			}
@@ -571,7 +571,7 @@ func TestParallelTestingMissingSetIsAnEmptyInventory(t *testing.T) {
 	}
 	engine := engineFixture(t, runner)
 	source, data := checkoutFixture(t, map[string]string{".macserve.json": parallelConfig})
-	result, err := engine.Execute(context.Background(), parallelUITestJob(t, `"parallel_testing":{"workers":2}`), source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), parallelUITestJob(t, `"parallel_testing":{"workers":2}`), source, bytes.NewReader(data), nil, nil)
 	if err != nil || result.State != model.Succeeded || !result.CleanupOK {
 		t.Fatalf("parallel-testing job on a fresh job home: %+v %v", result, err)
 	}
@@ -616,7 +616,7 @@ func TestParallelTestingWatchClaimsClonesOfASetMadeMidRun(t *testing.T) {
 	engine = laneEngine(t, runner, 3)
 	newTestClock(engine)
 	source, data := checkoutFixture(t, map[string]string{".macserve.json": parallelConfig})
-	result, err := engine.Execute(context.Background(), parallelUITestJob(t, `"parallel_testing":{"workers":2}`), source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), parallelUITestJob(t, `"parallel_testing":{"workers":2}`), source, bytes.NewReader(data), nil, nil)
 	if err != nil || result.State != model.Succeeded || !result.CleanupOK {
 		t.Fatalf("parallel-testing job: %+v %v", result, err)
 	}
@@ -671,7 +671,7 @@ func TestParallelTestingUnlistableSetFails(t *testing.T) {
 			}
 			engine := engineFixture(t, runner)
 			source, data := checkoutFixture(t, map[string]string{".macserve.json": parallelConfig})
-			result, err := engine.Execute(context.Background(), parallelUITestJob(t, `"parallel_testing":{"workers":2}`), source, bytes.NewReader(data), nil)
+			result, err := engine.Execute(context.Background(), parallelUITestJob(t, `"parallel_testing":{"workers":2}`), source, bytes.NewReader(data), nil, nil)
 			if err == nil || result.State == model.Succeeded || ran {
 				t.Fatalf("job with an unlistable set: ran %v, %+v %v", ran, result, err)
 			}

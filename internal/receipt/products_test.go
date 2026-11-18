@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -83,5 +84,56 @@ func TestBuildForTestingSuccessRequiresTestProducts(t *testing.T) {
 	defer signer.Close()
 	if _, err := signer.Seal(context.Background(), job, result); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("producer success without test products sealed: %v", err)
+	}
+}
+
+// A consumer's receipt binds its producer exactly as its request names it,
+// with the source tree it ran; no other receipt binds one, and the
+// expectation's products reference must match.
+func TestConsumerReceiptProductsBinding(t *testing.T) {
+	options, job, result, expected := fixture(t, model.Build)
+	_, _, p := sealFixture(t, options, job, result)
+	ref := model.ProductsRef{ProducerJobID: "j_producer", SHA256: strings.Repeat("c", 64), Xctestrun: "Herdr_iphonesimulator27.1-arm64.xctestrun"}
+	bound := Products{ProducerJobID: ref.ProducerJobID, ProducerSealSHA256: strings.Repeat("1", 64), ProducerRecipeDigest: strings.Repeat("2", 64), SourceTree: p.Source.Tree, ProductsSHA256: ref.SHA256, Xctestrun: ref.Xctestrun, SelectorsSource: SelectorsRepoConfig}
+	has := func(p Payload) bool { return slices.Contains(incomplete(p), "test products binding") }
+	if has(p) {
+		t.Fatal("a plain receipt lacks a binding it should not have")
+	}
+	stray := p
+	stray.Products = &bound
+	if !has(stray) {
+		t.Fatal("a non-consumer receipt carried a producer binding")
+	}
+	consumer := p
+	consumer.Request.Kind, consumer.Request.Products, consumer.Products = model.SimulatorUITest, &ref, &bound
+	if has(consumer) {
+		t.Fatalf("valid binding refused: %v", incomplete(consumer))
+	}
+	for name, edit := range map[string]func(*Products){
+		"missing":          nil,
+		"other tree":       func(b *Products) { b.SourceTree = strings.Repeat("8", 40) },
+		"other producer":   func(b *Products) { b.ProducerJobID = "j_other" },
+		"other digest":     func(b *Products) { b.ProductsSHA256 = strings.Repeat("d", 64) },
+		"other xctestrun":  func(b *Products) { b.Xctestrun = "Other.xctestrun" },
+		"no producer seal": func(b *Products) { b.ProducerSealSHA256 = "" },
+		"no recipe digest": func(b *Products) { b.ProducerRecipeDigest = "" },
+		"selectors source": func(b *Products) { b.SelectorsSource = "selector_file" },
+	} {
+		c := consumer
+		if edit == nil {
+			c.Products = nil
+		} else {
+			b := bound
+			edit(&b)
+			c.Products = &b
+		}
+		if !has(c) {
+			t.Fatalf("%s: binding accepted", name)
+		}
+	}
+	other := expected
+	other.Products = &ref
+	if err := ValidateSuccess(p, other); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("a plain receipt satisfied a consumer expectation: %v", err)
 	}
 }

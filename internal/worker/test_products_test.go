@@ -79,7 +79,7 @@ func TestBuildForTestingJobExportsSealedTestProducts(t *testing.T) {
 	engine := archiveEngine(t, runner)
 	job := buildForTestingJob(t)
 	source, data := checkoutFixture(t, map[string]string{".macserve.json": archiveConfig})
-	result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil, nil)
 	if err != nil || result.State != model.Succeeded || !result.CleanupOK {
 		t.Fatalf("build-for-testing job failed: %+v %v", result, err)
 	}
@@ -182,7 +182,7 @@ func TestBuildForTestingJobWithoutSealableProductsFails(t *testing.T) {
 	runner.hook = buildForTestingHook(t, noXctestrun, map[string]archiveFile{profiles.TestProductsArtifact: {"planted tar", 0644}}, &build)
 	engine := archiveEngine(t, runner)
 	source, data := checkoutFixture(t, map[string]string{".macserve.json": archiveConfig})
-	result, err := engine.Execute(context.Background(), buildForTestingJob(t), source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), buildForTestingJob(t), source, bytes.NewReader(data), nil, nil)
 	if err == nil || result.State != model.Failed || !strings.HasPrefix(result.Reason, "test products: ") || !strings.Contains(result.Reason, "0 .xctestrun files, want exactly one") {
 		t.Fatalf("result %+v err %v", result, err)
 	}

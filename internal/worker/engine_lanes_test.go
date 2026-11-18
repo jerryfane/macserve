@@ -148,7 +148,7 @@ type laneOutcome struct {
 func runLane(engine *Engine, job model.Job, source Source, data []byte) chan laneOutcome {
 	out := make(chan laneOutcome, 1)
 	go func() {
-		result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil)
+		result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil, nil)
 		out <- laneOutcome{result, err}
 	}()
 	return out
@@ -239,7 +239,7 @@ func TestLaneResidueDrainsUntilIdleQuiesce(t *testing.T) {
 	if err := engine.LaneReady(context.Background()); !errors.Is(err, ErrDrain) {
 		t.Fatalf("draining engine ready: %v", err)
 	}
-	if _, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-c", model.Build), source, bytes.NewReader(data), nil); !errors.Is(err, ErrDrain) {
+	if _, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-c", model.Build), source, bytes.NewReader(data), nil, nil); !errors.Is(err, ErrDrain) {
 		t.Fatalf("draining engine started a job: %v", err)
 	}
 	if err := engine.Recover(context.Background()); !errors.Is(err, ErrBusy) {
@@ -317,7 +317,7 @@ func TestExclusiveKindsRunAlone(t *testing.T) {
 	<-runner.started
 	job := fixtureLaneJob(t, "job-x", model.Build)
 	job.Request.Kind = model.SimulatorScript
-	if _, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil); !errors.Is(err, ErrBusy) {
+	if _, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil, nil); !errors.Is(err, ErrBusy) {
 		t.Fatalf("exclusive job started beside another: %v", err)
 	}
 	close(gate)
@@ -325,7 +325,7 @@ func TestExclusiveKindsRunAlone(t *testing.T) {
 	engine.mu.Lock()
 	engine.running["job-x"] = &laneEntry{start: time.Now(), exclusive: true}
 	engine.mu.Unlock()
-	if _, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-b", model.Build), source, bytes.NewReader(data), nil); !errors.Is(err, ErrBusy) {
+	if _, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-b", model.Build), source, bytes.NewReader(data), nil, nil); !errors.Is(err, ErrBusy) {
 		t.Fatalf("job started beside an exclusive one: %v", err)
 	}
 	if err := engine.LaneReady(context.Background()); !errors.Is(err, ErrBusy) {
@@ -343,7 +343,7 @@ func TestOneLaneKeepsSingleJobCleanup(t *testing.T) {
 	gate := runner.gate("job-a")
 	a := runLane(engine, fixtureLaneJob(t, "job-a", model.Build), source, data)
 	<-runner.started
-	if _, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-b", model.Build), source, bytes.NewReader(data), nil); !errors.Is(err, ErrBusy) {
+	if _, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-b", model.Build), source, bytes.NewReader(data), nil, nil); !errors.Is(err, ErrBusy) {
 		t.Fatalf("second job with one lane: %v", err)
 	}
 	close(gate)
@@ -514,7 +514,7 @@ func TestACLCensusCutShortIsRetried(t *testing.T) {
 	engine := laneEngine(t, runner, 2)
 	source, data := sourceFixture(t)
 	runner.set(1, nil)
-	result, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-a", model.Build), source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-a", model.Build), source, bytes.NewReader(data), nil, nil)
 	if err != nil || result.State != model.Succeeded || !result.CleanupOK || result.Reason != "" || result.Concurrency.IdleVerdict != IdleClean {
 		t.Fatalf("census timeout failed the job: %+v %v", result, err)
 	}
@@ -540,7 +540,7 @@ func TestACLCensusUnavailableAtJobEndDefersToIdleCheck(t *testing.T) {
 	if err := engine.LaneReady(context.Background()); !errors.Is(err, ErrDrain) {
 		t.Fatalf("engine admits before the idle check: %v", err)
 	}
-	if _, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-b", model.Build), source, bytes.NewReader(data), nil); !errors.Is(err, ErrDrain) {
+	if _, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-b", model.Build), source, bytes.NewReader(data), nil, nil); !errors.Is(err, ErrDrain) {
 		t.Fatalf("job started before the idle check: %v", err)
 	}
 	runner.set(0, nil)
@@ -589,7 +589,7 @@ func TestLaneAdmissionACLCensusUnavailableRefusesOnlyTheJob(t *testing.T) {
 			a := runLane(engine, fixtureLaneJob(t, "job-a", model.Build), source, data)
 			<-runner.started
 			runner.set(c.cut, c.probe)
-			result, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-b", model.Build), source, bytes.NewReader(data), nil)
+			result, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-b", model.Build), source, bytes.NewReader(data), nil, nil)
 			if !errors.Is(err, ErrACLCensusUnavailable) || result.State != model.Failed || !result.CleanupOK || result.Reason != c.reason || result.Concurrency.IdleVerdict != IdleNotRequired || result.FinishedAt.IsZero() {
 				t.Fatalf("unavailable census at lane admission: %+v %v", result, err)
 			}
@@ -622,12 +622,12 @@ func TestSoloAdmissionACLCensusUnavailableRefusesOnlyTheJob(t *testing.T) {
 	engine := laneEngine(t, runner, 2)
 	source, data := sourceFixture(t)
 	runner.set(-1, nil)
-	result, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-a", model.Build), source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-a", model.Build), source, bytes.NewReader(data), nil, nil)
 	if !errors.Is(err, ErrACLCensusUnavailable) || result.State != model.Failed || !result.CleanupOK || result.Reason != "admission: registered tree ACL census unavailable" || result.Concurrency.IdleVerdict != IdleNotRequired {
 		t.Fatalf("unavailable census at admission: %+v %v", result, err)
 	}
 	runner.set(0, nil)
-	if next, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-b", model.Build), source, bytes.NewReader(data), nil); err != nil || next.State != model.Succeeded || !next.CleanupOK {
+	if next, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-b", model.Build), source, bytes.NewReader(data), nil, nil); err != nil || next.State != model.Succeeded || !next.CleanupOK {
 		t.Fatalf("next job: %+v %v", next, err)
 	}
 }
@@ -657,7 +657,7 @@ func TestLaneAdmissionACLCheckThatRanStillFails(t *testing.T) {
 			a := runLane(engine, fixtureLaneJob(t, "job-a", model.Build), source, data)
 			<-runner.started
 			runner.set(0, probe)
-			result, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-b", model.Build), source, bytes.NewReader(data), nil)
+			result, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-b", model.Build), source, bytes.NewReader(data), nil, nil)
 			if err == nil || errors.Is(err, ErrACLCensusUnavailable) || result.CleanupOK {
 				t.Fatalf("admission check that ran passed as a deadline: %+v %v", result, err)
 			}

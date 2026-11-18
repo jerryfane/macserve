@@ -45,7 +45,7 @@ func TestSimulatorAndJobWritersStopBeforeEvidenceExtraction(t *testing.T) {
 	}
 	engine := engineFixture(t, runner)
 	source, data := sourceFixture(t)
-	result, err := engine.Execute(context.Background(), fixtureJob(t, model.UnitTest), source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), fixtureJob(t, model.UnitTest), source, bytes.NewReader(data), nil, nil)
 	if err != nil || result.State != model.Succeeded || !result.CleanupOK || !extracted || quiet < 4 {
 		t.Fatalf("missing finalization barriers: quiet=%d result=%+v err=%v", quiet, result, err)
 	}
@@ -75,7 +75,7 @@ func TestResidualWritersForbidParsingSealingAndNextLease(t *testing.T) {
 			engine := engineFixture(t, runner)
 			source, data := sourceFixture(t)
 			job := fixtureJob(t, model.UnitTest)
-			result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil)
+			result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil, nil)
 			if err == nil || result.State == model.Succeeded || result.CleanupOK || result.Summary != nil || len(result.Artifacts) != 0 {
 				t.Fatalf("uncertain evidence escaped: %+v %v", result, err)
 			}
@@ -89,7 +89,7 @@ func TestResidualWritersForbidParsingSealingAndNextLease(t *testing.T) {
 				t.Fatalf("lost positive contamination quarantine: %v", err)
 			}
 			job.ID = "job-2"
-			if _, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil); !errors.Is(err, ErrRecovery) {
+			if _, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil, nil); !errors.Is(err, ErrRecovery) {
 				t.Fatalf("new lease admitted: %v", err)
 			}
 			// A later empty snapshot does not silently clear durable uncertainty.
@@ -136,7 +136,7 @@ func TestReadOnlyWorkspaceCleanupDoesNotFollowSymlinks(t *testing.T) {
 	engine := engineFixture(t, runner)
 	source, data := sourceFixture(t)
 	job := fixtureJob(t, model.Build)
-	result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil, nil)
 	if err != nil || result.State != model.Succeeded || !result.CleanupOK {
 		t.Fatalf("readonly cleanup wedged: %+v %v", result, err)
 	}
@@ -152,7 +152,7 @@ func TestReadOnlyWorkspaceCleanupDoesNotFollowSymlinks(t *testing.T) {
 		t.Fatalf("outside permissions repaired: %v %v", info, err)
 	}
 	job.ID = "job-2"
-	if result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil); err != nil || !result.CleanupOK {
+	if result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil, nil); err != nil || !result.CleanupOK {
 		t.Fatalf("readonly input blocked next job: %+v %v", result, err)
 	}
 }
@@ -175,7 +175,7 @@ func TestPrivilegedCollectionRejectsHardlinkedWorkspaceFiles(t *testing.T) {
 	job := fixtureJob(t, model.Build)
 	job.Profile.Artifacts = []model.ArtifactRule{{Path: "checkout/leak", Required: true}}
 	resignJob(t, &job)
-	result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil, nil)
 	if err == nil || result.State == model.Succeeded || !result.CleanupOK || len(result.Artifacts) != 0 {
 		t.Fatalf("unsafe collection or false cleanup quarantine: %+v %v", result, err)
 	}
@@ -228,7 +228,7 @@ func TestJobCannotReplaceProtectedRawLogsWithWorkspaceEvidence(t *testing.T) {
 	engine := engineFixture(t, runner)
 	source, data := sourceFixture(t)
 	job := fixtureJob(t, model.Build)
-	result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), job, source, bytes.NewReader(data), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -294,6 +294,10 @@ func validateShards(key string, s *model.TestShards) error {
 // A test template builds for testing on the job's own simulator in prepare and
 // runs test-without-building on it, both restricted to the snapshot shard's
 // selectors, which become the job's required tests.
+// A consumer snapshot (one with Products, never a Flutter template's) has
+// no prepare at all: its run is test-without-building of the imported
+// products' ${PRODUCTS}/macserve.xctestrun on the job's simulator with the
+// same selectors (see testWithoutBuildingRun).
 //
 // A script template builds the scheme for the job's own simulator in prepare
 // and runs the snapshot shard's script with /bin/bash; it has no required
@@ -340,6 +344,8 @@ func Derive(snapshot model.Profile, c model.RepoConfig) (model.Profile, error) {
 		return model.Profile{}, fmt.Errorf("%w: invalid Flutter template snapshot", ErrInvalid)
 	case snapshot.BuildForTesting && snapshot.Kind != model.Build:
 		return model.Profile{}, fmt.Errorf("%w: only a build template snapshot may build for testing", ErrInvalid)
+	case snapshot.Products != nil && (!snapshot.Kind.Tests() || flutter != nil || !ValidProductsRef(*snapshot.Products)):
+		return model.Profile{}, fmt.Errorf("%w: only a test template snapshot without a Flutter pin may run sealed test products", ErrInvalid)
 	}
 	container := []string{"-project", c.Project}
 	if c.Workspace != "" {
@@ -409,10 +415,19 @@ func Derive(snapshot model.Profile, c model.RepoConfig) (model.Profile, error) {
 		for i, selector := range selectors {
 			only[i] = "-only-testing:" + selector
 		}
+		p.RequiredTests = slices.Clone(selectors)
+		if snapshot.Products != nil {
+			// A consumer runs the producer's sealed products, which the
+			// worker imported and verified as ${PRODUCTS}: it builds
+			// nothing, so it has no prepare (no xcodegen or package
+			// resolution either).
+			p.Prepare = nil
+			p.Run = model.Command{Executable: "/usr/bin/xcrun", Args: testWithoutBuildingRun(only)}
+			break
+		}
 		test := []string{"-scheme", c.Scheme, "-configuration", "Debug", "-sdk", "iphonesimulator", "-destination", "id=${SIMULATOR_ID}", "-derivedDataPath", "${DERIVED_DATA}"}
 		p.Prepare = append(p.Prepare, xcodebuild(append(append(slices.Clone(test), "CODE_SIGNING_ALLOWED=NO", "build-for-testing"), only...)...))
 		p.Run = xcodebuild(append(append(slices.Clone(test), "-resultBundlePath", "${RESULT_BUNDLE}", "CODE_SIGNING_ALLOWED=NO", "test-without-building"), only...)...)
-		p.RequiredTests = slices.Clone(selectors)
 	case model.SimulatorScript:
 		if !shardPattern.MatchString(snapshot.Shard) || snapshot.Simulator == nil {
 			return model.Profile{}, fmt.Errorf("%w: script template snapshot lacks its shard or simulator", ErrInvalid)

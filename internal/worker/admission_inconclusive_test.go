@@ -65,7 +65,7 @@ func TestPersistingToleratedChildIsRecordedWithoutQuarantine(t *testing.T) {
 	now = now.Add(time.Minute)
 	job := fixtureJob(t, model.Build)
 	source, archive := sourceFixture(t)
-	if _, err := engine.Execute(ctx, job, source, bytes.NewReader(archive), nil); !errors.Is(err, errToleratedChildPersists) {
+	if _, err := engine.Execute(ctx, job, source, bytes.NewReader(archive), nil, nil); !errors.Is(err, errToleratedChildPersists) {
 		t.Fatalf("execute = %v", err)
 	}
 	if len(runner.commands) != 0 {
@@ -86,7 +86,7 @@ func TestPersistingToleratedChildIsRecordedWithoutQuarantine(t *testing.T) {
 	// After a job, quiesce runs and the admission that follows refuses: the
 	// job's cleanup is unverified and the record is written.
 	runner.failures = []error{nil, errToleratedChildPersists}
-	result, err := engine.Execute(ctx, fixtureJob(t, model.Build), source, bytes.NewReader(archive), nil)
+	result, err := engine.Execute(ctx, fixtureJob(t, model.Build), source, bytes.NewReader(archive), nil, nil)
 	if !errors.Is(err, errToleratedChildPersists) || result.CleanupOK || errors.Is(err, ErrContamination) {
 		t.Fatalf("post-job admission: cleanup %v: %v", result.CleanupOK, err)
 	}

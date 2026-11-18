@@ -20,7 +20,11 @@ func sameSimulator(a, b *model.Simulator) bool {
 }
 func sameStrings(a, b []string) bool { return slices.Equal(a, b) }
 func expectedFor(p Payload) Expected {
-	return Expected{RepositoryID: p.Repository.ID, Repo: p.Request.Repo, SHA: p.Request.SHA, Profile: p.Request.Profile, ProfileDigest: p.ProfileDigest, Kind: p.Request.Kind, Xcode: p.Request.Xcode, Simulator: p.Request.Simulator, RequiredTests: p.Tests.Required, Release: p.Request.Release, BuildForTesting: p.Request.BuildForTesting}
+	return Expected{RepositoryID: p.Repository.ID, Repo: p.Request.Repo, SHA: p.Request.SHA, Profile: p.Request.Profile, ProfileDigest: p.ProfileDigest, Kind: p.Request.Kind, Xcode: p.Request.Xcode, Simulator: p.Request.Simulator, RequiredTests: p.Tests.Required, Release: p.Request.Release, BuildForTesting: p.Request.BuildForTesting, Products: p.Request.Products}
+}
+
+func sameProductsRef(a, b *model.ProductsRef) bool {
+	return a == nil && b == nil || a != nil && b != nil && *a == *b
 }
 
 // ValidateSuccess must only be called on the Payload returned by Verify. A
@@ -29,7 +33,7 @@ func ValidateSuccess(p Payload, e Expected) error {
 	if e.RepositoryID <= 0 || e.Repo == "" || !validSHA(e.SHA) || e.Profile == "" || !validDigest(e.ProfileDigest) || e.Xcode.Version == "" || e.Xcode.Build == "" {
 		return fmt.Errorf("%w: incomplete expected policy", ErrInvalid)
 	}
-	if p.Repository.ID != e.RepositoryID || p.Repository.Name != e.Repo || p.Request.Repo != e.Repo || p.Request.SHA != e.SHA || p.Source.Commit != e.SHA || p.Request.Profile != e.Profile || p.ProfileDigest != e.ProfileDigest || p.Request.Kind != e.Kind || p.Request.Xcode != e.Xcode || !sameSimulator(p.Request.Simulator, e.Simulator) || !sameStrings(p.Tests.Required, e.RequiredTests) || !profiles.SameRelease(p.Request.Release, e.Release) || p.Request.BuildForTesting != e.BuildForTesting {
+	if p.Repository.ID != e.RepositoryID || p.Repository.Name != e.Repo || p.Request.Repo != e.Repo || p.Request.SHA != e.SHA || p.Source.Commit != e.SHA || p.Request.Profile != e.Profile || p.ProfileDigest != e.ProfileDigest || p.Request.Kind != e.Kind || p.Request.Xcode != e.Xcode || !sameSimulator(p.Request.Simulator, e.Simulator) || !sameStrings(p.Tests.Required, e.RequiredTests) || !profiles.SameRelease(p.Request.Release, e.Release) || p.Request.BuildForTesting != e.BuildForTesting || !sameProductsRef(p.Request.Products, e.Products) {
 		return fmt.Errorf("%w: expected policy mismatch", ErrInvalid)
 	}
 	if p.State != model.Succeeded || !p.Complete || len(p.Missing) != 0 {
@@ -106,6 +110,15 @@ func incomplete(p Payload) []string {
 	}
 	// Only a build job is a build-for-testing producer.
 	require(!p.Request.BuildForTesting || p.Request.Kind == model.Build, "build-for-testing request")
+	// A consumer ran a producer's sealed test products: its receipt binds
+	// that producer, the source tree both computed and the products it
+	// verified, exactly as it requested them; no other receipt binds any.
+	if ref := p.Request.Products; ref != nil {
+		b := p.Products
+		require(p.Request.Kind.Tests() && !p.Request.BuildForTesting && b != nil && b.ProducerJobID == ref.ProducerJobID && b.ProductsSHA256 == ref.SHA256 && b.Xctestrun == ref.Xctestrun && profiles.ValidProductsRef(*ref) && validDigest(b.ProducerSealSHA256) && validDigest(b.ProducerRecipeDigest) && validSHA(b.SourceTree) && b.SourceTree == p.Source.Tree && b.SelectorsSource == SelectorsRepoConfig, "test products binding")
+	} else {
+		require(p.Products == nil, "test products binding")
+	}
 	require(!p.LogsTruncated && validLogs(p.Logs), "raw logs")
 	require(p.CommandCount > 0 && p.ArtifactCount >= len(p.Logs) && validDigest(p.Digests.Commands) && validDigest(p.Digests.Artifacts) && validDigest(p.Digests.Generated) && validDigest(p.Digests.Lockfiles) && validDigest(p.Digests.TestCases), "evidence digests")
 	t := p.Tests
@@ -243,7 +256,7 @@ func validateDetails(p Payload, require func(bool, string)) {
 	r := d.Result
 	snapshot := d.Profile
 	snapshotDigest, err := snapshot.SnapshotDigest()
-	require(err == nil && snapshotDigest == p.ProfileDigest && snapshot.ID == p.Request.Profile && snapshot.Version == p.ProfileVersion && snapshot.Repo == p.Request.Repo && snapshot.Kind == p.Request.Kind && snapshot.Xcode == p.Request.Xcode && sameSimulator(snapshot.Simulator, p.Request.Simulator) && profiles.SameRelease(snapshot.Release, p.Request.Release) && snapshot.BuildForTesting == p.Request.BuildForTesting && snapshot.MemoryLimitMiB == p.Resources.MemoryLimitMiB, "recipe manifest")
+	require(err == nil && snapshotDigest == p.ProfileDigest && snapshot.ID == p.Request.Profile && snapshot.Version == p.ProfileVersion && snapshot.Repo == p.Request.Repo && snapshot.Kind == p.Request.Kind && snapshot.Xcode == p.Request.Xcode && sameSimulator(snapshot.Simulator, p.Request.Simulator) && profiles.SameRelease(snapshot.Release, p.Request.Release) && snapshot.BuildForTesting == p.Request.BuildForTesting && sameProductsRef(snapshot.Products, p.Request.Products) && snapshot.MemoryLimitMiB == p.Resources.MemoryLimitMiB, "recipe manifest")
 	// A template job's snapshot has no recipe; the executed recipe, and a test
 	// template's required tests (its shard's selectors; a script template has
 	// none), are the derivation from its reported repository configuration.

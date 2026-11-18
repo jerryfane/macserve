@@ -112,7 +112,7 @@ func TestAdmissionInspectionDeadlineRefusesOnlyTheJob(t *testing.T) {
 			a := runLane(engine, fixtureLaneJob(t, "job-a", model.Build), source, data)
 			<-runner.started
 			runner.set(nil, cut, nil)
-			result, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-b", model.Build), source, bytes.NewReader(data), nil)
+			result, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-b", model.Build), source, bytes.NewReader(data), nil, nil)
 			firstLine := strings.SplitN(cut.Error(), "\n", 2)[0]
 			if !errors.Is(err, ErrACLCensusUnavailable) || result.State != model.Failed || !result.CleanupOK || result.Concurrency.IdleVerdict != IdleNotRequired || !strings.HasPrefix(result.Reason, "lane admission: "+firstLine) {
 				t.Fatalf("inspection cut short at lane admission: %+v %v", result, err)
@@ -134,12 +134,12 @@ func TestAdmissionInspectionDeadlineRefusesOnlyTheJob(t *testing.T) {
 			engine := laneEngine(t, runner, 2)
 			source, data := sourceFixture(t)
 			runner.set(cut, nil, nil)
-			result, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-a", model.Build), source, bytes.NewReader(data), nil)
+			result, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-a", model.Build), source, bytes.NewReader(data), nil, nil)
 			if !errors.Is(err, ErrACLCensusUnavailable) || result.State != model.Failed || !result.CleanupOK || result.Concurrency.IdleVerdict != IdleNotRequired || !strings.HasPrefix(result.Reason, "admission: ") {
 				t.Fatalf("inspection cut short at solo admission: %+v %v", result, err)
 			}
 			runner.set(nil, nil, nil)
-			if next, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-b", model.Build), source, bytes.NewReader(data), nil); err != nil || next.State != model.Succeeded || !next.CleanupOK {
+			if next, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-b", model.Build), source, bytes.NewReader(data), nil, nil); err != nil || next.State != model.Succeeded || !next.CleanupOK {
 				t.Fatalf("next job after the refusal: %+v %v", next, err)
 			}
 		})
@@ -266,7 +266,7 @@ func TestFinalBarrierGetsItsOwnWindowAfterEvidence(t *testing.T) {
 	engine := laneEngine(t, runner, 2)
 	engine.options.CleanupTimeout = 500 * time.Millisecond
 	source, data := sourceFixture(t)
-	result, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-a", model.UnitTest), source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-a", model.UnitTest), source, bytes.NewReader(data), nil, nil)
 	if runner.calls.Load() != finalBarrier || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("not the logged finalization: calls=%d err=%v", runner.calls.Load(), err)
 	}
@@ -293,7 +293,7 @@ func TestFinalBarrierCutShortDefersToIdleCheck(t *testing.T) {
 	})
 	engine := laneEngine(t, runner, 2)
 	source, data := sourceFixture(t)
-	result, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-a", model.UnitTest), source, bytes.NewReader(data), nil)
+	result, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-a", model.UnitTest), source, bytes.NewReader(data), nil, nil)
 	if err != nil || result.State != model.Succeeded || !result.CleanupOK || result.Concurrency.IdleVerdict != IdleDeferred {
 		t.Fatalf("final barrier cut short: %+v %v", result, err)
 	}
@@ -353,7 +353,7 @@ func TestFinalizationFindingsKeepTheirVerdicts(t *testing.T) {
 			runner.laneFake = newBarrierFake(func(_ context.Context, call int32) error { return c.answer(runner, call) }).laneFake
 			engine := laneEngine(t, runner, 2)
 			source, data := sourceFixture(t)
-			result, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-a", model.UnitTest), source, bytes.NewReader(data), nil)
+			result, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-a", model.UnitTest), source, bytes.NewReader(data), nil, nil)
 			if err == nil || result.CleanupOK || result.Concurrency.IdleVerdict != IdleDeferred {
 				t.Fatalf("finding passed as a deadline: %+v %v", result, err)
 			}
@@ -386,7 +386,7 @@ func TestAdmissionFindingBesideDeadlineKeepsItsVerdict(t *testing.T) {
 			a := runLane(engine, fixtureLaneJob(t, "job-a", model.Build), source, data)
 			<-runner.started
 			runner.set(nil, c.err, nil)
-			result, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-b", model.Build), source, bytes.NewReader(data), nil)
+			result, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-b", model.Build), source, bytes.NewReader(data), nil, nil)
 			if err == nil || errors.Is(err, ErrACLCensusUnavailable) || result.CleanupOK {
 				t.Fatalf("finding refused as a deadline: %+v %v", result, err)
 			}
@@ -407,7 +407,7 @@ func TestAdmissionFindingBesideDeadlineKeepsItsVerdict(t *testing.T) {
 		source, data := sourceFixture(t)
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		if result, err := engine.Execute(ctx, fixtureLaneJob(t, "job-a", model.Build), source, bytes.NewReader(data), nil); errors.Is(err, ErrACLCensusUnavailable) || result.CleanupOK {
+		if result, err := engine.Execute(ctx, fixtureLaneJob(t, "job-a", model.Build), source, bytes.NewReader(data), nil, nil); errors.Is(err, ErrACLCensusUnavailable) || result.CleanupOK {
 			t.Fatalf("cancelled job refused as the service's: %+v %v", result, err)
 		}
 	})

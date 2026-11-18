@@ -155,6 +155,15 @@ func (s *Signer) Seal(ctx context.Context, job model.Job, result worker.Result) 
 	if repository.ID <= 0 || repository.Name != job.Request.Repo || approval.Intake == "" || approval.Identity == "" || approval.AttemptID == "" {
 		return nil, ErrInvalid
 	}
+	// A consumer's producer binding comes only from the Products option
+	// (the keyholder's own record); without it the receipt binds none, and
+	// a consumer's success receipt is incomplete.
+	var products *Products
+	if s.options.Products != nil && job.Request.Products != nil {
+		if products, err = s.options.Products(ctx, job); err != nil {
+			return nil, err
+		}
+	}
 	// Persisted job state and completion timestamps may change after sealing.
 	// Only immutable admission/dispatch inputs participate in replay identity.
 	input := struct {
@@ -169,7 +178,8 @@ func (s *Signer) Seal(ctx context.Context, job model.Job, result worker.Result) 
 		Result                                                      worker.Result
 		// Omitted when absent, so other jobs' input digests are unchanged.
 		ReleaseProvenance *model.ReleaseProvenance `json:",omitempty"`
-	}{job.ID, job.Principal, job.ProfileDigest, job.RequestDigest, job.WorkerEpoch, job.Request, job.Profile, job.CreatedAt, job.Deadline, s.options.Service, repository, approval, result, job.ReleaseProvenance}
+		Products          *Products                `json:",omitempty"`
+	}{job.ID, job.Principal, job.ProfileDigest, job.RequestDigest, job.WorkerEpoch, job.Request, job.Profile, job.CreatedAt, job.Deadline, s.options.Service, repository, approval, result, job.ReleaseProvenance, products}
 	inputDigest, err := valueDigest(input)
 	if err != nil {
 		return nil, err
@@ -201,6 +211,7 @@ func (s *Signer) Seal(ctx context.Context, job model.Job, result worker.Result) 
 	}
 	p := Payload{Schema: payloadSchema, JobID: job.ID, AttemptID: approval.AttemptID, InputDigest: inputDigest, Service: s.options.Service, Repository: repository, Approval: approval, Request: job.Request, ProfileDigest: job.ProfileDigest, ProfileVersion: job.Profile.Version, Source: result.Source, Observation: observed(result.Observation), State: result.State, Reason: result.Reason, ExitCode: result.ExitCode, Signal: result.Signal, CreatedAt: job.CreatedAt, StartedAt: result.StartedAt, FinishedAt: result.FinishedAt, Deadline: job.Deadline, SealedAt: s.options.Now().UTC(), WorkerEpoch: job.WorkerEpoch, Resources: ResourcePolicy{TimeoutSeconds: job.Request.TimeoutSeconds, MemoryLimitMiB: job.Profile.MemoryLimitMiB, PeakMemoryMiB: result.PeakMemoryMiB, HostPeakMemoryMiB: result.HostPeakMemoryMiB, CleanupRequired: true, CleanupOK: result.CleanupOK}, Concurrency: lanes(result), Tests: testEvidence(job.Request.Kind, required, result.Summary), Logs: []evidence.Artifact{}, LogsTruncated: result.LogsTruncated, CommandCount: len(result.Commands), ArtifactCount: len(result.Artifacts), Details: &Details{Profile: job.Profile, Result: result}}
 	p.RequestDigest = job.RequestDigest
+	p.Products = products
 	if job.Request.Kind == model.IOSArchive {
 		p.Release, p.ReleaseProvenance = job.Request.Release, job.ReleaseProvenance
 		for _, a := range result.Artifacts {

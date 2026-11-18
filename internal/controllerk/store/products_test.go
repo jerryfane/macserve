@@ -133,3 +133,86 @@ func TestPruneDropsOldEvictionProofsOnly(t *testing.T) {
 		}
 	}
 }
+
+// A consumer is admitted only against a succeeded build-for-testing
+// producer of the same repository and commit whose sealed products the
+// reference names exactly, while the pool still holds them.
+func TestEnqueueConsumerAdmission(t *testing.T) {
+	ctx := context.Background()
+	xcode := model.Xcode{Version: "27.0", Build: "27A100"}
+	build := model.Template{ID: "org-ios-sim-build-v1", Version: 1, Kind: model.Build, Owners: []string{"example-org"}, Xcode: xcode, DeveloperDir: "/Applications/ExampleToolchain.app/Contents/Developer"}
+	ui := model.Template{ID: "org-ios-sim-uitest-v1", Version: 1, Kind: model.SimulatorUITest, Owners: []string{"example-org"}, Xcode: xcode, DeveloperDir: build.DeveloperDir, Simulators: []model.Simulator{{Runtime: "com.apple.CoreSimulator.SimRuntime.iOS-27-0", RuntimeBuild: "24A100", DeviceType: "com.apple.CoreSimulator.SimDeviceType.iPhone-18-Pro"}}}
+	registry, err := profiles.New(nil, []model.Template{build, ui})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha := strings.Repeat("c", 40)
+	producerAdmission, err := registry.Resolve(model.Request{Repo: "example-org/example-app", SHA: sha, Kind: model.Build, Profile: build.ID, Xcode: xcode, BuildForTesting: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, _ := newStore(t, Options{})
+	producer := enqueueAdmission(t, s, "producer", producerAdmission, testNow)
+	digest := strings.Repeat("d", 64)
+	ref := model.ProductsRef{ProducerJobID: producer.ID, SHA256: digest, Xctestrun: "App_iphonesimulator27.0-arm64.xctestrun"}
+	consumer := func(ref model.ProductsRef, sha string) model.Admission {
+		a, err := registry.Resolve(model.Request{Repo: "example-org/example-app", SHA: sha, Kind: model.SimulatorUITest, Profile: ui.ID, Xcode: xcode, Shard: "smoke", Products: &ref})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+	enqueue := func(key string, a model.Admission) error {
+		_, _, err := s.Enqueue(ctx, "principal", key, a, testNow)
+		return err
+	}
+	if err := enqueue("queued producer", consumer(ref, sha)); !errors.Is(err, ErrProductsUnavailable) {
+		t.Fatalf("queued producer: %v", err)
+	}
+	completion := `{"input_digest":"x","result":{"state":"succeeded","artifacts":[{"name":"evidence/stdout.log","sha256":"` + strings.Repeat("1", 64) + `"},{"name":"test-products.tar","sha256":"` + digest + `"}],"observation":{"xctestrun":"` + ref.Xctestrun + `"}}}`
+	if _, err := s.db.ExecContext(ctx, "UPDATE jobs SET state='succeeded',result=? WHERE id=?", completion, producer.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ProducerProducts(getJob(t, s, producer.ID))
+	if err != nil || got != ref {
+		t.Fatalf("ProducerProducts = %+v %v", got, err)
+	}
+	if err := enqueue("unpooled", consumer(ref, sha)); !errors.Is(err, ErrProductsUnavailable) {
+		t.Fatalf("bytes never pooled: %v", err)
+	}
+	if err := s.RecordProduct(ctx, digest, 240<<20, producer.ID, testNow); err != nil {
+		t.Fatal(err)
+	}
+	otherDigest, otherXctestrun, unknown := ref, ref, ref
+	otherDigest.SHA256 = strings.Repeat("e", 64)
+	otherXctestrun.Xctestrun = "Other.xctestrun"
+	unknown.ProducerJobID = "j_unknown"
+	for name, tc := range map[string]struct {
+		admission model.Admission
+		want      error
+	}{
+		"another commit":   {consumer(ref, strings.Repeat("b", 40)), ErrInvalid},
+		"another digest":   {consumer(otherDigest, sha), ErrInvalid},
+		"another name":     {consumer(otherXctestrun, sha), ErrInvalid},
+		"unknown producer": {consumer(unknown, sha), ErrProductsUnavailable},
+	} {
+		if err := enqueue(name, tc.admission); !errors.Is(err, tc.want) {
+			t.Fatalf("%s: %v, want %v", name, err, tc.want)
+		}
+	}
+	admitted := consumer(ref, sha)
+	mismatched := admitted
+	mismatched.Profile.Products = &otherDigest
+	if err := enqueue("snapshot mismatch", mismatched); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("snapshot mismatch: %v", err)
+	}
+	if err := enqueue("consumer", admitted); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EvictProduct(ctx, digest, testNow.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := enqueue("evicted", consumer(ref, sha)); !errors.Is(err, ErrProductsUnavailable) {
+		t.Fatalf("evicted: %v", err)
+	}
+}
