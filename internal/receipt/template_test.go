@@ -196,11 +196,11 @@ func TestRequiredExecutedMatchesBundleRelative(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := testEvidence(model.SimulatorUITest, executed, &summary).ExecutedRequired; !slices.Equal(got, executed) {
+	if got := testEvidence(model.SimulatorUITest, executed, 0, &summary).ExecutedRequired; !slices.Equal(got, executed) {
 		t.Fatalf("executed required %q, want %q", got, executed)
 	}
 	others := []string{"OtherUITests/TerminalControlTests", "Herdr/TerminalControlTests", "HerdrUITests/TerminalResizeTests/testEngineAndWiringAgree"}
-	if got := testEvidence(model.SimulatorUITest, others, &summary).ExecutedRequired; len(got) != 0 {
+	if got := testEvidence(model.SimulatorUITest, others, 0, &summary).ExecutedRequired; len(got) != 0 {
 		t.Fatalf("unexecuted selectors counted: %q", got)
 	}
 }

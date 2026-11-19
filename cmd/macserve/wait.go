@@ -26,10 +26,10 @@ type waitPins struct {
 	Request          model.Request     `json:"request"`
 	ProfileDigest    string            `json:"profile_digest"`
 	RequiredTests    []string          `json:"required_tests"`
+	VerificationKeys map[string]string `json:"verification_keys"`
 	// RetryIterations is the pinned template's retry_failed_tests
 	// iterations; omitted (0) for a template without retries.
-	RetryIterations  int               `json:"retry_iterations,omitempty"`
-	VerificationKeys map[string]string `json:"verification_keys"`
+	RetryIterations int `json:"retry_iterations,omitempty"`
 }
 
 func runWait(args []string, stdout, stderr io.Writer) int {

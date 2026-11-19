@@ -252,6 +252,7 @@ func validRetries(kind model.Kind, t TestEvidence) bool {
 func requiredExecuted(c evidence.TestCase, name string) bool {
 	return !c.Container && (c.Outcome == "passed" || c.Outcome == "expected-failure") && (c.Name == name || evidence.RequiredMatch(c, name))
 }
+
 // testEvidence is the payload's test record of a job of kind with required
 // tests and retryIterations (model.Profile.RetryIterations) whose parsed
 // summary is s.

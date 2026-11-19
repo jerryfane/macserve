@@ -116,23 +116,23 @@ type ManifestReference struct {
 	URL       string `json:"url"`
 }
 type TestEvidence struct {
-	Status           string   `json:"status"`
-	ParserVersion    string   `json:"parser_version,omitempty"`
-	Tests            int      `json:"tests"`
-	Passed           int      `json:"passed"`
-	Failed           int      `json:"failed"`
-	Skipped          int      `json:"skipped"`
-	ExpectedFailures int      `json:"expected_failures"`
+	Status           string `json:"status"`
+	ParserVersion    string `json:"parser_version,omitempty"`
+	Tests            int    `json:"tests"`
+	Passed           int    `json:"passed"`
+	Failed           int    `json:"failed"`
+	Skipped          int    `json:"skipped"`
+	ExpectedFailures int    `json:"expected_failures"`
 	// RetryIterations is the job's retry opt-in (its template's
 	// retry_failed_tests iterations); Retried counts the cases that passed
 	// on retry, Superseded their failed attempts (Tests is Passed + Failed
 	// + Skipped + ExpectedFailures + Superseded) and RetriedTests names the
 	// first PublishedRetried of those cases' distinct IDs. All are omitted
 	// when zero, so a receipt of a job without retries keeps its bytes.
-	RetryIterations int      `json:"retry_iterations,omitempty"`
-	Retried         int      `json:"retried,omitempty"`
-	Superseded      int      `json:"superseded,omitempty"`
-	RetriedTests    []string `json:"retried_tests,omitempty"`
+	RetryIterations  int      `json:"retry_iterations,omitempty"`
+	Retried          int      `json:"retried,omitempty"`
+	Superseded       int      `json:"superseded,omitempty"`
+	RetriedTests     []string `json:"retried_tests,omitempty"`
 	Required         []string `json:"required"`
 	ExecutedRequired []string `json:"executed_required"`
 	XCResultSHA256   string   `json:"xcresult_sha256,omitempty"`

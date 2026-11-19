@@ -28,14 +28,14 @@ type TestCase struct {
 }
 
 type Summary struct {
-	SchemaVersion    int        `json:"schema_version"`
-	ParserVersion    string     `json:"parser_version"`
-	ParseStatus      string     `json:"parse_status"`
-	Tests            int        `json:"tests"`
-	Passed           int        `json:"passed"`
-	Failed           int        `json:"failed"`
-	Skipped          int        `json:"skipped"`
-	ExpectedFailures int        `json:"expected_failures"`
+	SchemaVersion    int    `json:"schema_version"`
+	ParserVersion    string `json:"parser_version"`
+	ParseStatus      string `json:"parse_status"`
+	Tests            int    `json:"tests"`
+	Passed           int    `json:"passed"`
+	Failed           int    `json:"failed"`
+	Skipped          int    `json:"skipped"`
+	ExpectedFailures int    `json:"expected_failures"`
 	// Retried counts the cases that passed on retry and Superseded their
 	// failed attempts, which Failed does not count: Tests is Passed +
 	// Failed + Skipped + ExpectedFailures + Superseded. Both are zero, and
@@ -43,9 +43,9 @@ type Summary struct {
 	Retried         int        `json:"retried,omitempty"`
 	Superseded      int        `json:"superseded,omitempty"`
 	DurationSeconds float64    `json:"duration_seconds"`
-	Cases            []TestCase `json:"cases"`
-	RequiredTests    []string   `json:"required_tests"`
-	XCResultSHA256   string     `json:"xcresult_sha256,omitempty"`
+	Cases           []TestCase `json:"cases"`
+	RequiredTests   []string   `json:"required_tests"`
+	XCResultSHA256  string     `json:"xcresult_sha256,omitempty"`
 }
 
 type Artifact struct {

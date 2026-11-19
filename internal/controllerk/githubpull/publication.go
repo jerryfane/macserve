@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/jerryfane/macserve/internal/controllerk/store"
@@ -177,8 +178,8 @@ func (p *Poller) checkInput(ctx context.Context, run store.GitHubRun) (githubapi
 				// binds its durable request-to-attempt mapping to those signed identities.
 				var envelope struct {
 					Payload struct {
-						JobID     string              `json:"job_id"`
-						AttemptID string              `json:"attempt_id"`
+						JobID     string               `json:"job_id"`
+						AttemptID string               `json:"attempt_id"`
 						Tests     receipt.TestEvidence `json:"tests"`
 					} `json:"payload"`
 				}
