@@ -89,27 +89,42 @@ func TestTemplateJobCompletesWithSignedReceipt(t *testing.T) {
 // admitted snapshot has no required tests: the controller reparses the
 // captured herdrup suite against the shard's bundle-relative selectors, the
 // signer seals them and success validation accepts the receipt. A selector
-// with no executed case turns the success claim into a failure.
+// with no executed case turns the success claim into a failure. With the
+// template's retry_failed_tests, the controller's reparse accepts a case
+// that failed and then passed on retry and the receipt records it; without
+// the field, or for a case that failed on every attempt, it does not.
 func TestTemplateTestJobsCompleteWithSignedReceipt(t *testing.T) {
 	selectors := []string{"HerdrUITests/TerminalControlTests", "HerdrUITests/TerminalSearchTests"}
-	report, err := os.ReadFile(filepath.Join("..", "..", "evidence", "testdata", "herdrup-uitests.json"))
-	if err != nil {
-		t.Fatal(err)
+	reports := map[string][]byte{}
+	for _, name := range []string{"herdrup-uitests.json", "herdrup-uitests-retry-passed.json", "herdrup-uitests-retry-mixed.json"} {
+		report, err := os.ReadFile(filepath.Join("..", "..", "evidence", "testdata", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		reports[name] = report
 	}
+	retry := &model.RetryFailedTests{Iterations: 2}
 	for _, tc := range []struct {
 		name      string
 		kind      model.Kind
 		selectors []string
+		retry     *model.RetryFailedTests
+		report    string
 		want      model.State
+		retried   int
 	}{
-		{"simulator_ui_test", model.SimulatorUITest, selectors, model.Succeeded},
-		{"unit_test", model.UnitTest, selectors, model.Succeeded},
-		{"selector not executed", model.SimulatorUITest, append(slices.Clone(selectors), "HerdrUITests/MissingTests"), model.Failed},
+		{"simulator_ui_test", model.SimulatorUITest, selectors, nil, "herdrup-uitests.json", model.Succeeded, 0},
+		{"unit_test", model.UnitTest, selectors, nil, "herdrup-uitests.json", model.Succeeded, 0},
+		{"selector not executed", model.SimulatorUITest, append(slices.Clone(selectors), "HerdrUITests/MissingTests"), nil, "herdrup-uitests.json", model.Failed, 0},
+		{"passed on retry", model.SimulatorUITest, selectors, retry, "herdrup-uitests-retry-passed.json", model.Succeeded, 1},
+		{"retry pass without the template field", model.SimulatorUITest, selectors, nil, "herdrup-uitests-retry-passed.json", model.Failed, 0},
+		{"failed on every attempt", model.SimulatorUITest, selectors, retry, "herdrup-uitests-retry-mixed.json", model.Failed, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			report := reports[tc.report]
 			f := newRuntime(t)
 			c := f.controller
-			template := model.Template{ID: "org-test-v1", Version: 1, Kind: tc.kind, Owners: []string{"example-org"}, Xcode: model.Xcode{Version: "27.0", Build: "27A100"}, DeveloperDir: "/Applications/ExampleToolchain.app/Contents/Developer", Simulators: []model.Simulator{{Runtime: "com.apple.CoreSimulator.SimRuntime.iOS-18-5", RuntimeBuild: "22F77", DeviceType: "com.apple.CoreSimulator.SimDeviceType.iPhone-16"}}, DefaultTimeoutSeconds: 600, MaxTimeoutSeconds: 600, MemoryLimitMiB: 512}
+			template := model.Template{ID: "org-test-v1", Version: 1, Kind: tc.kind, Owners: []string{"example-org"}, Xcode: model.Xcode{Version: "27.0", Build: "27A100"}, DeveloperDir: "/Applications/ExampleToolchain.app/Contents/Developer", Simulators: []model.Simulator{{Runtime: "com.apple.CoreSimulator.SimRuntime.iOS-18-5", RuntimeBuild: "22F77", DeviceType: "com.apple.CoreSimulator.SimDeviceType.iPhone-16"}}, DefaultTimeoutSeconds: 600, MaxTimeoutSeconds: 600, MemoryLimitMiB: 512, RetryFailedTests: tc.retry}
 			registry, err := profiles.New(nil, []model.Template{template})
 			if err != nil {
 				t.Fatal(err)
@@ -163,12 +178,21 @@ func TestTemplateTestJobsCompleteWithSignedReceipt(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = receipt.ValidateSuccess(p, receipt.Expected{RepositoryID: 123, Repo: admission.Request.Repo, SHA: admission.Request.SHA, Profile: template.ID, ProfileDigest: admission.ProfileDigest, Kind: tc.kind, Xcode: template.Xcode, Simulator: admission.Request.Simulator, RequiredTests: tc.selectors})
+			err = receipt.ValidateSuccess(p, receipt.Expected{RepositoryID: 123, Repo: admission.Request.Repo, SHA: admission.Request.SHA, Profile: template.ID, ProfileDigest: admission.ProfileDigest, Kind: tc.kind, Xcode: template.Xcode, Simulator: admission.Request.Simulator, RequiredTests: tc.selectors, RetryIterations: admission.Profile.RetryIterations()})
 			if tc.want == model.Succeeded && err != nil {
 				t.Fatal(err)
 			}
-			if tc.want == model.Failed && (err == nil || job.Reason != "test evidence did not prove success" || saved.Result.Summary.ParseStatus == "parsed") {
-				t.Fatalf("unexecuted selector: reason %q, validation %v", job.Reason, err)
+			if saved.Result.Summary.Retried != tc.retried {
+				t.Fatalf("retried %d, want %d", saved.Result.Summary.Retried, tc.retried)
+			}
+			if tc.want == model.Succeeded && tc.retried > 0 && (p.Tests.Retried != tc.retried || p.Tests.RetryIterations != 2 || len(p.Tests.RetriedTests) != 1) {
+				t.Fatalf("receipt retries: %+v", p.Tests)
+			}
+			if tc.want == model.Failed && (err == nil || job.Reason != "test evidence did not prove success") {
+				t.Fatalf("%s: reason %q, validation %v", tc.name, job.Reason, err)
+			}
+			if tc.name == "selector not executed" && saved.Result.Summary.ParseStatus == "parsed" {
+				t.Fatalf("unexecuted selector parsed: %+v", saved.Result.Summary)
 			}
 		})
 	}

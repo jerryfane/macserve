@@ -494,6 +494,14 @@ failure keeps the inventory for recovery. Recovery after a restart does the same
 script leaves follows the residue, hold and idle-verdict rules above. The engine cannot detect a script acting on a
 sibling's simulator or on CoreSimulator; the contract in [configuration.md](configuration.md) forbids it.
 
+**Retried UI tests.** A `simulator_ui_test` job of a template with `retry_failed_tests`
+(`model.Profile.RetryIterations`) adds `-retry-tests-on-failure -test-iterations 2` to its commands that run tests
+(`test`, `test-without-building`), not to `build-for-testing`, after the parallel-testing options. The worker, the
+controller's reparse and receipt validation all apply `evidence.MarkRetries` to the parsed attempts: a case (one ID
+in one suite) passes on retry when its last attempt passed after failed ones, and only failures may be retried, so
+a non-failed earlier attempt or more attempts than iterations is invalid evidence. Success still requires the test
+command's exit 0: xcodebuild exits 0 when every test's last attempt passed, so no non-zero exit is reinterpreted.
+
 **Parallel-testing clones.** A `simulator_ui_test` job of a template with `parallel_testing`
 (`model.Profile.ParallelTestingWorkers`) runs its tests with xcodebuild parallel testing, which clones the job's
 simulator into XCTest's device set (`simctl --set testing`, `Library/Developer/XCTestDevices` in the job's home), names each clone

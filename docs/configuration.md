@@ -180,6 +180,17 @@ never ambiguous. The worker cannot see a script act on another job's simulator o
 shows up only as the other job's failure, and the residue rules of *Concurrent jobs in one job account* in
 [architecture.md](architecture.md) still apply to anything it leaves.
 
+A `simulator_ui_test` template may set `"retry_failed_tests": {"iterations": 2}` (2 is the only count; any other kind,
+member or count refuses to load). Like `parallel_testing`, it is part of the template digest only when set, so adding
+it requires requalification and a template without it keeps its digest. Its jobs' test runs add
+`-retry-tests-on-failure -test-iterations 2`: xcodebuild reruns a failed test once. A test whose last attempt passed
+passes on retry; one that failed on both attempts fails the job. A retry pass satisfies `required_tests`, and a test
+whose retry is an expected failure (`XCTExpectFailure`) counts as an expected failure. The success rules are unchanged:
+the test command must exit 0 (xcodebuild does when every test's last attempt passed), and no other non-zero exit
+(build failure, runner crash, timeout) succeeds. `macserve wait` pins for such a template carry
+`"retry_iterations": 2`. Unit-test templates cannot retry. See [install.md](install.md) and
+[receipts-and-github.md](receipts-and-github.md) for what the evidence records.
+
 A Flutter template (one with a `flutter` pin: `version`, `sdk_sha256`, `ruby_sha256`, `cocoapods_version`,
 `gems_sha256`) runs `build`, `unit_test`, `simulator_ui_test` or `ios_archive` jobs for repositories whose `.macserve.json` has a
 `flutter` section, `{"app_dir": "apps/mobile", "prepare_ruby": ["scripts/add_call_directory_target.rb"]}` (at most 8
