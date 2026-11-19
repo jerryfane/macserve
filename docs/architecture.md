@@ -505,7 +505,9 @@ node lacking an identifier. The worker, the controller's reparse and receipt val
 ones, unless its identity (ID and suite) is shared with another group or case, as two same-named devices would be;
 only failures may be retried, so a non-failed earlier attempt or more attempts than iterations is invalid evidence.
 A superseded attempt explains only the failure it rolls up: a container's own failure messages (a suite teardown)
-and a test case's message no attempt records stay failures. Success still requires the test command's exit 0:
+stay failures, and a test case's own messages (outside its attempts, or recorded by none of them) are fixed from the
+tree before aggregate messages are copied onto attempts; they become the last attempt's `case_failures` and keep it
+failed even when it passed or was an expected failure. Success still requires the test command's exit 0:
 xcodebuild exits 0 when every test's last attempt passed, so no non-zero exit is reinterpreted.
 
 **Parallel-testing clones.** A `simulator_ui_test` job of a template with `parallel_testing`

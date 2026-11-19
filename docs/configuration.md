@@ -185,7 +185,8 @@ member or count refuses to load). Like `parallel_testing`, it is part of the tem
 it requires requalification and a template without it keeps its digest. Its jobs' test runs add
 `-retry-tests-on-failure -test-iterations 2`: xcodebuild reruns a failed test once. A test whose last attempt passed
 passes on retry; one that failed on both attempts fails the job. A retry pass satisfies `required_tests`, and a test
-whose retry is an expected failure (`XCTExpectFailure`) counts as an expected failure. The success rules are unchanged:
+whose retry is an expected failure (`XCTExpectFailure`) counts as an expected failure, unless the test case has a
+failure of its own outside its attempts (a teardown, for example): that keeps it failed. The success rules are unchanged:
 the test command must exit 0 (xcodebuild does when every test's last attempt passed), and no other non-zero exit
 (build failure, runner crash, timeout) succeeds. `macserve wait` pins for such a template carry
 `"retry_iterations": 2`. Unit-test templates cannot retry. See [install.md](install.md) and

@@ -23,7 +23,9 @@ one passed on retry: that attempt has `retried: true` and `failed_attempts`, the
 and messages with `superseded: true`, and `tests` gains `retry_iterations`, `retried`, `superseded` (counted in
 `tests` beside passed, failed, skipped and expected failures) and `retried_tests`, the first 8 retried case IDs.
 Attempts without labels, or whose ID and suite another attempt group shares (two devices with one display name),
-are never a retry, and a suite's own failure stays a failure. Validation recomputes those marks from the recorded
+are never a retry, and a suite's own failure stays a failure. A test case's own failure (a teardown outside its
+attempts) is recorded as `case_failures` on its last attempt, which stays failed, so the case does not pass on retry;
+validation refuses `case_failures` on a passing, expected-failure or superseded attempt. Validation recomputes those marks from the recorded
 attempts and accepts them only when the signed template snapshot sets `retry_failed_tests` and the expected policy
 names the same `retry_iterations`: a retry claim without a failing earlier attempt and a passing last one, a forged
 label, count or mark, or one on a template without the field is refused. A receipt without retries omits all of them and keeps
