@@ -49,12 +49,13 @@ import (
 // A new head is admitted afresh, so it has no full check until a trigger
 // holds for it. With MatrixSkipPaths a head whose every changed file (against
 // its base, as GitHub compares them) is one the paths match (SkipPaths.Match)
-// runs no matrix entry: each gets a neutral check that says so. An added,
-// modified or removed file is matched by its path, a renamed one by both its
-// previous and its new path. Any doubt (a failed or possibly truncated
-// comparison, no base commit, a rename without its previous path, a copied,
-// mode-changed, unchanged or unknown-status file, no changed file) runs the
-// matrix.
+// runs no matrix entry: each gets a neutral check that says so. A matrix
+// entry's own SkipPaths (MatrixEntry.SkipPaths) skips that entry alone the
+// same way, by the same comparison. An added, modified or removed file is
+// matched by its path, a renamed one by both its previous and its new path.
+// Any doubt (a failed or possibly truncated comparison, no base commit, a
+// rename without its previous path, a copied, mode-changed, unchanged or
+// unknown-status file, no changed file) runs the matrix.
 type Policy struct {
 	RepositoryID     int64         `json:"repository_id,omitempty"`
 	Repository       string        `json:"repository,omitempty"`
@@ -114,6 +115,15 @@ type MatrixEntry struct {
 	// the producer's sealed test products without building.
 	Build     string          `json:"build,omitempty"`
 	Simulator model.Simulator `json:"simulator"`
+	// TimeoutSeconds is the entry's job timeout, 0 for its template's
+	// maximum (the default). It is positive and at most that maximum,
+	// which the controller checks against the profile registry when it
+	// starts.
+	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
+	// SkipPaths, when set, skips this entry alone (a neutral check, no
+	// job) at a head whose every changed file it selects, as the policy's
+	// MatrixSkipPaths skips every entry; it has the same shape and bounds.
+	SkipPaths *SkipPaths `json:"skip_paths,omitempty"`
 }
 
 // Matrix entry tiers. With matrix_skip_drafts a fast entry runs on draft
@@ -199,17 +209,19 @@ const maxLabelRunes = 50
 // CheckMatrix refuses a matrix (or matrix_skip_drafts, matrix_skip_paths or
 // matrix_full_label) on an owner-form policy, any option without a matrix, a
 // matrix entry that is not one of the policy's profiles, has an invalid shard
-// name, an incomplete simulator or a tier other than fast or full, or repeats
-// a profile and shard, tiered and untiered entries in one matrix, two entries
-// with one tier and shard (one check name), an entry whose build is not one
-// of the policy's profiles or is a profile with matrix entries, a
-// matrix_full_label without matrix_skip_drafts and a full entry or that is
-// not a GitHub label name, and skip paths without an include glob, with more
+// name, an incomplete simulator, a tier other than fast or full or a
+// timeout_seconds below zero, or repeats a profile and shard, tiered and
+// untiered entries in one matrix, two entries with one tier and shard (one
+// check name), an entry whose build is not one of the policy's profiles or is
+// a profile with matrix entries, a matrix_full_label without
+// matrix_skip_drafts and a full entry or that is not a GitHub label name, and
+// skip paths (the policy's or an entry's) without an include glob, with more
 // than MaxSkipPaths globs in a list, or with an invalid (ValidSkipPath) or
 // repeated glob. Whether the profile is a simulator template pinning that
-// simulator, and whether a build is a build template that can produce test
-// products for the entry's kind, is checked against the profile registry
-// when the controller starts.
+// simulator, whether an entry's timeout is within the template's maximum, and
+// whether a build is a build template that can produce test products for the
+// entry's kind, is checked against the profile registry when the controller
+// starts.
 func (p Policy) CheckMatrix() error {
 	options := p.MatrixSkipDrafts || p.MatrixSkipPaths != nil || p.MatrixFullLabel != ""
 	if p.OwnerScoped() && (len(p.Matrix) != 0 || options) || options && len(p.Matrix) == 0 {
@@ -240,6 +252,14 @@ func (p Policy) CheckMatrix() error {
 		if entry.Build != "" && (!slices.Contains(p.Profiles, entry.Build) || slices.ContainsFunc(p.Matrix, func(other MatrixEntry) bool { return other.Profile == entry.Build })) {
 			return fmt.Errorf("GitHub policy matrix entry build %q is not one of its profiles without matrix entries", entry.Build)
 		}
+		if entry.TimeoutSeconds < 0 {
+			return fmt.Errorf("GitHub policy matrix entry %s timeout_seconds %d is not a positive number of seconds", name, entry.TimeoutSeconds)
+		}
+		if entry.SkipPaths != nil {
+			if err := entry.SkipPaths.check("matrix entry " + name + " skip_paths"); err != nil {
+				return err
+			}
+		}
 	}
 	if label := p.MatrixFullLabel; label != "" {
 		if !p.MatrixSkipDrafts || !full {
@@ -250,23 +270,32 @@ func (p Policy) CheckMatrix() error {
 		}
 	}
 	if s := p.MatrixSkipPaths; s != nil {
-		if len(s.Include) == 0 || len(s.Include) > MaxSkipPaths || len(s.Exclude) > MaxSkipPaths {
-			return fmt.Errorf("GitHub policy matrix_skip_paths has 1 to %d include and at most %d exclude globs", MaxSkipPaths, MaxSkipPaths)
-		}
-		for _, globs := range [][]string{s.Include, s.Exclude} {
-			for i, glob := range globs {
-				if !ValidSkipPath(glob) || slices.Contains(globs[:i], glob) {
-					return fmt.Errorf("GitHub policy matrix_skip_paths glob %q is invalid or repeated", glob)
-				}
+		return s.check("matrix_skip_paths")
+	}
+	return nil
+}
+
+// check refuses skip paths, named field in the error, without an include
+// glob, with more than MaxSkipPaths globs in a list, or with an invalid
+// (ValidSkipPath) or repeated glob.
+func (s SkipPaths) check(field string) error {
+	if len(s.Include) == 0 || len(s.Include) > MaxSkipPaths || len(s.Exclude) > MaxSkipPaths {
+		return fmt.Errorf("GitHub policy %s has 1 to %d include and at most %d exclude globs", field, MaxSkipPaths, MaxSkipPaths)
+	}
+	for _, globs := range [][]string{s.Include, s.Exclude} {
+		for i, glob := range globs {
+			if !ValidSkipPath(glob) || slices.Contains(globs[:i], glob) {
+				return fmt.Errorf("GitHub policy %s glob %q is invalid or repeated", field, glob)
 			}
 		}
 	}
 	return nil
 }
 
-// ValidSkipPath reports a matrix_skip_paths glob: a slash-separated relative
-// path of at most 96 bytes whose segments are each "**" (at most two) or a
-// non-empty path.Match pattern other than "." and "..".
+// ValidSkipPath reports a matrix_skip_paths (or entry skip_paths) glob: a
+// slash-separated relative path of at most 96 bytes whose segments are each
+// "**" (at most two) or a non-empty path.Match pattern other than "." and
+// "..".
 func ValidSkipPath(glob string) bool {
 	if glob == "" || len(glob) > maxSkipPathBytes || !utf8.ValidString(glob) || strings.ContainsFunc(glob, unicode.IsControl) {
 		return false

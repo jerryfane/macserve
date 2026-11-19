@@ -3,11 +3,17 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"io"
 	"time"
 
 	"github.com/jerryfane/macserve/internal/model"
 )
+
+// ErrStalled ends a command, and so its job, whose output stopped for its
+// Command.StallTimeout: the worker frees the lane instead of waiting for the
+// job's deadline (#201).
+var ErrStalled = errors.New("stalled")
 
 type Command struct {
 	Executable     string
@@ -25,6 +31,13 @@ type Command struct {
 	// command is charged for footprint above it. Nil samples a baseline
 	// before this command alone.
 	MemoryBaseline *MemoryBaseline
+	// StallTimeout, when positive, ends the command with ErrStalled once its
+	// combined stdout and stderr have gone this long without a byte. The
+	// runner then SIGKILLs the command's process group and every descendant
+	// that left it before the group's cleanup (nativeRunner.stallKill). Only
+	// a template job's run command sets it (model.Profile.StallTimeout):
+	// never a prepare, evidence, simulator or cleanup command.
+	StallTimeout time.Duration
 }
 
 // MemoryBaseline is the job-UID footprint that preceded a job. The runner

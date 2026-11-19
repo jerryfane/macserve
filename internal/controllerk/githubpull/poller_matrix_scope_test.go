@@ -199,6 +199,89 @@ func TestMatrixSkippedRunOwnerRerunStartsJob(t *testing.T) {
 	}
 }
 
+// A matrix entry's skip_paths skips that entry alone, as matrix_skip_paths
+// skips every entry: a head whose changed files it all selects (a rename by
+// both its paths) gets a neutral check and no job for that entry while its
+// sibling entries run. The policy's skip_paths still skip every entry. Both
+// decide from one comparison per head, and a failed one runs every entry. A
+// later head that touches anything else runs the entry.
+func TestMatrixEntrySkipPaths(t *testing.T) {
+	base := headSHA('b')
+	ipad := "mac-evidence/org-ios-sim-uitest-v1/ipad"
+	newPolicy := func() githubwire.Policy {
+		policy := matrixPolicy()
+		policy.MatrixSkipPaths = herdrupSkipPaths()
+		policy.Matrix[2].SkipPaths = &githubwire.SkipPaths{Include: []string{"HerdrUITests/Chat*"}}
+		return policy
+	}
+	for name, tc := range map[string]struct {
+		files []githubapi.ChangedFile // nil: the comparison fails
+		want  string                  // the ipad entry's summary, "" to run it
+		all   bool                    // the policy skips every entry
+	}{
+		"entry paths only":           {files: append(modified("HerdrUITests/ChatViewTests.swift"), renamed("HerdrUITests/ChatA.swift", "HerdrUITests/ChatB.swift")), want: "all 2 changed files match the matrix entry's skip_paths (HerdrUITests/Chat*)"},
+		"rename out of entry paths":  {files: []githubapi.ChangedFile{renamed("HerdrUITests/ChatA.swift", "HerdrUITests/TerminalA.swift")}},
+		"entry paths and other code": {files: modified("HerdrUITests/ChatViewTests.swift", "App/a.swift")},
+		"policy paths":               {files: modified("README.md"), want: "all 1 changed files match the policy's matrix_skip_paths (**/*.md)", all: true},
+		"comparison fails":           {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			policy := newPolicy()
+			f := newMatrixFixture(t, policy)
+			pull := matrixPull(1, headSHA('1'))
+			pull.BaseSHA = base
+			f.pull(matrixRepo, pull, matrixConfig)
+			if tc.files != nil {
+				f.remote.changed[matrixRepo+"@"+base+"..."+headSHA('1')] = tc.files
+			}
+			f.poll(t)
+			f.poll(t)
+			runs, checks := f.runsByCheck(t, headSHA('1')), f.checksOf(headSHA('1'))
+			if build := "mac-evidence/" + nativeBuild; len(runs) != 5 || runs[build].JobID == "" || checks[build].Status != "queued" {
+				t.Fatalf("runs %v checks %v", runs, checks)
+			}
+			for _, entry := range policy.Matrix {
+				name := githubwire.CheckName(entry.Profile, entry.Tier, entry.Shard)
+				run, check := runs[name], checks[name]
+				if tc.want == "" || name != ipad && !tc.all {
+					if run.JobID == "" || run.Skipped != "" || check.Status != "queued" {
+						t.Fatalf("%s should run: run %+v check %+v", name, run, check)
+					}
+					continue
+				}
+				if run.JobID != "" || !strings.Contains(run.Skipped, tc.want) || check.Status != "completed" || check.Conclusion != "neutral" || check.Output.Title != "Not run: docs/version-only change" || check.Output.Summary != run.Skipped {
+					t.Fatalf("%s should be skipped (%q): run %+v check %+v", name, tc.want, run, check)
+				}
+			}
+			f.remote.mu.Lock()
+			compares := f.remote.compares
+			f.remote.mu.Unlock()
+			if compares != 1 {
+				t.Fatalf("%d comparisons for two polls of one head's four entries, want 1", compares)
+			}
+		})
+	}
+
+	f := newMatrixFixture(t, newPolicy())
+	pull := matrixPull(1, headSHA('1'))
+	pull.BaseSHA = base
+	f.pull(matrixRepo, pull, matrixConfig)
+	f.remote.changed[matrixRepo+"@"+base+"..."+headSHA('1')] = modified("HerdrUITests/ChatViewTests.swift")
+	f.remote.changed[matrixRepo+"@"+base+"..."+headSHA('2')] = modified("HerdrUITests/ChatViewTests.swift", "App/a.swift")
+	f.poll(t)
+	if run := f.runsByCheck(t, headSHA('1'))[ipad]; run.JobID != "" || run.Skipped == "" {
+		t.Fatalf("entry-only head: %+v", run)
+	}
+	f.setPull(matrixRepo, func(p *githubapi.PullRequest) { p.HeadSHA = headSHA('2') })
+	f.remote.mu.Lock()
+	f.remote.files[matrixRepo+"@"+headSHA('2')] = matrixConfig
+	f.remote.mu.Unlock()
+	f.poll(t)
+	if run := f.runsByCheck(t, headSHA('2'))[ipad]; run.JobID == "" || run.Skipped != "" {
+		t.Fatalf("code head: %+v", run)
+	}
+}
+
 // matrix_skip_drafts also gates owner reruns: a draft pull request's matrix
 // run gets no new attempt; once it is ready, the rerun starts one.
 func TestMatrixOwnerRerunRespectsSkipDrafts(t *testing.T) {

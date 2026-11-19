@@ -79,13 +79,17 @@ const (
 //   - admin_pause (an administrator's cancel_active pause),
 //   - worker_admission (the worker refused it before it ran for a cause of
 //     its own, such as a registered tree ACL census cut short on a loaded
-//     host), or
+//     host),
 //   - client from a principal other than the job's own (an operator's
 //     POST /v1/jobs/<id>/cancel; a GitHub attempt's principal is
 //     github:<repository id>, never an API principal, so every API cancel of
-//     one is an operator's), unless the attempt was itself an automatic
-//     rerun (automatic): cancelling the service's own rerun keeps the head
-//     cancelled.
+//     one is an operator's), or
+//   - stalled (the worker ended it because its run command's output
+//     stopped for its stall limit, #201),
+//
+// in both last cases unless the attempt was itself an automatic rerun
+// (automatic): cancelling the service's own rerun, or a rerun that stalls
+// again, keeps the head cancelled.
 //
 // Never github (supersession or ineligibility), deadline or log_limit, nor an
 // attempt interrupted without a cancel request (a lost worker or a fenced
@@ -99,6 +103,8 @@ func serviceEnded(job model.Job, automatic bool) bool {
 		return true
 	case model.CancelClient:
 		return job.CancelReason.Principal != job.Principal && !automatic
+	case model.CancelStalled:
+		return !automatic
 	}
 	return false
 }

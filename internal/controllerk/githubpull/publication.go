@@ -135,8 +135,8 @@ func (p *Poller) checkInput(ctx context.Context, run store.GitHubRun) (githubapi
 		input.Output.Title = "Mac evidence requires action"
 		input.Output.Summary = run.Blocked
 	} else if run.JobID == "" && run.Skipped != "" {
-		// matrix_skip_paths: neutral passes branch protection without
-		// claiming evidence.
+		// matrix_skip_paths or an entry's skip_paths: neutral passes branch
+		// protection without claiming evidence.
 		input.Status = "completed"
 		input.Conclusion = "neutral"
 		input.Output.Title = "Not run: docs/version-only change"

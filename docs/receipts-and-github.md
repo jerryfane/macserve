@@ -281,6 +281,12 @@ the timeout they request. The timeout is part of the entry's run: a matrix job a
 head's: its job is cancelled (`github`, never rerun automatically) and the entry is admitted afresh with a new
 job and a new check of the same name. A run that was waiting for queue space is replaced the same way.
 
+An entry may set `timeout_seconds` (a positive integer, at most its template's `max_timeout_seconds`) to give its
+job a shorter timeout than the template maximum; a larger value refuses the policy at controller start
+(`entry <profile> shard <shard> timeout_seconds <n> exceeds template <profile> max_timeout_seconds <max>`). Like
+the template maximum it is part of the entry's run: setting, changing or removing it supersedes that entry's
+unfinished job and admits the entry afresh, while entries without it keep their runs.
+
 `matrix_skip_drafts: true` (default false; requires a matrix) holds matrix entries back while the pull request is a
 draft: a draft head admits only the policy's other profiles and publishes no matrix check. Marking it ready for
 review admits the matrix for the current head on the next poll. Converting it back to a draft cancels nothing:
@@ -315,6 +321,21 @@ new head. A skipped run keeps its pull request, so the owner rerun API (with its
 first attempt; a matrix run that already has a job (admitted before the skip, or started by such a rerun) keeps
 it. Content rules, such as a version-only edit of a project file, cannot be expressed; such changes run the
 matrix.
+
+A matrix entry may carry its own `skip_paths`, of the same shape and limits as `matrix_skip_paths`, to skip only
+that entry:
+
+```json
+{"profile": "org-ios-sim-uitest-v1", "shard": "chat", "simulator": {...},
+ "skip_paths": {"include": ["App/Terminal/**", "HerdrUITests/Terminal*"]}}
+```
+
+It is decided from the same comparison (one per head, shared by every entry), by the same per-file rules: when
+`matrix_skip_paths` selects every changed file every entry is skipped as above; otherwise an entry whose own
+`skip_paths` selects every changed file publishes the same `neutral` check, whose summary names the entry's
+`skip_paths` and the include globs that matched, and admits no job, while the other entries run. Anything
+doubtful, including a failed comparison, runs the entry; the decision is per head, and a skipped entry run
+reruns and keeps an existing job as above.
 
 A repository-form policy replaces the owner-form policy for its repository: the owner policy's build no longer
 runs there, so list the build template (e.g. `org-ios-sim-build-v1`) in the repository policy's `profiles` to keep

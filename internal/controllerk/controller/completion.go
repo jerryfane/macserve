@@ -59,6 +59,29 @@ func (c *Controller) refusedAdmission(ctx context.Context, job model.Job, comple
 	return err
 }
 
+// stalledJob records a completion the worker reports as its own end of the
+// job because the run command's output stopped for its stall limit
+// (protocol.Completion.Stalled) as the controller's cancellation stalled
+// before complete judges it: the job ends cancelled by the service, and pull
+// mode reruns its head once (store's serviceEnded; #201). A job already
+// terminal, or already cancelled for another cause, keeps its record.
+func (c *Controller) stalledJob(ctx context.Context, job model.Job, completion protocol.Completion) error {
+	if !completion.Stalled || job.State.Terminal() {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if a := c.execution(job.ID); a == nil || !a.offered {
+		return store.ErrLease
+	}
+	current, err := c.options.Store.Get(ctx, job.ID)
+	if err != nil {
+		return err
+	}
+	_, err = c.cancelJob(ctx, current, "worker ended the job: stalled", model.CancelReason{Source: model.CancelStalled, Detail: completion.Result.Reason}, c.options.Now())
+	return err
+}
+
 func (c *Controller) complete(ctx context.Context, job model.Job, result worker.Result, seal buildseal.Envelope) error {
 	ctx, cancel := context.WithTimeout(ctx, c.options.DeliveryTimeout)
 	defer cancel()
@@ -208,6 +231,13 @@ func normalizeCancellation(result *worker.Result, job model.Job, now time.Time) 
 	if job.Deadline != nil && !now.Before(*job.Deadline) {
 		result.State = model.TimedOut
 		result.Reason = "job deadline exceeded"
+	} else if job.CancelRequested && job.CancelReason != nil && job.CancelReason.Source == model.CancelStalled {
+		// The worker's own reason names the stall limit.
+		result.State = model.Cancelled
+		if !strings.HasPrefix(result.Reason, "stalled") {
+			result.Reason = "stalled"
+		}
+		result.Reason, _, _ = strings.Cut(result.Reason, "\n")
 	} else if job.CancelRequested {
 		result.State = model.Cancelled
 		result.Reason = "cancellation requested"

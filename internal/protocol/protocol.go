@@ -74,11 +74,16 @@ const HeartbeatTimeout = 30 * time.Second
 // with cleanup_ok); the controller then ends the job cancelled by the
 // service (model.CancelWorkerAdmission). A controller from before this field
 // refuses a completion carrying it (unknown fields are refused), so the
-// worker and controller of one release ship together.
+// worker and controller of one release ship together. Stalled is set only
+// when the worker ended the job itself because its run command's output
+// stopped for its stall limit (worker.ErrStalled); the controller then
+// records the job cancelled by the service (model.CancelStalled), which
+// pull mode reruns once. It ships the same way.
 type Completion struct {
 	Result           worker.Result      `json:"result"`
 	Seal             buildseal.Envelope `json:"seal"`
 	AdmissionRefused AdmissionRefusal   `json:"admission_refused,omitempty"`
+	Stalled          bool               `json:"stalled,omitempty"`
 }
 
 // AdmissionRefusal is why the worker refused a job's admission before it

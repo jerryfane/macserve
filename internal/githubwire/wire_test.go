@@ -1,6 +1,9 @@
 package githubwire
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // Globs match whole repository paths segment by segment: * and ? stay within
 // a segment and ** spans zero or more segments; an exclude glob wins.
@@ -37,6 +40,33 @@ func TestSkipPathsMatch(t *testing.T) {
 			if MatchPath(glob, name) != want {
 				t.Errorf("MatchPath(%q, %q) != %v", glob, name, want)
 			}
+		}
+	}
+}
+
+// A matrix entry's timeout_seconds is positive when set, and its skip_paths
+// have the bounds of matrix_skip_paths; both are optional.
+func TestCheckMatrixEntryTimeoutAndSkipPaths(t *testing.T) {
+	policy := tieredPolicy()
+	policy.Matrix[1].TimeoutSeconds = 1800
+	policy.Matrix[1].SkipPaths = &SkipPaths{Include: []string{"App/Chat/**"}, Exclude: []string{"App/Chat/Shared/**"}}
+	if err := policy.CheckMatrix(); err != nil {
+		t.Fatalf("valid entry timeout and skip_paths refused: %v", err)
+	}
+	for name, tc := range map[string]struct {
+		mutate func(*MatrixEntry)
+		want   string
+	}{
+		"negative timeout":       {func(e *MatrixEntry) { e.TimeoutSeconds = -1 }, "mac-evidence/full/ipad timeout_seconds -1"},
+		"no include glob":        {func(e *MatrixEntry) { e.SkipPaths = &SkipPaths{Exclude: []string{"docs/**"}} }, "matrix entry mac-evidence/full/ipad skip_paths has 1 to 32 include"},
+		"invalid glob":           {func(e *MatrixEntry) { e.SkipPaths = &SkipPaths{Include: []string{"../docs"}} }, `skip_paths glob "../docs" is invalid`},
+		"repeated exclude glob":  {func(e *MatrixEntry) { e.SkipPaths = &SkipPaths{Include: []string{"a"}, Exclude: []string{"b", "b"}} }, `skip_paths glob "b" is invalid or repeated`},
+		"too many include globs": {func(e *MatrixEntry) { e.SkipPaths = &SkipPaths{Include: strings.Split(strings.Repeat("a,", MaxSkipPaths)+"b", ",")} }, "skip_paths has 1 to 32"},
+	} {
+		policy := tieredPolicy()
+		tc.mutate(&policy.Matrix[1])
+		if err := policy.CheckMatrix(); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: accepted or wrong error %v, want %q", name, err, tc.want)
 		}
 	}
 }

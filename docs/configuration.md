@@ -11,9 +11,10 @@ a dedicated non-login, non-admin controller account distinct from the owner and 
 (`owner`/`owner_id`, covering every repository the owner's App installation lists); a policy setting both is
 refused. Each owner-form owner must also be in `receipt.owners`, and each repository-form repository in
 `receipt.repositories` with its numeric ID. A repository-form policy may add a `matrix` of simulator test and
-script template jobs (each entry a `profile`, `shard`, `simulator` and optional `tier` `fast`/`full`, checked as
-`mac-evidence/<profile>/<shard>`, or `mac-evidence/<tier>/<shard>` when tiered) and the `matrix_skip_drafts`,
-`matrix_full_label` and `matrix_skip_paths` options; owner-form policies refuse all four. See
+script template jobs (each entry a `profile`, `shard`, `simulator` and optional `tier` `fast`/`full`,
+`timeout_seconds` and `skip_paths`, checked as `mac-evidence/<profile>/<shard>`, or `mac-evidence/<tier>/<shard>`
+when tiered) and the `matrix_skip_drafts`, `matrix_full_label` and `matrix_skip_paths` options; owner-form
+policies refuse all four. See
 [receipts and GitHub](receipts-and-github.md#owner-policies) for the fields, threat model and migration, and
 [policy matrices](receipts-and-github.md#policy-matrices) for the matrix.
 Profiles and the public TLS certificate are root-controlled. The TLS private key is a controller-private file; the

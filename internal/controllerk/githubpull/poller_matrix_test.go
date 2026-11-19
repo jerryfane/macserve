@@ -530,3 +530,57 @@ func TestMatrixJobsGetTheTemplateMaximumTimeout(t *testing.T) {
 		}
 	}
 }
+
+// A matrix entry's timeout_seconds replaces its template's maximum as that
+// entry's job timeout and is part of its run: setting it gives that entry a
+// new run key, while entries without it keep theirs. A timeout above the
+// template's maximum is refused when the controller starts.
+func TestMatrixEntryTimeoutSeconds(t *testing.T) {
+	templates := matrixTemplates()
+	for i := range templates {
+		if templates[i].ID == uiTemplate {
+			templates[i].DefaultTimeoutSeconds, templates[i].MaxTimeoutSeconds = 2400, 7200
+		}
+	}
+	over := matrixPolicy()
+	over.Matrix[2].TimeoutSeconds = 7201
+	if _, err := newOrgFixture(t, templates, over); err == nil || !strings.Contains(err.Error(), "entry org-ios-sim-uitest-v1 shard ipad timeout_seconds 7201 exceeds template org-ios-sim-uitest-v1 max_timeout_seconds 7200") {
+		t.Fatalf("entry timeout above the template maximum accepted or wrong error: %v", err)
+	}
+	policy := matrixPolicy()
+	policy.Matrix[2].TimeoutSeconds = 1800
+	f, err := newOrgFixture(t, templates, policy)
+	if err != nil {
+		t.Fatalf("entry timeout within the template maximum refused: %v", err)
+	}
+	f.remote.install(matrixRepo, matrixRepoID, martianID, "")
+	pull := matrixPull(1, headSHA('1'))
+	f.pull(matrixRepo, pull, matrixConfig)
+	f.poll(t)
+	runs := f.runsByCheck(t, headSHA('1'))
+	for _, entry := range policy.Matrix {
+		before, err := f.p.admission(matrixPolicy(), pull, entry.Profile, entry.Shard, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		after, err := f.p.admission(policy, pull, entry.Profile, entry.Shard, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if (before.Run.Key != after.Run.Key) != (entry.TimeoutSeconds != 0) {
+			t.Fatalf("%s: run key %s without an entry timeout, %s with the policy's", entry.Shard, before.Run.Key, after.Run.Key)
+		}
+		recipe, _ := f.p.recipe(policy, entry.Profile)
+		want := recipe.MaxTimeoutSeconds
+		if entry.TimeoutSeconds != 0 {
+			want = entry.TimeoutSeconds
+		}
+		run := runs[githubwire.CheckName(entry.Profile, entry.Tier, entry.Shard)]
+		if run.Key != after.Run.Key || run.JobID == "" {
+			t.Fatalf("%s: run %+v, want key %s", entry.Shard, run, after.Run.Key)
+		}
+		if got := f.job(t, run.JobID).Request.TimeoutSeconds; got != want {
+			t.Fatalf("%s: job timeout %d, want %d", entry.Shard, got, want)
+		}
+	}
+}
