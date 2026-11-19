@@ -436,6 +436,12 @@ func validateDetails(p Payload, require func(bool, string)) {
 		default:
 			require(false, "test outcome")
 		}
+		// A case's own diagnostics keep its last attempt failed and are
+		// among its failures; a passing, expected-failure or superseded
+		// attempt has none.
+		for _, message := range c.CaseFailures {
+			require(c.Outcome == "failed" && !c.Superseded && slices.Contains(c.Failures, message), "case diagnostics")
+		}
 	}
 	require(passed == s.Passed && failed == s.Failed && skipped == s.Skipped && expected == s.ExpectedFailures && retried == s.Retried && superseded == s.Superseded && duration == s.DurationSeconds, "test counts")
 	// A pass on retry is the parser's verdict on the recorded attempts, and

@@ -30,6 +30,11 @@ type TestCase struct {
 	// Superseded marks a failed attempt of a case that passed on retry: it
 	// keeps its failed outcome and messages but does not fail the job.
 	Superseded bool `json:"superseded,omitempty"`
+	// CaseFailures are, in a retry job, the case's own failure messages
+	// (outside its attempts, a teardown for example) on its last attempt,
+	// also in Failures. They keep that attempt failed, so the case cannot
+	// pass on retry.
+	CaseFailures []string `json:"case_failures,omitempty"`
 }
 
 type Summary struct {

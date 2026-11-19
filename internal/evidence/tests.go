@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -423,6 +424,50 @@ func (p *testParser) containerFailure(n xcresultNode, path string, start int) {
 	}
 }
 
+// caseDiagnostics are a Test Case node's own failure messages: those in its
+// tree outside every execution (Repetition, Test Case Run) that no execution
+// records itself, in order and once each. Messages of an Expected Failure
+// issue are not failures. A case with no execution below it is its own only
+// attempt, so it has none.
+func caseDiagnostics(n xcresultNode) []string {
+	var outside, inside []string
+	var walk func(xcresultNode)
+	walk = func(node xcresultNode) {
+		for _, child := range node.Children {
+			switch {
+			case executionNode(child.Type):
+				inside = append(inside, failures(child)...)
+				continue
+			case child.Type == "Expected Failure":
+				continue
+			case child.Type == "Failure Message":
+				outside = append(outside, child.Name)
+			}
+			walk(child)
+		}
+	}
+	walk(n)
+	if len(inside) == 0 && !hasExecution(n) {
+		return nil
+	}
+	var own []string
+	for _, message := range outside {
+		if !slices.Contains(inside, message) && !slices.Contains(own, message) {
+			own = append(own, message)
+		}
+	}
+	return own
+}
+
+func hasExecution(n xcresultNode) bool {
+	for _, child := range n.Children {
+		if executionNode(child.Type) || hasExecution(child) {
+			return true
+		}
+	}
+	return false
+}
+
 func (p *testParser) visit(n xcresultNode, parent string) error {
 	if n.Type == "Test Case" {
 		id := n.Identifier
@@ -438,9 +483,40 @@ func (p *testParser) visit(n xcresultNode, parent string) error {
 		}
 		start := len(p.summary.Cases)
 		p.scope, p.ambiguous = suite, false
+		// In a retry job a case's own diagnostics (failure messages outside
+		// its attempts, such as a teardown) are fixed from the tree before
+		// executions propagates aggregate messages onto attempts.
+		var independent []string
+		if p.retry > 0 {
+			independent = caseDiagnostics(n)
+		}
 		_, err := p.executions(n, id, suite, n.Name)
 		if err != nil {
 			return err
+		}
+		if p.retry > 0 {
+			// A message no emitted attempt records (one on an intermediate
+			// execution node, say) is the case's own too.
+			for _, message := range failures(n) {
+				recorded := slices.Contains(independent, message)
+				for i := start; i < len(p.summary.Cases) && !recorded; i++ {
+					recorded = slices.Contains(p.summary.Cases[i].Failures, message)
+				}
+				if !recorded {
+					independent = append(independent, message)
+				}
+			}
+			// They fail the last attempt whatever its outcome (an expected
+			// failure too), so the case cannot pass on retry.
+			last := &p.summary.Cases[len(p.summary.Cases)-1]
+			for _, message := range independent {
+				if !slices.Contains(last.Failures, message) {
+					last.Failures = append(last.Failures, message)
+				}
+				last.CaseFailures = append(last.CaseFailures, message)
+				last.Outcome = "failed"
+			}
+			return p.markRetries(start)
 		}
 		messages := failures(n)
 		if len(messages) != 0 {
@@ -455,11 +531,6 @@ func (p *testParser) visit(n xcresultNode, parent string) error {
 					seen[message] = true
 				}
 			}
-			if p.retry > 0 {
-				// A case's own message that no attempt records is not
-				// attributable to a retried attempt: it fails the last one.
-				target = len(p.summary.Cases) - 1
-			}
 			for _, message := range messages {
 				if !seen[message] {
 					p.summary.Cases[target].Failures = append(p.summary.Cases[target].Failures, message)
@@ -470,7 +541,7 @@ func (p *testParser) visit(n xcresultNode, parent string) error {
 				}
 			}
 		}
-		return p.markRetries(start)
+		return nil
 	}
 	if n.Type == "Test Case Run" || n.Type == "Repetition" {
 		return fmt.Errorf("%w: execution without a test case", ErrInvalidTests)
@@ -596,7 +667,11 @@ func MarkRetries(cases []TestCase, iterations int) error {
 				return fmt.Errorf("%w: %q was retried after a %s attempt", ErrInvalidTests, first.ID, cases[i].Outcome)
 			}
 		}
-		if len(earlier) == 0 || identities[keyOf(first)] > 1 || last.Outcome != "passed" && last.Outcome != "expected-failure" {
+		diagnosed := false
+		for _, i := range group {
+			diagnosed = diagnosed || len(cases[i].CaseFailures) != 0
+		}
+		if len(earlier) == 0 || diagnosed || identities[keyOf(first)] > 1 || last.Outcome != "passed" && last.Outcome != "expected-failure" {
 			continue
 		}
 		last.Retried, last.FailedAttempts = true, len(earlier)

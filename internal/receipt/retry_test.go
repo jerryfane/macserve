@@ -140,6 +140,23 @@ func TestRetryReceiptRefusesForgedClaims(t *testing.T) {
 			}
 		})
 	}
+	// A case's own diagnostic on a passing retry, or on a superseded
+	// attempt, is refused: it must keep its last attempt failed.
+	for name, edit := range map[string]func(*evidence.Summary){
+		"diagnostic on the passing retry": func(s *evidence.Summary) {
+			s.Cases[1].CaseFailures = []string{"teardown failed"}
+		},
+		"diagnostic on a superseded attempt": func(s *evidence.Summary) {
+			s.Cases[0].CaseFailures = []string{"flaky"}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := ValidateSuccess(forge(edit), expected)
+			if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "case diagnostics") {
+				t.Fatalf("dropped case diagnostic accepted: %v", err)
+			}
+		})
+	}
 	// The payload's own retry record must match the recorded cases.
 	for name, edit := range map[string]func(*TestEvidence){
 		"retried count":     func(e *TestEvidence) { e.Retried++ },
