@@ -461,7 +461,7 @@ func (c *Client) Run(ctx context.Context) (returned error) {
 // and SourceTree are the worker's own lease resolution and computed source
 // tree; Seal is the signed build seal over them and the result. A pending
 // file written before seals existed has none and is sealed on delivery.
-// AdmissionRefused is protocol.Completion's.
+// AdmissionRefused and Stalled are protocol.Completion's.
 type pending struct {
 	Epoch            string                    `json:"epoch"`
 	Lease            protocol.Lease            `json:"lease"`
@@ -470,6 +470,7 @@ type pending struct {
 	SourceTree       string                    `json:"source_tree,omitempty"`
 	Seal             *buildseal.Envelope       `json:"seal,omitempty"`
 	AdmissionRefused protocol.AdmissionRefusal `json:"admission_refused,omitempty"`
+	Stalled          bool                      `json:"stalled,omitempty"`
 	// file is the name it was loaded from; empty for a new completion.
 	file string
 }
@@ -652,6 +653,11 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 	// caused the failure (protocol.Completion).
 	if executed && result.State == model.Failed && result.CleanupOK && errors.Is(err, worker.ErrACLCensusUnavailable) {
 		saved.AdmissionRefused = protocol.AdmissionACLCensusUnavailable
+	}
+	// The engine ended the job itself because its run command's output
+	// stopped (worker.ErrStalled), and nothing else cancelled it first.
+	if executed && cause == nil && errors.Is(err, worker.ErrStalled) {
+		saved.Stalled = true
 	}
 	seal, err := c.seal(saved)
 	if err != nil {
@@ -915,7 +921,7 @@ func (c *Client) deliver(ctx context.Context, saved pending) error {
 		}
 		saved.Seal = &seal
 	}
-	status, err := c.json(ctx, http.MethodPost, "/jobs/"+jobID+"/complete", saved.Epoch, saved.Lease.Token, protocol.Completion{Result: saved.Result, Seal: *saved.Seal, AdmissionRefused: saved.AdmissionRefused}, nil)
+	status, err := c.json(ctx, http.MethodPost, "/jobs/"+jobID+"/complete", saved.Epoch, saved.Lease.Token, protocol.Completion{Result: saved.Result, Seal: *saved.Seal, AdmissionRefused: saved.AdmissionRefused, Stalled: saved.Stalled}, nil)
 	if err != nil && status != http.StatusGone {
 		return err
 	}

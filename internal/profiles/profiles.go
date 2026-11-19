@@ -368,7 +368,36 @@ func normalizeTemplate(t *model.Template) error {
 	if err := normalizeRetryFailedTests(*t); err != nil {
 		return err
 	}
+	if err := normalizeStallSeconds(*t); err != nil {
+		return err
+	}
 	return normalizeBudgets(t.Kind, &t.DefaultTimeoutSeconds, &t.MaxTimeoutSeconds, &t.MemoryLimitMiB)
+}
+
+// MinStallSeconds and MaxStallSeconds bound a template's stall_seconds: a
+// limit under a minute would end jobs during an ordinary quiet step, and one
+// over an hour no longer frees a lane early.
+const (
+	MinStallSeconds = 60
+	MaxStallSeconds = 3600
+)
+
+// normalizeStallSeconds admits stall_seconds on the templates whose run
+// command the worker watches for output (model.Profile.StallTimeout):
+// simulator_script, where it replaces model.DefaultStallSeconds, and
+// unit_test and simulator_ui_test, which opt in with it. It must lie within
+// MinStallSeconds and MaxStallSeconds.
+func normalizeStallSeconds(t model.Template) error {
+	if t.StallSeconds == 0 {
+		return nil
+	}
+	if t.Kind != model.SimulatorScript && t.Kind != model.UnitTest && t.Kind != model.SimulatorUITest {
+		return fmt.Errorf("%w: only simulator_script, unit_test and simulator_ui_test templates may set stall_seconds", ErrInvalid)
+	}
+	if t.StallSeconds < MinStallSeconds || t.StallSeconds > MaxStallSeconds {
+		return fmt.Errorf("%w: stall_seconds must be %d to %d", ErrInvalid, MinStallSeconds, MaxStallSeconds)
+	}
+	return nil
 }
 
 // MaxParallelTestingWorkers bounds a UI-test template's parallel_testing

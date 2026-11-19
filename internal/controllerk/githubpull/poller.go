@@ -69,17 +69,23 @@ type Poller struct {
 	// Guarded by mu (held by Poll): the current name of each repository ID
 	// the owner listings cover (replaced by every complete cycle), and each
 	// head's parsed .macserve.json (key: repository ID, SHA; nil when missing
-	// or invalid) and matrix_skip_paths decision, kept while the head is still
-	// observed. An owner-form template is selected from the file against the
-	// governing policy on every use.
+	// or invalid) and changed files against its base, for the matrix skip
+	// paths, kept while the head is still observed. An owner-form template
+	// is selected from the file against the governing policy on every use.
 	discovered map[int64]string
 	configs    map[string]*model.RepoConfig
 	scopes     map[string]matrixScope
 }
 
-// matrixScope is a head's matrix_skip_paths decision against its base
-// commit: summary is why its matrix is not run, "" to run it.
-type matrixScope struct{ base, summary string }
+// matrixScope is a head's comparison with its base commit, which both the
+// policy's matrix_skip_paths and its entries' skip_paths decide from:
+// complete reports a comparison that lists every changed file (files), false
+// for a failed or possibly truncated one, which runs the matrix.
+type matrixScope struct {
+	base     string
+	files    []githubapi.ChangedFile
+	complete bool
+}
 
 func New(options Options) (*Poller, error) {
 	if options.Store == nil || options.Profiles == nil || options.Client == nil || options.Client.AppID() <= 0 || options.VerifyReceipt == nil || options.PollInterval < 0 {
@@ -124,6 +130,11 @@ func New(options Options) (*Poller, error) {
 		policy.BaseBranches = slices.Clone(policy.BaseBranches)
 		policy.Profiles = slices.Clone(policy.Profiles)
 		policy.Matrix = slices.Clone(policy.Matrix)
+		for i, entry := range policy.Matrix {
+			if s := entry.SkipPaths; s != nil {
+				policy.Matrix[i].SkipPaths = &githubwire.SkipPaths{Include: slices.Clone(s.Include), Exclude: slices.Clone(s.Exclude)}
+			}
+		}
 		if s := policy.MatrixSkipPaths; s != nil {
 			policy.MatrixSkipPaths = &githubwire.SkipPaths{Include: slices.Clone(s.Include), Exclude: slices.Clone(s.Exclude)}
 		}
@@ -157,6 +168,9 @@ func New(options Options) (*Poller, error) {
 			snapshot, _ := p.recipe(policy, entry.Profile)
 			if !slices.Contains(snapshot.Template.Simulators, entry.Simulator) {
 				return nil, fmt.Errorf("invalid GitHub policy matrix: template %s pins no simulator %+v", entry.Profile, entry.Simulator)
+			}
+			if entry.TimeoutSeconds > snapshot.MaxTimeoutSeconds {
+				return nil, fmt.Errorf("invalid GitHub policy matrix: entry %s shard %s timeout_seconds %d exceeds template %s max_timeout_seconds %d", entry.Profile, entry.Shard, entry.TimeoutSeconds, entry.Profile, snapshot.MaxTimeoutSeconds)
 			}
 			// A producer is a build template without a Flutter pin (the
 			// only recipe build_for_testing admits), and only entries of a
@@ -414,8 +428,8 @@ func (p *Poller) pollOwners(ctx context.Context, observed map[string]bool) []err
 	return failures
 }
 
-// pruneConfigs drops the parsed .macserve.json files and matrix_skip_paths
-// decisions of heads not observed.
+// pruneConfigs drops the parsed .macserve.json files and skip paths
+// comparisons of heads not observed.
 func (p *Poller) pruneConfigs(observed map[string]bool) {
 	for key := range p.configs {
 		if !observed[key] {
@@ -560,14 +574,15 @@ func matrixTemplate(recipe model.Profile) bool {
 // admission is the run of profileID and shard at pull's head: shard "" for a
 // profile that is not a matrix template, else the shard of one of the
 // policy's matrix entries for it, whose simulator the job runs on. Any other
-// combination is ErrIneligible. A matrix run's job gets the template's
-// maximum timeout, the owner-approved bound, not its default: one shard of
-// UI tests or a script runs far longer than a build. A profile some matrix
-// entry names as its build (Policy.Producer) is admitted as a
-// build-for-testing producer. products is the test products the job of an
-// entry with a build runs from (nil for any other run, and to compute only
-// the run): the run is the same whichever producer attempt's products its
-// job names, so its key binds the entry's build but not the products.
+// combination is ErrIneligible. A matrix run's job gets the entry's
+// timeout_seconds or else the template's maximum timeout, the owner-approved
+// bound, not its default: one shard of UI tests or a script runs far longer
+// than a build. A profile some matrix entry names as its build
+// (Policy.Producer) is admitted as a build-for-testing producer. products is
+// the test products the job of an entry with a build runs from (nil for any
+// other run, and to compute only the run): the run is the same whichever
+// producer attempt's products its job names, so its key binds the entry's
+// build but not the products.
 func (p *Poller) admission(policy githubwire.Policy, pull githubapi.PullRequest, profileID, shard string, products *model.ProductsRef) (store.GitHubAdmission, error) {
 	profile, ok := p.recipe(policy, profileID)
 	if !ok || !slices.Contains(policy.Profiles, profileID) || matrixTemplate(profile) != (shard != "") {
@@ -583,6 +598,9 @@ func (p *Poller) admission(policy githubwire.Policy, pull githubapi.PullRequest,
 		entry = policy.Matrix[i]
 		request.Shard, request.Simulator = shard, &entry.Simulator
 		request.TimeoutSeconds = profile.MaxTimeoutSeconds
+		if entry.TimeoutSeconds > 0 {
+			request.TimeoutSeconds = entry.TimeoutSeconds
+		}
 	} else {
 		request.BuildForTesting = policy.Producer(profileID)
 	}
@@ -947,10 +965,11 @@ func policyRuns(policy githubwire.Policy) []githubwire.MatrixEntry {
 // without starting anything. A head whose .macserve.json does not
 // declare the entry's shard for the template's kind, or from which the
 // worker could not derive the entry's recipe, gets the run blocked: an
-// action_required check and no job. A head matrix_skip_paths skips gets the
-// run skipped, a neutral check and no job, unless the run already has a job
-// (admitted before, or by an owner rerun), which it keeps. An entry with a
-// build is admitted from its producer's test products (admitConsumer).
+// action_required check and no job. A head the policy's matrix_skip_paths or
+// the entry's skip_paths skips gets the run skipped, a neutral check and no
+// job, unless the run already has a job (admitted before, or by an owner
+// rerun), which it keeps. An entry with a build is admitted from its
+// producer's test products (admitConsumer).
 // failure is a store refusal the poll reports and continues past; err ends
 // the repository's poll.
 func (p *Poller) admitMatrix(ctx context.Context, policy githubwire.Policy, pull githubapi.PullRequest, entry githubwire.MatrixEntry, input store.GitHubAdmission, observed map[string]bool, currentKeys map[string]bool, now time.Time) (failure, err error) {
@@ -975,7 +994,7 @@ func (p *Poller) admitMatrix(ctx context.Context, policy githubwire.Policy, pull
 		return p.options.Store.BlockGitHub(ctx, input.Run, reason, now), nil
 	}
 	currentKeys[key] = true
-	if summary := p.skipSummary(ctx, policy, pull, observed); summary != "" {
+	if summary := p.skipSummary(ctx, policy, pull, entry, observed); summary != "" {
 		existing, err := p.options.Store.GitHubRun(ctx, key)
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return nil, err
@@ -1115,39 +1134,51 @@ func (p *Poller) admitConsumer(ctx context.Context, policy githubwire.Policy, pu
 	return errors.Join(failure, p.options.Store.AwaitGitHub(ctx, input.Run, s.producer.Run.Key, pull.Number, now)), nil
 }
 
-// skipSummary is why matrix_skip_paths skips the policy's matrix at pull's
-// head, "" to run it. The decision is GitHub's comparison of the head with
-// its base commit, cached per head and base while the head is observed. Any
-// doubt runs the matrix: no base commit, a failed comparison (logged), and
-// every case scopeSummary refuses.
-func (p *Poller) skipSummary(ctx context.Context, policy githubwire.Policy, pull githubapi.PullRequest, observed map[string]bool) string {
-	if policy.MatrixSkipPaths == nil {
+// skipSummary is why the policy's matrix_skip_paths, or else entry's own
+// skip_paths, skips entry at pull's head, "" to run it. Both decide from
+// GitHub's comparison of the head with its base commit, read once per head
+// and base and cached while the head is observed. Any doubt runs the entry:
+// no base commit, a failed comparison (logged), and every case scopeSummary
+// refuses.
+func (p *Poller) skipSummary(ctx context.Context, policy githubwire.Policy, pull githubapi.PullRequest, entry githubwire.MatrixEntry, observed map[string]bool) string {
+	if policy.MatrixSkipPaths == nil && entry.SkipPaths == nil {
 		return ""
 	}
 	key := strconv.FormatInt(policy.RepositoryID, 10) + "/" + pull.HeadSHA
 	observed[key] = true
-	if cached, ok := p.scopes[key]; ok && cached.base == pull.BaseSHA {
-		return cached.summary
+	scope, ok := p.scopes[key]
+	if !ok || scope.base != pull.BaseSHA {
+		scope = matrixScope{base: pull.BaseSHA}
+		files, complete, err := p.options.Client.CompareFiles(ctx, policy.Repository, pull.BaseSHA, pull.HeadSHA)
+		if err != nil {
+			log.Printf("GitHub matrix skip paths comparison failed, running the matrix: repository=%s pull=%d head=%s: %v", policy.Repository, pull.Number, pull.HeadSHA, err)
+		} else {
+			scope.files, scope.complete = files, complete
+		}
+		p.scopes[key] = scope
 	}
-	summary := ""
-	files, complete, err := p.options.Client.CompareFiles(ctx, policy.Repository, pull.BaseSHA, pull.HeadSHA)
-	if err != nil {
-		log.Printf("GitHub matrix_skip_paths comparison failed, running the matrix: repository=%s pull=%d head=%s: %v", policy.Repository, pull.Number, pull.HeadSHA, err)
-	} else if complete {
-		summary = scopeSummary(*policy.MatrixSkipPaths, files)
+	if !scope.complete {
+		return ""
 	}
-	p.scopes[key] = matrixScope{base: pull.BaseSHA, summary: summary}
-	return summary
+	if policy.MatrixSkipPaths != nil {
+		if summary := scopeSummary(*policy.MatrixSkipPaths, "the policy's matrix_skip_paths", scope.files); summary != "" {
+			return summary
+		}
+	}
+	if entry.SkipPaths != nil {
+		return scopeSummary(*entry.SkipPaths, "the matrix entry's skip_paths", scope.files)
+	}
+	return ""
 }
 
 // scopeSummary is the neutral check summary of a complete comparison whose
-// every file is selected by paths, "" otherwise. An added, modified or
-// removed file is selected when paths matches its path; a renamed file only
-// when paths matches both its previous and its new path. No changed file, a
-// rename without its previous path, a previous path on any other status, and
-// any copied, mode-changed, unchanged, unknown or unselected file run the
-// matrix.
-func scopeSummary(paths githubwire.SkipPaths, files []githubapi.ChangedFile) string {
+// every file is selected by paths (named by field), "" otherwise. An added,
+// modified or removed file is selected when paths matches its path; a renamed
+// file only when paths matches both its previous and its new path. No changed
+// file, a rename without its previous path, a previous path on any other
+// status, and any copied, mode-changed, unchanged, unknown or unselected file
+// run the matrix.
+func scopeSummary(paths githubwire.SkipPaths, field string, files []githubapi.ChangedFile) string {
 	if len(files) == 0 {
 		return ""
 	}
@@ -1173,7 +1204,7 @@ func scopeSummary(paths githubwire.SkipPaths, files []githubapi.ChangedFile) str
 			return ""
 		}
 	}
-	return fmt.Sprintf("Not run: all %d changed files match the policy's matrix_skip_paths (%s). No job ran, so this check is not test evidence.", len(files), strings.Join(matched, ", "))
+	return fmt.Sprintf("Not run: all %d changed files match %s (%s). No job ran, so this check is not test evidence.", len(files), field, strings.Join(matched, ", "))
 }
 
 // shardProblem is why a matrix entry's admitted snapshot cannot run at a head
@@ -1227,10 +1258,11 @@ func (p *Poller) acceptComment(ctx context.Context, policy githubwire.Policy, co
 // requested reruns are bounded at two per run in any hour. A matrix run that
 // matrix_skip_drafts holds back at its draft head (Policy.HoldsBack) gets no
 // new attempt (its current attempt is left alone). A skipped matrix run
-// (matrix_skip_paths) starts its first attempt. The new attempt publishes to
-// the run's check name. It returns the run and whether a new attempt started
-// (false: the latest attempt is still queued or active). An unknown run is
-// store.ErrNotFound, a head no longer eligible (or a draft, as above)
+// (matrix_skip_paths or its entry's skip_paths) starts its first attempt.
+// The new attempt publishes to the run's check name. It returns the run and
+// whether a new attempt started (false: the latest attempt is still queued or
+// active). An unknown run is store.ErrNotFound, a head no longer eligible (or
+// a draft, as above)
 // ErrIneligible, the bound store.ErrRerunLimit. A matrix run whose entry
 // has a build reruns from its producer's retained test products:
 // ErrNoProducts while the producer has none (unfinished, failed or evicted).

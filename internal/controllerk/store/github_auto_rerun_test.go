@@ -188,6 +188,28 @@ func TestGitHubAutomaticRerunBounds(t *testing.T) {
 	}
 }
 
+// #201: an attempt the worker ended as stalled gets one automatic rerun; a
+// rerun that stalls again keeps the head cancelled, well within the hourly
+// bound.
+func TestGitHubStalledAttemptRerunsOnce(t *testing.T) {
+	ctx := context.Background()
+	s, _ := githubStore(t)
+	first, err := s.AdmitGitHub(ctx, githubFixture(), testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stalled := model.CancelReason{Source: "stalled", Detail: "stalled: no job output for 10m0s"}
+	cancelQueued(t, s, first, stalled, testNow)
+	rerun, err := s.AdmitGitHub(ctx, githubFixture(), testNow.Add(time.Minute))
+	if err != nil || rerun.JobID == first.JobID || rerun.Key != first.Key || getJob(t, s, rerun.JobID).State != model.Queued {
+		t.Fatalf("stalled attempt not rerun: %+v %v", rerun, err)
+	}
+	cancelQueued(t, s, rerun, stalled, testNow.Add(2*time.Minute))
+	if kept, err := s.AdmitGitHub(ctx, githubFixture(), testNow.Add(3*time.Minute)); err != nil || kept.JobID != rerun.JobID {
+		t.Fatalf("a rerun that stalled again was rerun: %+v %v", kept, err)
+	}
+}
+
 // A publication in flight defers the automatic rerun to a later poll without
 // failing ensure.
 func TestGitHubAutomaticRerunWaitsForPublication(t *testing.T) {

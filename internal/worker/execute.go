@@ -149,10 +149,11 @@ const DefaultCleanupTimeout = 2 * time.Minute
 // accepted Metal toolchain mount (cleanup, unmountMetalToolchain; #195
 // review F3). A finished ios_archive or build-for-testing job: the cleanup
 // budget's, its ArchiveEvidenceTimeout window's (which the controller grants
-// besides) and the verification window's. 883.5 s. The controller's
-// finalizing and cancelling lease budgets are derived from it (#150 review
-// r1).
-const FinalizationTimeout = DefaultCleanupTimeout + finalVerificationWindow + finalizationCommandCleanups*processCleanupBound
+// besides) and the verification window's. A stalled run command's cleanup
+// (ErrStalled, the recipe command's) also waits for its stallKill first:
+// stallKillBound, once. 918.5 s. The controller's finalizing and cancelling
+// lease budgets are derived from it (#150 review r1).
+const FinalizationTimeout = DefaultCleanupTimeout + finalVerificationWindow + finalizationCommandCleanups*processCleanupBound + stallKillBound
 
 // finalizationCommandCleanups is how many command cleanups one finalization
 // path can wait for beyond its windows (see FinalizationTimeout).
@@ -378,6 +379,10 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 		switch {
 		case parent.Err() == context.Canceled || job.CancelRequested:
 			result.State = model.Cancelled
+		case errors.Is(returned, ErrStalled):
+			// The worker ended the job itself; the controller records it as
+			// cancelled by the service (protocol.Completion.Stalled).
+			result.State = model.Cancelled
 		case errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(returned, context.DeadlineExceeded):
 			result.State = model.TimedOut
 		case returned != nil:
@@ -555,7 +560,9 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 		// The watch is x.manifest's only writer until stopWatch returns.
 		stopWatch = e.watchTestClones(ctx, &x.manifest)
 	}
-	returned = x.recipe(ctx, x.job.Profile.Run, x.runEnvironment()...)
+	// Only the run command is watched for output: never prepare, which
+	// builds quietly at times, nor the finalization and cleanup.
+	returned = x.recipe(ctx, x.job.Profile.Run, x.job.Profile.StallTimeout(), x.runEnvironment()...)
 	if err := stopWatch(); err != nil {
 		// A discovery listing whose cleanup failed or that found
 		// contamination fails the job like one of its own commands
@@ -644,7 +651,7 @@ func (x *execution) prepare(ctx context.Context) error {
 		if err := x.flutterStep(ctx, command, false); err != nil {
 			return err
 		}
-		if err := x.recipe(ctx, command); err != nil {
+		if err := x.recipe(ctx, command, 0); err != nil {
 			return err
 		}
 		if err := x.budget(x.engine.options.MaxWorkspaceBytes); err != nil {
@@ -731,8 +738,9 @@ func (x *execution) observe(ctx context.Context) error {
 }
 
 // recipe runs one recipe command in the work directory with the job
-// environment plus env.
-func (x *execution) recipe(ctx context.Context, recipe model.Command, env ...string) error {
+// environment plus env, ended as stalled after stall without output when
+// stall is positive (Command.StallTimeout).
+func (x *execution) recipe(ctx context.Context, recipe model.Command, stall time.Duration, env ...string) error {
 	replacement := strings.NewReplacer("${CHECKOUT}", filepath.Join(x.workspace, "checkout"), "${WORKSPACE}", x.workspace, "${DERIVED_DATA}", filepath.Join(x.workspace, "derived-data"), "${RESULT_BUNDLE}", filepath.Join(x.workspace, "results.xcresult"), "${SIMULATOR_ID}", x.manifest.DeviceUDID, "${JOB_ID}", x.job.ID, "${DEVELOPER_DIR}", x.job.Profile.DeveloperDir, "${PRODUCTS}", filepath.Join(x.workspace, profiles.ProductsDir))
 	args := make([]string, len(recipe.Args))
 	for i, arg := range recipe.Args {
@@ -798,6 +806,7 @@ func (x *execution) recipe(ctx context.Context, recipe model.Command, env ...str
 	command := x.command(executable, args)
 	command.Env = append(command.Env, env...)
 	command.Dir = filepath.Join(x.workspace, filepath.FromSlash(work))
+	command.StallTimeout = stall
 	outcome, err := x.invoke(ctx, command, x.stdout, x.stderr)
 	x.result.ExitCode = &outcome.ExitCode
 	x.result.Signal = outcome.Signal

@@ -157,14 +157,17 @@ Pull mode also reruns heads the service ended (#119). When an `ensure` admission
 head, owner-form or repository-form, and `mode=ensure` comments) finds the run's latest attempt `cancelled` or
 `interrupted` with a recorded cancel reason of `host_readiness`, `gate_error`, `controller_shutdown`,
 `admin_pause` (an administrator's `cancel_active` pause), `worker_admission` (the worker refused the job before it
-ran for a cause of the service's own, such as an ACL census cut short on a loaded host) or `client`
+ran for a cause of the service's own, such as an ACL census cut short on a loaded host), `stalled` (the worker ended
+the job because its run command's output stopped for the template's stall limit, #201; see `stall_seconds` in
+[configuration.md](configuration.md)) or `client`
 by a principal other than the job's own
 (an operator's `POST /v1/jobs/<id>/cancel`; a GitHub attempt's principal is `github:<repository id>`, so every
 API cancel of one is an operator's), it starts one new attempt in the same logical run, published to the same
 `mac-evidence/<profile>` check. It never reruns an attempt cancelled by GitHub intake (`github`: supersession or
 ineligibility), by its deadline or log limit, an attempt interrupted without a cancel request (lost or fenced
-worker), a failed, timed-out or succeeded attempt, nor an operator-cancelled attempt that was itself an
-automatic rerun. Automatic reruns are bounded at two per head/profile per hour, separately from requested
+worker), a failed, timed-out or succeeded attempt (a stalled attempt whose cleanup was not confirmed fails), nor an
+operator-cancelled or stalled attempt that was itself an automatic rerun: a rerun that stalls again keeps the head
+cancelled. API jobs are never rerun. Automatic reruns are bounded at two per head/profile per hour, separately from requested
 reruns; over the bound, or while the run's publication is in flight, the cancelled attempt stays current and
 a later poll retries.
 
@@ -281,6 +284,12 @@ the timeout they request. The timeout is part of the entry's run: a matrix job a
 head's: its job is cancelled (`github`, never rerun automatically) and the entry is admitted afresh with a new
 job and a new check of the same name. A run that was waiting for queue space is replaced the same way.
 
+An entry may set `timeout_seconds` (a positive integer, at most its template's `max_timeout_seconds`) to give its
+job a shorter timeout than the template maximum; a larger value refuses the policy at controller start
+(`entry <profile> shard <shard> timeout_seconds <n> exceeds template <profile> max_timeout_seconds <max>`). Like
+the template maximum it is part of the entry's run: setting, changing or removing it supersedes that entry's
+unfinished job and admits the entry afresh, while entries without it keep their runs.
+
 `matrix_skip_drafts: true` (default false; requires a matrix) holds matrix entries back while the pull request is a
 draft: a draft head admits only the policy's other profiles and publishes no matrix check. Marking it ready for
 review admits the matrix for the current head on the next poll. Converting it back to a draft cancels nothing:
@@ -315,6 +324,21 @@ new head. A skipped run keeps its pull request, so the owner rerun API (with its
 first attempt; a matrix run that already has a job (admitted before the skip, or started by such a rerun) keeps
 it. Content rules, such as a version-only edit of a project file, cannot be expressed; such changes run the
 matrix.
+
+A matrix entry may carry its own `skip_paths`, of the same shape and limits as `matrix_skip_paths`, to skip only
+that entry:
+
+```json
+{"profile": "org-ios-sim-uitest-v1", "shard": "chat", "simulator": {...},
+ "skip_paths": {"include": ["App/Terminal/**", "HerdrUITests/Terminal*"]}}
+```
+
+It is decided from the same comparison (one per head, shared by every entry), by the same per-file rules: when
+`matrix_skip_paths` selects every changed file every entry is skipped as above; otherwise an entry whose own
+`skip_paths` selects every changed file publishes the same `neutral` check, whose summary names the entry's
+`skip_paths` and the include globs that matched, and admits no job, while the other entries run. Anything
+doubtful, including a failed comparison, runs the entry; the decision is per head, and a skipped entry run
+reruns and keeps an existing job as above.
 
 A repository-form policy replaces the owner-form policy for its repository: the owner policy's build no longer
 runs there, so list the build template (e.g. `org-ios-sim-build-v1`) in the repository policy's `profiles` to keep

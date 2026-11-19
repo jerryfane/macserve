@@ -202,6 +202,115 @@ func (w synchronizedWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
+// outputClock records in last when reader last delivered a byte.
+type outputClock struct {
+	reader io.Reader
+	last   *atomic.Int64
+}
+
+func (c outputClock) Read(p []byte) (int, error) {
+	n, err := c.reader.Read(p)
+	if n > 0 {
+		c.last.Store(time.Now().UnixNano())
+	}
+	return n, err
+}
+
+// stallKillBound bounds stallKill: one listing and one signalling round.
+// FinalizationTimeout counts it once, for the stalled run command's cleanup
+// before the finalizer.
+const stallKillBound = defaultSampleTimeout + cleanupSignalTimeout
+
+// stallKill SIGKILLs a stalled command (ErrStalled) at once, before its
+// group's cleanup: every member of its process group and every descendant
+// of its direct child or of any group member, wherever in the tree it left
+// the group, of the job UID. A stalled job's
+// hung children need no grace, and a wrapper such as coreutils timeout puts
+// its command (a hung `simctl ui` or `simctl status_bar`) in a group of its
+// own, which the group cleanup never reaches: left running, it held the
+// job's simulator while the finalization shut it down, and the job's cleanup
+// went unconfirmed (herdrup j_8798460a, 2026-11-19). The group's cleanup
+// (cleanupGroup) still confirms the group; the finalization's quiesce and
+// census then judge every job process left (#201).
+//
+// Processes are listed once (within sampleTimeout) from the kernel's
+// process table, which names each one's parent (the protected scope's
+// sampler, identityProcesses without one), and signalled as the group
+// cleanup signals them: the protected signal helper, which checks each
+// instance's identity, or kill(2) without a protected scope (tests). The
+// command's root launcher (UID 0) is left to the group cleanup. Failures are
+// diagnostics only: the cleanup and the census that follow decide.
+func (r *nativeRunner) stallKill(child processInstance, uid int) {
+	sample := processSampler(identityProcesses)
+	if r.scope != nil && r.scope.sample != nil {
+		sample = r.scope.sample
+	}
+	samples, err := r.snapshot(sample)
+	if err != nil {
+		r.diagnose("stalled command: list processes: %v", err)
+		return
+	}
+	children := make(map[int][]processSample, len(samples))
+	seen := map[int]bool{}
+	var targets []processSample
+	// The walk starts at the direct child and every group member: a member
+	// that stayed in the group (a shell's subshell, a wrapper) may itself
+	// have a child that left it with setsid or setpgid (#203 review).
+	queue := []int{child.pid}
+	for _, p := range samples {
+		children[p.parent] = append(children[p.parent], p)
+		if p.group == child.pid && !seen[p.pid] {
+			seen[p.pid] = true
+			targets = append(targets, p)
+			queue = append(queue, p.pid)
+		}
+	}
+	// Only descendants by parent PID in this one listing are added: the
+	// lineage the lane tracker attributes to this job, never another job's
+	// processes.
+	for ; len(queue) > 0; queue = queue[1:] {
+		for _, p := range children[queue[0]] {
+			if p.pid > 1 && !seen[p.pid] {
+				seen[p.pid] = true
+				targets = append(targets, p)
+				queue = append(queue, p.pid)
+			}
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), r.signalTimeout)
+	defer cancel()
+	if r.signalProcess == nil {
+		// The direct child leads the group; kill(2) of the group reaches it.
+		if err := r.kill(-child.pid, syscall.SIGKILL); !signalSettled(err) {
+			r.diagnose("stalled command: SIGKILL process group: %v", err)
+		}
+	}
+	for _, p := range targets {
+		if ctx.Err() != nil {
+			r.diagnose("stalled command: SIGKILL round ran out: %v", ctx.Err())
+			return
+		}
+		if p.uid != uid || p.zombie {
+			continue
+		}
+		if r.signalProcess != nil {
+			err = r.signalProcess(ctx, p, syscall.SIGKILL)
+		} else {
+			err = r.kill(p.pid, syscall.SIGKILL)
+		}
+		if !signalSettled(err) {
+			r.diagnose("stalled command: SIGKILL pid=%d: %v", p.pid, err)
+		}
+	}
+}
+
+// diagnose writes one line to the runner's diagnostics, if any.
+func (r *nativeRunner) diagnose(format string, args ...any) {
+	if r.diagnostics != nil {
+		fmt.Fprintf(r.diagnostics, "macserve worker: "+format+"\n", args...)
+	}
+}
+
 // exitStatusError is a reaped command's ordinary non-zero exit, with no
 // signal: the command's own verdict rather than a runner, output, deadline or
 // cleanup failure.
@@ -337,8 +446,13 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 
 	pipes := make(chan pipeResult, 2)
 	var outputMu sync.Mutex
+	// lastOutput is when either pipe last delivered a byte (the stall
+	// watchdog, Command.StallTimeout): it is read before the output is
+	// written, so a slow log writer never counts as silence.
+	var lastOutput atomic.Int64
+	lastOutput.Store(time.Now().UnixNano())
 	pump := func(stream string, reader *os.File, writer io.Writer) {
-		_, err := io.Copy(synchronizedWriter{mu: &outputMu, writer: writer}, reader)
+		_, err := io.Copy(synchronizedWriter{mu: &outputMu, writer: writer}, outputClock{reader: reader, last: &lastOutput})
 		_ = reader.Close()
 		pipes <- pipeResult{stream: stream, err: err}
 	}
@@ -473,6 +587,7 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 		}
 		fmt.Fprintf(r.diagnostics, "macserve worker: %s: memory monitoring degraded: no sample completed for %s (%d failed; %s); the command keeps running and its budget is enforced on the next completed sample\n", label, unobserved.Round(time.Millisecond), failures, cause)
 	}
+	stalled := false
 	sampleMemory()
 	for runErr == nil {
 		reap()
@@ -485,6 +600,10 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 		case p := <-pipes:
 			recordPipe(p)
 		case <-poll.C:
+			if silent := time.Since(time.Unix(0, lastOutput.Load())); command.StallTimeout > 0 && silent >= command.StallTimeout {
+				runErr = fmt.Errorf("%w: no job output for %s", ErrStalled, command.StallTimeout)
+				stalled = true
+			}
 		case c := <-charges:
 			recordCharge(c)
 		case <-memory.C:
@@ -501,6 +620,9 @@ func (r *nativeRunner) Run(ctx context.Context, command Command, stdout, stderr 
 		runErr = errors.Join(runErr, ctx.Err())
 	}
 
+	if stalled {
+		r.stallKill(child, uid)
+	}
 	cleanupErr := r.cleanupGroup(child, uid, reap, func() bool { return reaped }, func() bool { return waitFailed })
 	result.CleanupOK = cleanupErr == nil
 	if cleanupErr != nil {

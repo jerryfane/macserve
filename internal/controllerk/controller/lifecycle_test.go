@@ -179,6 +179,49 @@ func TestWorkerAdmissionRefusalEndsCancelledByService(t *testing.T) {
 	}
 }
 
+// #201: a completion the worker reports as its own end of a stalled job
+// ends cancelled with cancel source stalled, which pull mode reruns once,
+// and keeps the reason distinct from an operator's cancel. With its cleanup
+// unconfirmed it fails and fences the epoch, as any such completion does.
+func TestStalledCompletionEndsCancelledByService(t *testing.T) {
+	const reason = "stalled: no job output for 10m0s"
+	for name, cleanup := range map[string]bool{"confirmed": true, "unconfirmed": false} {
+		t.Run(name, func(t *testing.T) {
+			f := newRuntime(t)
+			lease := f.lease(t, model.Build)
+			result := f.result(t, lease)
+			result.State, result.Reason, result.CleanupOK, result.ExitCode = model.Cancelled, reason, cleanup, nil
+			if !cleanup {
+				result.State = model.Failed
+			}
+			// The worker reports finalizing before its completion.
+			for _, state := range []model.State{model.Running, model.Finalizing} {
+				if code := lifecycleRequest(t, f.controller, lease, "/stage", protocol.Stage{State: state}); code != http.StatusNoContent {
+					t.Fatalf("stage %s: %d", state, code)
+				}
+			}
+			completion := map[string]any{"result": result, "seal": buildseal.Envelope{}, "stalled": true}
+			if status := lifecycleRequest(t, f.controller, lease, "/complete", completion); status != http.StatusNoContent {
+				t.Fatalf("completion status %d", status)
+			}
+			job, err := f.db.Get(context.Background(), lease.Job.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if job.CancelReason == nil || job.CancelReason.Source != "stalled" || job.CancelReason.Detail != reason {
+				t.Fatalf("cancel reason %+v", job.CancelReason)
+			}
+			want, wantReason := model.Cancelled, reason
+			if !cleanup {
+				want = model.Failed
+			}
+			if job.State != want || job.CleanupOK != cleanup || cleanup && job.Reason != wantReason {
+				t.Fatalf("job %s %q cleanup_ok %v, want %s", job.State, job.Reason, job.CleanupOK, want)
+			}
+		})
+	}
+}
+
 func TestFinalizingHeartbeatsCannotExtendBound(t *testing.T) {
 	f := newRuntime(t)
 	c := f.controller

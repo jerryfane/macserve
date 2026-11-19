@@ -300,6 +300,25 @@ func (p Profile) RetryIterations() int {
 	return p.Template.RetryFailedTests.Iterations
 }
 
+// DefaultStallSeconds is a simulator_script template's stall limit when it
+// sets none (Template.StallSeconds): ten minutes without job output.
+const DefaultStallSeconds = 600
+
+// StallTimeout is how long the run command of a template job snapshot p may
+// go without output before the worker ends the job as stalled: the
+// template's stall_seconds, DefaultStallSeconds for a simulator_script
+// template without it, and 0 (no limit) for any other job.
+func (p Profile) StallTimeout() time.Duration {
+	if p.Template == nil {
+		return 0
+	}
+	seconds := p.Template.StallSeconds
+	if seconds == 0 && p.Kind == SimulatorScript {
+		seconds = DefaultStallSeconds
+	}
+	return time.Duration(seconds) * time.Second
+}
+
 // Template is a controller-owned, owner-scoped recipe. Every repository of a
 // listed GitHub account may use it by declaring its Xcode project or workspace
 // and scheme, and for a test or script template its shards, in .macserve.json;
@@ -332,6 +351,13 @@ type Template struct {
 	// xcodebuild retrying a failed test. It is omitted when absent, so a
 	// template without it keeps its digest.
 	RetryFailedTests *RetryFailedTests `json:"retry_failed_tests,omitempty"`
+	// StallSeconds is how long the run command of a job of this template
+	// may go without a byte of output before the worker ends the job as
+	// stalled (Profile.StallTimeout). A simulator_script template defaults to
+	// DefaultStallSeconds when it is omitted; a unit_test or
+	// simulator_ui_test template opts in by setting it. It is omitted when
+	// absent, so a template without it keeps its digest.
+	StallSeconds int `json:"stall_seconds,omitempty"`
 }
 
 // ParallelTesting is a UI-test template's parallel-testing opt-in: the
@@ -522,11 +548,16 @@ const (
 	// a cause of the service's own (protocol.AdmissionRefusal), recorded by
 	// the controller when that completion arrives.
 	CancelWorkerAdmission CancelSource = "worker_admission"
+	// CancelStalled is the worker ending a job whose run command's output
+	// stopped for its stall limit (Profile.StallTimeout; worker.ErrStalled),
+	// recorded by the controller when that completion arrives
+	// (protocol.Completion.Stalled).
+	CancelStalled CancelSource = "stalled"
 )
 
 func (s CancelSource) Valid() bool {
 	switch s {
-	case CancelClient, CancelAdminPause, CancelDeadline, CancelHostReadiness, CancelGateError, CancelLogLimit, CancelShutdown, CancelGitHub, CancelWorkerAdmission:
+	case CancelClient, CancelAdminPause, CancelDeadline, CancelHostReadiness, CancelGateError, CancelLogLimit, CancelShutdown, CancelGitHub, CancelWorkerAdmission, CancelStalled:
 		return true
 	}
 	return false
