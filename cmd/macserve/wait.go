@@ -27,6 +27,9 @@ type waitPins struct {
 	ProfileDigest    string            `json:"profile_digest"`
 	RequiredTests    []string          `json:"required_tests"`
 	VerificationKeys map[string]string `json:"verification_keys"`
+	// RetryIterations is the pinned template's retry_failed_tests
+	// iterations; omitted (0) for a template without retries.
+	RetryIterations int `json:"retry_iterations,omitempty"`
 }
 
 func runWait(args []string, stdout, stderr io.Writer) int {
@@ -100,7 +103,7 @@ func runWait(args []string, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	result, err := waiter.Run(ctx, waiter.Options{Client: client, Repo: pins.Request.Repo, RepositoryID: pins.RepositoryID, PullRequest: pr, Profile: pins.Request.Profile, RequestID: requestID, Mode: mode, AppID: pins.AppID, Timeout: timeout, Keys: keys,
-		Expected: receipt.Expected{RepositoryID: pins.RepositoryID, Repo: pins.Request.Repo, SHA: sha, Profile: pins.Request.Profile, ProfileDigest: pins.ProfileDigest, Kind: pins.Request.Kind, Xcode: pins.Request.Xcode, Simulator: pins.Request.Simulator, RequiredTests: pins.RequiredTests, Release: pins.Request.Release, BuildForTesting: pins.Request.BuildForTesting, Products: pins.Request.Products},
+		Expected: receipt.Expected{RepositoryID: pins.RepositoryID, Repo: pins.Request.Repo, SHA: sha, Profile: pins.Request.Profile, ProfileDigest: pins.ProfileDigest, Kind: pins.Request.Kind, Xcode: pins.Request.Xcode, Simulator: pins.Request.Simulator, RequiredTests: pins.RequiredTests, Release: pins.Request.Release, BuildForTesting: pins.Request.BuildForTesting, Products: pins.Request.Products, RetryIterations: pins.RetryIterations},
 	})
 	if err != nil {
 		return fail(err)
@@ -115,7 +118,7 @@ func runWait(args []string, stdout, stderr io.Writer) int {
 	if err := appendActionsFile("GITHUB_OUTPUT", output); err != nil {
 		return fail(err)
 	}
-	summary := fmt.Sprintf("## Verified Mac evidence\n\nJob `%s`; receipt `%s`.\n\nTests: %s; %d passed, %d failed, %d skipped, %d expected failures.\n", result.JobID, result.ReceiptDigest, result.Tests.Status, result.Tests.Passed, result.Tests.Failed, result.Tests.Skipped, result.Tests.ExpectedFailures)
+	summary := fmt.Sprintf("## Verified Mac evidence\n\nJob `%s`; receipt `%s`.\n\nTests: %s; %d passed, %d failed, %d skipped, %d expected failures, %d passed on retry.\n", result.JobID, result.ReceiptDigest, result.Tests.Status, result.Tests.Passed, result.Tests.Failed, result.Tests.Skipped, result.Tests.ExpectedFailures, result.Tests.Retried)
 	if err := appendActionsFile("GITHUB_STEP_SUMMARY", summary); err != nil {
 		return fail(err)
 	}

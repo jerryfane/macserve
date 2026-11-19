@@ -36,7 +36,7 @@ func simpleReport(nodes string) []byte {
 }
 
 func TestParseTestsPreservesNestedAttemptsAndOutcomes(t *testing.T) {
-	summary, err := ParseTests([]byte(nestedTestReport), []string{"ExampleTests/Flow", "ExampleTests/Flow/testExpected()", "ExampleTests/Flow/testRepeated()"})
+	summary, err := ParseTests([]byte(nestedTestReport), []string{"ExampleTests/Flow", "ExampleTests/Flow/testExpected()", "ExampleTests/Flow/testRepeated()"}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestParseTestsKeepsDeviceConfigurationsAndFallbackIdentifiers(t *testing.T)
 		{"nodeType":"Device","name":"Second","children":[{"nodeType":"Test Case","name":"case","nodeIdentifier":"Suite/case","result":"Passed"}]},
 		{"nodeType":"Test Case","name":"fallback","result":"Passed"}
 	]}`)
-	summary, err := ParseTests(report, []string{"Suite"})
+	summary, err := ParseTests(report, []string{"Suite"}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestParseTestsKeepsDeviceConfigurationsAndFallbackIdentifiers(t *testing.T)
 func TestParseTestsRequiredScopeBoundaries(t *testing.T) {
 	for _, required := range []string{"Flow", "ExampleTests/Flo", "Repeated", "testSkipped()", "ExampleTests/Other", ""} {
 		t.Run(required, func(t *testing.T) {
-			summary, err := ParseTests([]byte(nestedTestReport), []string{required})
+			summary, err := ParseTests([]byte(nestedTestReport), []string{required}, 0)
 			if !errors.Is(err, ErrRequiredTests) || summary.ParseStatus != "incomplete" {
 				t.Fatalf("scope %q: %+v, %v", required, summary, err)
 			}
@@ -88,11 +88,11 @@ func TestParseTestsRequiredScopeBoundaries(t *testing.T) {
 		simpleReport(""),
 		simpleReport(`{"nodeType":"Test Case","name":"skip","result":"Skipped"}`),
 	} {
-		if _, err := ParseTests(report, nil); !errors.Is(err, ErrInvalidTests) {
+		if _, err := ParseTests(report, nil, 0); !errors.Is(err, ErrInvalidTests) {
 			t.Fatalf("non-executed report accepted: %v", err)
 		}
 	}
-	if summary, err := ParseTests(simpleReport(`{"nodeType":"Test Case","name":"expected","result":"Expected Failure"}`), []string{"expected"}); err != nil || summary.ExpectedFailures != 1 {
+	if summary, err := ParseTests(simpleReport(`{"nodeType":"Test Case","name":"expected","result":"Expected Failure"}`), []string{"expected"}, 0); err != nil || summary.ExpectedFailures != 1 {
 		t.Fatalf("expected failure did not execute: %+v %v", summary, err)
 	}
 }
@@ -126,13 +126,13 @@ func TestParseTestsRejectsMalformedAndIncompleteReports(t *testing.T) {
 	}
 	for name, data := range invalid {
 		t.Run(name, func(t *testing.T) {
-			if _, err := ParseTests(data, nil); !errors.Is(err, ErrInvalidTests) {
+			if _, err := ParseTests(data, nil, 0); !errors.Is(err, ErrInvalidTests) {
 				t.Fatalf("accepted invalid evidence: %v", err)
 			}
 		})
 	}
 	oversized := bytes.Repeat([]byte(" "), MaxTestsBytes+1)
-	if _, err := ParseTests(oversized, nil); !errors.Is(err, ErrInvalidTests) {
+	if _, err := ParseTests(oversized, nil, 0); !errors.Is(err, ErrInvalidTests) {
 		t.Fatalf("accepted oversized report: %v", err)
 	}
 }
@@ -148,19 +148,19 @@ func TestParseTestsUsesExplicitDurationAndValidHumanUnits(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		summary, err := ParseTests(simpleReport(string(node)), nil)
+		summary, err := ParseTests(simpleReport(string(node)), nil, 0)
 		if err != nil || summary.DurationSeconds != tc.seconds {
 			t.Fatalf("duration %q: %+v, %v", tc.duration, summary, err)
 		}
 	}
-	summary, err := ParseTests(simpleReport(`{"nodeType":"Test Case","name":"case","result":"Passed","duration":"presentation only","durationInSeconds":0.25}`), nil)
+	summary, err := ParseTests(simpleReport(`{"nodeType":"Test Case","name":"case","result":"Passed","duration":"presentation only","durationInSeconds":0.25}`), nil, 0)
 	if err != nil || summary.DurationSeconds != .25 {
 		t.Fatalf("explicit numeric duration: %+v %v", summary, err)
 	}
 }
 
 func TestJUnitEscapesAndPreservesFailureAndRepetitionDetails(t *testing.T) {
-	summary, err := ParseTests([]byte(nestedTestReport), nil)
+	summary, err := ParseTests([]byte(nestedTestReport), nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +216,7 @@ func TestParseTestsKeepsAggregateFailureDetailsWithoutDoubleCounting(t *testing.
 	summary, err := ParseTests(simpleReport(`{"nodeType":"Test Case","name":"case","result":"Failed","children":[
 		{"nodeType":"Failure Message","name":"aggregate detail"},
 		{"nodeType":"Test Case Run","name":"run","result":"Failed","children":[{"nodeType":"Failure Message","name":"run detail"}]}
-	]}`), nil)
+	]}`), nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,7 +243,7 @@ func TestParseTestsPreservesFailedContainers(t *testing.T) {
 				data := simpleReport(`{"nodeType":"` + kind + `","name":"Container","result":"Failed","durationInSeconds":99,"children":[
 					{"nodeType":"Failure Message","name":"teardown <failed> & stopped"}` + child.nodes + `
 				]}`)
-				summary, err := ParseTests(data, nil)
+				summary, err := ParseTests(data, nil, 0)
 				if child.executed {
 					if err != nil || summary.ParseStatus != "parsed" {
 						t.Fatalf("executed report: %+v, %v", summary, err)
@@ -313,7 +313,7 @@ func TestParseTestsDoesNotDoubleCountNestedContainerFailures(t *testing.T) {
 			]`, 1)
 		}
 		t.Run(name, func(t *testing.T) {
-			summary, err := ParseTests(simpleReport(nodes), []string{"Plan/Bundle/Suite/case"})
+			summary, err := ParseTests(simpleReport(nodes), []string{"Plan/Bundle/Suite/case"}, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -368,14 +368,14 @@ func TestParseTestsContainerDiagnosticsCannotSatisfyRequiredTests(t *testing.T) 
 		{"nodeType":"Test Case","name":"unrelated","result":"Passed"},
 		{"nodeType":"Test Suite","name":"required","result":"Failed","children":[
 			{"nodeType":"Failure Message","name":"setup failed"}
-		]}`), []string{"required"})
+		]}`), []string{"required"}, 0)
 	if !errors.Is(err, ErrRequiredTests) || summary.ParseStatus != "incomplete" || summary.Failed != 1 || summary.Passed != 1 {
 		t.Fatalf("container diagnostic satisfied required execution: %+v, %v", summary, err)
 	}
 }
 
 func TestParseTestsFailedContainerWithoutMessageRemainsDiagnostic(t *testing.T) {
-	summary, err := ParseTests(simpleReport(`{"nodeType":"Test Suite","name":"Setup","result":"Failed"}`), nil)
+	summary, err := ParseTests(simpleReport(`{"nodeType":"Test Suite","name":"Setup","result":"Failed"}`), nil, 0)
 	if !errors.Is(err, ErrInvalidTests) || summary.ParseStatus != "incomplete" || summary.Passed != 0 || summary.Failed != 1 {
 		t.Fatalf("empty failed container lost: %+v, %v", summary, err)
 	}

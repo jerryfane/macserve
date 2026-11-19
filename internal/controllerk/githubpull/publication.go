@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/jerryfane/macserve/internal/controllerk/store"
@@ -177,13 +178,14 @@ func (p *Poller) checkInput(ctx context.Context, run store.GitHubRun) (githubapi
 				// binds its durable request-to-attempt mapping to those signed identities.
 				var envelope struct {
 					Payload struct {
-						JobID     string `json:"job_id"`
-						AttemptID string `json:"attempt_id"`
+						JobID     string               `json:"job_id"`
+						AttemptID string               `json:"attempt_id"`
+						Tests     receipt.TestEvidence `json:"tests"`
 					} `json:"payload"`
 				}
 				if json.Unmarshal(packet.Receipt, &envelope) == nil && envelope.Payload.JobID == job.ID && envelope.Payload.AttemptID == run.AttemptID {
 					input.Conclusion = "success"
-					input.Output.Summary = "Complete signed execution evidence verified by the controller."
+					input.Output.Summary = "Complete signed execution evidence verified by the controller." + retriedSummary(envelope.Payload.Tests)
 				}
 			}
 			if input.Conclusion != "success" {
@@ -214,6 +216,24 @@ func (p *Poller) checkInput(ctx context.Context, run store.GitHubRun) (githubapi
 	}
 	input.Output.Text = string(data)
 	return input, nil
+}
+
+// retriedSummary is the check summary's note of a verified receipt's tests
+// that passed on retry: their count and the receipt's bounded names
+// (receipt.PublishedRetried), or nothing when none did.
+func retriedSummary(t receipt.TestEvidence) string {
+	if t.Retried == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n\n%d test(s) failed and then passed on retry:", t.Retried)
+	for _, name := range t.RetriedTests {
+		fmt.Fprintf(&b, "\n- `%s`", strings.ReplaceAll(name, "`", "'"))
+	}
+	if more := t.Retried - len(t.RetriedTests); more > 0 {
+		fmt.Fprintf(&b, "\n- and %d more (see the receipt's test cases)", more)
+	}
+	return b.String()
 }
 
 // CheckName is run's check name under its configured policy, which names a

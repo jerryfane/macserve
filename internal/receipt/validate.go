@@ -20,7 +20,7 @@ func sameSimulator(a, b *model.Simulator) bool {
 }
 func sameStrings(a, b []string) bool { return slices.Equal(a, b) }
 func expectedFor(p Payload) Expected {
-	return Expected{RepositoryID: p.Repository.ID, Repo: p.Request.Repo, SHA: p.Request.SHA, Profile: p.Request.Profile, ProfileDigest: p.ProfileDigest, Kind: p.Request.Kind, Xcode: p.Request.Xcode, Simulator: p.Request.Simulator, RequiredTests: p.Tests.Required, Release: p.Request.Release, BuildForTesting: p.Request.BuildForTesting, Products: p.Request.Products}
+	return Expected{RepositoryID: p.Repository.ID, Repo: p.Request.Repo, SHA: p.Request.SHA, Profile: p.Request.Profile, ProfileDigest: p.ProfileDigest, Kind: p.Request.Kind, Xcode: p.Request.Xcode, Simulator: p.Request.Simulator, RequiredTests: p.Tests.Required, Release: p.Request.Release, BuildForTesting: p.Request.BuildForTesting, Products: p.Request.Products, RetryIterations: p.Tests.RetryIterations}
 }
 
 func sameProductsRef(a, b *model.ProductsRef) bool {
@@ -33,7 +33,7 @@ func ValidateSuccess(p Payload, e Expected) error {
 	if e.RepositoryID <= 0 || e.Repo == "" || !validSHA(e.SHA) || e.Profile == "" || !validDigest(e.ProfileDigest) || e.Xcode.Version == "" || e.Xcode.Build == "" {
 		return fmt.Errorf("%w: incomplete expected policy", ErrInvalid)
 	}
-	if p.Repository.ID != e.RepositoryID || p.Repository.Name != e.Repo || p.Request.Repo != e.Repo || p.Request.SHA != e.SHA || p.Source.Commit != e.SHA || p.Request.Profile != e.Profile || p.ProfileDigest != e.ProfileDigest || p.Request.Kind != e.Kind || p.Request.Xcode != e.Xcode || !sameSimulator(p.Request.Simulator, e.Simulator) || !sameStrings(p.Tests.Required, e.RequiredTests) || !profiles.SameRelease(p.Request.Release, e.Release) || p.Request.BuildForTesting != e.BuildForTesting || !sameProductsRef(p.Request.Products, e.Products) {
+	if p.Repository.ID != e.RepositoryID || p.Repository.Name != e.Repo || p.Request.Repo != e.Repo || p.Request.SHA != e.SHA || p.Source.Commit != e.SHA || p.Request.Profile != e.Profile || p.ProfileDigest != e.ProfileDigest || p.Request.Kind != e.Kind || p.Request.Xcode != e.Xcode || !sameSimulator(p.Request.Simulator, e.Simulator) || !sameStrings(p.Tests.Required, e.RequiredTests) || !profiles.SameRelease(p.Request.Release, e.Release) || p.Request.BuildForTesting != e.BuildForTesting || !sameProductsRef(p.Request.Products, e.Products) || p.Tests.RetryIterations != e.RetryIterations {
 		return fmt.Errorf("%w: expected policy mismatch", ErrInvalid)
 	}
 	if p.State != model.Succeeded || !p.Complete || len(p.Missing) != 0 {
@@ -130,14 +130,15 @@ func incomplete(p Payload) []string {
 		case model.IOSArchive:
 			scope = "archive test scope"
 		}
-		require(t.Status == "tests_not_run" && t.Tests == 0 && t.Passed == 0 && t.Failed == 0 && t.Skipped == 0 && t.ExpectedFailures == 0 && len(t.Required) == 0 && len(t.ExecutedRequired) == 0, scope)
+		require(t.Status == "tests_not_run" && t.Tests == 0 && t.Passed == 0 && t.Failed == 0 && t.Skipped == 0 && t.ExpectedFailures == 0 && len(t.Required) == 0 && len(t.ExecutedRequired) == 0 && t.RetryIterations == 0 && t.Retried == 0 && t.Superseded == 0 && len(t.RetriedTests) == 0, scope)
 	} else {
-		require(t.Status == "parsed" && t.ParserVersion == "xcresult-tests-0.4.0" && t.Tests > 0 && t.Passed >= 0 && t.Failed == 0 && t.Skipped >= 0 && t.ExpectedFailures >= 0 && t.Passed+t.ExpectedFailures > 0 && t.Tests == t.Passed+t.Failed+t.Skipped+t.ExpectedFailures && validDigest(t.XCResultSHA256) && sameStrings(t.Required, t.ExecutedRequired), "parsed tests and required scope")
+		require(t.Status == "parsed" && t.ParserVersion == "xcresult-tests-0.4.0" && t.Tests > 0 && t.Passed >= 0 && t.Failed == 0 && t.Skipped >= 0 && t.ExpectedFailures >= 0 && t.Passed+t.ExpectedFailures > 0 && t.Tests == t.Passed+t.Failed+t.Skipped+t.ExpectedFailures+t.Superseded && validDigest(t.XCResultSHA256) && sameStrings(t.Required, t.ExecutedRequired), "parsed tests and required scope")
 		seen := map[string]bool{}
 		for _, name := range t.Required {
 			require(name != "" && !seen[name], "required test identity")
 			seen[name] = true
 		}
+		require(validRetries(p.Request.Kind, t), "test retries")
 	}
 	require((p.Details == nil) != (p.Manifest == nil), "full or compact evidence")
 	if p.Manifest != nil {
@@ -217,6 +218,33 @@ func sameLanes(a, b *Concurrency) bool {
 	return a.Lane == b.Lane && a.MaxLanes == b.MaxLanes && a.OverlapCount == b.OverlapCount && slices.Equal(a.OverlappedJobs, b.OverlappedJobs) && a.OverlapsSHA256 == b.OverlapsSHA256 && a.Attribution == b.Attribution && a.UnattributedResidue == b.UnattributedResidue && a.IdleVerdict == b.IdleVerdict
 }
 
+// validRetries reports whether t's retry record is well formed: retries
+// only on a UI-test job whose template sets retry_failed_tests (its
+// iterations, profiles.RetryTestIterations); cases that passed on retry
+// among the passed and expected failures, each with from one to
+// iterations-1 superseded failed attempts; and up to PublishedRetried
+// distinct, bounded names, at least one when any case was retried.
+func validRetries(kind model.Kind, t TestEvidence) bool {
+	if t.RetryIterations == 0 {
+		return t.Retried == 0 && t.Superseded == 0 && len(t.RetriedTests) == 0
+	}
+	if kind != model.SimulatorUITest || t.RetryIterations != profiles.RetryTestIterations {
+		return false
+	}
+	if t.Retried < 0 || t.Retried > t.Passed+t.ExpectedFailures || t.Superseded < t.Retried || t.Superseded > t.Retried*(t.RetryIterations-1) {
+		return false
+	}
+	if len(t.RetriedTests) > min(t.Retried, PublishedRetried) || t.Retried > 0 && len(t.RetriedTests) == 0 {
+		return false
+	}
+	for i, name := range t.RetriedTests {
+		if name == "" || len(name) > MaxRetriedTestName || slices.Contains(t.RetriedTests[:i], name) {
+			return false
+		}
+	}
+	return true
+}
+
 // requiredExecuted applies the parser's required-test rule (evidence.RequiredMatch,
 // including bundle-relative Target/Class[/method] selectors) to a recorded
 // case, and also accepts the case name; only passed or expected-failure
@@ -224,12 +252,17 @@ func sameLanes(a, b *Concurrency) bool {
 func requiredExecuted(c evidence.TestCase, name string) bool {
 	return !c.Container && (c.Outcome == "passed" || c.Outcome == "expected-failure") && (c.Name == name || evidence.RequiredMatch(c, name))
 }
-func testEvidence(kind model.Kind, required []string, s *evidence.Summary) TestEvidence {
+
+// testEvidence is the payload's test record of a job of kind with required
+// tests and retryIterations (model.Profile.RetryIterations) whose parsed
+// summary is s.
+func testEvidence(kind model.Kind, required []string, retryIterations int, s *evidence.Summary) TestEvidence {
 	t := TestEvidence{Status: "missing", Required: append([]string(nil), required...)}
 	if !kind.Tests() {
 		t.Status = "tests_not_run"
 		return t
 	}
+	t.RetryIterations = retryIterations
 	if s == nil {
 		return t
 	}
@@ -241,6 +274,20 @@ func testEvidence(kind model.Kind, required []string, s *evidence.Summary) TestE
 	t.Skipped = s.Skipped
 	t.ExpectedFailures = s.ExpectedFailures
 	t.XCResultSHA256 = s.XCResultSHA256
+	t.Retried = s.Retried
+	t.Superseded = s.Superseded
+	for _, c := range s.Cases {
+		if len(t.RetriedTests) == PublishedRetried {
+			break
+		}
+		name := c.ID
+		if len(name) > MaxRetriedTestName {
+			name = strings.ToValidUTF8(name[:MaxRetriedTestName], "")
+		}
+		if c.Retried && !slices.Contains(t.RetriedTests, name) {
+			t.RetriedTests = append(t.RetriedTests, name)
+		}
+	}
 	for _, name := range required {
 		for _, c := range s.Cases {
 			if name != "" && requiredExecuted(c, name) {
@@ -337,7 +384,7 @@ func validateDetails(p Payload, require func(bool, string)) {
 	for name, digest := range r.Observation.LockfileDigests {
 		require(name != "" && validDigest(digest), "lockfile digest")
 	}
-	require(reflect.DeepEqual(testEvidence(p.Request.Kind, profile.RequiredTests, r.Summary), p.Tests), "test predicate")
+	require(reflect.DeepEqual(testEvidence(p.Request.Kind, profile.RequiredTests, snapshot.RetryIterations(), r.Summary), p.Tests), "test predicate")
 	if !p.Request.Kind.Tests() {
 		ran := "build tests not run"
 		switch p.Request.Kind {
@@ -358,7 +405,7 @@ func validateDetails(p Payload, require func(bool, string)) {
 	_, testsFound := names["evidence/tests.json"]
 	require(found && testsFound && archive.SHA256 == s.XCResultSHA256, "test artifacts")
 	require(s.SchemaVersion == 1 && sameStrings(s.RequiredTests, profile.RequiredTests) && len(s.Cases) == s.Tests, "test schema")
-	passed, failed, skipped, expected := 0, 0, 0, 0
+	passed, failed, skipped, expected, retried, superseded := 0, 0, 0, 0, 0, 0
 	duration := 0.0
 	attempts := map[string]int{}
 	for _, c := range s.Cases {
@@ -367,21 +414,50 @@ func validateDetails(p Payload, require func(bool, string)) {
 		attempts[c.ID]++
 		require(c.Attempt == attempts[c.ID], "test attempt")
 		duration += c.DurationSeconds
+		if c.Retried {
+			retried++
+		}
+		switch {
+		case c.Superseded:
+			superseded++
+		case c.Outcome == "passed":
+			passed++
+		case c.Outcome == "failed":
+			failed++
+		case c.Outcome == "skipped":
+			skipped++
+		case c.Outcome == "expected-failure":
+			expected++
+		}
 		switch c.Outcome {
 		case "passed":
-			passed++
 			require(len(c.Failures) == 0, "passing test failures")
-		case "failed":
-			failed++
-		case "skipped":
-			skipped++
-		case "expected-failure":
-			expected++
+		case "failed", "skipped", "expected-failure":
 		default:
 			require(false, "test outcome")
 		}
+		// A case's own diagnostics keep its last attempt failed and are
+		// among its failures; a passing, expected-failure or superseded
+		// attempt has none.
+		for _, message := range c.CaseFailures {
+			require(c.Outcome == "failed" && !c.Superseded && slices.Contains(c.Failures, message), "case diagnostics")
+		}
 	}
-	require(passed == s.Passed && failed == s.Failed && skipped == s.Skipped && expected == s.ExpectedFailures && duration == s.DurationSeconds, "test counts")
+	require(passed == s.Passed && failed == s.Failed && skipped == s.Skipped && expected == s.ExpectedFailures && retried == s.Retried && superseded == s.Superseded && duration == s.DurationSeconds, "test counts")
+	// A pass on retry is the parser's verdict on the recorded attempts, and
+	// only under the snapshot's (signed) retry opt-in: reapplied to the
+	// cases stripped of their retry marks, it must give exactly the marks
+	// recorded, so every retried case shows its failed attempts and its
+	// passing last one, all with xcodebuild's retry labels and an identity
+	// no other attempt shares. Without the opt-in no attempt has a label.
+	recomputed := make([]evidence.TestCase, len(s.Cases))
+	labelled := false
+	for i, c := range s.Cases {
+		labelled = labelled || c.Repetition != ""
+		c.Retried, c.FailedAttempts, c.Superseded = false, 0, false
+		recomputed[i] = c
+	}
+	require(evidence.MarkRetries(recomputed, snapshot.RetryIterations()) == nil && reflect.DeepEqual(recomputed, s.Cases) && (snapshot.RetryIterations() > 0 || !labelled), "test retries")
 }
 func cases(s *evidence.Summary) []evidence.TestCase {
 	if s == nil {

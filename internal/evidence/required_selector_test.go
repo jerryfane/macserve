@@ -28,7 +28,7 @@ func TestRequiredSelectorMatchesBundleRelative(t *testing.T) {
 		{"HerdrUITests/TerminalControlTests/testACopiedDocumentBeatsItsFinderIcon()"},
 		{"HerdrUITests/TerminalControlTests/testACopiedDocumentBeatsItsFinderIcon"},
 	} {
-		summary, err := ParseTests(fixture, required)
+		summary, err := ParseTests(fixture, required, 0)
 		if err != nil || summary.ParseStatus != "parsed" {
 			t.Fatalf("selectors %q not matched: %v", required, err)
 		}
@@ -52,7 +52,7 @@ func TestRequiredSelectorRejectsOtherTargetsClassesAndMethods(t *testing.T) {
 		"HerdrUITests//testACopiedDocumentBeatsItsFinderIcon",
 		"HerdrUITests/TerminalControlTests/testACopiedDocumentBeatsItsFinderIcon/extra",
 	} {
-		summary, err := ParseTests(fixture, []string{required})
+		summary, err := ParseTests(fixture, []string{required}, 0)
 		if !errors.Is(err, ErrRequiredTests) || summary.ParseStatus != "incomplete" {
 			t.Fatalf("selector %q accepted: %+v %v", required, summary.ParseStatus, err)
 		}
@@ -65,7 +65,7 @@ func TestRequiredSelectorSkippedCasesDoNotSatisfy(t *testing.T) {
 		"HerdrUITests/TerminalResizeTests/testRealSidebarOrientationAndFontPreserveHistory",
 		"HerdrUITests/TerminalResizeTests/testRealSidebarOrientationAndFontPreserveHistory()",
 	} {
-		if _, err := ParseTests(herdrupUITests(t), []string{required}); !errors.Is(err, ErrRequiredTests) {
+		if _, err := ParseTests(herdrupUITests(t), []string{required}, 0); !errors.Is(err, ErrRequiredTests) {
 			t.Fatalf("skipped case satisfied %q: %v", required, err)
 		}
 	}
@@ -75,10 +75,10 @@ func TestRequiredSelectorSkippedCasesDoNotSatisfy(t *testing.T) {
 			{"nodeType":"Test Case","name":"testPadOnly()","nodeIdentifier":"SelectAgentFieldTests/testPadOnly()","result":"Skipped","children":[{"nodeType":"Skip Message","name":"iPad only"}]}]},
 		{"nodeType":"Test Suite","name":"GramTests","nodeIdentifier":"GramTests","children":[
 			{"nodeType":"Test Case","name":"testGram()","nodeIdentifier":"GramTests/testGram()","result":"Passed"}]}]}]}`)
-	if _, err := ParseTests(report, []string{"HerdrUITests/SelectAgentFieldTests"}); !errors.Is(err, ErrRequiredTests) {
+	if _, err := ParseTests(report, []string{"HerdrUITests/SelectAgentFieldTests"}, 0); !errors.Is(err, ErrRequiredTests) {
 		t.Fatalf("all-skipped class satisfied its selector: %v", err)
 	}
-	if _, err := ParseTests(report, []string{"HerdrUITests/GramTests"}); err != nil {
+	if _, err := ParseTests(report, []string{"HerdrUITests/GramTests"}, 0); err != nil {
 		t.Fatalf("executed class rejected: %v", err)
 	}
 }
@@ -89,7 +89,7 @@ func TestRequiredSelectorMatchesPerDeviceExecutions(t *testing.T) {
 		{"nodeType":"Test Suite","name":"GramTests","nodeIdentifier":"GramTests","children":[
 			{"nodeType":"Test Case","name":"testGram()","nodeIdentifier":"GramTests/testGram()","result":"Passed","children":[
 				{"nodeType":"Device","name":"iPhone 17 Pro","nodeIdentifier":"device-1","children":[{"nodeType":"Test Case Run","name":"Run 1","result":"Passed"}]}]}]}]}]}`)
-	summary, err := ParseTests(report, []string{"HerdrUITests/GramTests", "HerdrUITests/GramTests/testGram"})
+	summary, err := ParseTests(report, []string{"HerdrUITests/GramTests", "HerdrUITests/GramTests/testGram"}, 0)
 	if err != nil || summary.Cases[0].Suite != "Herdr/HerdrUITests/GramTests/device-1" {
 		t.Fatalf("per-device execution: %+v %v", summary, err)
 	}

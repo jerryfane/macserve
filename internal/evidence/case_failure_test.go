@@ -12,7 +12,7 @@ func TestPassedCaseCannotHideFailureDiagnostic(t *testing.T) {
 		`{"nodeType":"Test Case Run","name":"run","result":"Passed","children":[{"nodeType":"Failure Message","name":"assertion failed"}]}`,
 	} {
 		report := simpleReport(`{"nodeType":"Test Case","name":"testFails","nodeIdentifier":"Suite/testFails","result":"Passed","children":[` + children + `]}`)
-		summary, err := ParseTests(report, []string{"Suite/testFails"})
+		summary, err := ParseTests(report, []string{"Suite/testFails"}, 0)
 		if err != nil {
 			t.Fatal(err)
 		}

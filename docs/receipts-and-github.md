@@ -16,6 +16,22 @@ Container failures cannot count as executed tests. Build receipts explicitly say
 A `simulator_script` receipt also says tests were not run (`tests_not_run`, no required tests, no xcresult):
 it proves the derived script exited 0 on the pinned, observed simulator, and its `output.tar.gz` is a required,
 hashed artifact. A script receipt without its simulator pin or with test evidence is refused.
+A UI-test job of a template with `retry_failed_tests` records every attempt of each case (`attempt` 1, 2), with
+xcodebuild's retry label (`repetition`: `First Run`, `Retry 1`) when the parser found the attempts under one parent
+with an unambiguous identity. A labelled group whose last attempt passed (or was an expected failure) after a failed
+one passed on retry: that attempt has `retried: true` and `failed_attempts`, the failed attempt keeps its outcome
+and messages with `superseded: true`, and `tests` gains `retry_iterations`, `retried`, `superseded` (counted in
+`tests` beside passed, failed, skipped and expected failures) and `retried_tests`, the first 8 retried case IDs.
+Attempts without labels, or whose ID and suite another attempt group shares (two devices with one display name),
+are never a retry, and a suite's own failure stays a failure. A test case's own failure (a teardown outside its
+attempts) is recorded as `case_failures` on its last attempt, which stays failed, so the case does not pass on retry,
+even when an expected issue (`XCTExpectFailure`) of the attempts has the same text;
+validation refuses `case_failures` on a passing, expected-failure or superseded attempt. Validation recomputes those marks from the recorded
+attempts and accepts them only when the signed template snapshot sets `retry_failed_tests` and the expected policy
+names the same `retry_iterations`: a retry claim without a failing earlier attempt and a passing last one, a forged
+label, count or mark, or one on a template without the field is refused. A receipt without retries omits all of them and keeps
+its bytes, so the schema is unchanged. A verified success check summary names the retried tests (at most 8, then a
+count).
 An org-template job's admitted snapshot carries no recipe; its success is checked against the recipe derived
 from the reported `.macserve.json`, which must equal the reported recipe and whose executable must have exited 0.
 A Flutter template job's receipt has `request.flutter.version` equal to the template's pin and

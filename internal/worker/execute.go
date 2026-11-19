@@ -743,10 +743,11 @@ func (x *execution) recipe(ctx context.Context, recipe model.Command, env ...str
 		return errors.New("xcode-select is forbidden")
 	}
 	isXcode := filepath.Base(executable) == "xcodebuild"
+	xcodeArgs := args
 	if filepath.Base(executable) == "xcrun" {
-		for _, arg := range args {
+		for i, arg := range args {
 			if arg == "xcodebuild" {
-				isXcode = true
+				isXcode, xcodeArgs = true, args[i+1:]
 				break
 			}
 			if arg == "xcode-select" {
@@ -757,6 +758,7 @@ func (x *execution) recipe(ctx context.Context, recipe model.Command, env ...str
 	if isXcode {
 		filtered := make([]string, 0, len(args)+8)
 		testing := x.job.Request.Kind.Tests()
+		runsTests := runsTestAction(xcodeArgs)
 		for i := 0; i < len(args); i++ {
 			arg := args[i]
 			if arg == "test" || arg == "test-without-building" {
@@ -780,6 +782,9 @@ func (x *execution) recipe(ctx context.Context, recipe model.Command, env ...str
 		args = append(filtered, "-jobs", "4", "CODE_SIGNING_ALLOWED=NO")
 		if testing {
 			args = append(args, testingOptions(x.job.Profile.ParallelTestingWorkers())...)
+		}
+		if runsTests {
+			args = append(args, retryOptions(x.job.Profile.RetryIterations())...)
 		}
 	}
 	work := path.Join("checkout", x.job.Profile.WorkDir)
@@ -812,6 +817,40 @@ func testingOptions(workers int) []string {
 		return []string{"-parallel-testing-enabled", "NO", "-maximum-concurrent-test-simulator-destinations", "1"}
 	}
 	return []string{"-parallel-testing-enabled", "YES", "-parallel-testing-worker-count", strconv.Itoa(workers), "-maximum-concurrent-test-simulator-destinations", "1"}
+}
+
+// retryOptions are the options of a command that runs tests (a test or
+// test-without-building action, runsTestAction; not build-for-testing) of a UI-test template
+// job that opts in to retries (model.Profile.RetryIterations): xcodebuild
+// retries a failed test until it passes, at most iterations attempts in all.
+// They combine with the parallel-testing options and the shard's
+// -only-testing selectors: each selected test is retried on its own.
+// xcodebuild then exits 0 when every test's last attempt passed, so success
+// still requires exit 0 and the parsed verdict (evidence.MarkRetries).
+func retryOptions(iterations int) []string {
+	if iterations == 0 {
+		return nil
+	}
+	return []string{"-retry-tests-on-failure", "-test-iterations", strconv.Itoa(iterations)}
+}
+
+// runsTestAction reports whether xcodebuild arguments args name a test or
+// test-without-building action. An action is a bare word in action
+// position: not the value of an option. Any option without an attached
+// value (-name:value, -name=value) may take the next argument as its value,
+// so a bare word directly after one is never an action: a scheme named
+// "test" is not one. A valueless flag directly before an action only costs
+// that command its retries.
+func runsTestAction(args []string) bool {
+	for i, arg := range args {
+		if arg != "test" && arg != "test-without-building" {
+			continue
+		}
+		if i == 0 || !strings.HasPrefix(args[i-1], "-") || strings.ContainsAny(args[i-1], ":=") {
+			return true
+		}
+	}
+	return false
 }
 
 func noSymlinkPath(root *os.Root, name string) error {
@@ -1002,7 +1041,7 @@ func (x *execution) testEvidence(ctx context.Context) error {
 		return commandErr
 	}
 	writeErr := x.writeEvidence("tests.json", raw)
-	summary, parseErr := evidence.ParseTests(raw, x.job.Profile.RequiredTests)
+	summary, parseErr := evidence.ParseTests(raw, x.job.Profile.RequiredTests, x.job.Profile.RetryIterations())
 	x.result.Summary = &summary
 	var failed error
 	if summary.Failed > 0 {

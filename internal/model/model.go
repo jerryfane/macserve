@@ -290,6 +290,16 @@ func (p Profile) ParallelTestingWorkers() int {
 	return p.Template.ParallelTesting.Workers
 }
 
+// RetryIterations is the most attempts xcodebuild gives each test of a
+// simulator_ui_test template job snapshot whose template opts in to retrying
+// failed tests (Template.RetryFailedTests); 0 when it does not.
+func (p Profile) RetryIterations() int {
+	if p.Kind != SimulatorUITest || p.Template == nil || p.Template.RetryFailedTests == nil {
+		return 0
+	}
+	return p.Template.RetryFailedTests.Iterations
+}
+
 // Template is a controller-owned, owner-scoped recipe. Every repository of a
 // listed GitHub account may use it by declaring its Xcode project or workspace
 // and scheme, and for a test or script template its shards, in .macserve.json;
@@ -318,6 +328,10 @@ type Template struct {
 	// xcodebuild parallel testing on clones of the job's simulator. It is
 	// omitted when absent, so a template without it keeps its digest.
 	ParallelTesting *ParallelTesting `json:"parallel_testing,omitempty"`
+	// RetryFailedTests opts a simulator_ui_test template's jobs in to
+	// xcodebuild retrying a failed test. It is omitted when absent, so a
+	// template without it keeps its digest.
+	RetryFailedTests *RetryFailedTests `json:"retry_failed_tests,omitempty"`
 }
 
 // ParallelTesting is a UI-test template's parallel-testing opt-in: the
@@ -326,6 +340,14 @@ type Template struct {
 // of the job's simulator that xcodebuild creates in XCTest's own device set.
 type ParallelTesting struct {
 	Workers int `json:"workers"`
+}
+
+// RetryFailedTests is a UI-test template's retry opt-in: the worker runs its
+// tests with -retry-tests-on-failure -test-iterations Iterations (2: one
+// retry), and a test whose last attempt passed passes on retry
+// (evidence.ParseTests).
+type RetryFailedTests struct {
+	Iterations int `json:"iterations"`
 }
 
 // FlutterPin is a Flutter template's exact tool identity: the Flutter SDK

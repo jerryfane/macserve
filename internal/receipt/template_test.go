@@ -121,7 +121,7 @@ func testTemplateFixtureWith(t *testing.T, kind model.Kind, edit func(*model.Tem
 	if err != nil {
 		t.Fatal(err)
 	}
-	summary, err := evidence.ParseTests(report, derived.RequiredTests)
+	summary, err := evidence.ParseTests(report, derived.RequiredTests, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,15 +192,15 @@ func TestRequiredExecutedMatchesBundleRelative(t *testing.T) {
 		t.Fatal(err)
 	}
 	executed := []string{"HerdrUITests/TerminalControlTests", "HerdrUITests/TerminalSearchTests/testEngineAndWiringAgree()", "HerdrUITests/TerminalResizeTests/testAppBackgroundReleasesClaimAndReturnReclaims"}
-	summary, err := evidence.ParseTests(report, executed)
+	summary, err := evidence.ParseTests(report, executed, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := testEvidence(model.SimulatorUITest, executed, &summary).ExecutedRequired; !slices.Equal(got, executed) {
+	if got := testEvidence(model.SimulatorUITest, executed, 0, &summary).ExecutedRequired; !slices.Equal(got, executed) {
 		t.Fatalf("executed required %q, want %q", got, executed)
 	}
 	others := []string{"OtherUITests/TerminalControlTests", "Herdr/TerminalControlTests", "HerdrUITests/TerminalResizeTests/testEngineAndWiringAgree"}
-	if got := testEvidence(model.SimulatorUITest, others, &summary).ExecutedRequired; len(got) != 0 {
+	if got := testEvidence(model.SimulatorUITest, others, 0, &summary).ExecutedRequired; len(got) != 0 {
 		t.Fatalf("unexecuted selectors counted: %q", got)
 	}
 }
