@@ -495,12 +495,18 @@ script leaves follows the residue, hold and idle-verdict rules above. The engine
 sibling's simulator or on CoreSimulator; the contract in [configuration.md](configuration.md) forbids it.
 
 **Retried UI tests.** A `simulator_ui_test` job of a template with `retry_failed_tests`
-(`model.Profile.RetryIterations`) adds `-retry-tests-on-failure -test-iterations 2` to its commands that run tests
-(`test`, `test-without-building`), not to `build-for-testing`, after the parallel-testing options. The worker, the
-controller's reparse and receipt validation all apply `evidence.MarkRetries` to the parsed attempts: a case (one ID
-in one suite) passes on retry when its last attempt passed after failed ones, and only failures may be retried, so
-a non-failed earlier attempt or more attempts than iterations is invalid evidence. Success still requires the test
-command's exit 0: xcodebuild exits 0 when every test's last attempt passed, so no non-zero exit is reinterpreted.
+(`model.Profile.RetryIterations`) adds `-retry-tests-on-failure -test-iterations 2` to its commands whose xcodebuild
+action is `test` or `test-without-building` (`runsTestAction`: a bare word that is not an option's value, so a
+scheme named `test` does not count), not to `build-for-testing`, after the parallel-testing options. Attempts are one
+test's only by xcodebuild's retry provenance: the parser labels Repetition nodes `First Run`, `Retry 1`, ... that are
+the only executions under one parent (`repetition` on each case), and drops the labels of a Test Case with a Device
+node lacking an identifier. The worker, the controller's reparse and receipt validation all apply
+`evidence.MarkRetries` to the labelled attempts: a group passes on retry when its last attempt passed after failed
+ones, unless its identity (ID and suite) is shared with another group or case, as two same-named devices would be;
+only failures may be retried, so a non-failed earlier attempt or more attempts than iterations is invalid evidence.
+A superseded attempt explains only the failure it rolls up: a container's own failure messages (a suite teardown)
+and a test case's message no attempt records stay failures. Success still requires the test command's exit 0:
+xcodebuild exits 0 when every test's last attempt passed, so no non-zero exit is reinterpreted.
 
 **Parallel-testing clones.** A `simulator_ui_test` job of a template with `parallel_testing`
 (`model.Profile.ParallelTestingWorkers`) runs its tests with xcodebuild parallel testing, which clones the job's
