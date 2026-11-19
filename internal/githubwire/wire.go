@@ -48,11 +48,13 @@ import (
 // them, and converting it back to a draft or removing the label ends none.
 // A new head is admitted afresh, so it has no full check until a trigger
 // holds for it. With MatrixSkipPaths a head whose every changed file (against
-// its base, as GitHub compares them) was added or modified and is one the
-// paths match (SkipPaths.Match) runs no matrix entry: each gets a neutral
-// check that says so. Any doubt (a failed or possibly truncated comparison,
-// no base commit, a removed, renamed, copied or mode-changed file, no changed
-// file) runs the matrix.
+// its base, as GitHub compares them) is one the paths match (SkipPaths.Match)
+// runs no matrix entry: each gets a neutral check that says so. An added,
+// modified or removed file is matched by its path, a renamed one by both its
+// previous and its new path. Any doubt (a failed or possibly truncated
+// comparison, no base commit, a rename without its previous path, a copied,
+// mode-changed, unchanged or unknown-status file, no changed file) runs the
+// matrix.
 type Policy struct {
 	RepositoryID     int64         `json:"repository_id,omitempty"`
 	Repository       string        `json:"repository,omitempty"`
