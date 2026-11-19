@@ -198,7 +198,7 @@ func TestGitHubStalledAttemptRerunsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stalled := model.CancelReason{Source: model.CancelStalled, Detail: "stalled: no job output for 10m0s"}
+	stalled := model.CancelReason{Source: "stalled", Detail: "stalled: no job output for 10m0s"}
 	cancelQueued(t, s, first, stalled, testNow)
 	rerun, err := s.AdmitGitHub(ctx, githubFixture(), testNow.Add(time.Minute))
 	if err != nil || rerun.JobID == first.JobID || rerun.Key != first.Key || getJob(t, s, rerun.JobID).State != model.Queued {

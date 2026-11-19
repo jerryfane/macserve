@@ -194,6 +194,12 @@ func TestStalledCompletionEndsCancelledByService(t *testing.T) {
 			if !cleanup {
 				result.State = model.Failed
 			}
+			// The worker reports finalizing before its completion.
+			for _, state := range []model.State{model.Running, model.Finalizing} {
+				if code := lifecycleRequest(t, f.controller, lease, "/stage", protocol.Stage{State: state}); code != http.StatusNoContent {
+					t.Fatalf("stage %s: %d", state, code)
+				}
+			}
 			completion := map[string]any{"result": result, "seal": buildseal.Envelope{}, "stalled": true}
 			if status := lifecycleRequest(t, f.controller, lease, "/complete", completion); status != http.StatusNoContent {
 				t.Fatalf("completion status %d", status)
@@ -202,7 +208,7 @@ func TestStalledCompletionEndsCancelledByService(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if job.CancelReason == nil || job.CancelReason.Source != model.CancelStalled || job.CancelReason.Detail != reason {
+			if job.CancelReason == nil || job.CancelReason.Source != "stalled" || job.CancelReason.Detail != reason {
 				t.Fatalf("cancel reason %+v", job.CancelReason)
 			}
 			want, wantReason := model.Cancelled, reason

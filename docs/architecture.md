@@ -95,9 +95,18 @@ PF enforcement may be a separately reviewed future opt-in; it is not implemented
   group judged contaminated and quarantined the worker (2026-11-18, #194). The account and lane quiesces judge a
   survivor by escalation too: an instance is a survivor only when still listed a grace after a SIGKILL to it
   completed, and their settle bound excludes time spent signalling. A job's finalization budget
-  (`FinalizationTimeout`, 883.5 s, which sizes the controller's finalizing and cancelling leases) includes three such
+  (`FinalizationTimeout`, 918.5 s, which sizes the controller's finalizing and cancelling leases) includes three such
   cleanups, one per context window that runs commands: a cancelled job's recipe command, the cleanup budget's
-  evidence commands and the verification window's Metal toolchain unmount.
+  evidence commands and the verification window's Metal toolchain unmount; plus one stall kill (one listing and one
+  SIGKILL round, 35 s) before a stalled run command's cleanup.
+- Stall watchdog (#201): a template job's run command (only it: never prepare, evidence or cleanup commands) whose
+  combined stdout and stderr get no byte for its stall limit (`model.Profile.StallTimeout`: 600 s by default for
+  `simulator_script`, opt-in `stall_seconds` for test templates) ends with `worker.ErrStalled`. The runner SIGKILLs at
+  once every job-UID member of the command's process group and every descendant of its direct child that left the
+  group (a hung `simctl` under `timeout` leads a group of its own, and on 2026-11-19 such children left a cancelled
+  stalled job's cleanup unconfirmed), then runs the usual protected group cleanup. The finalization then stops and
+  deletes the job's simulators, quiesces and takes its census as for any job. The job ends `cancelled`; its
+  completion carries `stalled`, the controller records cancel source `stalled`, and pull mode reruns it once.
 - `internal/evidence`: bounded xcresult test parsing, required-test execution checks, JUnit, deterministic
   artifact archives and content-addressed exports, including a script job's required `output.tar.gz`. Missing or incomplete test evidence cannot report success.
   Failed plans, bundles and suites remain explicit `container` diagnostics and JUnit errors even when child

@@ -80,7 +80,7 @@ Optional `signer` connects the controller to the [code signer](#code-signer).
   no collected completion have no execution receipt; GitHub reports non-success, never invented evidence.
 - A job whose cancellation was requested carries `cancel_reason` in `GET /v1/jobs/{id}`, the `GET /v1/jobs` list and
   the cancel response: `source` (`client`, `admin_pause`, `deadline`, `host_readiness`, `gate_error`, `log_limit`,
-  `controller_shutdown`, `github` or `worker_admission`), `at` (when the request was recorded), `principal` for
+  `controller_shutdown`, `github`, `worker_admission` or `stalled`), `at` (when the request was recorded), `principal` for
   `client` and `admin_pause`, `blockers` (the readiness gate's, e.g. `isolation_unavailable`,
   `host_memory_pressure`) for `host_readiness`, and an optional `detail` of at most 512 bytes (the client or pause
   reason, the gate error, the gate's free and accounted bytes, the worker's refusal reason). A `client` detail ends
@@ -91,9 +91,12 @@ Optional `signer` connects the controller to the [code signer](#code-signer).
   `worker_admission` when the worker reports that it refused the job before it ran for a cause of the service's
   own (`admission_refused` in its completion; `acl_census_unavailable`: an admission inspection, such as an ACL
   census or a membership check, cut short by its deadline on a loaded host) with a failed result and `cleanup_ok`;
-  the job then ends `cancelled`. Only the first request is
+  the job then ends `cancelled`. It records `stalled` when the worker reports that it ended the job itself because
+  the run command's output stopped for the template's stall limit (`stalled` in its completion; see
+  `stall_seconds` below); the job then ends `cancelled` with that reason (`stalled: no job output for …`), not
+  `cancellation requested`, or `failed` if its cleanup was not confirmed. Only the first request is
   recorded and it survives the job's finish, whose
-  `reason` says only `cancellation requested`. Receipts never carry it and are byte-identical with or without it;
+  `reason` says only `cancellation requested` (a `stalled` job's names the stall). Receipts never carry it and are byte-identical with or without it;
   jobs never cancelled, or cancelled before this field existed (store schema version 6), have none.
 - `PUT /v1/admin/pause` accepts `{"reason":"benchmark","mode":"drain"}` or `cancel_active`.
   Poll `GET /v1/admin/state` until `quiescent=true` before benchmarking; acceptance of pause is not quiescence.
@@ -192,6 +195,19 @@ the test command must exit 0 (xcodebuild does when every test's last attempt pas
 (build failure, runner crash, timeout) succeeds. `macserve wait` pins for such a template carry
 `"retry_iterations": 2`. Unit-test templates cannot retry. See [install.md](install.md) and
 [receipts-and-github.md](receipts-and-github.md) for what the evidence records.
+
+**Stall limit.** A job of a `simulator_script` template is ended as `stalled` when its run command (the shard's
+script) writes no byte to stdout or stderr for 10 minutes. The worker then SIGKILLs the command's process group and
+every descendant that left it (a hung `simctl ui` or `simctl status_bar` under a wrapper such as `timeout`, which
+puts its child in a group of its own), and the job's normal finalization shuts down and deletes its simulators and
+takes its census within the usual cleanup budgets, so the lane is freed with cleanup confirmed. Prepare (source,
+simulator, build), the evidence steps and the cleanup are never watched. A template may set `"stall_seconds": N`
+(60 to 3600) to change the limit. A `unit_test` or `simulator_ui_test` template has no limit unless it sets
+`stall_seconds`: a test run can be legitimately quiet for longer (one long test case, xcodebuild's result-bundle
+processing on a loaded host, parallel-testing clone boots), and a UI-test run already gets xcodebuild's own test
+timeouts and `retry_failed_tests`. `build` and `ios_archive` templates cannot set it. The field is part of the
+template digest only when set. A stalled pull-mode attempt gets one automatic rerun (see
+[receipts-and-github.md](receipts-and-github.md)); an API job is not rerun.
 
 A Flutter template (one with a `flutter` pin: `version`, `sdk_sha256`, `ruby_sha256`, `cocoapods_version`,
 `gems_sha256`) runs `build`, `unit_test`, `simulator_ui_test` or `ios_archive` jobs for repositories whose `.macserve.json` has a

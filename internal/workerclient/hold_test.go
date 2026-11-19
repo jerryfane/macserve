@@ -33,6 +33,7 @@ type holdWorld struct {
 	epochs    []string
 	complete  map[string]worker.Result
 	refused   map[string]protocol.AdmissionRefusal
+	stalled   map[string]bool
 	gates     map[string]chan struct{}
 	started   chan string
 	live      int
@@ -49,7 +50,7 @@ type holdWorld struct {
 }
 
 func newHoldWorld(t *testing.T, queue ...string) *holdWorld {
-	w := &holdWorld{t: t, queue: queue, deadlines: map[string]time.Time{}, complete: map[string]worker.Result{}, refused: map[string]protocol.AdmissionRefusal{}, gates: map[string]chan struct{}{}, started: make(chan string, 8), finalizing: map[string]time.Time{}, heldAcked: map[string]bool{}}
+	w := &holdWorld{t: t, queue: queue, deadlines: map[string]time.Time{}, complete: map[string]worker.Result{}, refused: map[string]protocol.AdmissionRefusal{}, stalled: map[string]bool{}, gates: map[string]chan struct{}{}, started: make(chan string, 8), finalizing: map[string]time.Time{}, heldAcked: map[string]bool{}}
 	for _, id := range queue {
 		w.gates[id] = make(chan struct{})
 	}
@@ -131,6 +132,7 @@ func (w *holdWorld) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		json.NewDecoder(r.Body).Decode(&completion)
 		w.complete[id] = completion.Result
 		w.refused[id] = completion.AdmissionRefused
+		w.stalled[id] = completion.Stalled
 		w.events = append(w.events, "complete "+id)
 		rw.WriteHeader(http.StatusNoContent)
 	case strings.HasSuffix(path, "/heartbeat"):
@@ -161,6 +163,10 @@ func (w *holdWorld) executor() *fakeExecutor {
 			if job.ID == "j_refused" {
 				err := fmt.Errorf("lane admission: %w", worker.ErrACLCensusUnavailable)
 				return worker.Result{State: model.Failed, Reason: err.Error(), CleanupOK: true, StartedAt: time.Now(), FinishedAt: time.Now(), Concurrency: &worker.Concurrency{Lane: 2, MaxLanes: 2, Attribution: worker.AttributionLineage, IdleVerdict: worker.IdleNotRequired}}, err
+			}
+			if job.ID == "j_stalled" {
+				err := fmt.Errorf("%w: no job output for 10m0s", worker.ErrStalled)
+				return worker.Result{State: model.Cancelled, Reason: err.Error(), CleanupOK: true, StartedAt: time.Now(), FinishedAt: time.Now(), Concurrency: &worker.Concurrency{Lane: 2, MaxLanes: 2, Attribution: worker.AttributionLineage, IdleVerdict: worker.IdleNotRequired}}, err
 			}
 			w.mu.Lock()
 			w.live++
@@ -361,5 +367,30 @@ func TestCensusAdmissionRefusalReportedAtOnce(t *testing.T) {
 	}
 	if len(slices.Compact(slices.Clone(w.epochs))) != 1 {
 		t.Fatalf("refusal replaced the epoch: %v", w.epochs)
+	}
+}
+
+// #201: a job the engine ended as stalled is reported as stalled, so the
+// controller records the service's cancel; a sibling's completion is not.
+func TestStalledJobReportedAsStalled(t *testing.T) {
+	w := newHoldWorld(t, "j_sib", "j_stalled")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	done, _ := w.run(ctx)
+	<-w.started
+	w.wait(ctx, "complete j_stalled")
+	close(w.gates["j_sib"])
+	w.wait(ctx, "complete j_sib")
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if result := w.complete["j_stalled"]; !w.stalled["j_stalled"] || result.State != model.Cancelled || !result.CleanupOK {
+		t.Fatalf("stalled completion: %+v stalled %v", result, w.stalled["j_stalled"])
+	}
+	if w.stalled["j_sib"] {
+		t.Fatal("sibling reported as stalled")
 	}
 }
