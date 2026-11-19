@@ -97,10 +97,12 @@ func TestParseTestsRetryPassSatisfiesRequired(t *testing.T) {
 // An expected failure (XCTExpectFailure) after a failed attempt passes on
 // retry and counts as an expected failure; xcodebuild retries only a
 // failure, so an attempt after a pass, a skip or an expected failure, or more
-// attempts than the iterations, is invalid evidence.
+// attempts than the iterations, is invalid evidence. Only labelled attempts
+// of one identity are a retry, and a mark the attempts do not support is
+// cleared.
 func TestMarkRetriesShapes(t *testing.T) {
 	attempt := func(outcome string, n int) TestCase {
-		return TestCase{ID: "S/c", Suite: "S", Name: "c", Outcome: outcome, Attempt: n}
+		return TestCase{ID: "S/c", Suite: "S", Name: "c", Outcome: outcome, Attempt: n, Repetition: retryLabel(n - 1)}
 	}
 	cases := []TestCase{attempt("failed", 1), attempt("expected-failure", 2)}
 	if err := MarkRetries(cases, 2); err != nil || !cases[0].Superseded || !cases[1].Retried || cases[1].FailedAttempts != 1 {
@@ -118,10 +120,24 @@ func TestMarkRetriesShapes(t *testing.T) {
 			}
 		})
 	}
-	// Separate suites (devices, configurations, arguments) are separate
-	// cases: one attempt each is no retry.
-	separate := []TestCase{{ID: "S/c", Suite: "S/A", Name: "c", Outcome: "failed", Attempt: 1}, {ID: "S/c", Suite: "S/B", Name: "c", Outcome: "passed", Attempt: 2}}
-	if err := MarkRetries(separate, 2); err != nil || separate[0].Superseded || separate[1].Retried {
-		t.Fatalf("separate suites: %+v %v", separate, err)
+	for name, cases := range map[string][]TestCase{
+		// Separate suites (devices, configurations, arguments) are separate
+		// cases: one attempt each is no retry.
+		"separate suites": {{ID: "S/c", Suite: "S/A", Name: "c", Outcome: "failed", Attempt: 1, Repetition: firstRun}, {ID: "S/c", Suite: "S/B", Name: "c", Outcome: "passed", Attempt: 2, Repetition: "Retry 1"}},
+		"unlabelled":      {{ID: "S/c", Suite: "S", Name: "c", Outcome: "failed", Attempt: 1}, {ID: "S/c", Suite: "S", Name: "c", Outcome: "passed", Attempt: 2}},
+		"two first runs":  {attempt("failed", 1), {ID: "S/c", Suite: "S", Name: "c", Outcome: "passed", Attempt: 2, Repetition: firstRun}},
+		"shared identity": {attempt("failed", 1), attempt("passed", 2), {ID: "S/c", Suite: "S", Name: "c", Outcome: "failed", Attempt: 3}},
+		"forged marks":    {{ID: "S/c", Suite: "S", Name: "c", Outcome: "failed", Attempt: 1, Superseded: true}, {ID: "S/c", Suite: "S", Name: "c", Outcome: "passed", Attempt: 2, Retried: true, FailedAttempts: 1}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := MarkRetries(cases, 2); err != nil {
+				t.Fatal(err)
+			}
+			for _, c := range cases {
+				if c.Retried || c.Superseded || c.FailedAttempts != 0 {
+					t.Fatalf("retry marked: %+v", cases)
+				}
+			}
+		})
 	}
 }

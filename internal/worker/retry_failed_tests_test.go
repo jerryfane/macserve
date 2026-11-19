@@ -128,3 +128,23 @@ func TestRetryFailedTestsFailures(t *testing.T) {
 		})
 	}
 }
+
+// An action is a bare word that is not an option's value.
+func TestRunsTestAction(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want bool
+	}{
+		{[]string{"test-without-building", "-xctestrun", "x"}, true},
+		{[]string{"-scheme", "App", "CODE_SIGNING_ALLOWED=NO", "test"}, true},
+		{[]string{"-scheme", "test", "build-for-testing"}, false},
+		{[]string{"-scheme", "test", "-resolvePackageDependencies"}, false},
+		{[]string{"-scheme", "test", "test"}, true},
+		{[]string{"-only-testing:A/B", "test"}, true},
+		{[]string{"build", "-destination", "test-without-building"}, false},
+	} {
+		if got := runsTestAction(tc.args); got != tc.want {
+			t.Fatalf("%q: %v, want %v", tc.args, got, tc.want)
+		}
+	}
+}

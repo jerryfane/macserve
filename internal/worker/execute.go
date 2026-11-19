@@ -743,10 +743,11 @@ func (x *execution) recipe(ctx context.Context, recipe model.Command, env ...str
 		return errors.New("xcode-select is forbidden")
 	}
 	isXcode := filepath.Base(executable) == "xcodebuild"
+	xcodeArgs := args
 	if filepath.Base(executable) == "xcrun" {
-		for _, arg := range args {
+		for i, arg := range args {
 			if arg == "xcodebuild" {
-				isXcode = true
+				isXcode, xcodeArgs = true, args[i+1:]
 				break
 			}
 			if arg == "xcode-select" {
@@ -757,11 +758,11 @@ func (x *execution) recipe(ctx context.Context, recipe model.Command, env ...str
 	if isXcode {
 		filtered := make([]string, 0, len(args)+8)
 		testing := x.job.Request.Kind.Tests()
-		runsTests := false
+		runsTests := runsTestAction(xcodeArgs)
 		for i := 0; i < len(args); i++ {
 			arg := args[i]
 			if arg == "test" || arg == "test-without-building" {
-				testing, runsTests = true, true
+				testing = true
 			}
 			if arg == "-allowProvisioningUpdates" || arg == "-allowProvisioningDeviceRegistration" || strings.HasPrefix(arg, "-download") {
 				return errors.New("Xcode profile or platform fetching is forbidden")
@@ -819,7 +820,7 @@ func testingOptions(workers int) []string {
 }
 
 // retryOptions are the options of a command that runs tests (a test or
-// test-without-building action, not build-for-testing) of a UI-test template
+// test-without-building action, runsTestAction; not build-for-testing) of a UI-test template
 // job that opts in to retries (model.Profile.RetryIterations): xcodebuild
 // retries a failed test until it passes, at most iterations attempts in all.
 // They combine with the parallel-testing options and the shard's
@@ -831,6 +832,25 @@ func retryOptions(iterations int) []string {
 		return nil
 	}
 	return []string{"-retry-tests-on-failure", "-test-iterations", strconv.Itoa(iterations)}
+}
+
+// runsTestAction reports whether xcodebuild arguments args name a test or
+// test-without-building action. An action is a bare word in action
+// position: not the value of an option. Any option without an attached
+// value (-name:value, -name=value) may take the next argument as its value,
+// so a bare word directly after one is never an action: a scheme named
+// "test" is not one. A valueless flag directly before an action only costs
+// that command its retries.
+func runsTestAction(args []string) bool {
+	for i, arg := range args {
+		if arg != "test" && arg != "test-without-building" {
+			continue
+		}
+		if i == 0 || !strings.HasPrefix(args[i-1], "-") || strings.ContainsAny(args[i-1], ":=") {
+			return true
+		}
+	}
+	return false
 }
 
 func noSymlinkPath(root *os.Root, name string) error {

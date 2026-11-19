@@ -442,13 +442,16 @@ func validateDetails(p Payload, require func(bool, string)) {
 	// only under the snapshot's (signed) retry opt-in: reapplied to the
 	// cases stripped of their retry marks, it must give exactly the marks
 	// recorded, so every retried case shows its failed attempts and its
-	// passing last one.
+	// passing last one, all with xcodebuild's retry labels and an identity
+	// no other attempt shares. Without the opt-in no attempt has a label.
 	recomputed := make([]evidence.TestCase, len(s.Cases))
+	labelled := false
 	for i, c := range s.Cases {
+		labelled = labelled || c.Repetition != ""
 		c.Retried, c.FailedAttempts, c.Superseded = false, 0, false
 		recomputed[i] = c
 	}
-	require(evidence.MarkRetries(recomputed, snapshot.RetryIterations()) == nil && reflect.DeepEqual(recomputed, s.Cases), "test retries")
+	require(evidence.MarkRetries(recomputed, snapshot.RetryIterations()) == nil && reflect.DeepEqual(recomputed, s.Cases) && (snapshot.RetryIterations() > 0 || !labelled), "test retries")
 }
 func cases(s *evidence.Summary) []evidence.TestCase {
 	if s == nil {

@@ -233,6 +233,16 @@ type testParser struct {
 	// scope is the suite of the Test Case node being emitted, before
 	// per-device, configuration or argument labels extend it.
 	scope string
+	// retry is the job's retry iterations (0: no retries). In a retry job,
+	// repetition is the label of the Repetition node being emitted when it
+	// belongs to a proper retry sequence (retrySequence), ambiguous records
+	// that the Test Case being emitted has a Device without an identifier,
+	// and groups counts the attempt groups (retryGroups) of earlier Test
+	// Case nodes by case identity.
+	retry      int
+	repetition string
+	ambiguous  bool
+	groups     map[caseKey]int
 }
 
 func (p *testParser) emit(n xcresultNode, id, suite, name string) error {
@@ -253,8 +263,38 @@ func (p *testParser) emit(n xcresultNode, id, suite, name string) error {
 	if p.scope != suite {
 		c.Scope = p.scope
 	}
+	if n.Type == "Repetition" && p.repetition != "" && n.Name == p.repetition {
+		c.Repetition = n.Name
+	}
 	p.summary.Cases = append(p.summary.Cases, c)
 	return nil
+}
+
+// firstRun is the label xcodebuild -retry-tests-on-failure gives a test's
+// first attempt; its retries are "Retry 1", "Retry 2"...
+const firstRun = "First Run"
+
+func retryLabel(attempt int) string {
+	if attempt == 0 {
+		return firstRun
+	}
+	return "Retry " + strconv.Itoa(attempt)
+}
+
+// retrySequence reports whether children are the attempts of one test
+// under one parent as xcodebuild records a retry: only Repetition nodes,
+// labelled First Run, Retry 1, ... in order.
+func retrySequence(children []xcresultNode) bool {
+	repetitions := 0
+	for _, child := range children {
+		if executionNode(child.Type) && (child.Type != "Repetition" || child.Name != retryLabel(repetitions)) {
+			return false
+		}
+		if child.Type == "Repetition" {
+			repetitions++
+		}
+	}
+	return repetitions > 0
 }
 
 // Executions emits only the deepest run/repetition, retaining every attempt.
@@ -263,6 +303,7 @@ func (p *testParser) emit(n xcresultNode, id, suite, name string) error {
 func (p *testParser) executions(n xcresultNode, id, suite, name string) (bool, error) {
 	start := len(p.summary.Cases)
 	found := false
+	retries := p.retry > 0 && retrySequence(n.Children)
 	for _, child := range n.Children {
 		if child.Type == "Test Case" {
 			return false, fmt.Errorf("%w: nested test case", ErrInvalidTests)
@@ -271,7 +312,15 @@ func (p *testParser) executions(n xcresultNode, id, suite, name string) (bool, e
 		if child.Type == "Device" || child.Type == "Test Plan Configuration" || child.Type == "Arguments" {
 			childSuite = joinTestPath(suite, nodeLabel(child))
 		}
+		if child.Type == "Device" && child.Identifier == "" {
+			p.ambiguous = true
+		}
+		outer := p.repetition
+		if retries && child.Type == "Repetition" {
+			p.repetition = child.Name
+		}
 		present, err := p.executions(child, id, childSuite, name)
+		p.repetition = outer
 		if err != nil {
 			return false, err
 		}
@@ -325,12 +374,19 @@ func joinTestPath(parent, child string) string {
 
 // A failed container explained by a failed descendant contributes diagnostics,
 // not another failure count. Distinct ancestor messages stay on a failed case.
+// A superseded attempt (one a retry passed) explains only the container
+// failure it rolls up: a container whose only failed descendants are
+// superseded and that has messages of its own (a suite teardown failure, for
+// example) keeps them on a failed diagnostic record.
 func (p *testParser) containerFailure(n xcresultNode, path string, start int) {
 	target := -1
+	superseded := false
 	seen := make(map[string]bool)
 	for i := start; i < len(p.summary.Cases); i++ {
 		c := &p.summary.Cases[i]
-		if c.Outcome == "failed" {
+		if c.Outcome == "failed" && c.Superseded {
+			superseded = true
+		} else if c.Outcome == "failed" {
 			target = i
 		}
 		for _, message := range c.Failures {
@@ -338,6 +394,17 @@ func (p *testParser) containerFailure(n xcresultNode, path string, start int) {
 		}
 	}
 	messages := failures(n)
+	if target == -1 && superseded {
+		var own []string
+		for _, message := range messages {
+			if !seen[message] {
+				own = append(own, message)
+			}
+		}
+		if len(own) == 0 {
+			return
+		}
+	}
 	if target == -1 {
 		// This record is diagnostic only: it cannot satisfy required selections
 		// or the requirement that at least one test actually executed.
@@ -370,7 +437,7 @@ func (p *testParser) visit(n xcresultNode, parent string) error {
 			}
 		}
 		start := len(p.summary.Cases)
-		p.scope = suite
+		p.scope, p.ambiguous = suite, false
 		_, err := p.executions(n, id, suite, n.Name)
 		if err != nil {
 			return err
@@ -388,6 +455,11 @@ func (p *testParser) visit(n xcresultNode, parent string) error {
 					seen[message] = true
 				}
 			}
+			if p.retry > 0 {
+				// A case's own message that no attempt records is not
+				// attributable to a retried attempt: it fails the last one.
+				target = len(p.summary.Cases) - 1
+			}
 			for _, message := range messages {
 				if !seen[message] {
 					p.summary.Cases[target].Failures = append(p.summary.Cases[target].Failures, message)
@@ -398,7 +470,7 @@ func (p *testParser) visit(n xcresultNode, parent string) error {
 				}
 			}
 		}
-		return nil
+		return p.markRetries(start)
 	}
 	if n.Type == "Test Case Run" || n.Type == "Repetition" {
 		return fmt.Errorf("%w: execution without a test case", ErrInvalidTests)
@@ -462,45 +534,69 @@ func RequiredMatch(c TestCase, required string) bool {
 	return c.ID == method || c.ID == method+"()"
 }
 
-// MarkRetries applies a retry job's verdict to its parsed cases: a case
-// (one ID in one suite: device, configuration and argument labels make
-// separate cases) passes on retry when its last attempt passed or was an
-// expected failure after failed attempts. That attempt is marked Retried
-// with its FailedAttempts and the failed ones Superseded; a case whose last
-// attempt failed stays failed on every attempt. xcodebuild retries only a
-// failure, so an attempt other than the last that did not fail, or more
-// attempts than iterations, is invalid evidence. With iterations 0 (no
-// retries) it changes nothing. Receipt validation reapplies it to the
-// recorded cases.
+type caseKey struct{ id, suite string }
+
+func keyOf(c TestCase) caseKey { return caseKey{c.ID, c.Suite} }
+
+// retryGroups splits the non-container cases into attempt groups: a run of
+// consecutive cases of one ID and suite whose Repetition labels are First
+// Run, Retry 1, ... in order is one group (the parser labels only such a
+// sequence recorded under one parent node); every other case is a group of
+// its own.
+func retryGroups(cases []TestCase) [][]int {
+	var groups [][]int
+	for i := 0; i < len(cases); i++ {
+		if cases[i].Container {
+			continue
+		}
+		group := []int{i}
+		if cases[i].Repetition == firstRun {
+			for j := i + 1; j < len(cases) && !cases[j].Container && keyOf(cases[j]) == keyOf(cases[i]) && cases[j].Repetition == retryLabel(len(group)); j++ {
+				group = append(group, j)
+			}
+		}
+		groups = append(groups, group)
+		i = group[len(group)-1]
+	}
+	return groups
+}
+
+// MarkRetries applies a retry job's verdict to its parsed cases. Only
+// xcodebuild's own retry provenance makes attempts one test's: a group of
+// attempts labelled First Run, Retry 1, ... (retryGroups) passes on retry
+// when its last attempt passed or was an expected failure. That attempt is
+// marked Retried with its FailedAttempts and the failed ones Superseded. A
+// group whose last attempt failed stays failed on every attempt, and so does
+// a group whose identity (ID and suite) is ambiguous: shared with another
+// group or case, as two devices with one display name are. xcodebuild
+// retries only a failure, so a group attempt other than the last that did
+// not fail, or more attempts than iterations, is invalid evidence. It first
+// clears earlier marks. With iterations 0 (no retries) it changes nothing.
+// Receipt validation reapplies it to the recorded cases.
 func MarkRetries(cases []TestCase, iterations int) error {
 	if iterations == 0 {
 		return nil
 	}
-	type key struct{ id, suite string }
-	groups := make(map[key][]int)
-	var order []key
-	for i, c := range cases {
-		if c.Container {
-			continue
-		}
-		k := key{c.ID, c.Suite}
-		if _, ok := groups[k]; !ok {
-			order = append(order, k)
-		}
-		groups[k] = append(groups[k], i)
+	for i := range cases {
+		cases[i].Retried, cases[i].FailedAttempts, cases[i].Superseded = false, 0, false
 	}
-	for _, k := range order {
-		attempts := groups[k]
-		if len(attempts) > iterations {
-			return fmt.Errorf("%w: %q has %d attempts, more than %d", ErrInvalidTests, k.id, len(attempts), iterations)
+	groups := retryGroups(cases)
+	identities := make(map[caseKey]int, len(groups))
+	for _, group := range groups {
+		identities[keyOf(cases[group[0]])]++
+	}
+	for _, group := range groups {
+		first := cases[group[0]]
+		if len(group) > iterations {
+			return fmt.Errorf("%w: %q has %d attempts, more than %d", ErrInvalidTests, first.ID, len(group), iterations)
 		}
-		earlier, last := attempts[:len(attempts)-1], &cases[attempts[len(attempts)-1]]
+		earlier, last := group[:len(group)-1], &cases[group[len(group)-1]]
 		for _, i := range earlier {
 			if cases[i].Outcome != "failed" {
-				return fmt.Errorf("%w: %q was retried after a %s attempt", ErrInvalidTests, k.id, cases[i].Outcome)
+				return fmt.Errorf("%w: %q was retried after a %s attempt", ErrInvalidTests, first.ID, cases[i].Outcome)
 			}
 		}
-		if len(earlier) == 0 || last.Outcome != "passed" && last.Outcome != "expected-failure" {
+		if len(earlier) == 0 || identities[keyOf(first)] > 1 || last.Outcome != "passed" && last.Outcome != "expected-failure" {
 			continue
 		}
 		last.Retried, last.FailedAttempts = true, len(earlier)
@@ -511,13 +607,44 @@ func MarkRetries(cases []TestCase, iterations int) error {
 	return nil
 }
 
+// markRetries applies MarkRetries to the cases of the Test Case node whose
+// first case is start, so that its enclosing containers see which failures
+// a retry superseded (containerFailure). A Device without an identifier in
+// the node makes its attempts' identity ambiguous: they lose their retry
+// labels. An identity an earlier node already recorded is ambiguous too;
+// ParseTests' final MarkRetries also unmarks that earlier node's.
+func (p *testParser) markRetries(start int) error {
+	if p.retry == 0 {
+		return nil
+	}
+	cases := p.summary.Cases[start:]
+	if p.ambiguous {
+		for i := range cases {
+			cases[i].Repetition = ""
+		}
+	}
+	if err := MarkRetries(cases, p.retry); err != nil {
+		return err
+	}
+	for _, group := range retryGroups(cases) {
+		key := keyOf(cases[group[0]])
+		if p.groups[key] > 0 {
+			for _, i := range group {
+				cases[i].Retried, cases[i].FailedAttempts, cases[i].Superseded = false, 0, false
+			}
+		}
+		p.groups[key]++
+	}
+	return nil
+}
+
 // ParseTests parses only schema 0.4.0's test tree, not command exit status.
 // Failed tests are valid evidence and return a summary with a nil error.
 // retryIterations is the job's retry opt-in
-// (model.Profile.RetryIterations): nonzero, a case that passes on retry
-// (MarkRetries) does not count as failed.
+// (model.Profile.RetryIterations): nonzero, attempts get their retry labels
+// and a case that passes on retry (MarkRetries) does not count as failed.
 func ParseTests(data []byte, required []string, retryIterations int) (Summary, error) {
-	p := testParser{summary: Summary{SchemaVersion: 1, ParserVersion: "xcresult-tests-0.4.0", ParseStatus: "invalid", Cases: []TestCase{}, RequiredTests: append([]string(nil), required...)}, attempts: make(map[string]int)}
+	p := testParser{summary: Summary{SchemaVersion: 1, ParserVersion: "xcresult-tests-0.4.0", ParseStatus: "invalid", Cases: []TestCase{}, RequiredTests: append([]string(nil), required...)}, attempts: make(map[string]int), retry: retryIterations, groups: make(map[caseKey]int)}
 	if err := boundedTestJSON(data); err != nil {
 		return p.summary, err
 	}

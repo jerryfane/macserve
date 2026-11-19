@@ -20,8 +20,8 @@ func withRetry(t *testing.T, s evidence.Summary) evidence.Summary {
 		t.Fatalf("fixture's first case %+v", first)
 	}
 	failed := first
-	failed.Outcome, failed.Failures = "failed", []string{"flaky"}
-	first.Attempt = 2
+	failed.Outcome, failed.Failures, failed.Repetition = "failed", []string{"flaky"}, "First Run"
+	first.Attempt, first.Repetition = 2, "Retry 1"
 	s.Cases = append([]evidence.TestCase{failed, first}, s.Cases[1:]...)
 	for i := range s.Cases[2:] {
 		if s.Cases[i+2].ID == first.ID {
@@ -126,6 +126,11 @@ func TestRetryReceiptRefusesForgedClaims(t *testing.T) {
 		"retry mark on a first-time pass": func(s *evidence.Summary) {
 			s.Cases[1].Retried, s.Cases[1].FailedAttempts = false, 0
 			s.Cases[2].Retried, s.Cases[2].FailedAttempts = true, 1
+		},
+		// Two first runs of one identity: the attempts are not one
+		// test's retry, so the recorded marks do not recompute.
+		"two first runs of one identity": func(s *evidence.Summary) {
+			s.Cases[1].Repetition = "First Run"
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

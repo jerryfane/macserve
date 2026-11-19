@@ -17,6 +17,11 @@ type TestCase struct {
 	Attempt         int      `json:"attempt"`
 	// Container marks a failed container diagnostic, not an executed test.
 	Container bool `json:"container,omitempty"`
+	// Repetition is, in a retry job, an attempt's xcodebuild retry label
+	// (First Run, Retry 1, ...) when the parser found it in a retry sequence
+	// under one parent node with an unambiguous identity; MarkRetries groups
+	// only labelled attempts. Omitted otherwise.
+	Repetition string `json:"repetition,omitempty"`
 	// Retried marks, in a retry job (see MarkRetries), the passing or
 	// expected-failure last attempt of a case whose FailedAttempts earlier
 	// attempts failed: the case passed on retry.
