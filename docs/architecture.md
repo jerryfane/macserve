@@ -507,7 +507,8 @@ only failures may be retried, so a non-failed earlier attempt or more attempts t
 A superseded attempt explains only the failure it rolls up: a container's own failure messages (a suite teardown)
 stay failures, and a test case's own messages (outside its attempts, or recorded by none of them) are fixed from the
 tree before aggregate messages are copied onto attempts; they become the last attempt's `case_failures` and keep it
-failed even when it passed or was an expected failure. Success still requires the test command's exit 0:
+failed even when it passed or was an expected failure. Attribution goes by kind as well as text: an Expected Failure
+issue's messages are never a case failure and never explain one away, even with identical text. Success still requires the test command's exit 0:
 xcodebuild exits 0 when every test's last attempt passed, so no non-zero exit is reinterpreted.
 
 **Parallel-testing clones.** A `simulator_ui_test` job of a template with `parallel_testing`
