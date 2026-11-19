@@ -101,6 +101,10 @@ func TestRetryReceiptRefusesForgedClaims(t *testing.T) {
 		}
 		edit(f.Details.Result.Summary)
 		f.Tests = testEvidence(f.Request.Kind, base.Tests.Required, base.Tests.RetryIterations, f.Details.Result.Summary)
+		// Re-commit to the forged cases, so only the retry rules can refuse.
+		if f.Digests.TestCases, err = valueDigest(cases(f.Details.Result.Summary)); err != nil {
+			t.Fatal(err)
+		}
 		return f
 	}
 	for name, edit := range map[string]func(*evidence.Summary){
@@ -115,6 +119,13 @@ func TestRetryReceiptRefusesForgedClaims(t *testing.T) {
 			s.Passed--
 			s.Superseded++
 			s.Cases[1].Superseded = false
+		},
+		// Counts, names and digest all consistent: only recomputing the
+		// verdict from the attempts finds a single-attempt pass marked
+		// retried.
+		"retry mark on a first-time pass": func(s *evidence.Summary) {
+			s.Cases[1].Retried, s.Cases[1].FailedAttempts = false, 0
+			s.Cases[2].Retried, s.Cases[2].FailedAttempts = true, 1
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -140,6 +151,15 @@ func TestRetryReceiptRefusesForgedClaims(t *testing.T) {
 				t.Fatalf("forged payload retry record accepted: %v", err)
 			}
 		})
+	}
+	// A compact receipt carries no attempts: its retry record is refused
+	// unless it names the only iteration count a template may set.
+	compact := p
+	compact.Tests.RetryIterations = 3
+	pinned := expected
+	pinned.RetryIterations = 3
+	if err := ValidateSuccess(compact, pinned); !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "test retries") {
+		t.Fatalf("compact receipt with forged iterations accepted: %v", err)
 	}
 
 	// The same attempts on a template without retries.
