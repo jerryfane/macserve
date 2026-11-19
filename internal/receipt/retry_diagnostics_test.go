@@ -25,6 +25,10 @@ func TestRetryReceiptKeepsCaseDiagnostics(t *testing.T) {
 	}{
 		{"herdrup-uitests-retry-teardown.json", false},
 		{"herdrup-uitests-retry-teardown-expected.json", false},
+		// The expected issue has the teardown's exact text.
+		{"herdrup-uitests-retry-teardown-same-text.json", false},
+		// A genuine expected failure on retry, no other failure.
+		{"herdrup-uitests-retry-expected.json", true},
 		{"herdrup-uitests-retry-passed.json", true},
 	} {
 		t.Run(tc.fixture, func(t *testing.T) {

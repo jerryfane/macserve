@@ -424,19 +424,25 @@ func (p *testParser) containerFailure(n xcresultNode, path string, start int) {
 	}
 }
 
-// caseDiagnostics are a Test Case node's own failure messages: those in its
-// tree outside every execution (Repetition, Test Case Run) that no execution
-// records itself, in order and once each. Messages of an Expected Failure
-// issue are not failures. A case with no execution below it is its own only
+// caseDiagnostics are a Test Case node's own failure messages, in order and
+// once each: the Failure Message nodes in its tree outside the attempts it
+// emits (the leaf executions; an intermediate execution node's own messages
+// are the case's) that no attempt records as an ordinary failure of its
+// own. Attribution goes by kind as well as text: an Expected Failure issue's
+// messages are neither the case's failures nor ever explain one away, even
+// with identical text. A case with no execution below it is its own only
 // attempt, so it has none.
 func caseDiagnostics(n xcresultNode) []string {
+	if !hasExecution(n) {
+		return nil
+	}
 	var outside, inside []string
 	var walk func(xcresultNode)
 	walk = func(node xcresultNode) {
 		for _, child := range node.Children {
 			switch {
-			case executionNode(child.Type):
-				inside = append(inside, failures(child)...)
+			case executionNode(child.Type) && !hasExecution(child):
+				inside = append(inside, ordinaryFailures(child)...)
 				continue
 			case child.Type == "Expected Failure":
 				continue
@@ -447,9 +453,6 @@ func caseDiagnostics(n xcresultNode) []string {
 		}
 	}
 	walk(n)
-	if len(inside) == 0 && !hasExecution(n) {
-		return nil
-	}
 	var own []string
 	for _, message := range outside {
 		if !slices.Contains(inside, message) && !slices.Contains(own, message) {
@@ -457,6 +460,21 @@ func caseDiagnostics(n xcresultNode) []string {
 		}
 	}
 	return own
+}
+
+// ordinaryFailures are n's Failure Message texts outside any Expected
+// Failure issue.
+func ordinaryFailures(n xcresultNode) []string {
+	var messages []string
+	if n.Type == "Failure Message" {
+		messages = append(messages, n.Name)
+	}
+	for _, child := range n.Children {
+		if child.Type != "Expected Failure" {
+			messages = append(messages, ordinaryFailures(child)...)
+		}
+	}
+	return messages
 }
 
 func hasExecution(n xcresultNode) bool {
@@ -495,24 +513,12 @@ func (p *testParser) visit(n xcresultNode, parent string) error {
 			return err
 		}
 		if p.retry > 0 {
-			// A message no emitted attempt records (one on an intermediate
-			// execution node, say) is the case's own too.
-			for _, message := range failures(n) {
-				recorded := slices.Contains(independent, message)
-				for i := start; i < len(p.summary.Cases) && !recorded; i++ {
-					recorded = slices.Contains(p.summary.Cases[i].Failures, message)
-				}
-				if !recorded {
-					independent = append(independent, message)
-				}
-			}
 			// They fail the last attempt whatever its outcome (an expected
-			// failure too), so the case cannot pass on retry.
+			// failure too, even one whose issue has the same text), so the
+			// case cannot pass on retry.
 			last := &p.summary.Cases[len(p.summary.Cases)-1]
 			for _, message := range independent {
-				if !slices.Contains(last.Failures, message) {
-					last.Failures = append(last.Failures, message)
-				}
+				last.Failures = append(last.Failures, message)
 				last.CaseFailures = append(last.CaseFailures, message)
 				last.Outcome = "failed"
 			}
