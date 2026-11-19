@@ -308,7 +308,7 @@ func (c *Controller) verifyResult(ctx context.Context, job model.Job, result wor
 			}
 			raw, readErr := io.ReadAll(io.LimitReader(file, (32<<20)+1))
 			file.Close()
-			summary, parseErr := evidence.ParseTests(raw, profile.RequiredTests)
+			summary, parseErr := evidence.ParseTests(raw, profile.RequiredTests, job.Profile.RetryIterations())
 			summary.XCResultSHA256 = archive.SHA256
 			result.Summary = &summary
 			if readErr != nil || parseErr != nil || summary.ParseStatus != "parsed" || summary.Tests == 0 || summary.Failed != 0 {

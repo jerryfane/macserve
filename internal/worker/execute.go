@@ -757,10 +757,11 @@ func (x *execution) recipe(ctx context.Context, recipe model.Command, env ...str
 	if isXcode {
 		filtered := make([]string, 0, len(args)+8)
 		testing := x.job.Request.Kind.Tests()
+		runsTests := false
 		for i := 0; i < len(args); i++ {
 			arg := args[i]
 			if arg == "test" || arg == "test-without-building" {
-				testing = true
+				testing, runsTests = true, true
 			}
 			if arg == "-allowProvisioningUpdates" || arg == "-allowProvisioningDeviceRegistration" || strings.HasPrefix(arg, "-download") {
 				return errors.New("Xcode profile or platform fetching is forbidden")
@@ -780,6 +781,9 @@ func (x *execution) recipe(ctx context.Context, recipe model.Command, env ...str
 		args = append(filtered, "-jobs", "4", "CODE_SIGNING_ALLOWED=NO")
 		if testing {
 			args = append(args, testingOptions(x.job.Profile.ParallelTestingWorkers())...)
+		}
+		if runsTests {
+			args = append(args, retryOptions(x.job.Profile.RetryIterations())...)
 		}
 	}
 	work := path.Join("checkout", x.job.Profile.WorkDir)
@@ -812,6 +816,21 @@ func testingOptions(workers int) []string {
 		return []string{"-parallel-testing-enabled", "NO", "-maximum-concurrent-test-simulator-destinations", "1"}
 	}
 	return []string{"-parallel-testing-enabled", "YES", "-parallel-testing-worker-count", strconv.Itoa(workers), "-maximum-concurrent-test-simulator-destinations", "1"}
+}
+
+// retryOptions are the options of a command that runs tests (a test or
+// test-without-building action, not build-for-testing) of a UI-test template
+// job that opts in to retries (model.Profile.RetryIterations): xcodebuild
+// retries a failed test until it passes, at most iterations attempts in all.
+// They combine with the parallel-testing options and the shard's
+// -only-testing selectors: each selected test is retried on its own.
+// xcodebuild then exits 0 when every test's last attempt passed, so success
+// still requires exit 0 and the parsed verdict (evidence.MarkRetries).
+func retryOptions(iterations int) []string {
+	if iterations == 0 {
+		return nil
+	}
+	return []string{"-retry-tests-on-failure", "-test-iterations", strconv.Itoa(iterations)}
 }
 
 func noSymlinkPath(root *os.Root, name string) error {
@@ -1002,7 +1021,7 @@ func (x *execution) testEvidence(ctx context.Context) error {
 		return commandErr
 	}
 	writeErr := x.writeEvidence("tests.json", raw)
-	summary, parseErr := evidence.ParseTests(raw, x.job.Profile.RequiredTests)
+	summary, parseErr := evidence.ParseTests(raw, x.job.Profile.RequiredTests, x.job.Profile.RetryIterations())
 	x.result.Summary = &summary
 	var failed error
 	if summary.Failed > 0 {

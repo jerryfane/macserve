@@ -462,9 +462,61 @@ func RequiredMatch(c TestCase, required string) bool {
 	return c.ID == method || c.ID == method+"()"
 }
 
+// MarkRetries applies a retry job's verdict to its parsed cases: a case
+// (one ID in one suite: device, configuration and argument labels make
+// separate cases) passes on retry when its last attempt passed or was an
+// expected failure after failed attempts. That attempt is marked Retried
+// with its FailedAttempts and the failed ones Superseded; a case whose last
+// attempt failed stays failed on every attempt. xcodebuild retries only a
+// failure, so an attempt other than the last that did not fail, or more
+// attempts than iterations, is invalid evidence. With iterations 0 (no
+// retries) it changes nothing. Receipt validation reapplies it to the
+// recorded cases.
+func MarkRetries(cases []TestCase, iterations int) error {
+	if iterations == 0 {
+		return nil
+	}
+	type key struct{ id, suite string }
+	groups := make(map[key][]int)
+	var order []key
+	for i, c := range cases {
+		if c.Container {
+			continue
+		}
+		k := key{c.ID, c.Suite}
+		if _, ok := groups[k]; !ok {
+			order = append(order, k)
+		}
+		groups[k] = append(groups[k], i)
+	}
+	for _, k := range order {
+		attempts := groups[k]
+		if len(attempts) > iterations {
+			return fmt.Errorf("%w: %q has %d attempts, more than %d", ErrInvalidTests, k.id, len(attempts), iterations)
+		}
+		earlier, last := attempts[:len(attempts)-1], &cases[attempts[len(attempts)-1]]
+		for _, i := range earlier {
+			if cases[i].Outcome != "failed" {
+				return fmt.Errorf("%w: %q was retried after a %s attempt", ErrInvalidTests, k.id, cases[i].Outcome)
+			}
+		}
+		if len(earlier) == 0 || last.Outcome != "passed" && last.Outcome != "expected-failure" {
+			continue
+		}
+		last.Retried, last.FailedAttempts = true, len(earlier)
+		for _, i := range earlier {
+			cases[i].Superseded = true
+		}
+	}
+	return nil
+}
+
 // ParseTests parses only schema 0.4.0's test tree, not command exit status.
 // Failed tests are valid evidence and return a summary with a nil error.
-func ParseTests(data []byte, required []string) (Summary, error) {
+// retryIterations is the job's retry opt-in
+// (model.Profile.RetryIterations): nonzero, a case that passes on retry
+// (MarkRetries) does not count as failed.
+func ParseTests(data []byte, required []string, retryIterations int) (Summary, error) {
 	p := testParser{summary: Summary{SchemaVersion: 1, ParserVersion: "xcresult-tests-0.4.0", ParseStatus: "invalid", Cases: []TestCase{}, RequiredTests: append([]string(nil), required...)}, attempts: make(map[string]int)}
 	if err := boundedTestJSON(data); err != nil {
 		return p.summary, err
@@ -498,6 +550,9 @@ func ParseTests(data []byte, required []string) (Summary, error) {
 			return p.summary, err
 		}
 	}
+	if err := MarkRetries(p.summary.Cases, retryIterations); err != nil {
+		return p.summary, err
+	}
 	executed := 0
 	for _, c := range p.summary.Cases {
 		if !c.Container && c.Outcome != "skipped" {
@@ -505,14 +560,19 @@ func ParseTests(data []byte, required []string) (Summary, error) {
 		}
 		p.summary.Tests++
 		p.summary.DurationSeconds += c.DurationSeconds
-		switch c.Outcome {
-		case "passed":
+		if c.Retried {
+			p.summary.Retried++
+		}
+		switch {
+		case c.Superseded:
+			p.summary.Superseded++
+		case c.Outcome == "passed":
 			p.summary.Passed++
-		case "failed":
+		case c.Outcome == "failed":
 			p.summary.Failed++
-		case "skipped":
+		case c.Outcome == "skipped":
 			p.summary.Skipped++
-		case "expected-failure":
+		case c.Outcome == "expected-failure":
 			p.summary.ExpectedFailures++
 		}
 	}

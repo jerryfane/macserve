@@ -121,7 +121,7 @@ func testTemplateFixtureWith(t *testing.T, kind model.Kind, edit func(*model.Tem
 	if err != nil {
 		t.Fatal(err)
 	}
-	summary, err := evidence.ParseTests(report, derived.RequiredTests)
+	summary, err := evidence.ParseTests(report, derived.RequiredTests, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +192,7 @@ func TestRequiredExecutedMatchesBundleRelative(t *testing.T) {
 		t.Fatal(err)
 	}
 	executed := []string{"HerdrUITests/TerminalControlTests", "HerdrUITests/TerminalSearchTests/testEngineAndWiringAgree()", "HerdrUITests/TerminalResizeTests/testAppBackgroundReleasesClaimAndReturnReclaims"}
-	summary, err := evidence.ParseTests(report, executed)
+	summary, err := evidence.ParseTests(report, executed, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

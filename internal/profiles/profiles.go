@@ -365,6 +365,9 @@ func normalizeTemplate(t *model.Template) error {
 	if err := normalizeParallelTesting(t); err != nil {
 		return err
 	}
+	if err := normalizeRetryFailedTests(*t); err != nil {
+		return err
+	}
 	return normalizeBudgets(t.Kind, &t.DefaultTimeoutSeconds, &t.MaxTimeoutSeconds, &t.MemoryLimitMiB)
 }
 
@@ -406,6 +409,25 @@ func normalizeParallelTesting(t *model.Template) error {
 	}
 	if floor := ParallelTestingBaseFloorMiB + p.Workers*ParallelTestingCloneMiB; t.MemoryLimitMiB < floor {
 		return fmt.Errorf("%w: a parallel_testing template's memory_limit_mib must be at least %d for %d workers", ErrInvalid, floor, p.Workers)
+	}
+	return nil
+}
+
+// RetryTestIterations is the only retry_failed_tests iterations a UI-test
+// template may set: each failed test is retried once.
+const RetryTestIterations = 2
+
+// normalizeRetryFailedTests admits retry_failed_tests only on a
+// simulator_ui_test template, with RetryTestIterations iterations.
+func normalizeRetryFailedTests(t model.Template) error {
+	if t.RetryFailedTests == nil {
+		return nil
+	}
+	if t.Kind != model.SimulatorUITest {
+		return fmt.Errorf("%w: only simulator_ui_test templates may set retry_failed_tests", ErrInvalid)
+	}
+	if t.RetryFailedTests.Iterations != RetryTestIterations {
+		return fmt.Errorf("%w: retry_failed_tests iterations must be %d", ErrInvalid, RetryTestIterations)
 	}
 	return nil
 }
@@ -619,6 +641,10 @@ func cloneTemplate(t model.Template) model.Template {
 	if t.ParallelTesting != nil {
 		parallel := *t.ParallelTesting
 		t.ParallelTesting = &parallel
+	}
+	if t.RetryFailedTests != nil {
+		retry := *t.RetryFailedTests
+		t.RetryFailedTests = &retry
 	}
 	return t
 }

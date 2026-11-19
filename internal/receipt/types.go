@@ -68,6 +68,9 @@ type Expected struct {
 	// Products is the admitted request's test products reference: set
 	// exactly for a consumer job, whose receipt binds that producer.
 	Products *model.ProductsRef
+	// RetryIterations is the admitted template's retry_failed_tests
+	// iterations (model.Profile.RetryIterations); 0 without retries.
+	RetryIterations int
 }
 
 // SelectorsRepoConfig is the only Products.SelectorsSource today: the
@@ -120,6 +123,16 @@ type TestEvidence struct {
 	Failed           int      `json:"failed"`
 	Skipped          int      `json:"skipped"`
 	ExpectedFailures int      `json:"expected_failures"`
+	// RetryIterations is the job's retry opt-in (its template's
+	// retry_failed_tests iterations); Retried counts the cases that passed
+	// on retry, Superseded their failed attempts (Tests is Passed + Failed
+	// + Skipped + ExpectedFailures + Superseded) and RetriedTests names the
+	// first PublishedRetried of those cases' distinct IDs. All are omitted
+	// when zero, so a receipt of a job without retries keeps its bytes.
+	RetryIterations int      `json:"retry_iterations,omitempty"`
+	Retried         int      `json:"retried,omitempty"`
+	Superseded      int      `json:"superseded,omitempty"`
+	RetriedTests    []string `json:"retried_tests,omitempty"`
 	Required         []string `json:"required"`
 	ExecutedRequired []string `json:"executed_required"`
 	XCResultSHA256   string   `json:"xcresult_sha256,omitempty"`
@@ -178,6 +191,15 @@ type Concurrency struct {
 // PublishedOverlaps bounds Concurrency.OverlappedJobs, so a long job beside a
 // replenished queue still fits the compact receipt's publication limit.
 const PublishedOverlaps = 8
+
+// PublishedRetried bounds TestEvidence.RetriedTests (and the GitHub check
+// summary that names them), so a flaky suite still fits the compact
+// receipt's publication limit; Retried keeps the full count.
+const PublishedRetried = 8
+
+// MaxRetriedTestName bounds each RetriedTests name in bytes; a longer case
+// ID is cut there.
+const MaxRetriedTestName = 200
 
 type Overlap struct {
 	JobID   string `json:"job_id"`
