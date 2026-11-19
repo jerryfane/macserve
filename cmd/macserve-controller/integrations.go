@@ -160,5 +160,5 @@ func receiptExpectation(repositoryID int64, job model.Job) (receipt.Expected, er
 	if err != nil {
 		return receipt.Expected{}, err
 	}
-	return receipt.Expected{RepositoryID: repositoryID, Repo: job.Request.Repo, SHA: job.Request.SHA, Profile: job.Request.Profile, ProfileDigest: job.ProfileDigest, Kind: job.Request.Kind, Xcode: job.Request.Xcode, Simulator: job.Request.Simulator, RequiredTests: profile.RequiredTests, Release: job.Request.Release, BuildForTesting: job.Request.BuildForTesting, Products: job.Request.Products}, nil
+	return receipt.Expected{RepositoryID: repositoryID, Repo: job.Request.Repo, SHA: job.Request.SHA, Profile: job.Request.Profile, ProfileDigest: job.ProfileDigest, Kind: job.Request.Kind, Xcode: job.Request.Xcode, Simulator: job.Request.Simulator, RequiredTests: profile.RequiredTests, Release: job.Request.Release, BuildForTesting: job.Request.BuildForTesting, Products: job.Request.Products, RetryIterations: job.Profile.RetryIterations()}, nil
 }
