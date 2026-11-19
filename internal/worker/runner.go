@@ -223,7 +223,8 @@ const stallKillBound = defaultSampleTimeout + cleanupSignalTimeout
 
 // stallKill SIGKILLs a stalled command (ErrStalled) at once, before its
 // group's cleanup: every member of its process group and every descendant
-// of its direct child that left the group, of the job UID. A stalled job's
+// of its direct child or of any group member, wherever in the tree it left
+// the group, of the job UID. A stalled job's
 // hung children need no grace, and a wrapper such as coreutils timeout puts
 // its command (a hung `simctl ui` or `simctl status_bar`) in a group of its
 // own, which the group cleanup never reaches: left running, it held the
@@ -252,14 +253,22 @@ func (r *nativeRunner) stallKill(child processInstance, uid int) {
 	children := make(map[int][]processSample, len(samples))
 	seen := map[int]bool{}
 	var targets []processSample
+	// The walk starts at the direct child and every group member: a member
+	// that stayed in the group (a shell's subshell, a wrapper) may itself
+	// have a child that left it with setsid or setpgid (#203 review).
+	queue := []int{child.pid}
 	for _, p := range samples {
 		children[p.parent] = append(children[p.parent], p)
 		if p.group == child.pid && !seen[p.pid] {
 			seen[p.pid] = true
 			targets = append(targets, p)
+			queue = append(queue, p.pid)
 		}
 	}
-	for queue := []int{child.pid}; len(queue) > 0; queue = queue[1:] {
+	// Only descendants by parent PID in this one listing are added: the
+	// lineage the lane tracker attributes to this job, never another job's
+	// processes.
+	for ; len(queue) > 0; queue = queue[1:] {
 		for _, p := range children[queue[0]] {
 			if p.pid > 1 && !seen[p.pid] {
 				seen[p.pid] = true

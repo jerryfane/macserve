@@ -28,6 +28,15 @@ trap '' TERM
 perl -e '$| = 1; setpgrp(0, 0); $SIG{TERM} = "IGNORE"; print "escaped=$$\n"; sleep 1000'
 `
 
+// grandchildScript ignores SIGTERM and blocks, after starting a child that
+// stays in the command's process group and forks a grandchild that leaves
+// it with setsid, ignores SIGTERM and blocks too. It prints the grandchild's
+// PID, then nothing more.
+const grandchildScript = `#!/bin/bash
+trap '' TERM
+perl -MPOSIX -e '$| = 1; $SIG{TERM} = "IGNORE"; if (fork() == 0) { POSIX::setsid(); print "escaped=$$\n"; sleep 1000; exit } sleep 1000'
+`
+
 var escapedPID = regexp.MustCompile(`escaped=(\d+)`)
 
 // #201 acceptance (herdrup j_8798460a, 2026-11-19): a script job whose
@@ -37,6 +46,20 @@ var escapedPID = regexp.MustCompile(`escaped=(\d+)`)
 // children run as real processes; the job's run command alone is watched
 // (the default ten minutes, cut to a second here), never prepare.
 func TestStalledScriptJobEndsWithConfirmedCleanup(t *testing.T) {
+	assertStalledScriptCleanup(t, stallScript)
+}
+
+// #203 review: a process that left the group below a group member that
+// stayed in it (not below the group leader) is SIGKILLed too.
+func TestStalledScriptJobKillsGrandchildThatLeftTheGroup(t *testing.T) {
+	assertStalledScriptCleanup(t, grandchildScript)
+}
+
+// assertStalledScriptCleanup runs a script job whose script is script and
+// requires it to end stalled with confirmed cleanup, the process the script
+// reports as escaped=<pid> gone before the census.
+func assertStalledScriptCleanup(t *testing.T, script string) {
+	t.Helper()
 	if _, err := exec.LookPath("perl"); err != nil {
 		t.Skip("perl is required to start a child outside the command's group")
 	}
@@ -82,7 +105,7 @@ func TestStalledScriptJobEndsWithConfirmedCleanup(t *testing.T) {
 		}
 	})
 	engine := engineFixture(t, runner)
-	source, data := checkoutFixture(t, map[string]string{".macserve.json": scriptConfig, "Tools/ci/duo-screenshots.sh": stallScript})
+	source, data := checkoutFixture(t, map[string]string{".macserve.json": scriptConfig, "Tools/ci/duo-screenshots.sh": script})
 	job := testTemplateJob(t, model.SimulatorScript, scriptShard)
 	// Without the watchdog the job would run to this bound, not stall.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
