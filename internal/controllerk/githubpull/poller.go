@@ -1141,24 +1141,36 @@ func (p *Poller) skipSummary(ctx context.Context, policy githubwire.Policy, pull
 }
 
 // scopeSummary is the neutral check summary of a complete comparison whose
-// every file was added or modified and is selected by paths, "" otherwise
-// (no changed file, or any removed, renamed, copied, mode-changed or
-// unselected file).
+// every file is selected by paths, "" otherwise. An added, modified or
+// removed file is selected when paths matches its path; a renamed file only
+// when paths matches both its previous and its new path. No changed file, a
+// rename without its previous path, a previous path on any other status, and
+// any copied, mode-changed, unchanged, unknown or unselected file run the
+// matrix.
 func scopeSummary(paths githubwire.SkipPaths, files []githubapi.ChangedFile) string {
 	if len(files) == 0 {
 		return ""
 	}
 	var matched []string
-	for _, file := range files {
-		if file.Status != "added" && file.Status != "modified" || file.PreviousFilename != "" {
-			return ""
-		}
-		glob, ok := paths.Match(file.Filename)
-		if !ok {
-			return ""
-		}
-		if !slices.Contains(matched, glob) {
+	selected := func(name string) bool {
+		glob, ok := paths.Match(name)
+		if ok && !slices.Contains(matched, glob) {
 			matched = append(matched, glob)
+		}
+		return ok
+	}
+	for _, file := range files {
+		switch file.Status {
+		case "added", "modified", "removed":
+			if file.PreviousFilename != "" || !selected(file.Filename) {
+				return ""
+			}
+		case "renamed":
+			if file.PreviousFilename == "" || !selected(file.PreviousFilename) || !selected(file.Filename) {
+				return ""
+			}
+		default:
+			return ""
 		}
 	}
 	return fmt.Sprintf("Not run: all %d changed files match the policy's matrix_skip_paths (%s). No job ran, so this check is not test evidence.", len(files), strings.Join(matched, ", "))

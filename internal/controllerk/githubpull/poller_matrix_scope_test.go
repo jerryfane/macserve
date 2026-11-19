@@ -30,15 +30,28 @@ func modified(names ...string) []githubapi.ChangedFile {
 	return files
 }
 
+func renamed(from, to string) githubapi.ChangedFile {
+	return githubapi.ChangedFile{Filename: to, PreviousFilename: from, Status: "renamed"}
+}
+
+func removed(name string) githubapi.ChangedFile {
+	return githubapi.ChangedFile{Filename: name, Status: "removed"}
+}
+
 // matrix_skip_paths skips a head's matrix only when GitHub's comparison
-// lists files, all added or modified, all selected: each matrix entry then
-// gets a neutral check and no job, while the build still runs. Any doubt runs
-// the matrix.
+// lists files that are all selected: an added, modified or removed file by
+// its path, a renamed one by both its previous and its new path. Each matrix
+// entry then gets a neutral check and no job, while the build still runs.
+// Any doubt runs the matrix.
 func TestMatrixSkipPaths(t *testing.T) {
 	base := headSHA('b')
 	many := make([]string, githubapi.MaxCompareFiles)
 	for i := range many {
 		many[i] = fmt.Sprintf("docs/page-%d.md", i)
+	}
+	manyRenames := make([]githubapi.ChangedFile, githubapi.MaxCompareFiles)
+	for i := range manyRenames {
+		manyRenames[i] = renamed(fmt.Sprintf("docs/assets/index-%d.js", i), fmt.Sprintf("docs/assets/index-%d-new.js", i))
 	}
 	for name, tc := range map[string]struct {
 		files  []githubapi.ChangedFile // nil: the comparison fails
@@ -52,9 +65,20 @@ func TestMatrixSkipPaths(t *testing.T) {
 		"Markdown under App":                          {files: modified("App/Foo.md")},
 		"docs and code":                               {files: modified("docs/x.md", "App/a.swift")},
 		"project.yml":                                 {files: modified("project.yml")},
-		"rename within docs":                          {files: []githubapi.ChangedFile{{Filename: "docs/b.md", PreviousFilename: "docs/a.md", Status: "renamed"}}},
+		"rename within docs":                          {files: []githubapi.ChangedFile{renamed("docs/assets/index-a1.js", "docs/assets/index-b2.js")}, skip: true, globs: "docs/**"},
+		"rename across selected globs":                {files: []githubapi.ChangedFile{renamed("README.md", "docs/README.md")}, skip: true, globs: "**/*.md, docs/**"},
+		"rename into docs from App":                   {files: []githubapi.ChangedFile{renamed("App/Notes.md", "docs/Notes.md")}},
+		"rename out of docs into App":                 {files: []githubapi.ChangedFile{renamed("docs/Notes.md", "App/Notes.md")}},
+		"rename without previous_filename":            {files: []githubapi.ChangedFile{{Filename: "docs/b.md", Status: "renamed"}}},
+		"modified with previous_filename":             {files: []githubapi.ChangedFile{{Filename: "docs/b.md", PreviousFilename: "docs/a.md", Status: "modified"}}},
 		"copy within docs":                            {files: []githubapi.ChangedFile{{Filename: "docs/b.md", PreviousFilename: "docs/a.md", Status: "copied"}}},
-		"removed doc":                                 {files: []githubapi.ChangedFile{{Filename: "docs/a.md", Status: "removed"}}},
+		"removed doc":                                 {files: []githubapi.ChangedFile{removed("docs/a.md")}, skip: true, globs: "docs/**"},
+		"removed code":                                {files: []githubapi.ChangedFile{removed("App/a.swift")}},
+		"code with skippable renames and removals":    {files: append(modified("App/a.swift"), renamed("docs/a.md", "docs/b.md"), removed("docs/c.md"))},
+		"skippable renames, removals and edits":       {files: append(modified("LICENSE"), renamed("docs/a.md", "docs/b.md"), removed("Tools/ci/README.md"), githubapi.ChangedFile{Filename: "docs/new.png", Status: "added"}), skip: true, globs: "LICENSE, docs/**, **/*.md"},
+		"unchanged file":                              {files: []githubapi.ChangedFile{{Filename: "docs/a.md", Status: "unchanged"}}},
+		"unknown status":                              {files: []githubapi.ChangedFile{{Filename: "docs/a.md", Status: "moved"}}},
+		"possibly truncated renames":                  {files: manyRenames},
 		"mode change":                                 {files: []githubapi.ChangedFile{{Filename: "docs/a.md", Status: "changed"}}},
 		"empty diff":                                  {files: []githubapi.ChangedFile{}},
 		"possibly truncated":                          {files: modified(many...)},

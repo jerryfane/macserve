@@ -286,16 +286,19 @@ segment and at most two `**`. The rule lives only in the controller configuratio
 from, or runs, the repository's own scope logic.
 
 For each eligible head the poller asks GitHub for the head's changed files against its base commit
-(`GET /repos/<repo>/compare/<base sha>...<head sha>`, cached per head and base). When every listed file was
-`added` or `modified` and is selected, each matrix entry publishes a completed `neutral` check, "Not run:
-docs/version-only change", whose summary gives the file count and the include globs that matched, and admits no
-job; `neutral` satisfies branch protection without claiming evidence. Build profiles always run. Anything doubtful
-runs the matrix: a failed comparison, a list of 300 or more files (GitHub's compare limit, so possibly truncated),
-no changed file, no base commit, or any removed, renamed, copied or mode-changed (`changed`) file. The decision is
-per head: a later push that touches anything else runs the matrix for the new head. A skipped run keeps its pull
-request, so the owner rerun API (with its `shard`) can still start its first attempt; a matrix run that already
-has a job (admitted before the skip, or started by such a rerun) keeps it. Content rules, such as a
-version-only edit of a project file, cannot be expressed; such changes run the matrix.
+(`GET /repos/<repo>/compare/<base sha>...<head sha>`, cached per head and base). When every listed file is
+selected, each matrix entry publishes a completed `neutral` check, "Not run: docs/version-only change", whose
+summary gives the file count and the include globs that matched, and admits no job; `neutral` satisfies branch
+protection without claiming evidence. An `added`, `modified` or `removed` file is selected by its path; a
+`renamed` file only when both its `previous_filename` and its new `filename` are selected, so a rename into or
+out of a selected path runs the matrix. Build profiles always run. Anything doubtful runs the matrix: a failed
+comparison, a list of 300 or more files (GitHub's compare limit, so possibly truncated), no changed file, no base
+commit, a `renamed` file without a `previous_filename`, or any `copied`, mode-changed (`changed`), `unchanged` or
+unknown-status file. The decision is per head: a later push that touches anything else runs the matrix for the
+new head. A skipped run keeps its pull request, so the owner rerun API (with its `shard`) can still start its
+first attempt; a matrix run that already has a job (admitted before the skip, or started by such a rerun) keeps
+it. Content rules, such as a version-only edit of a project file, cannot be expressed; such changes run the
+matrix.
 
 A repository-form policy replaces the owner-form policy for its repository: the owner policy's build no longer
 runs there, so list the build template (e.g. `org-ios-sim-build-v1`) in the repository policy's `profiles` to keep
