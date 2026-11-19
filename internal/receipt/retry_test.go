@@ -124,6 +124,23 @@ func TestRetryReceiptRefusesForgedClaims(t *testing.T) {
 			}
 		})
 	}
+	// The payload's own retry record must match the recorded cases.
+	for name, edit := range map[string]func(*TestEvidence){
+		"retried count":     func(e *TestEvidence) { e.Retried++ },
+		"retried name":      func(e *TestEvidence) { e.RetriedTests = []string{"Suite/testOther()"} },
+		"names dropped":     func(e *TestEvidence) { e.RetriedTests = nil },
+		"iterations forged": func(e *TestEvidence) { e.RetryIterations = 3 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := forge(func(*evidence.Summary) {})
+			edit(&f.Tests)
+			e := expected
+			e.RetryIterations = f.Tests.RetryIterations
+			if err := ValidateSuccess(f, e); !errors.Is(err, ErrInvalid) {
+				t.Fatalf("forged payload retry record accepted: %v", err)
+			}
+		})
+	}
 
 	// The same attempts on a template without retries.
 	options, job, result, expected = testTemplateFixture(t, model.SimulatorUITest)
