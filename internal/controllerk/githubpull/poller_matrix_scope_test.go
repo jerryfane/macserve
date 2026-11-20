@@ -199,6 +199,31 @@ func TestMatrixSkippedRunOwnerRerunStartsJob(t *testing.T) {
 	}
 }
 
+// A skipped run needs no shard: a docs-only head whose .macserve.json
+// predates a matrix entry (#208: herdrup's policy gained settings-stack) gets
+// a neutral check for it, not action_required, so it stays mergeable without
+// merging main. A code head lacking the shard is still blocked.
+func TestMatrixSkipPathsSkipEntryTheHeadLacks(t *testing.T) {
+	policy := matrixPolicy()
+	policy.MatrixSkipPaths = herdrupSkipPaths()
+	f := newMatrixFixture(t, policy)
+	noIPad := strings.Replace(matrixConfig, `"ipad":`, `"other":`, 1)
+	docs, code := matrixPull(1, headSHA('1')), matrixPull(2, headSHA('2'))
+	docs.BaseSHA, code.BaseSHA = headSHA('b'), headSHA('b')
+	f.pull(matrixRepo, docs, noIPad)
+	f.pull(matrixRepo, code, noIPad)
+	f.remote.changed[matrixRepo+"@"+headSHA('b')+"..."+headSHA('1')] = modified("README.md")
+	f.remote.changed[matrixRepo+"@"+headSHA('b')+"..."+headSHA('2')] = modified("App/a.swift")
+	f.poll(t)
+	ipad := "mac-evidence/org-ios-sim-uitest-v1/ipad"
+	if run, check := f.runsByCheck(t, headSHA('1'))[ipad], f.checksOf(headSHA('1'))[ipad]; run.JobID != "" || run.Blocked != "" || run.Skipped == "" || check.Conclusion != "neutral" {
+		t.Fatalf("docs-only head lacking the shard: run %+v check %+v", run, check)
+	}
+	if run, check := f.runsByCheck(t, headSHA('2'))[ipad], f.checksOf(headSHA('2'))[ipad]; run.JobID != "" || !strings.Contains(run.Blocked, `ui_test.shards has no shard "ipad"`) || check.Conclusion != "action_required" {
+		t.Fatalf("code head lacking the shard: run %+v check %+v", run, check)
+	}
+}
+
 // A matrix entry's skip_paths skips that entry alone, as matrix_skip_paths
 // skips every entry: a head whose changed files it all selects (a rename by
 // both its paths) gets a neutral check and no job for that entry while its
