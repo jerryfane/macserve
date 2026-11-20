@@ -160,8 +160,11 @@ func (w *holdWorld) executor() *fakeExecutor {
 		},
 		execute: func(ctx context.Context, job model.Job, _ worker.Source, r io.Reader, sink worker.Sink) (worker.Result, error) {
 			io.ReadAll(r)
-			if job.ID == "j_refused" {
+			if job.ID == "j_refused" || job.ID == "j_relaunch" {
 				err := fmt.Errorf("lane admission: %w", worker.ErrACLCensusUnavailable)
+				if job.ID == "j_relaunch" {
+					err = fmt.Errorf("lane admission: %w: %w", worker.ErrDrain, worker.ErrRelaunchRefusal)
+				}
 				return worker.Result{State: model.Failed, Reason: err.Error(), CleanupOK: true, StartedAt: time.Now(), FinishedAt: time.Now(), Concurrency: &worker.Concurrency{Lane: 2, MaxLanes: 2, Attribution: worker.AttributionLineage, IdleVerdict: worker.IdleNotRequired}}, err
 			}
 			if job.ID == "j_stalled" {
@@ -336,37 +339,43 @@ func TestHeldStageRetriedUntilRecorded(t *testing.T) {
 	}
 }
 
-// A job the engine refused before it ran because its admission's ACL census
-// was cut short is reported at once as that service-caused refusal
-// (admission_refused), beside a running sibling: it is not held for an idle
-// check, and the sibling's completion carries no refusal (#148).
+// A job the engine refused before it ran for a cause of the service's own
+// is reported at once as that service-caused refusal (admission_refused),
+// beside a running sibling: it is not held for an idle check, and the
+// sibling's completion carries no refusal. An ACL census cut short (#148);
+// an unverifiable relaunch at lane admission, which the controller returns
+// to the queue instead of failing the job (#206).
 func TestCensusAdmissionRefusalReportedAtOnce(t *testing.T) {
-	w := newHoldWorld(t, "j_sib", "j_refused")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	done, _ := w.run(ctx)
-	<-w.started
-	w.wait(ctx, "complete j_refused")
-	if events := w.snapshot(); slices.Contains(events, "held j_refused") || slices.Contains(events, "complete j_sib") {
-		t.Fatalf("refusal waited for the sibling: %v", events)
-	}
-	close(w.gates["j_sib"])
-	w.wait(ctx, "complete j_sib")
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	result, refused := w.complete["j_refused"], w.refused["j_refused"]
-	if result.State != model.Failed || !result.CleanupOK || result.Concurrency.IdleVerdict != worker.IdleNotRequired || refused != protocol.AdmissionACLCensusUnavailable {
-		t.Fatalf("refusal: %+v refused %q", result, refused)
-	}
-	if w.refused["j_sib"] != "" {
-		t.Fatalf("sibling reported as refused: %q", w.refused["j_sib"])
-	}
-	if len(slices.Compact(slices.Clone(w.epochs))) != 1 {
-		t.Fatalf("refusal replaced the epoch: %v", w.epochs)
+	for job, want := range map[string]protocol.AdmissionRefusal{"j_refused": protocol.AdmissionACLCensusUnavailable, "j_relaunch": protocol.AdmissionRelaunchUnverified} {
+		t.Run(job, func(t *testing.T) {
+			w := newHoldWorld(t, "j_sib", job)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			done, _ := w.run(ctx)
+			<-w.started
+			w.wait(ctx, "complete "+job)
+			if events := w.snapshot(); slices.Contains(events, "held "+job) || slices.Contains(events, "complete j_sib") {
+				t.Fatalf("refusal waited for the sibling: %v", events)
+			}
+			close(w.gates["j_sib"])
+			w.wait(ctx, "complete j_sib")
+			cancel()
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			w.mu.Lock()
+			defer w.mu.Unlock()
+			result, refused := w.complete[job], w.refused[job]
+			if result.State != model.Failed || !result.CleanupOK || result.Concurrency.IdleVerdict != worker.IdleNotRequired || refused != want {
+				t.Fatalf("refusal: %+v refused %q", result, refused)
+			}
+			if w.refused["j_sib"] != "" {
+				t.Fatalf("sibling reported as refused: %q", w.refused["j_sib"])
+			}
+			if len(slices.Compact(slices.Clone(w.epochs))) != 1 {
+				t.Fatalf("refusal replaced the epoch: %v", w.epochs)
+			}
+		})
 	}
 }
 

@@ -112,6 +112,63 @@ func groupRefusal(foreign, baseline []processSample) error {
 	return errors.Join(ErrCleanup, ErrContamination, cleanupFailure("protected cleanup", append(refusals, members)...))
 }
 
+// relaunchUnverified is errRelaunchUnverified naming the census it judged:
+// the audited GUI-baseline processes that exited without a verified relaunch
+// (PID, start, launchd label, executable) and the unattributed processes
+// beside them, one of which may be that relaunch (PID, UID, parent, start,
+// executable, command name), at most contaminationEntries of each and each
+// field bounded. It names executables and kernel command names only, never
+// an argument or the environment. Unlike a contamination list it is no
+// evidence against the job, and PublicReason keeps it: the job's reason, and
+// so the controller's log of a lane admission's refusal, names the relaunching
+// agent. Until #206 the error named no process, and the agent whose relaunch
+// drained two lane admissions on 20 Nov could not be identified.
+type relaunchUnverified struct{ detail string }
+
+func (e *relaunchUnverified) Error() string {
+	return errRelaunchUnverified.Error() + " (" + e.detail + ")"
+}
+
+func (e *relaunchUnverified) Unwrap() error { return errRelaunchUnverified }
+
+// relaunchDetailBytes bounds relaunchUnverified's names well inside a job
+// reason (4 KiB).
+const relaunchDetailBytes = 2048
+
+// relaunchUnverified returns errRelaunchUnverified for census c, naming its
+// exited audited processes and its residual ones.
+func (s *processScope) relaunchUnverified(c processCensus) error {
+	return &relaunchUnverified{detail: clip("exited audited: "+goneList(c.gone)+"; unattributed: "+s.candidateList(c.residual), relaunchDetailBytes)}
+}
+
+// candidateList names unattributed processes by their kernel identity, at
+// most contaminationEntries of them, sorted by PID: PID, UID, parent and
+// start of the sample, the executable path when the agents' kernel record
+// still has the sample's start, and the kernel command name.
+func (s *processScope) candidateList(residual []processSample) string {
+	residual = slices.SortedFunc(slices.Values(residual), func(a, b processSample) int { return a.pid - b.pid })
+	parts := make([]string, 0, min(len(residual), contaminationEntries)+1)
+	for _, p := range residual[:min(len(residual), contaminationEntries)] {
+		exe, command := "unavailable", "unavailable"
+		if s != nil && s.agents != nil {
+			if k, err := s.agents.kernel(p.pid); err == nil && k.start == p.start {
+				exe = strconv.Quote(clip(k.executable, contaminationPathBytes))
+			}
+		}
+		if k, comm, ok := kernelProcess(p.pid); ok && k.start == p.start {
+			command = strconv.Quote(comm)
+		}
+		parts = append(parts, fmt.Sprintf("pid=%d uid=%d ppid=%d start=%s exe=%s command=%s", p.pid, p.uid, p.parent, p.start, exe, command))
+	}
+	if more := len(residual) - contaminationEntries; more > 0 {
+		parts = append(parts, fmt.Sprintf("+%d more", more))
+	}
+	if len(parts) == 0 {
+		return "none"
+	}
+	return strings.Join(parts, "; ")
+}
+
 func errorText(err error) string {
 	if err == nil {
 		return "not evaluated"

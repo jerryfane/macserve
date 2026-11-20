@@ -147,7 +147,7 @@ func (s *processScope) observeQuietWith(ctx context.Context, census func(context
 			clean = 0
 		default:
 			if c.unresolved {
-				return errRelaunchUnverified
+				return s.relaunchUnverified(c)
 			}
 			if !c.toleratedChildren {
 				return s.contaminated("processes outside audited GUI baseline", c)

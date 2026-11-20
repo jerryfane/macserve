@@ -35,11 +35,17 @@ var (
 	// ErrDrain refuses a new job while other jobs run: an unattributed
 	// job-account process or an unverified job cleanup must first be judged
 	// by the full job-account quiesce, which runs only when no job runs.
-	ErrDrain    = errors.New("worker draining: job-account cleanup must be verified when no job runs")
-	identifier  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
-	sha40       = regexp.MustCompile(`^[0-9a-f]{40}$`)
-	sha64       = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	udidPattern = regexp.MustCompile(`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`)
+	ErrDrain = errors.New("worker draining: job-account cleanup must be verified when no job runs")
+	// ErrRelaunchRefusal is a job refused before it ran because its lane
+	// admission drained the worker for an audited GUI process's relaunch it
+	// could not verify beside running jobs (errRelaunchUnverified,
+	// inconclusive, never contamination): the service, not the job, caused
+	// the refusal, and the client reports it as one (#206).
+	ErrRelaunchRefusal = errors.New("job refused before it ran; the worker drains until the idle check")
+	identifier         = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
+	sha40              = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	sha64              = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	udidPattern        = regexp.MustCompile(`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`)
 )
 
 type Engine struct {

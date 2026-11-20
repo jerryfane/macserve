@@ -430,7 +430,7 @@ func (s *processScope) quiesce(ctx context.Context) error {
 			}
 			if survivor || e.settled(sampled) {
 				if c.unresolved {
-					return errors.Join(ErrCleanup, errRelaunchUnverified)
+					return errors.Join(ErrCleanup, s.relaunchUnverified(c))
 				}
 				if survivor {
 					return s.contaminated("job processes remain after termination", c)

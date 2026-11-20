@@ -134,10 +134,11 @@ func TestWorkerAdmissionRefusalEndsCancelledByService(t *testing.T) {
 		status  int
 		state   model.State
 	}{
-		"refused":         {"acl_census_unavailable", true, http.StatusNoContent, model.Cancelled},
-		"unflagged":       {"", true, http.StatusNoContent, model.Failed},
-		"cleanup failed":  {"acl_census_unavailable", false, http.StatusNoContent, model.Failed},
-		"unknown refusal": {"disk_full", true, http.StatusBadRequest, ""},
+		"refused":             {"acl_census_unavailable", true, http.StatusNoContent, model.Cancelled},
+		"relaunch unverified": {"relaunch_unverified", true, http.StatusNoContent, model.Cancelled},
+		"unflagged":           {"", true, http.StatusNoContent, model.Failed},
+		"cleanup failed":      {"acl_census_unavailable", false, http.StatusNoContent, model.Failed},
+		"unknown refusal":     {"disk_full", true, http.StatusBadRequest, ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newRuntime(t)

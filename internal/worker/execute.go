@@ -239,6 +239,23 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 		result.FinishedAt = e.options.Now()
 		return result, err
 	}
+	if !solo && errors.Is(err, ErrDrain) && errors.Is(err, errRelaunchUnverified) && !hasContamination(err) && parent.Err() == nil {
+		// The lane admission found an audited GUI process exited beside an
+		// unattributed one it cannot verify as its relaunch while jobs run:
+		// inconclusive, and nothing of the job ran. laneAdmission drained
+		// the engine, so no job starts until the idle quiesce judges the
+		// account; only this job's fate differs from a drain at its end: it
+		// is refused (cleanup_ok, idle verdict not_required) and the
+		// controller returns it to the queue instead of failing it (#206).
+		// Contamination keeps failing the job.
+		result.CleanupOK = true
+		result.Concurrency.IdleVerdict = IdleNotRequired
+		err = fmt.Errorf("lane admission: %w: %w", err, ErrRelaunchRefusal)
+		log.Printf("worker job %s refused before it ran: %v", job.ID, err)
+		result.Reason = PublicReason(err)
+		result.FinishedAt = e.options.Now()
+		return result, err
+	}
 	if err != nil {
 		return result, err
 	}

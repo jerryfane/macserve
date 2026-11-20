@@ -91,7 +91,9 @@ Optional `signer` connects the controller to the [code signer](#code-signer).
   and a long reason is cut to keep them. The controller records
   `worker_admission` when the worker reports that it refused the job before it ran for a cause of the service's
   own (`admission_refused` in its completion; `acl_census_unavailable`: an admission inspection, such as an ACL
-  census or a membership check, cut short by its deadline on a loaded host) with a failed result and `cleanup_ok`;
+  census or a membership check, cut short by its deadline on a loaded host; `relaunch_unverified`: a lane admission
+  beside running jobs that could not verify an exited audited GUI process's launchd relaunch) with a failed result and
+  `cleanup_ok`;
   the job then ends `cancelled`. It records `stalled` when the worker reports that it ended the job itself because
   the run command's output stopped for the template's stall limit (`stalled` in its completion; see
   `stall_seconds` below); the job then ends `cancelled` with that reason (`stalled: no job output for …`), not
