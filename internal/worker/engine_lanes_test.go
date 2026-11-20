@@ -704,3 +704,89 @@ func TestACLCensusThatRanStillFailsCleanup(t *testing.T) {
 		})
 	}
 }
+
+// laneErrFake is a laneFake whose lane admission returns err while set.
+type laneErrFake struct {
+	*laneFake
+	emu sync.Mutex
+	err error
+}
+
+func (f *laneErrFake) set(err error) {
+	f.emu.Lock()
+	defer f.emu.Unlock()
+	f.err = err
+}
+
+func (f *laneErrFake) LaneAdmission(ctx context.Context) error {
+	f.emu.Lock()
+	err := f.err
+	f.emu.Unlock()
+	if err != nil {
+		f.event("lane-admission")
+		return err
+	}
+	return f.laneFake.LaneAdmission(ctx)
+}
+
+// A lane admission that finds an audited GUI process exited beside an
+// unattributed one it cannot verify as its relaunch (inconclusive, never
+// contamination) refuses only the job being admitted: cleanup_ok, idle
+// verdict not_required, which the client reports as a service-caused
+// refusal and the controller returns to the queue. The engine still drains:
+// no job starts beside the sibling until the idle check passes. Studio
+// v0.1.73, 20 Nov 03:42Z and 09:15Z: two innocent iphone-terminal jobs
+// failed (#206).
+func TestLaneAdmissionRelaunchUnverifiedRefusesJobAndDrains(t *testing.T) {
+	runner := &laneErrFake{laneFake: newLaneFake()}
+	engine := laneEngine(t, runner, 2)
+	source, data := sourceFixture(t)
+	gate := runner.gate("job-a")
+	a := runLane(engine, fixtureLaneJob(t, "job-a", model.Build), source, data)
+	<-runner.started
+	runner.set(fmt.Errorf("%w: %w", ErrDrain, errRelaunchUnverified))
+	result, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-b", model.Build), source, bytes.NewReader(data), nil, nil)
+	if !errors.Is(err, ErrDrain) || !errors.Is(err, errRelaunchUnverified) || result.State != model.Failed || !result.CleanupOK || result.Concurrency.IdleVerdict != IdleNotRequired || result.FinishedAt.IsZero() || !strings.HasPrefix(result.Reason, "lane admission: ") {
+		t.Fatalf("unverified relaunch at lane admission: %+v %v", result, err)
+	}
+	if _, err := engine.root.Lstat(quarantineRecord); err == nil {
+		t.Fatal("an unverified relaunch quarantined the worker")
+	}
+	runner.set(nil)
+	if err := engine.LaneReady(context.Background()); !errors.Is(err, ErrDrain) {
+		t.Fatalf("engine admits beside the sibling before the idle check: %v", err)
+	}
+	if _, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-c", model.Build), source, bytes.NewReader(data), nil, nil); !errors.Is(err, ErrDrain) {
+		t.Fatalf("draining engine started a job: %v", err)
+	}
+	close(gate)
+	if first := <-a; first.err != nil || first.result.State != model.Succeeded || !first.result.CleanupOK {
+		t.Fatalf("sibling: %+v %v", first.result, first.err)
+	}
+	if err := engine.LaneReady(context.Background()); err != nil {
+		t.Fatalf("drain survived the idle check: %v", err)
+	}
+}
+
+// Contamination at lane admission keeps failing the job as before: it is
+// not a refusal (cleanup not confirmed), and the engine drains.
+func TestLaneAdmissionContaminationStillFailsJob(t *testing.T) {
+	runner := &laneErrFake{laneFake: newLaneFake()}
+	engine := laneEngine(t, runner, 2)
+	source, data := sourceFixture(t)
+	gate := runner.gate("job-a")
+	a := runLane(engine, fixtureLaneJob(t, "job-a", model.Build), source, data)
+	<-runner.started
+	contaminated := (&processScope{}).contaminated("processes outside audited GUI baseline", processCensus{residual: []processSample{{pid: 900, start: "1:0"}}})
+	runner.set(fmt.Errorf("%w: %s", ErrDrain, PublicReason(contaminated)))
+	result, err := engine.Execute(context.Background(), fixtureLaneJob(t, "job-b", model.Build), source, bytes.NewReader(data), nil, nil)
+	if !errors.Is(err, ErrDrain) || errors.Is(err, errRelaunchUnverified) || result.CleanupOK {
+		t.Fatalf("contamination at lane admission: %+v %v", result, err)
+	}
+	runner.set(nil)
+	if err := engine.LaneReady(context.Background()); !errors.Is(err, ErrDrain) {
+		t.Fatalf("contamination did not drain: %v", err)
+	}
+	close(gate)
+	<-a
+}

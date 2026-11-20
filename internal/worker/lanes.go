@@ -749,9 +749,11 @@ func (r *nativeRunner) Residue(ctx context.Context) ([]string, error) {
 	if err := r.loadBaseline(); err != nil {
 		return nil, err
 	}
-	// gone is the last census's audited processes that exited without a
-	// verified relaunch, for the log entry.
+	// gone and candidates are the last census's audited processes that
+	// exited without a verified relaunch and its unattributed ones, for the
+	// log entry.
 	var gone []ProcessIdentity
+	var candidates []processSample
 	count := func() (map[processInstance]processSample, bool, error) {
 		samples, err := r.scope.sample(ctx)
 		if err != nil {
@@ -765,7 +767,7 @@ func (r *nativeRunner) Residue(ctx context.Context) ([]string, error) {
 		for _, p := range c.residual {
 			found[processInstance{p.pid, p.start}] = p
 		}
-		gone = c.gone
+		gone, candidates = c.gone, c.residual
 		return found, c.unresolved, nil
 	}
 	residue, unresolved, err := settledResidue(ctx, count)
@@ -777,7 +779,7 @@ func (r *nativeRunner) Residue(ctx context.Context) ([]string, error) {
 		entries = append(entries, r.residueEntry(p))
 	}
 	if unresolved {
-		entries = append(entries, "unresolved census: audited process(es) gone without a verified relaunch beside unattributed ones: "+goneList(gone))
+		entries = append(entries, "unresolved census: audited process(es) gone without a verified relaunch beside unattributed ones: "+goneList(gone)+"; unattributed: "+r.scope.candidateList(candidates))
 	}
 	return entries, nil
 }
@@ -875,7 +877,15 @@ func (r *nativeRunner) LaneAdmission(parent context.Context) error {
 	quietCtx, quietCancel := context.WithTimeout(parent, r.scope.childWait+persistenceAdmissionTimeout)
 	defer quietCancel()
 	err := r.scope.observeQuietWith(quietCtx, r.laneCensus)
-	if hasContamination(err) || errors.Is(err, errRelaunchUnverified) {
+	if errors.Is(err, errRelaunchUnverified) && !hasContamination(err) {
+		// While other jobs run, the relaunch cannot be verified: the full
+		// quiesce at idle decides (see Engine.Recover). The error keeps
+		// errRelaunchUnverified and its names: the engine refuses only the
+		// job being admitted, which the controller returns to the queue
+		// (#206).
+		return fmt.Errorf("%w: %w", ErrDrain, err)
+	}
+	if hasContamination(err) {
 		// While other jobs run, an unattributed process cannot be judged:
 		// the full quiesce at idle decides (see Engine.Recover).
 		return fmt.Errorf("%w: %s", ErrDrain, PublicReason(err))

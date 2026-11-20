@@ -441,6 +441,18 @@ A crash agent no running job covers (older than every running job, or started af
 began before it), a shared agent older than the busy period, a copy outside SIP, one the job forked itself, any other
 path (the App cryptex's included), and every other unattributed process still drain and hold as above.
 
+A lane admission that finds an audited GUI process exited beside an unattributed process it cannot verify as its
+launchd relaunch is inconclusive, never contamination (#206). The broker still drains: no job starts beside the running
+ones until the idle check verifies the account. The job being admitted is refused before it runs, though, not failed:
+reason `lane admission: …`, `cleanup_ok` true, idle verdict `not_required`, and its completion carries
+`admission_refused: relaunch_unverified`, which the controller records as the cancellation `worker_admission` like the
+refusal below, so pull mode reruns its head (bounded like every automatic rerun: twice per run per hour, after which
+the cancelled attempt stays with that reason). Contamination at a lane admission still fails the job. Every unverified
+relaunch, at a lane admission, a cleanup barrier or the idle admission, names the audited processes that exited (PID,
+start, launchd label, executable) and the unattributed ones beside them (PID, UID, parent, start, executable, kernel
+command name; never an argument or the environment), at most eight of each, in the worker's log, the drain reason and
+the job's reason, which the controller logs whole.
+
 An admission or finalization inspection still cut short by its own deadline (a loaded host) observed nothing, which
 is no evidence either way (#148, #150): the registered-root ACL census after its retries, `hostguard`'s
 protected-input ACL inspection of the persistence authority (`cannot inspect protected input ACL: signal: killed:

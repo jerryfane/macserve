@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"path"
 	"strings"
 	"time"
@@ -56,6 +57,12 @@ func (c *Controller) refusedAdmission(ctx context.Context, job model.Job, comple
 		return err
 	}
 	_, err = c.cancelJob(ctx, current, "worker refused admission: "+string(refusal), model.CancelReason{Source: model.CancelWorkerAdmission, Detail: result.Reason}, c.options.Now())
+	if err == nil {
+		// The cancel reason keeps 512 bytes of the worker's reason; its whole
+		// reason (at most 4 KiB) names what refused the job, such as the
+		// processes of an unverifiable relaunch (#206).
+		log.Printf("controller recorded worker admission refusal: job=%s refusal=%s reason=%q", job.ID, refusal, result.Reason)
+	}
 	return err
 }
 

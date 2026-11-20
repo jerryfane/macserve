@@ -6,6 +6,7 @@ import (
 	"maps"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -449,5 +450,35 @@ func TestAgentPlistProgramAndArguments(t *testing.T) {
 	}
 	if _, _, _, err := agentPlist([]byte("bplist00"), "l"); err == nil {
 		t.Error("binary plist parsed as XML")
+	}
+}
+
+// An unverified relaunch names the audited process that exited (PID, start,
+// launchd label, executable) and each unattributed process beside it (PID,
+// UID, parent, start, executable, command name), never an argument, and the
+// job's public reason keeps the names: the drain logs of 20 Nov named no
+// process, so the relaunching agent could not be identified (#206).
+func TestRelaunchUnverifiedNamesExitedAndCandidates(t *testing.T) {
+	s, agents, _ := appCryptexAgentWorld()
+	target := "gui/" + strconv.Itoa(testJobUID) + "/" + cryptexAgentLabel
+	entry := agents.services[target]
+	entry.Inherited = map[string]string{"SSH_AUTH_SOCK": jobSocket, "DYLD_INSERT_LIBRARIES": "/tmp/inject"}
+	agents.services[target] = entry
+	p := agents.procs[400]
+	p.argv += "\x00secret-argument"
+	agents.procs[400] = p
+	err := s.observeQuiet(context.Background())
+	if !errors.Is(err, errRelaunchUnverified) || hasContamination(err) {
+		t.Fatalf("not an unverified relaunch: %v", err)
+	}
+	for _, text := range []string{err.Error(), PublicReason(err)} {
+		for _, want := range []string{"exited audited: pid=99 start=9:0", "unattributed: pid=400 uid=" + strconv.Itoa(testJobUID) + " ppid=", `exe="` + cryptexAgentBinary + `"`, "command="} {
+			if !strings.Contains(text, want) {
+				t.Fatalf("%q does not name %q", text, want)
+			}
+		}
+		if strings.Contains(text, "secret-argument") {
+			t.Fatalf("%q names an argument", text)
+		}
 	}
 }

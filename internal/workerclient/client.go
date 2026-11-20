@@ -654,6 +654,11 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 	if executed && result.State == model.Failed && result.CleanupOK && errors.Is(err, worker.ErrACLCensusUnavailable) {
 		saved.AdmissionRefused = protocol.AdmissionACLCensusUnavailable
 	}
+	// The engine refused the job before it ran because its lane admission
+	// drained the worker for an unverifiable relaunch (#206).
+	if executed && result.State == model.Failed && result.CleanupOK && errors.Is(err, worker.ErrRelaunchRefusal) {
+		saved.AdmissionRefused = protocol.AdmissionRelaunchUnverified
+	}
 	// The engine ended the job itself because its run command's output
 	// stopped (worker.ErrStalled), and nothing else cancelled it first.
 	if executed && cause == nil && errors.Is(err, worker.ErrStalled) {

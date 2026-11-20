@@ -97,6 +97,13 @@ type AdmissionRefusal string
 // observed nothing about the job.
 const AdmissionACLCensusUnavailable AdmissionRefusal = "acl_census_unavailable"
 
+// AdmissionRelaunchUnverified is a lane admission beside running jobs that
+// found an audited GUI process exited beside an unattributed process it could
+// not verify as its launchd relaunch (worker.ErrRelaunchRefusal):
+// inconclusive, never contamination. The worker drains until its idle check;
+// the job is returned to the queue rather than failed (#206).
+const AdmissionRelaunchUnverified AdmissionRefusal = "relaunch_unverified"
+
 // DeliveryTimeout bounds the worker's delivery of a completion after its
 // finalization (worker.FinalizationTimeout), and the controller's handling
 // of one. The controller's finalizing lease budget covers both, plus its
@@ -105,5 +112,5 @@ const DeliveryTimeout = 2 * time.Minute
 
 // Valid reports whether r is empty or a known refusal.
 func (r AdmissionRefusal) Valid() bool {
-	return r == "" || r == AdmissionACLCensusUnavailable
+	return r == "" || r == AdmissionACLCensusUnavailable || r == AdmissionRelaunchUnverified
 }
