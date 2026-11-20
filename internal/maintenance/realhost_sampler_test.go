@@ -52,7 +52,7 @@ func TestRealHostHealthSampler(t *testing.T) {
 		if root := strings.TrimSpace(string(data)); root != "" {
 			begun := time.Now()
 			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-			accounted, accountErr := accountBytes(ctx, []string{root}, "", 0)
+			accounted, _, accountErr := accountBytes(ctx, []string{root}, "", 0)
 			cancel()
 			elapsed := time.Since(begun)
 			logical, legacy, entries, walkErr := legacyCensus(root)

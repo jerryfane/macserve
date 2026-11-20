@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jerryfane/macserve/internal/health"
 	"github.com/jerryfane/macserve/internal/model"
 	"github.com/jerryfane/macserve/internal/peercred"
 	"github.com/jerryfane/macserve/internal/protocol"
@@ -165,7 +166,7 @@ type Controller struct {
 	// afterProductsSnapshot runs in trimProducts between candidate
 	// selection and eviction; tests use it to interleave a download.
 	afterProductsSnapshot func()
-	// productsBudget is the products pool's budget, maxProductsPoolBytes
+	// productsBudget is the products pool's budget, health.ProductsPoolBytes
 	// unless a test lowers it.
 	productsBudget int64
 	// productsRefused names the producer jobs whose test products the pool
@@ -268,7 +269,7 @@ func New(options Options) (*Controller, error) {
 		return fail(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	c := &Controller{options: options, root: root, lock: lock, ctx: ctx, cancel: cancel, requestTimeout: 2 * time.Minute, productsBudget: maxProductsPoolBytes, productsRefused: map[string]bool{}}
+	c := &Controller{options: options, root: root, lock: lock, ctx: ctx, cancel: cancel, requestTimeout: 2 * time.Minute, productsBudget: health.ProductsPoolBytes, productsRefused: map[string]bool{}}
 	options.Store.OnCancel(c.cancelRequested)
 	service, serviceErr := options.Store.ServiceState(ctx)
 	gate, gateErr := options.Gate(ctx)

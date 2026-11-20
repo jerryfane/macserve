@@ -24,13 +24,17 @@ type censusKey struct {
 // reported by every probe until a newer census completes. An inconclusive
 // census (budget exceeded, CoreDevice mount changed) is never reused.
 type censusTracker struct {
-	tracker[censusKey, int64]
-	run func(ctx context.Context, roots []string, jobHome string, jobUID uint32) (int64, error)
+	tracker[censusKey, censusBytes]
+	run func(ctx context.Context, roots []string, jobHome string, jobUID uint32) (int64, int64, error)
 }
+
+// censusBytes is one census's result: its total and the part of it in the
+// products pool (accountBytes).
+type censusBytes struct{ total, products int64 }
 
 func newCensusTracker(parent context.Context) *censusTracker {
 	return &censusTracker{
-		tracker: tracker[censusKey, int64]{name: "mutable census", parent: parent, now: time.Now, budget: censusBudget, maxAge: censusMaxAge, reserve: probeReserve, inconclusive: censusInconclusive},
+		tracker: tracker[censusKey, censusBytes]{name: "mutable census", parent: parent, now: time.Now, budget: censusBudget, maxAge: censusMaxAge, reserve: probeReserve, inconclusive: censusInconclusive},
 		run:     accountBytes,
 	}
 }
@@ -39,12 +43,16 @@ func censusInconclusive(err error) bool {
 	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, errAcceptedMountChanged)
 }
 
-// account returns the accounted bytes for one probe.
-func (t *censusTracker) account(ctx context.Context, roots []string, jobHome string, jobUID uint32) (int64, error) {
+// account returns the accounted bytes for one probe and the part of them in
+// the products pool, both from the same census.
+func (t *censusTracker) account(ctx context.Context, roots []string, jobHome string, jobUID uint32) (int64, int64, error) {
 	key := censusKey{roots: strings.Join(roots, "\x00"), jobHome: jobHome, jobUID: jobUID}
-	bytes, err := t.observe(ctx, key, func(ctx context.Context) (int64, error) { return t.run(ctx, roots, jobHome, jobUID) })
+	bytes, err := t.observe(ctx, key, func(ctx context.Context) (censusBytes, error) {
+		total, products, err := t.run(ctx, roots, jobHome, jobUID)
+		return censusBytes{total, products}, err
+	})
 	if err != nil {
-		return -1, err
+		return -1, -1, err
 	}
-	return bytes, nil
+	return bytes.total, bytes.products, nil
 }

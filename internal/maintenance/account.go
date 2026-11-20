@@ -32,9 +32,16 @@ import (
 // workspace are not descended. Local sockets have metadata but no file payload.
 // Errors name the census root and the quoted root-relative path that failed, so
 // a TCC denial (EPERM without Full Disk Access) or a refusal is diagnosable.
-func accountBytes(ctx context.Context, roots []string, jobHome string, jobUID uint32) (int64, error) {
-	return census{base: "/", statat: unix.Fstatat, mounts: mounttable.Read, jobHome: jobHome, workspaces: workspaceRoot, jobUID: jobUID}.account(ctx, roots)
+// products is the part of total charged beneath the controller's products
+// pool (productsRoot); the service budget leaves it to the pool's own cap
+// (health.LaneAccountedBytes).
+func accountBytes(ctx context.Context, roots []string, jobHome string, jobUID uint32) (total, products int64, err error) {
+	return census{base: "/", statat: unix.Fstatat, mounts: mounttable.Read, jobHome: jobHome, workspaces: workspaceRoot, jobUID: jobUID, products: productsRoot}.account(ctx, roots)
 }
+
+// productsRoot is the controller's products pool of test products
+// (controller products.go), inside the accounted /Library/macserve/var.
+const productsRoot = "/Library/macserve/var/controller/products"
 
 // workspaceRoot is the worker's job workspace root, the only worker.json
 // workspace_root Inspect accepts.
@@ -56,6 +63,11 @@ type census struct {
 	jobHome    string
 	workspaces string
 	jobUID     uint32
+	// products, when set, is the absolute directory whose bytes account
+	// also reports apart. A hardlinked inode is charged where the census
+	// meets it first, so bytes shared with anything outside may count
+	// only as total: never more reported apart than the pool holds.
+	products string
 }
 
 const (
@@ -101,7 +113,7 @@ func (c census) acceptedMount(dev uint64, at string) (mounttable.Entry, error) {
 	return m, nil
 }
 
-func (c census) account(ctx context.Context, roots []string) (int64, error) {
+func (c census) account(ctx context.Context, roots []string) (int64, int64, error) {
 	// Raw x/sys calls, unlike package os, do not retry EINTR. On macOS opening a
 	// sandboxed container directory can be interrupted by the Go runtime's
 	// preemption signal; that is a transient condition, not a census failure.
@@ -132,7 +144,7 @@ func (c census) account(ctx context.Context, roots []string) (int64, error) {
 		ino uint64
 	}
 	seen := map[inode]bool{}
-	var total int64
+	var total, pool int64
 	entries := 0
 	// The accepted mounts (acceptedMount), by device, with where each was
 	// found; each must be unchanged when the census ends.
@@ -142,8 +154,10 @@ func (c census) account(ctx context.Context, roots []string) (int64, error) {
 	}
 	var skipped []accepted
 	rootPath := ""
-	var walk func(int, string, string, uint64, int) error
-	walk = func(parent int, name, rel string, device uint64, depth int) error {
+	// poolRel is c.products relative to rootPath, "" when outside it.
+	poolRel := ""
+	var walk func(int, string, string, uint64, int, bool) error
+	walk = func(parent int, name, rel string, device uint64, depth int, inPool bool) error {
 		fail := func(err error) error {
 			return fmt.Errorf("%s: %w", strconv.Quote(rel), err)
 		}
@@ -187,6 +201,7 @@ func (c census) account(ctx context.Context, roots []string) (int64, error) {
 			}
 			return nil
 		}
+		inPool = inPool || poolRel != "" && rel == poolRel
 		key := inode{uint64(st.Dev), uint64(st.Ino)}
 		if seen[key] {
 			return nil
@@ -229,6 +244,9 @@ func (c census) account(ctx context.Context, roots []string) (int64, error) {
 			return fail(errors.New("mutable size overflow"))
 		}
 		total += size
+		if inPool {
+			pool += size
+		}
 		if kind == unix.S_IFREG || kind == unix.S_IFLNK || kind == unix.S_IFSOCK {
 			return nil
 		}
@@ -244,7 +262,7 @@ func (c census) account(ctx context.Context, roots []string) (int64, error) {
 				return fail(err)
 			}
 			for _, child := range names {
-				if err := walk(fd, child, filepath.Join(rel, child), device, depth+1); err != nil {
+				if err := walk(fd, child, filepath.Join(rel, child), device, depth+1, inPool); err != nil {
 					return err
 				}
 			}
@@ -256,19 +274,19 @@ func (c census) account(ctx context.Context, roots []string) (int64, error) {
 	}
 	for _, root := range roots {
 		if !filepath.IsAbs(root) || filepath.Clean(root) != root || root == "/" {
-			return -1, errors.New("invalid mutable root")
+			return -1, -1, errors.New("invalid mutable root")
 		}
 		// Open every ancestor without following a link, not just the final component.
 		fd, err := openat(unix.AT_FDCWD, c.base, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 		if err != nil {
-			return -1, err
+			return -1, -1, err
 		}
 		parts := strings.Split(strings.TrimPrefix(root, "/"), "/")
 		for _, part := range parts[:len(parts)-1] {
 			next, e := openat(fd, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 			unix.Close(fd)
 			if e != nil {
-				return -1, fmt.Errorf("mutable census %s: ancestor %s: %w", root, strconv.Quote(part), e)
+				return -1, -1, fmt.Errorf("mutable census %s: ancestor %s: %w", root, strconv.Quote(part), e)
 			}
 			fd = next
 		}
@@ -279,11 +297,17 @@ func (c census) account(ctx context.Context, roots []string) (int64, error) {
 		}
 		if err == nil {
 			rootPath = root
-			err = walk(fd, parts[len(parts)-1], ".", uint64(st.Dev), 0)
+			poolRel = ""
+			if c.products == root {
+				poolRel = "."
+			} else if rest, ok := strings.CutPrefix(c.products, root+"/"); ok && c.products != "" {
+				poolRel = rest
+			}
+			err = walk(fd, parts[len(parts)-1], ".", uint64(st.Dev), 0, false)
 		}
 		unix.Close(fd)
 		if err != nil {
-			return -1, fmt.Errorf("mutable census %s: %w", root, err)
+			return -1, -1, fmt.Errorf("mutable census %s: %w", root, err)
 		}
 	}
 	if skipped != nil {
@@ -291,14 +315,14 @@ func (c census) account(ctx context.Context, roots []string) (int64, error) {
 		table, err := c.mounts()
 		for _, s := range skipped {
 			if err != nil {
-				return -1, fmt.Errorf("mutable census %s: %s: %w", s.root, strconv.Quote(s.rel), err)
+				return -1, -1, fmt.Errorf("mutable census %s: %s: %w", s.root, strconv.Quote(s.rel), err)
 			}
 			if m, ok := mounttable.Unique(table, s.entry.FSID); !ok || m != s.entry {
-				return -1, fmt.Errorf("mutable census %s: %s: %w", s.root, strconv.Quote(s.rel), errAcceptedMountChanged)
+				return -1, -1, fmt.Errorf("mutable census %s: %s: %w", s.root, strconv.Quote(s.rel), errAcceptedMountChanged)
 			}
 		}
 	}
-	return total, ctx.Err()
+	return total, pool, ctx.Err()
 }
 
 // errAcceptedMountChanged reports that an accepted mount (acceptedMount)

@@ -42,6 +42,9 @@ var Doctor = Policy{
 		module + "/internal/hostguard.ConsoleAdmissible",
 		// The service disk budget for a lane count: arithmetic, no I/O.
 		module + "/internal/health.ServiceBudget",
+		// The accounted bytes that budget judges, the products pool left
+		// out of a decoded health record: arithmetic, no I/O.
+		module + "/internal/health.LaneAccountedBytes",
 		// The lanes.json rule: decodes bytes doctor's probe read and calls
 		// back only doctor's own probe-backed check and reader; it logs
 		// nothing and touches no file itself.

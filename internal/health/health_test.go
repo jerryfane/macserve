@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -170,6 +171,87 @@ func TestDiskBudgetAtFourAndSixLanes(t *testing.T) {
 	options.Lanes = 7
 	if _, err := NewGuard(options); err == nil {
 		t.Fatal("seven lanes accepted")
+	}
+}
+
+// threeLaneGuard is readyGuard at three lanes (budget 140 GiB) and a setter
+// of free space and of the health record's disk accounting, decoded from
+// the record's JSON as the daemon publishes it: products_bytes is the part
+// of accounted_bytes in the products pool, and 0 is the field's absence (a
+// pool the census did not measure apart).
+func threeLaneGuard(t *testing.T) (*Guard, func(free, accounted, products int64)) {
+	t.Helper()
+	g, h, free := readyGuard(t)
+	options := g.options
+	options.Lanes = 3
+	configured, err := NewGuard(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configured.readHealth, configured.freeBytes = g.readHealth, g.freeBytes
+	return configured, func(freeBytes, accounted, products int64) {
+		*free = freeBytes
+		record := `{"accounted_bytes":` + strconv.FormatInt(accounted, 10) + `,"products_bytes":` + strconv.FormatInt(products, 10) + `}`
+		if err := json.Unmarshal([]byte(record), h); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// The products pool has its own 16 GiB cap, eviction and pinning, so its
+// bytes never take the lanes' reservations (#204: at three lanes, 2 jobs
+// running and 22 queued on "disk budget" with 340 GB free, because a full
+// pool counted against the 50 GiB the last lane may find accounted).
+func TestFullProductsPoolLeavesTheLastLaneClaimable(t *testing.T) {
+	g, set := threeLaneGuard(t)
+	set(340<<30, 56<<30, 16<<30) // 40 GiB accounted beside a full pinned pool
+	state, err := g.Check(context.Background())
+	if err != nil || !state.Ready || !AdmitsAnother(state, 2, 3) {
+		t.Fatalf("third lane refused with the products pool full and 40 GiB else accounted: %+v %v", state, err)
+	}
+}
+
+// Everything but the pool is still judged by the budget, the pool's bytes
+// still count against free space, and a pool the census did not measure
+// consistently counts as accounted.
+func TestProductsPoolExclusionFailsClosed(t *testing.T) {
+	g, set := threeLaneGuard(t)
+	check := func(free, accounted, products int64) GateState {
+		set(free, accounted, products)
+		state, err := g.Check(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return state
+	}
+	for _, tc := range []struct {
+		name                      string
+		free, accounted, products int64
+		admitted                  bool
+	}{
+		{"at the limit beside the pool", 340 << 30, 66 << 30, 16 << 30, true},
+		{"over the limit beside the pool", 340 << 30, 67 << 30, 16 << 30, false},
+		{"over the limit without a pool", 340 << 30, 51 << 30, 0, false},
+		{"pool bytes beyond its cap count", 340 << 30, 67 << 30, 27 << 30, false},
+		{"pool absent from the record", 340 << 30, 56 << 30, 0, false},
+		{"negative pool", 340 << 30, 56 << 30, -(16 << 30), false},
+		{"pool above the total", 340 << 30, 56 << 30, 57 << 30, false},
+		{"free space below the reservation", 210<<30 - 1, 56 << 30, 16 << 30, false},
+	} {
+		if state := check(tc.free, tc.accounted, tc.products); AdmitsAnother(state, 2, 3) != tc.admitted {
+			t.Fatalf("%s: %+v, want admitted %t", tc.name, state, tc.admitted)
+		}
+	}
+	// The budget-exceeded cancel ignores the pool too, and only the pool.
+	if state := check(340<<30, 140<<30+16<<30, 16<<30); state.CancelActive {
+		t.Fatalf("budget plus a full pool cancelled: %+v", state)
+	}
+	if state := check(340<<30, 140<<30+1, 0); !state.CancelActive || !slices.Contains(state.Blockers, "service_disk_budget_exceeded") {
+		t.Fatalf("over budget without the pool kept running: %+v", state)
+	}
+	// The free-space emergency counts the pool's bytes: they are on disk.
+	if state := check(100<<30-1, 56<<30, 16<<30); !state.CancelActive || !slices.Contains(state.Blockers, "disk_emergency") {
+		t.Fatalf("free space below 100 GiB with a full pool kept running: %+v", state)
 	}
 }
 func TestOwnerPauseDoesNotCancelDrainingWork(t *testing.T) {

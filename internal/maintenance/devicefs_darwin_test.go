@@ -58,7 +58,7 @@ func TestMutableAccountingRefusesRealImageAtCoreDevicePath(t *testing.T) {
 		t.Fatal(err)
 	}
 	attachImage(t, mountPoint)
-	n, err := accountBytes(context.Background(), []string{home}, home, uint32(os.Geteuid()))
+	n, _, err := accountBytes(context.Background(), []string{home}, home, uint32(os.Geteuid()))
 	if n != -1 || err == nil || !strings.Contains(err.Error(), `"Library/Developer/CoreDevice/DeviceFS": mutable mount crossing: "hfs" mount is not the job CoreDevice devicefs`) {
 		t.Fatalf("disk image at the CoreDevice path was not refused: bytes=%d err=%v", n, err)
 	}

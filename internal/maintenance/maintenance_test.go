@@ -48,13 +48,14 @@ func TestQualificationInvalidatesChangedLiveFacts(t *testing.T) {
 	for name, mutate := range mutations {
 		t.Run(name, func(t *testing.T) {
 			now, q, e, o := approvedFixture()
+			o.ProductsBytes = 234
 			h, err := Evaluate(now, q, e, o)
-			if err != nil || h.Schema != 3 || !h.BoundaryValidated || h.AccountedBytes != 1234 {
+			if err != nil || h.Schema != 3 || !h.BoundaryValidated || h.AccountedBytes != 1234 || h.ProductsBytes != 234 {
 				t.Fatalf("valid approval: %+v %v", h, err)
 			}
 			mutate(&o)
 			h, err = Evaluate(now, q, e, o)
-			if err == nil || h.BoundaryValidated || h.AccountedBytes != -1 || !h.MemoryPressure {
+			if err == nil || h.BoundaryValidated || h.AccountedBytes != -1 || h.ProductsBytes != 0 || !h.MemoryPressure {
 				t.Fatalf("uncertain observation published success: %+v %v", h, err)
 			}
 		})
@@ -157,20 +158,20 @@ func TestMutableAccountingDoesNotFollowLinksOrDoubleCountRoots(t *testing.T) {
 	if err = os.Symlink("/nonexistent-outside-accounted-tree", filepath.Join(nested, "outside")); err != nil {
 		t.Fatal(err)
 	}
-	before, err := accountBytes(context.Background(), []string{root}, "", 0)
+	before, _, err := accountBytes(context.Background(), []string{root}, "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	after, err := accountBytes(context.Background(), []string{root, nested}, "", 0)
+	after, _, err := accountBytes(context.Background(), []string{root, nested}, "", 0)
 	if err != nil || after != before || after < 8192 {
 		t.Fatalf("overlap count %d %d: %v", before, after, err)
 	}
-	if _, err = accountBytes(context.Background(), []string{filepath.Join(nested, "outside")}, "", 0); err == nil {
+	if _, _, err = accountBytes(context.Background(), []string{filepath.Join(nested, "outside")}, "", 0); err == nil {
 		t.Fatal("symlink mutable root accepted")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if n, err := accountBytes(ctx, []string{root}, "", 0); err == nil || n != -1 {
+	if n, _, err := accountBytes(ctx, []string{root}, "", 0); err == nil || n != -1 {
 		t.Fatalf("canceled census trusted: %d %v", n, err)
 	}
 }

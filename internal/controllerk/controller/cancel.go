@@ -41,6 +41,10 @@ func readinessCause(gate health.GateState, err error) model.CancelReason {
 		return model.CancelReason{Source: model.CancelGateError, Detail: err.Error()}
 	}
 	detail := fmt.Sprintf("free_bytes=%d used_bytes=%d", gate.FreeBytes, gate.UsedBytes)
+	if gate.ProductsBytes > 0 {
+		// The products pool's bytes, apart from used_bytes (#204).
+		detail += fmt.Sprintf(" products_bytes=%d", gate.ProductsBytes)
+	}
 	if gate.ProbeFailures > 0 {
 		detail += fmt.Sprintf(" probe_failures=%d", gate.ProbeFailures)
 	}

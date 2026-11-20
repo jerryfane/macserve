@@ -173,7 +173,7 @@ func TestMutableAccountingSkipsJobCoreDeviceMount(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			base, shadow := devicefsHome(t)
-			plain, err := census{base: base, statat: unix.Fstatat}.account(context.Background(), roots)
+			plain, _, err := census{base: base, statat: unix.Fstatat}.account(context.Background(), roots)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -221,7 +221,7 @@ func TestMutableAccountingSkipsJobCoreDeviceMount(t *testing.T) {
 				calls++
 				return tc.table(calls)
 			}}
-			n, err := c.account(context.Background(), roots)
+			n, _, err := c.account(context.Background(), roots)
 			if tc.want == "" {
 				if err != nil || n != want {
 					t.Fatalf("job CoreDevice mount not skipped: bytes=%d want=%d err=%v", n, want, err)
@@ -257,7 +257,7 @@ func TestMutableAccountingWithoutMountTableRefusesMounts(t *testing.T) {
 		}
 		return nil
 	}
-	_, err := census{base: base, statat: statat, jobHome: "/Users/macservejob", jobUID: 6202}.account(context.Background(), []string{"/Users/macservejob"})
+	_, _, err := census{base: base, statat: statat, jobHome: "/Users/macservejob", jobUID: 6202}.account(context.Background(), []string{"/Users/macservejob"})
 	if err == nil || !strings.Contains(err.Error(), "mutable mount crossing") {
 		t.Fatalf("mount accepted without a mount table: %v", err)
 	}

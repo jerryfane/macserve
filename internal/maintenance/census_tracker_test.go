@@ -17,21 +17,22 @@ type fakeCensus struct {
 }
 
 type censusOutcome struct {
-	bytes int64
-	err   error
+	bytes    int64
+	products int64
+	err      error
 }
 
 func newFakeCensus() *fakeCensus { return &fakeCensus{release: make(chan censusOutcome)} }
 
-func (f *fakeCensus) run(ctx context.Context, _ []string, _ string, _ uint32) (int64, error) {
+func (f *fakeCensus) run(ctx context.Context, _ []string, _ string, _ uint32) (int64, int64, error) {
 	f.mu.Lock()
 	f.started++
 	f.mu.Unlock()
 	select {
 	case o := <-f.release:
-		return o.bytes, o.err
+		return o.bytes, o.products, o.err
 	case <-ctx.Done():
-		return -1, ctx.Err()
+		return -1, -1, ctx.Err()
 	}
 }
 
@@ -76,7 +77,8 @@ var censusRoots = []string{"/Library/macserve/var", "/Users/job"}
 func probe(tr *censusTracker, wait time.Duration) (int64, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), wait)
 	defer cancel()
-	return tr.account(ctx, censusRoots, "/Users/job", 6202)
+	got, _, err := tr.account(ctx, censusRoots, "/Users/job", 6202)
+	return got, err
 }
 
 // probeLeavesTime is a 200 ms probe that also reports whether its context was
@@ -85,7 +87,7 @@ func probe(tr *censusTracker, wait time.Duration) (int64, error) {
 func probeLeavesTime(tr *censusTracker) (int64, error, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	got, err := tr.account(ctx, censusRoots, "/Users/job", 6202)
+	got, _, err := tr.account(ctx, censusRoots, "/Users/job", 6202)
 	return got, err, ctx.Err() == nil
 }
 
@@ -122,6 +124,23 @@ func TestCensusFinishingWithinTheProbeIsUsedFresh(t *testing.T) {
 	}
 	if f.starts() != 2 {
 		t.Fatalf("census started %d times, want once per probe", f.starts())
+	}
+}
+
+// A reused census reports its products pool bytes with its total, never the
+// pool of another census (#204): the budget subtracts the pool from that total.
+func TestReusedCensusKeepsItsProductsBytes(t *testing.T) {
+	tr, f, _ := newTestTracker(t)
+	if _, err := probe(tr, 10*time.Millisecond); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first probe with no census yet: %v, want inconclusive", err)
+	}
+	finish(t, tr, f, censusOutcome{bytes: 4096, products: 1024})
+	// The next census never finishes: the probe reuses the last one.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	total, products, err := tr.account(ctx, censusRoots, "/Users/job", 6202)
+	if err != nil || total != 4096 || products != 1024 {
+		t.Fatalf("got %d, %d, %v; want the last census 4096 with 1024 in the pool", total, products, err)
 	}
 }
 
@@ -204,7 +223,7 @@ func TestCensusForAnotherJobAccountIsNotReused(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
-	if _, err := tr.account(ctx, censusRoots, "/Users/other", 6300); !errors.Is(err, context.DeadlineExceeded) {
+	if _, _, err := tr.account(ctx, censusRoots, "/Users/other", 6300); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("got %v; another job account must not use this census", err)
 	}
 }
