@@ -31,7 +31,7 @@ func TestMutableAccountingRefusesMountAfterOpen(t *testing.T) {
 		}
 		return nil
 	}
-	n, err := census{base: "/", statat: unix.Fstatat, fstat: fstat}.account(context.Background(), []string{root})
+	n, _, err := census{base: "/", statat: unix.Fstatat, fstat: fstat}.account(context.Background(), []string{root})
 	if err == nil || n != -1 || !strings.Contains(err.Error(), "mount crossing") {
 		t.Fatalf("post-open mount accounted: bytes=%d err=%v", n, err)
 	}

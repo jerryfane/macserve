@@ -68,6 +68,7 @@ type Observation struct {
 	// observed. Absence is evidence, not a refusal, in qualification and health.
 	BaselineExited []worker.ProcessIdentity              `json:"baseline_exited,omitempty"`
 	AccountedBytes int64                                 `json:"accounted_bytes"`
+	ProductsBytes  int64                                 `json:"products_bytes,omitempty"` // the part of AccountedBytes in the products pool (accountBytes)
 	MemoryPressure bool                                  `json:"memory_pressure"`
 	Coexistence    *CoexistenceState                     `json:"coexistence,omitempty"`
 	Persistence    worker.PersistenceAttestationMetadata `json:"persistence"`
@@ -150,6 +151,7 @@ func Evaluate(now time.Time, q Qualification, e BoundaryEvidence, o Observation)
 	h.BoundaryReceiptSHA256 = o.BoundaryEvidenceSHA256
 	h.BoundaryValidated = true
 	h.AccountedBytes = o.AccountedBytes
+	h.ProductsBytes = o.ProductsBytes
 	h.MemoryPressure = o.MemoryPressure
 	h.QualifiedProfiles = maps.Clone(o.Profiles)
 	return h, nil

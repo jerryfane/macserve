@@ -20,15 +20,15 @@ import (
 
 // The products pool holds build-for-testing jobs' test-products.tar bytes,
 // content-addressed as products/<sha256>.tar under the controller root, with
-// its own budget apart from the evidence pool (maxArtifactPoolBytes), so
-// test products never evict test evidence. Bytes unused for maxProductAge
-// are evicted; beyond the budget the least recently used go first. The
-// store's products ledger records every retained digest and, after an
-// eviction, its proof.
+// its own budget (health.ProductsPoolBytes) apart from the evidence pool
+// (maxArtifactPoolBytes), so test products never evict test evidence; the
+// service disk budget leaves the pool's bytes to that cap
+// (health.LaneAccountedBytes). Bytes unused for maxProductAge are evicted;
+// beyond the budget the least recently used go first. The store's products
+// ledger records every retained digest and, after an eviction, its proof.
 const (
-	productsDir                = "products"
-	maxProductsPoolBytes int64 = 16 << 30
-	maxProductAge              = 7 * 24 * time.Hour
+	productsDir   = "products"
+	maxProductAge = 7 * 24 * time.Hour
 )
 
 // productsArtifact reports whether a is job's test products: the
@@ -188,7 +188,7 @@ func (c *Controller) productFiles() (map[string]int64, error) {
 // reservation bytes in the products pool: it records the eviction of every
 // ledger digest whose bytes are gone, removes bytes the ledger does not
 // record and bytes unused for maxProductAge, then the least recently used
-// until the pool fits limit (maxProductsPoolBytes in production). It never
+// until the pool fits limit (health.ProductsPoolBytes in production). It never
 // evicts a pinned digest: one any active producer job uploaded
 // (activeProducts), whose completion still verifies those bytes, whichever
 // producer the ledger names; one an unfinished consumer job names; or one

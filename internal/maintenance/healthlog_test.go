@@ -47,8 +47,8 @@ func TestHealthReportLogsInvalidHealthAndBlockerChanges(t *testing.T) {
 
 	want := []string{
 		"macserve maintenance: published invalid health checked_at=2026-01-02T03:04:04.000Z last_valid_until=none probe_failures=0 blockers=isolation_unavailable,persistence_attestation_unavailable cancels_active_job=true: maintenance starting",
-		"macserve maintenance: published health checked_at=2026-01-02T03:04:05.000Z accounted_bytes=1234 memory_pressure=false blockers=none cancels_active_job=false",
-		"macserve maintenance: published health checked_at=2026-01-02T03:04:05.000Z accounted_bytes=1234 memory_pressure=true blockers=host_memory_pressure cancels_active_job=false",
+		"macserve maintenance: published health checked_at=2026-01-02T03:04:05.000Z accounted_bytes=1234 products_bytes=0 memory_pressure=false blockers=none cancels_active_job=false",
+		"macserve maintenance: published health checked_at=2026-01-02T03:04:05.000Z accounted_bytes=1234 products_bytes=0 memory_pressure=true blockers=host_memory_pressure cancels_active_job=false",
 		"macserve maintenance: republished last valid health checked_at=2026-01-02T03:04:15.000Z last_valid_at=2026-01-02T03:04:05.000Z expires_at=2026-01-02T03:04:55.000Z probe_failures=1 blockers=maintenance_probe_failed,host_memory_pressure cancels_active_job=false: cannot inspect protected input ACL: signal: killed: context deadline exceeded",
 		"macserve maintenance: published invalid health checked_at=2026-01-02T03:15:05.000Z last_valid_until=2026-01-02T03:14:05.000Z probe_failures=66 blockers=isolation_unavailable,maintenance_probe_failed,persistence_attestation_unavailable cancels_active_job=true: mutable census /Users/macservejob: context deadline exceeded",
 	}

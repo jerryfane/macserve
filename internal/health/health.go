@@ -26,7 +26,11 @@ type GateState struct {
 	CancelActive bool     `json:"cancel_active"`
 	Blockers     []string `json:"blockers"`
 	FreeBytes    int64    `json:"free_bytes"`
-	UsedBytes    int64    `json:"used_bytes"`
+	// UsedBytes is the accounted bytes the service disk budget judges
+	// (LaneAccountedBytes): the products pool's bytes are not among them.
+	UsedBytes int64 `json:"used_bytes"`
+	// ProductsBytes is the products pool's bytes left out of UsedBytes.
+	ProductsBytes int64 `json:"products_bytes"`
 	// CapacityOnly is set with CancelActive when every cancelling blocker
 	// is a capacity fact (disk_emergency, service_disk_budget_exceeded):
 	// cancelling the newest active job may restore the gate. Trust facts
@@ -44,13 +48,33 @@ const (
 	JobReservationBytes int64 = 30 << 30
 	AdmissionFloorBytes int64 = 120 << 30
 	CancelFloorBytes    int64 = 100 << 30
+	// ProductsPoolBytes is the products pool's own cap: the controller
+	// evicts unpinned test products to fit it and refuses an upload that
+	// pinned products leave no room for.
+	ProductsPoolBytes int64 = 16 << 30
 )
 
 // ServiceBudget is the disk macserve may account with lanes concurrent jobs
 // (max_concurrent_jobs; values below 1 mean 1): one JobReservationBytes per
-// lane above a fixed base. One lane is the single-job budget of 80 GiB.
+// lane above a fixed base. One lane is the single-job budget of 80 GiB. The
+// products pool is bounded by its own cap instead (LaneAccountedBytes).
 func ServiceBudget(lanes int) int64 {
 	return serviceBaseBytes + int64(max(lanes, 1))*JobReservationBytes
+}
+
+// LaneAccountedBytes is the part of h's accounted bytes the service budget
+// judges: AccountedBytes less the products pool's bytes (ProductsBytes), at
+// most ProductsPoolBytes of them. The pool has its own cap, eviction and
+// pinning, and pinned while consumers are queued it filled the fixed base,
+// so a full pool left the last lane unclaimable (#204). It fails closed:
+// a record without a consistent pool measurement (none, negative or above
+// AccountedBytes, or invalid accounting) counts every byte, and bytes
+// beyond the pool's cap count too. Free space always includes the pool.
+func LaneAccountedBytes(h Health) int64 {
+	if h.AccountedBytes < 0 || h.ProductsBytes <= 0 || h.ProductsBytes > h.AccountedBytes {
+		return h.AccountedBytes
+	}
+	return h.AccountedBytes - min(h.ProductsBytes, ProductsPoolBytes)
 }
 
 // capacityBlockers cancel the newest active job first (see GateState).
@@ -86,6 +110,10 @@ type Health struct {
 	PersistenceValid        bool              `json:"persistence_valid"`
 	PersistenceNeedsReview  bool              `json:"persistence_needs_review"`
 	PersistenceReason       string            `json:"persistence_reason,omitempty"`
+	// ProductsBytes is the part of AccountedBytes the census found in the
+	// controller's products pool (absent when the pool is empty). The
+	// service budget leaves it out (LaneAccountedBytes).
+	ProductsBytes int64 `json:"products_bytes,omitempty"`
 	// AdmissionInconclusive is the reason of the broker's record of
 	// admissions refused, without quarantine, for a persisting child of a
 	// tolerated launch; the gate reports it as worker_admission_inconclusive.
@@ -195,7 +223,8 @@ func (g *Guard) Check(ctx context.Context) (GateState, error) {
 	if err != nil {
 		fail("isolation_unavailable", true)
 	} else {
-		state.UsedBytes = health.AccountedBytes
+		state.UsedBytes = LaneAccountedBytes(health)
+		state.ProductsBytes = health.AccountedBytes - state.UsedBytes
 		state.ProbeFailures = health.ProbeFailures
 		for _, b := range HealthBlockers(health, g.options.Now(), g.options.JobUID, g.options.Profiles, g.options.Lanes) {
 			fail(b.Name, b.Cancel)
@@ -255,9 +284,10 @@ func HealthBlockers(health Health, now time.Time, jobUID uint32, profiles map[st
 	if !health.BoundaryValidated {
 		return blockers
 	}
-	if budget := ServiceBudget(lanes); health.AccountedBytes < 0 || health.AccountedBytes > budget {
+	// The products pool is judged by its own cap (LaneAccountedBytes).
+	if accounted, budget := LaneAccountedBytes(health), ServiceBudget(lanes); accounted < 0 || accounted > budget {
 		fail("service_disk_budget_exceeded", true)
-	} else if health.AccountedBytes > budget-JobReservationBytes {
+	} else if accounted > budget-JobReservationBytes {
 		fail("service_disk_reservation_unavailable", false)
 	}
 	if health.MemoryPressure {

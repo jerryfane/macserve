@@ -60,7 +60,7 @@ func TestMutableAccountingSkipsJobMetalToolchainImage(t *testing.T) {
 			censusFixtureFile(t, filepath.Join(mountPoint, "shadowed"), 16*1024)
 			censusFixtureFile(t, filepath.Join(home, "build.log"), 8*1024)
 			roots := []string{"/Library/macserve/var"}
-			plain, err := census{base: base, statat: unix.Fstatat}.account(context.Background(), roots)
+			plain, _, err := census{base: base, statat: unix.Fstatat}.account(context.Background(), roots)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -90,7 +90,7 @@ func TestMutableAccountingSkipsJobMetalToolchainImage(t *testing.T) {
 				calls++
 				return []mounttable.Entry{{FSID: 1, FSType: "apfs", On: "/"}, tc.record}, nil
 			}}
-			n, err := c.account(context.Background(), roots)
+			n, _, err := c.account(context.Background(), roots)
 			if tc.want == "" {
 				if err != nil || n != want || calls != 2 {
 					t.Fatalf("job Metal toolchain image not skipped: bytes=%d want=%d calls=%d err=%v", n, want, calls, err)
@@ -134,7 +134,7 @@ func TestMutableAccountingMetalToolchainUnmountedDuringCensus(t *testing.T) {
 		}
 		return []mounttable.Entry{record}, nil
 	}}
-	_, err := c.account(context.Background(), []string{"/Library/macserve/var"})
+	_, _, err := c.account(context.Background(), []string{"/Library/macserve/var"})
 	if !errors.Is(err, errAcceptedMountChanged) || !strings.Contains(err.Error(), "mutable census /Library/macserve/var: "+strconv.Quote(rel)) {
 		t.Fatalf("census = %v, want inconclusive naming the image", err)
 	}
@@ -184,7 +184,7 @@ func TestMutableAccountingMetalToolchainGoneAfterAcceptance(t *testing.T) {
 			c := census{base: base, statat: statat, workspaces: workspaceRoot, jobUID: 6202, mounts: func() ([]mounttable.Entry, error) {
 				return []mounttable.Entry{record}, nil
 			}}
-			n, err := c.account(context.Background(), []string{"/Library/macserve/var"})
+			n, _, err := c.account(context.Background(), []string{"/Library/macserve/var"})
 			if n != -1 || err == nil || stats != 2 || errors.Is(err, errAcceptedMountChanged) != tc.inconclusive || !strings.Contains(err.Error(), strconv.Quote(rel)) {
 				t.Fatalf("census = %d %v (stats %d), want inconclusive=%v naming the image", n, err, stats, tc.inconclusive)
 			}

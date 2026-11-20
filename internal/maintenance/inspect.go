@@ -204,9 +204,9 @@ func inspect(ctx context.Context, c Config, bg *background) (Observation, error)
 	}
 	roots := []string{"/Library/macserve/var", account.HomeDir}
 	if bg != nil {
-		o.AccountedBytes, err = bg.census.account(ctx, roots, account.HomeDir, wc.JobUID)
+		o.AccountedBytes, o.ProductsBytes, err = bg.census.account(ctx, roots, account.HomeDir, wc.JobUID)
 	} else {
-		o.AccountedBytes, err = accountBytes(ctx, roots, account.HomeDir, wc.JobUID)
+		o.AccountedBytes, o.ProductsBytes, err = accountBytes(ctx, roots, account.HomeDir, wc.JobUID)
 	}
 	if err != nil {
 		return invalid, err

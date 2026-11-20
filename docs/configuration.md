@@ -83,7 +83,8 @@ Optional `signer` connects the controller to the [code signer](#code-signer).
   `controller_shutdown`, `github`, `worker_admission` or `stalled`), `at` (when the request was recorded), `principal` for
   `client` and `admin_pause`, `blockers` (the readiness gate's, e.g. `isolation_unavailable`,
   `host_memory_pressure`) for `host_readiness`, and an optional `detail` of at most 512 bytes (the client or pause
-  reason, the gate error, the gate's free and accounted bytes, the worker's refusal reason). A `client` detail ends
+  reason, the gate error, the gate's free and accounted bytes and, apart, the products pool's (`products_bytes`), the
+  worker's refusal reason). A `client` detail ends
   with who sent the cancel as the controller sees it, `[via remote=<peer> ua="…"]` plus `xff="…"` and
   `forwarded="…"` when those headers are present; caller-supplied values are sanitized (non-printable runes become
   `?`, `"` becomes `'`, `\` becomes `/`) and bounded (128 bytes for the User-Agent, 96 for each forwarding header),
@@ -402,17 +403,26 @@ qualification is the controller's own comparison and appears only in its lines.
 Disk admission reserves 30 GiB per job while preserving 120 GiB free: a job is claimed beside N running ones only
 with at least 120 + 30·(N+1) GiB free and at most budget − 30·(N+1) GiB accounted. Below 100 GiB free active work is
 cancelled. The total accounted mutable-data budget is 50 + 30·`max_concurrent_jobs` GiB; maintenance, `doctor` and the
-controller read `max_concurrent_jobs` from `controller.json` (lowered by `lanes.json`). Claiming the last lane, beside
-`max_concurrent_jobs` − 1 running jobs, needs:
+controller read `max_concurrent_jobs` from `controller.json` (lowered by `lanes.json`). The products pool (below) is
+not part of that accounted figure: it is bounded by its own 16 GiB cap, eviction and pinning, so a full pool never
+takes a lane's reservation (#204). Its bytes still count against free space, for admission and for the 100 GiB
+cancel. Maintenance's census reports them apart in health (`products_bytes`, the part of `accounted_bytes` under
+`var/controller/products`); the gate, `doctor` and the budget blockers judge `accounted_bytes` − `products_bytes`,
+the gate's `used_bytes`, and `doctor` names the pool's bytes beside it. That subtraction fails closed: without a
+`products_bytes` the census measured (absent, negative, or more than `accounted_bytes`) every accounted byte
+counts, and pool bytes beyond 16 GiB count too. Claiming the last lane, beside `max_concurrent_jobs` − 1 running
+jobs, needs:
 
-| lanes | accounted budget | free disk to claim the last lane | accounted to claim the last lane |
-| ----- | ---------------- | -------------------------------- | -------------------------------- |
-| 1     | 80 GiB           | 150 GiB                          | at most 50 GiB                   |
-| 2     | 110 GiB          | 180 GiB                          | at most 50 GiB                   |
-| 3     | 140 GiB          | 210 GiB                          | at most 50 GiB                   |
-| 4     | 170 GiB          | 240 GiB                          | at most 50 GiB                   |
-| 5     | 200 GiB          | 270 GiB                          | at most 50 GiB                   |
-| 6     | 230 GiB          | 300 GiB                          | at most 50 GiB                   |
+| lanes | accounted budget | free disk to claim the last lane | accounted (without the products pool) to claim the last lane |
+| ----- | ---------------- | -------------------------------- | ------------------------------------------------------------ |
+| 1     | 80 GiB           | 150 GiB                          | at most 50 GiB                                               |
+| 2     | 110 GiB          | 180 GiB                          | at most 50 GiB                                               |
+| 3     | 140 GiB          | 210 GiB                          | at most 50 GiB                                               |
+| 4     | 170 GiB          | 240 GiB                          | at most 50 GiB                                               |
+| 5     | 200 GiB          | 270 GiB                          | at most 50 GiB                                               |
+| 6     | 230 GiB          | 300 GiB                          | at most 50 GiB                                               |
+
+So with a full 16 GiB pool, the last lane is claimable with up to 66 GiB of `accounted_bytes`.
 
 The retained evidence pool reserves 1 GiB for store log
 rows and 14 GiB for artifacts, with seven-day expiry/oldest-terminal eviction. Producers' `test-products.tar`

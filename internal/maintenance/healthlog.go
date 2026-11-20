@@ -50,7 +50,7 @@ func (r *healthReport) valid(h health.Health) {
 		return
 	}
 	r.blockers = blockers
-	log.Printf("macserve maintenance: published health checked_at=%s accounted_bytes=%d memory_pressure=%t blockers=%s cancels_active_job=%t", stamp(h.CheckedAt), h.AccountedBytes, h.MemoryPressure, blockers, cancel)
+	log.Printf("macserve maintenance: published health checked_at=%s accounted_bytes=%d products_bytes=%d memory_pressure=%t blockers=%s cancels_active_job=%t", stamp(h.CheckedAt), h.AccountedBytes, h.ProductsBytes, h.MemoryPressure, blockers, cancel)
 }
 
 // healthBlockers lists the blockers a controller reports for h when it reads

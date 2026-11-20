@@ -735,19 +735,25 @@ func (s *state) healthChecks() {
 		blockers = append(blockers, "worker_admission_inconclusive")
 	}
 	// Invalid health carries no measured disk or memory facts, only
-	// fail-closed placeholders (health.HealthBlockers).
+	// fail-closed placeholders (health.HealthBlockers). The products pool
+	// has its own cap and is reported apart from the budget.
 	budget := health.ServiceBudget(s.lanes())
+	accounted := health.LaneAccountedBytes(h)
+	usage := fmt.Sprintf("macserve accounts %d GiB of its %d GiB budget", accounted>>30, budget>>30)
+	if pool := h.AccountedBytes - accounted; accounted >= 0 && pool > 0 {
+		usage += fmt.Sprintf(", plus %d GiB of test products in their own %d GiB pool", pool>>30, health.ProductsPoolBytes>>30)
+	}
 	switch {
 	case !h.BoundaryValidated:
 		s.set("disk", Unknown, "the maintenance health is invalid and carries no disk accounting", "")
-	case h.AccountedBytes < 0 || h.AccountedBytes > budget:
+	case accounted < 0 || accounted > budget:
 		blockers = append(blockers, "service_disk_budget_exceeded")
-		s.set("disk", Fail, fmt.Sprintf("macserve accounts %d GiB of its %d GiB budget", h.AccountedBytes>>30, budget>>30), "Remove old jobs' evidence or wait for retention cleanup.")
-	case h.AccountedBytes > budget-health.JobReservationBytes:
+		s.set("disk", Fail, usage, "Remove old jobs' evidence or wait for retention cleanup.")
+	case accounted > budget-health.JobReservationBytes:
 		blockers = append(blockers, "service_disk_reservation_unavailable")
-		s.set("disk", Warn, fmt.Sprintf("macserve accounts %d GiB of its %d GiB budget; no room for one more job", h.AccountedBytes>>30, budget>>30), "Wait for retention cleanup before the next build.")
+		s.set("disk", Warn, usage+"; no room for one more job", "Wait for retention cleanup before the next build.")
 	default:
-		s.set("disk", Pass, fmt.Sprintf("macserve accounts %d GiB of its %d GiB budget", h.AccountedBytes>>30, budget>>30), "")
+		s.set("disk", Pass, usage, "")
 	}
 	if h.BoundaryValidated && h.MemoryPressure {
 		blockers = append(blockers, "host_memory_pressure")
