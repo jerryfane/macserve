@@ -962,14 +962,17 @@ func policyRuns(policy githubwire.Policy) []githubwire.MatrixEntry {
 // When matrix_skip_drafts holds a draft head back from the entry
 // (Policy.HoldsBack: an untiered or full entry, unless the head carries the
 // full-tier label) it admits nothing, but keeps a run it already has current
-// without starting anything. A head whose .macserve.json does not
-// declare the entry's shard for the template's kind, or from which the
-// worker could not derive the entry's recipe, gets the run blocked: an
-// action_required check and no job. A head the policy's matrix_skip_paths or
-// the entry's skip_paths skips gets the run skipped, a neutral check and no
-// job, unless the run already has a job (admitted before, or by an owner
-// rerun), which it keeps. An entry with a build is admitted from its
-// producer's test products (admitConsumer).
+// without starting anything. A head the policy's matrix_skip_paths or the
+// entry's skip_paths skips gets the run skipped, a neutral check and no job,
+// unless the run already has a job (admitted before, or by an owner rerun),
+// which it keeps. The skip comes first: a skipped run starts no job, so it
+// needs no shard, and a skip-only head stays mergeable when the policy gains
+// an entry its .macserve.json predates. Otherwise a head whose .macserve.json
+// does not declare the entry's shard for the template's kind, or from which
+// the worker could not derive the entry's recipe, gets the run blocked: an
+// action_required check and no job (a job already started is cancelled).
+// An entry with a build is admitted from its producer's test products
+// (admitConsumer).
 // failure is a store refusal the poll reports and continues past; err ends
 // the repository's poll.
 func (p *Poller) admitMatrix(ctx context.Context, policy githubwire.Policy, pull githubapi.PullRequest, entry githubwire.MatrixEntry, input store.GitHubAdmission, observed map[string]bool, currentKeys map[string]bool, now time.Time) (failure, err error) {
@@ -989,20 +992,21 @@ func (p *Poller) admitMatrix(ctx context.Context, policy githubwire.Policy, pull
 	if err != nil {
 		return nil, err
 	}
-	if reason := shardProblem(config, input.Admission.Profile); reason != "" {
-		currentKeys[key] = false
-		return p.options.Store.BlockGitHub(ctx, input.Run, reason, now), nil
-	}
-	currentKeys[key] = true
 	if summary := p.skipSummary(ctx, policy, pull, entry, observed); summary != "" {
 		existing, err := p.options.Store.GitHubRun(ctx, key)
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return nil, err
 		}
 		if err != nil || existing.JobID == "" {
+			currentKeys[key] = true
 			return p.options.Store.SkipGitHub(ctx, input.Run, pull.Number, summary, now), nil
 		}
 	}
+	if reason := shardProblem(config, input.Admission.Profile); reason != "" {
+		currentKeys[key] = false
+		return p.options.Store.BlockGitHub(ctx, input.Run, reason, now), nil
+	}
+	currentKeys[key] = true
 	if entry.Build != "" {
 		return p.admitConsumer(ctx, policy, pull, entry, input, now)
 	}
