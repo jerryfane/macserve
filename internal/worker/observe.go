@@ -11,9 +11,10 @@ import (
 // than refused: launchd-managed Apple helpers in the job GUI session may exit
 // on their own, and absence can neither hide nor retain job state. A changed
 // UID or zombie on an audited instance is always an error, as is a changed
-// job launchd domain environment or a job-UID process without identity. Any
-// other process on an exited audited PID number is another process
-// (macserve#108), and no other process is classified (processScope.checkOnly).
+// job launchd domain environment or a live job-UID process without identity
+// (zombies are skipped). Any other process on an exited audited PID number
+// is another process (macserve#108), and no other process is classified
+// (observerScope).
 func ObserveGUIBaseline(ctx context.Context, path, persistencePath string, uid uint32) (string, []ProcessIdentity, error) {
 	baseline, err := loadBaseline(path, uid)
 	if err != nil {
@@ -30,11 +31,23 @@ func ObserveGUIBaseline(ctx context.Context, path, persistencePath string, uid u
 	if err != nil {
 		return "", nil, err
 	}
-	scope := processScope{uid: int(uid), baseline: baseline, agents: nativeAgents{}, checkOnly: true}
-	if _, err := scope.census(ctx, samples); err != nil {
+	if err := observerScope(uid, baseline, nativeAgents{}).observe(ctx, samples); err != nil {
 		return "", nil, err
 	}
 	return baseline.Boot, baselineExited(baseline, samples), ctx.Err()
+}
+
+// observerScope is the census scope of ObserveGUIBaseline: no sampler, no
+// worker-reset, checkOnly.
+func observerScope(uid uint32, b GUIBaseline, agents agentInspector) *processScope {
+	return &processScope{uid: int(uid), baseline: b, agents: agents, checkOnly: true}
+}
+
+// observe returns the error census finds in samples; a checkOnly census
+// classifies nothing, so it returns no census.
+func (s *processScope) observe(ctx context.Context, samples []processSample) error {
+	_, err := s.census(ctx, samples)
+	return err
 }
 
 // baselineExited returns the audited identities no longer running: the PID is

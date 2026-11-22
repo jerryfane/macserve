@@ -63,11 +63,12 @@ type processScope struct {
 	// childWait bounds admission's wait for children of tolerated launches
 	// (see toleratedChildWait).
 	childWait time.Duration
-	// checkOnly is set by ObserveGUIBaseline: census returns once its errors
-	// are settled and classifies nothing. Outside worker-reset no error
-	// depends on the classification (relaunches, tolerated launches), which
-	// costs one launchctl print, plist and bundle read per candidate and
-	// only admission and worker-reset use (macserve#215).
+	// checkOnly is set only by observerScope: census returns once its errors
+	// are settled and classifies nothing. In that scope (no sampler, no
+	// worker-reset) no error depends on the classification (relaunches,
+	// tolerated launches), which costs one launchctl print, plist and bundle
+	// read per candidate and only admission and worker-reset use
+	// (macserve#215).
 	checkOnly bool
 }
 

@@ -11,9 +11,7 @@ import (
 
 // observed runs the census ObserveGUIBaseline applies, without launchd agents.
 func observed(b GUIBaseline, samples []processSample) error {
-	scope := processScope{uid: int(b.JobUID), baseline: b, checkOnly: true}
-	_, err := scope.residual(context.Background(), samples)
-	return err
+	return observerScope(b.JobUID, b, nil).observe(context.Background(), samples)
 }
 
 // countingAgents records which launchd and process inspections a census made.
@@ -57,15 +55,15 @@ func TestMaintenanceBaselineInspectsNoJobProcess(t *testing.T) {
 	samples := []processSample{{pid: 101, uid: uid, start: "boot:101"}, {pid: 300, uid: uid, start: "boot:300"}, {pid: 301, uid: uid, start: "boot:301"}}
 	agents := countingAgents{fakeAgents: newFakeAgents(), calls: map[string]int{}}
 	agents.env[gui], agents.env[user] = map[string]string{}, map[string]string{}
-	scope := processScope{uid: uid, baseline: b, agents: agents, checkOnly: true}
-	if _, err := scope.census(context.Background(), samples); err != nil {
+	scope := observerScope(uid, b, agents)
+	if err := scope.observe(context.Background(), samples); err != nil {
 		t.Fatalf("maintenance census: %v", err)
 	}
 	if want := map[string]int{"domain": 2}; !maps.Equal(agents.calls, want) {
 		t.Fatalf("inspections = %v, want %v", agents.calls, want)
 	}
 	agents.env[gui] = map[string]string{"DYLD_INSERT_LIBRARIES": "/tmp/x"}
-	if _, err := scope.census(context.Background(), samples); !errors.Is(err, ErrContamination) {
+	if err := scope.observe(context.Background(), samples); !errors.Is(err, ErrContamination) {
 		t.Fatalf("changed job launchd environment: %v", err)
 	}
 }
