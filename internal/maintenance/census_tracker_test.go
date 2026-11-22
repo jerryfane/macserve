@@ -132,7 +132,9 @@ func TestCensusFinishingWithinTheProbeIsUsedFresh(t *testing.T) {
 
 // #215: started at every probe, the byte census ran back to back, about one
 // CPU core around the clock on the Studio. A usable census is reused until
-// censusInterval after its start; one that was not usable is retried at once.
+// censusInterval after its start; one that was not usable, a finding, or a
+// census of another job account starts at once (newTestTracker's other tests
+// run without the interval).
 func TestCensusStartsAtMostOncePerInterval(t *testing.T) {
 	tr, f, clock := newTestTracker(t)
 	tr.interval = newCensusTracker(context.Background()).interval
@@ -164,6 +166,17 @@ func TestCensusStartsAtMostOncePerInterval(t *testing.T) {
 	finish(t, tr, f, censusOutcome{bytes: -1, err: errAcceptedMountChanged})
 	if _, err := probe(tr, 10*time.Millisecond); err != nil || !censusRunning(tr) {
 		t.Fatalf("after an inconclusive census: %v; want the next census started at once", err)
+	}
+	finding := errors.New("mutable mount crossing")
+	finish(t, tr, f, censusOutcome{bytes: -1, err: finding})
+	if _, err := probe(tr, 10*time.Millisecond); !errors.Is(err, finding) || !censusRunning(tr) {
+		t.Fatalf("after a finding: %v; want it reported and the next census started at once", err)
+	}
+	finish(t, tr, f, censusOutcome{bytes: 300})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if _, _, err := tr.account(ctx, censusRoots, "/Users/other", 6300); !errors.Is(err, context.DeadlineExceeded) || !censusRunning(tr) {
+		t.Fatalf("another job account: %v; want its own census started at once", err)
 	}
 }
 
