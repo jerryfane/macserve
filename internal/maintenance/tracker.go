@@ -49,6 +49,11 @@ type tracker[K comparable, T any] struct {
 	running      *trackedRun[K, T]
 	latest       *trackedResult[K, T]
 	usable       *trackedResult[K, T] // latest successful, conclusive result
+	lastStart    time.Time
+	// interval is the least time between the starts of two observations
+	// while the latest completed one is usable: probes in between use that
+	// one. Zero starts one at every probe that finds none running.
+	interval time.Duration
 }
 
 type trackedResult[K comparable, T any] struct {
@@ -65,13 +70,18 @@ type trackedRun[K comparable, T any] struct {
 }
 
 // start begins an observation for key unless one is running; it returns the
-// running one.
+// running one, or nil while the latest observation of key is usable and
+// began less than interval ago.
 func (t *tracker[K, T]) start(key K, run func(context.Context) (T, error)) *trackedRun[K, T] {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.running != nil {
 		return t.running
 	}
+	if t.interval > 0 && t.usable != nil && t.usable == t.latest && t.usable.key == key && t.now().Sub(t.lastStart) < t.interval {
+		return nil
+	}
+	t.lastStart = t.now()
 	r := &trackedRun[K, T]{key: key, done: make(chan struct{})}
 	t.running = r
 	ctx, cancel := context.WithTimeout(t.parent, t.budget)
@@ -101,7 +111,7 @@ func (t *tracker[K, T]) observe(ctx context.Context, key K, run func(context.Con
 	if err := t.finding(key); err != nil {
 		return none, err
 	}
-	if r.key == key {
+	if r != nil && r.key == key {
 		wait := ctx
 		if deadline, ok := ctx.Deadline(); ok {
 			var cancel context.CancelFunc
