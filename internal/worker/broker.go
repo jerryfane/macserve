@@ -63,6 +63,12 @@ type processScope struct {
 	// childWait bounds admission's wait for children of tolerated launches
 	// (see toleratedChildWait).
 	childWait time.Duration
+	// checkOnly is set by ObserveGUIBaseline: census returns once its errors
+	// are settled and classifies nothing. Outside worker-reset no error
+	// depends on the classification (relaunches, tolerated launches), which
+	// costs one launchctl print, plist and bundle read per candidate and
+	// only admission and worker-reset use (macserve#215).
+	checkOnly bool
 }
 
 func loadBaseline(path string, uid uint32) (GUIBaseline, error) {
@@ -203,6 +209,9 @@ func (s *processScope) census(ctx context.Context, samples []processSample) (pro
 			return processCensus{}, errors.New("job process identity unavailable")
 		}
 		c.residual = append(c.residual, p)
+	}
+	if s.checkOnly && s.adopt == nil {
+		return c, nil
 	}
 	if len(absent) != 0 && len(c.residual) != 0 && s.agents != nil {
 		c.residual, c.relaunched = respawned(ctx, s.agents, s.uid, s.baseline, absent, c.residual)
