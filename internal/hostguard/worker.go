@@ -50,8 +50,9 @@ func BrokerIdentity(jobUID, jobGID, controllerUID, ownerUID uint32) error {
 	cmd.Dir = "/"
 	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: jobUID, Gid: jobGID, Groups: []uint32{}}}
 	cmd.WaitDelay = 100 * time.Millisecond
+	interrupted := watchCancel(cmd)
 	if err := cmd.Run(); err != nil {
-		if cutShort(ctx, cmd, err) && !errors.Is(err, ctx.Err()) {
+		if interrupted.cutShort(ctx, err) && !errors.Is(err, ctx.Err()) {
 			// Killed at the deadline: no evidence either way (#215).
 			err = errors.Join(err, ctx.Err())
 		}

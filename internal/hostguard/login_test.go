@@ -104,32 +104,50 @@ func TestJobLoginListableKilledReadIsADeadline(t *testing.T) {
 	}
 }
 
-// Review of #219: a failed command and an expired context do not show that
-// the deadline ended the command. Its exit, whatever the status, is a result:
-// only a command ctx kept from starting or killed is cut short.
+// Review of #219: a failed command and an ended context do not show that the
+// context ended the command. One reaped before its context ended (an exit
+// with any status, or a signal from anyone else) is a result, even while a
+// descendant keeps its output open past that point; only one the context kept
+// from starting or killed is cut short.
 func TestCutShortOnlyWhenTheContextEndedTheCommand(t *testing.T) {
-	done, cancel := context.WithCancel(context.Background())
-	cancel()
-	exited := exec.Command("/bin/sh", "-c", "exit 42")
-	err := exited.Run()
-	if err == nil || cutShort(done, exited, err) {
-		t.Fatalf("a command that exited 42 (%v) before its context ended was cut short", err)
+	// A descendant holds stdout for 1.5 s, so the drain outlasts the context,
+	// which ends at 500 ms.
+	const drain = "(/bin/sleep 1.5) & "
+	for _, tc := range []struct {
+		name, script string
+		cut          bool
+	}{
+		{name: "exit 42 during the drain", script: drain + "exit 42"},
+		{name: "own SIGTERM during the drain", script: drain + "kill -TERM $$"},
+		{name: "own SIGKILL during the drain", script: drain + "kill -KILL $$"},
+		{name: "killed by the context", script: "exec /bin/sleep 5", cut: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "/bin/sh", "-c", tc.script)
+			cmd.WaitDelay = 5 * time.Second
+			w := watchCancel(cmd)
+			timer := time.AfterFunc(500*time.Millisecond, cancel)
+			defer timer.Stop()
+			_, err := cmd.Output()
+			if ctx.Err() == nil {
+				t.Fatalf("returned (%v) before the context ended", err)
+			}
+			if got := w.cutShort(ctx, err); got != tc.cut {
+				t.Fatalf("%v: cut short %v, want %v", err, got, tc.cut)
+			}
+		})
 	}
+	done, stop := context.WithCancel(context.Background())
+	stop()
 	notStarted := exec.CommandContext(done, "/bin/sh", "-c", "exit 0")
-	if err := notStarted.Run(); err == nil || !cutShort(done, notStarted, err) {
+	w := watchCancel(notStarted)
+	if err := notStarted.Run(); !w.cutShort(done, err) {
 		t.Fatalf("a command its done context kept from starting (%v) was not cut short", err)
 	}
-	live, stop := context.WithCancel(context.Background())
-	killed := exec.CommandContext(live, "/bin/sleep", "5")
-	if err := killed.Start(); err != nil {
-		t.Fatal(err)
-	}
-	stop()
-	if err := killed.Wait(); err == nil || !cutShort(live, killed, err) {
-		t.Fatalf("a command its context killed (%v) was not cut short", err)
-	}
-	running := exec.Command("/bin/sh", "-c", "exit 1")
-	if err := running.Run(); err == nil || cutShort(context.Background(), running, err) {
+	failed := exec.Command("/bin/sh", "-c", "exit 1")
+	if err := failed.Run(); (&cancelWatch{cmd: failed}).cutShort(context.Background(), err) {
 		t.Fatalf("a failure with a live context (%v) was cut short", err)
 	}
 }
