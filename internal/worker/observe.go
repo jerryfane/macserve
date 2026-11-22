@@ -10,8 +10,10 @@ import (
 // Audited processes that are simply absent are returned as evidence rather
 // than refused: launchd-managed Apple helpers in the job GUI session may exit
 // on their own, and absence can neither hide nor retain job state. A changed
-// UID or zombie is always an error, and so is a reused audited PID unless the
-// new holder is a verified launchd relaunch (see processScope.census).
+// UID or zombie on an audited instance is always an error, as is a changed
+// job launchd domain environment or a job-UID process without identity. Any
+// other process on an exited audited PID number is another process
+// (macserve#108), and no other process is classified (processScope.checkOnly).
 func ObserveGUIBaseline(ctx context.Context, path, persistencePath string, uid uint32) (string, []ProcessIdentity, error) {
 	baseline, err := loadBaseline(path, uid)
 	if err != nil {
@@ -28,7 +30,7 @@ func ObserveGUIBaseline(ctx context.Context, path, persistencePath string, uid u
 	if err != nil {
 		return "", nil, err
 	}
-	scope := processScope{uid: int(uid), baseline: baseline, agents: nativeAgents{}}
+	scope := processScope{uid: int(uid), baseline: baseline, agents: nativeAgents{}, checkOnly: true}
 	if _, err := scope.census(ctx, samples); err != nil {
 		return "", nil, err
 	}

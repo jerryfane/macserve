@@ -2,14 +2,72 @@ package worker
 
 import (
 	"context"
+	"errors"
+	"maps"
 	"testing"
+
+	"github.com/jerryfane/macserve/internal/launchctlprint"
 )
 
 // observed runs the census ObserveGUIBaseline applies, without launchd agents.
 func observed(b GUIBaseline, samples []processSample) error {
-	scope := processScope{uid: int(b.JobUID), baseline: b}
+	scope := processScope{uid: int(b.JobUID), baseline: b, checkOnly: true}
 	_, err := scope.residual(context.Background(), samples)
 	return err
+}
+
+// countingAgents records which launchd and process inspections a census made.
+type countingAgents struct {
+	*fakeAgents
+	calls map[string]int
+}
+
+func (c countingAgents) domain(ctx context.Context, target string) (launchctlprint.Domain, error) {
+	c.calls["domain"]++
+	return c.fakeAgents.domain(ctx, target)
+}
+
+func (c countingAgents) process(pid int) (agentProcess, error) {
+	c.calls["process"]++
+	return c.fakeAgents.process(pid)
+}
+
+func (c countingAgents) kernel(pid int) (agentProcess, error) {
+	c.calls["kernel"]++
+	return c.fakeAgents.kernel(pid)
+}
+
+func (c countingAgents) service(ctx context.Context, target string) (launchctlprint.Snapshot, error) {
+	c.calls["service"]++
+	return c.fakeAgents.service(ctx, target)
+}
+
+// macserve#215: under job load the maintenance GUI-baseline check spent its
+// 30 s budget verifying every job process as a launchd relaunch or tolerated
+// launch, one launchctl print each, although no outcome of that work can fail
+// it; it timed out for over 10 minutes and health cancelled every running
+// job. The maintenance census reads the job launchd domains only.
+func TestMaintenanceBaselineInspectsNoJobProcess(t *testing.T) {
+	const uid = 550
+	gui, user := "gui/550", "user/550"
+	b := GUIBaseline{JobUID: uid, Boot: "qualified", Launchd: &LaunchdEnvironment{GUI: map[string]string{}, User: map[string]string{}}, Processes: []ProcessIdentity{
+		{PID: 100, Start: "boot:100", Service: LaunchdService{Domain: gui, Label: "com.apple.helper"}},
+		{PID: 101, Start: "boot:101"},
+	}}
+	samples := []processSample{{pid: 101, uid: uid, start: "boot:101"}, {pid: 300, uid: uid, start: "boot:300"}, {pid: 301, uid: uid, start: "boot:301"}}
+	agents := countingAgents{fakeAgents: newFakeAgents(), calls: map[string]int{}}
+	agents.env[gui], agents.env[user] = map[string]string{}, map[string]string{}
+	scope := processScope{uid: uid, baseline: b, agents: agents, checkOnly: true}
+	if _, err := scope.census(context.Background(), samples); err != nil {
+		t.Fatalf("maintenance census: %v", err)
+	}
+	if want := map[string]int{"domain": 2}; !maps.Equal(agents.calls, want) {
+		t.Fatalf("inspections = %v, want %v", agents.calls, want)
+	}
+	agents.env[gui] = map[string]string{"DYLD_INSERT_LIBRARIES": "/tmp/x"}
+	if _, err := scope.census(context.Background(), samples); !errors.Is(err, ErrContamination) {
+		t.Fatalf("changed job launchd environment: %v", err)
+	}
 }
 
 func TestMaintenanceBaselineAllowsActiveJobsButRejectsLostIdentity(t *testing.T) {
