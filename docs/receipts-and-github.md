@@ -381,6 +381,14 @@ Checks attach to the exact head. A new push gets new runs: fast entries are admi
 **no** full check until it is ready for review or labelled, and a missing required check blocks the merge, so the
 gate fails closed.
 
+Claims take fast work first (#193): among one repository's queued jobs, the GitHub jobs of a tiered policy's
+fast entries and builds (build-for-testing producers included) are claimed before its full-tier shards, each kept
+in submission order, so a draft push's smoke shard does not wait behind other pull requests' full matrices. The
+[fair order](configuration.md) across repositories is unchanged, and API jobs and jobs of untiered policies keep
+their place relative to every job: no job is moved past them. A full shard is passed at most 3 times
+(`store.MaxTierPasses`) before the oldest one is claimed in the fair order; each full claim starts the count
+afresh. A job view's `waiting` reports this claim order.
+
 Branch protection for herdrup's tiered policy (GitHub requires exact names, no wildcards), each pinned to the
 configured App:
 

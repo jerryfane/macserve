@@ -81,7 +81,7 @@ func blockedBy(status controller.Status, err error) []string {
 
 // waiting is a queued job's wait: the first scheduler condition holding it
 // back, the busy and total lanes, its place among its repository's queued
-// jobs in the fair order (1 is next), and how many queued jobs of any
+// jobs in the claim order (1 is next), and how many queued jobs of any
 // repository precede it. It names no other job. nil when job is no longer
 // queued in q's read.
 func (q *queueWait) waiting(job model.Job) map[string]any {
@@ -98,7 +98,7 @@ func (q *queueWait) waiting(job model.Job) map[string]any {
 	return map[string]any{"reason": q.reason(index), "lanes_busy": len(q.view.Active), "lanes": q.lanes(), "position_in_repository": position, "queued_ahead_overall": index}
 }
 
-// reason mirrors dispatch for the queued job at index of the fair order:
+// reason mirrors dispatch for the queued job at index of the claim order:
 // Controller.next checks the service, a held completion, the gate, the lanes
 // and the disk reservation for one more lane before it asks Store.Claim,
 // which then checks for an active exclusive job and the fair head. The cases

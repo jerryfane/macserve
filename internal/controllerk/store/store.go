@@ -58,6 +58,10 @@ type Store struct {
 	options Options
 	// cancelled is the OnCancel observer, if any.
 	cancelled atomic.Pointer[func(id, lease string)]
+	// runTiers is the SetRunTiers function, if any; tierPasses counts
+	// Claim's early jobs taken ahead of a late one in a row (MaxTierPasses).
+	runTiers   atomic.Pointer[func(GitHubRun) string]
+	tierPasses atomic.Int64
 }
 
 // OnCancel registers fn, told the id and lease of every active job whose
