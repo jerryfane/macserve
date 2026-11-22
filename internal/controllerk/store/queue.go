@@ -310,7 +310,6 @@ func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time, la
 		}
 		return model.Job{}, ErrNoJob
 	}
-	fairHead, _ := claimable(fair, concurrent)
 	if job.Exclusive() && len(running) > 0 || holdSimulators && job.Request.Kind.UsesSimulator() || !memoryAdmits(running, job) {
 		if err := tx.Commit(); err != nil {
 			return model.Job{}, err
@@ -342,7 +341,7 @@ func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time, la
 	if err := tx.Commit(); err != nil {
 		return model.Job{}, err
 	}
-	s.countPass(job, fairHead, fair, classes)
+	s.countPass(job, fair, classes)
 	return job, nil
 }
 
