@@ -95,7 +95,8 @@ func (f *ownerFixture) checksOf(sha string) map[string]githubapi.Check {
 	defer f.remote.mu.Unlock()
 	checks := make(map[string]githubapi.Check)
 	for _, check := range f.remote.checks {
-		if check.HeadSHA == sha {
+		// GitHub shows the newest check run of a name (#198).
+		if check.HeadSHA == sha && check.ID > checks[check.Name].ID {
 			checks[check.Name] = check
 		}
 	}

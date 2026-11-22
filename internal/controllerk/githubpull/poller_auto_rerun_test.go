@@ -13,8 +13,9 @@ import (
 
 // #119: in pull mode (owner policies read no comments) a head whose attempt
 // the service cancelled gets one new attempt on the next poll, published to
-// the same check; the owner API's requested rerun starts one more after a
-// terminal attempt, bounded at two per hour.
+// the same check while that check is not yet completed; the owner API's
+// requested rerun starts one more after a terminal attempt, bounded at two
+// per hour, on a new check once the old one completed (#198).
 func TestOwnerPullModeRerunsServiceCancelledHeadOnSameCheck(t *testing.T) {
 	ctx := context.Background()
 	f, err := newOwnerFixture(t, ownerPolicy("themartianapp", martianID))
@@ -55,17 +56,26 @@ func TestOwnerPullModeRerunsServiceCancelledHeadOnSameCheck(t *testing.T) {
 	if run, started, err := rerun(); err != nil || started || run.JobID != runs[0].JobID {
 		t.Fatalf("rerun of a queued attempt: %+v %v %v", run, started, err)
 	}
-	current := runs[0].JobID
+	current, checkID := runs[0].JobID, runs[0].CheckID
 	for i := range 2 {
 		if _, err := f.s.Cancel(ctx, current, "client", model.CancelReason{Source: model.CancelGitHub}, f.options.Now()); err != nil {
 			t.Fatal(err)
 		}
+		f.poll(t) // publishes the cancelled conclusion
 		run, started, err := rerun()
-		if err != nil || !started || run.JobID == current || run.CheckID != first.CheckID {
+		if err != nil || !started || run.JobID == current {
 			t.Fatalf("owner rerun %d: %+v %v %v", i+1, run, started, err)
 		}
 		current = run.JobID
 		f.poll(t)
+		run = f.active(t, 501)[0]
+		f.remote.mu.Lock()
+		check := f.remote.checks[run.CheckID]
+		f.remote.mu.Unlock()
+		if run.CheckID == checkID || check.ExternalID != current || check.Status != "queued" {
+			t.Fatalf("owner rerun %d not on a new check: %+v %+v (previous %d)", i+1, run, check, checkID)
+		}
+		checkID = run.CheckID
 	}
 	if _, err := f.s.Cancel(ctx, current, "client", model.CancelReason{Source: model.CancelGitHub}, f.options.Now()); err != nil {
 		t.Fatal(err)

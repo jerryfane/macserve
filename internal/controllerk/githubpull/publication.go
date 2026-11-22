@@ -317,7 +317,14 @@ func (p *Poller) publishOne(ctx context.Context, run store.GitHubRun) (int64, er
 			if check.Name != input.Name || check.HeadSHA != run.SHA || check.AppID != p.options.Client.AppID() {
 				return 0, errors.New("durable GitHub check identity changed")
 			}
-			id = check.ID
+			// #198: GitHub never moves a completed check back to queued or
+			// in_progress, so a new attempt (rerun, retry) after a completed
+			// one publishes a new check of the same name; the superseded one
+			// stays as is. A crash after the create is reconciled above by
+			// the new attempt's external_id, never by creating a second one.
+			if check.Status != "completed" || check.ExternalID == input.ExternalID {
+				id = check.ID
+			}
 		}
 	}
 	var check githubapi.Check

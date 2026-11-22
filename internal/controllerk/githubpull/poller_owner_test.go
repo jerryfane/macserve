@@ -193,7 +193,11 @@ func (g *orgGitHub) serve(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
-			c.Status, c.Conclusion, c.ExternalID, c.Output = input.Status, input.Conclusion, input.ExternalID, input.Output
+			// GitHub never moves a completed check back (#198).
+			if c.Status != "completed" {
+				c.Status, c.Conclusion = input.Status, input.Conclusion
+			}
+			c.ExternalID, c.Output = input.ExternalID, input.Output
 			g.checks[id] = c
 		}
 		encode(checkJSON(c))
