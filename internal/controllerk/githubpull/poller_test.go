@@ -179,8 +179,11 @@ func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 			}
 			check.Name = input.Name
 			check.ExternalID = input.ExternalID
-			check.Status = input.Status
-			check.Conclusion = input.Conclusion
+			// GitHub never moves a completed check back (#198).
+			if check.Status != "completed" {
+				check.Status = input.Status
+				check.Conclusion = input.Conclusion
+			}
 			check.Output = input.Output
 			f.checks[id] = check
 		}
@@ -396,15 +399,39 @@ func TestHTTPFailureEnsureAndExplicitBoundedReruns(t *testing.T) {
 	if check.Conclusion != "failure" || packet.JobID != first.JobID || len(packet.Requests) != 1 {
 		t.Fatalf("ensure retried failure: %+v %+v", check, packet)
 	}
+	// #198: each rerun publishes a new check run (GitHub never moves the
+	// completed one back to queued), completion updates that new run, and a
+	// lost create response is reconciled by external_id, not created twice.
+	previous := first.CheckID
 	for i := int64(2); i <= 3; i++ {
 		f.add(f.comment(i, "rerun"))
+		created := f.remote.created
+		if i == 3 {
+			f.remote.lostCreate = true
+			if err := f.p.Poll(context.Background()); err == nil {
+				t.Fatal("lost create response unexpectedly succeeded")
+			}
+			f.advance(20 * time.Second)
+		}
 		f.poll(t)
 		check, packet = f.current(t)
-		if check.ID != first.CheckID || check.Status != "queued" || check.Conclusion != "" || packet.JobID == first.JobID || len(packet.Requests) != 1 || packet.Requests[0].CommentID != i {
-			t.Fatalf("rerun did not replace current check/correlation: %+v %+v", check, packet)
+		if check.ID == previous || f.remote.created != created+1 || check.Status != "queued" || check.Conclusion != "" || packet.JobID == first.JobID || len(packet.Requests) != 1 || packet.Requests[0].CommentID != i {
+			t.Fatalf("rerun %d did not publish a new check: creates=%d (was %d) %+v %+v", i, f.remote.created, created, check, packet)
+		}
+		f.remote.mu.Lock()
+		old := f.remote.checks[previous]
+		f.remote.mu.Unlock()
+		if old.Status != "completed" || old.Conclusion != "failure" {
+			t.Fatalf("superseded check changed: %+v", old)
 		}
 		f.finish(t, model.Failed, json.RawMessage(`{}`))
 		f.poll(t)
+		f.poll(t)
+		done, _ := f.current(t)
+		if done.ID != check.ID || done.Status != "completed" || done.Conclusion != "failure" || f.remote.created != created+1 {
+			t.Fatalf("completion did not update the new check %d: %+v creates=%d", check.ID, done, f.remote.created)
+		}
+		previous = check.ID
 	}
 	last := f.run(t)
 	f.add(f.comment(4, "rerun"))
