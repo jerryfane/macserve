@@ -1,12 +1,16 @@
 package hostguard
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -105,40 +109,45 @@ func TestJobLoginListableKilledReadIsADeadline(t *testing.T) {
 }
 
 // Review of #219: a failed command and an ended context do not show that the
-// context ended the command. One reaped before its context ended (an exit
-// with any status, or a signal from anyone else) is a result, even while a
-// descendant keeps its output open past that point; only one the context kept
-// from starting or killed is cut short.
+// context ended the command. One that ended on its own (an exit with any
+// status, or a signal from anyone else), whether reaped before the context
+// ended or still unreaped then, is a result, even while a descendant keeps
+// its output open; only one the context kept from starting or terminated is
+// cut short.
 func TestCutShortOnlyWhenTheContextEndedTheCommand(t *testing.T) {
-	// A descendant holds stdout for 1.5 s, so the drain outlasts the context,
-	// which ends at 500 ms.
-	const drain = "(/bin/sleep 1.5) & "
-	for _, tc := range []struct {
-		name, script string
-		cut          bool
-	}{
-		{name: "exit 42 during the drain", script: drain + "exit 42"},
-		{name: "own SIGTERM during the drain", script: drain + "kill -TERM $$"},
-		{name: "own SIGKILL during the drain", script: drain + "kill -KILL $$"},
-		{name: "killed by the context", script: "exec /bin/sleep 5", cut: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			cmd := exec.CommandContext(ctx, "/bin/sh", "-c", tc.script)
-			cmd.WaitDelay = 5 * time.Second
-			w := watchCancel(cmd)
-			timer := time.AfterFunc(500*time.Millisecond, cancel)
-			defer timer.Stop()
-			_, err := cmd.Output()
-			if ctx.Err() == nil {
-				t.Fatalf("returned (%v) before the context ended", err)
-			}
-			if got := w.cutShort(ctx, err); got != tc.cut {
-				t.Fatalf("%v: cut short %v, want %v", err, got, tc.cut)
-			}
-		})
+	for _, ending := range []string{"exit 42", "kill -TERM $$", "kill -KILL $$"} {
+		for _, reaped := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s, reaped %v", ending, reaped), func(t *testing.T) {
+				run := startWatched(t, "(read _ < \"$HOLD\") & "+ending)
+				if reaped {
+					run.wait()
+					run.until("reaped", func() bool { return syscall.Kill(run.cmd.Process.Pid, 0) == syscall.ESRCH })
+				} else {
+					run.until("dead", func() bool {
+						out, _ := exec.Command("/bin/ps", "-o", "stat=", "-p", strconv.Itoa(run.cmd.Process.Pid)).Output()
+						return strings.HasPrefix(strings.TrimSpace(string(out)), "Z")
+					})
+				}
+				run.cancel()
+				if !reaped {
+					run.awaitCancelCall()
+					run.wait()
+				}
+				run.release()
+				if err := run.result(); run.watch.cutShort(run.ctx, err) {
+					t.Fatalf("%v: cut short, want a result", err)
+				}
+			})
+		}
 	}
+	t.Run("terminated by the context", func(t *testing.T) {
+		run := startWatched(t, "exec /bin/sleep 5")
+		run.wait()
+		run.cancel()
+		if err := run.result(); !run.watch.cutShort(run.ctx, err) {
+			t.Fatalf("%v: not cut short", err)
+		}
+	})
 	done, stop := context.WithCancel(context.Background())
 	stop()
 	notStarted := exec.CommandContext(done, "/bin/sh", "-c", "exit 0")
@@ -149,5 +158,87 @@ func TestCutShortOnlyWhenTheContextEndedTheCommand(t *testing.T) {
 	failed := exec.Command("/bin/sh", "-c", "exit 1")
 	if err := failed.Run(); (&cancelWatch{cmd: failed}).cutShort(context.Background(), err) {
 		t.Fatalf("a failure with a live context (%v) was cut short", err)
+	}
+}
+
+// watchedRun is one command started under watchCancel whose stdout a
+// background descendant may hold open until release.
+type watchedRun struct {
+	t        *testing.T
+	ctx      context.Context
+	cancel   context.CancelFunc
+	cmd      *exec.Cmd
+	watch    *cancelWatch
+	hold     string
+	canceled chan struct{}
+	done     chan error
+}
+
+func startWatched(t *testing.T, script string) *watchedRun {
+	t.Helper()
+	hold := filepath.Join(t.TempDir(), "hold")
+	if err := syscall.Mkfifo(hold, 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", script)
+	cmd.Env = []string{"HOLD=" + hold}
+	cmd.Stdout = &bytes.Buffer{} // copied by exec, so its drain can outlast the command
+	cmd.WaitDelay = 10 * time.Second
+	r := &watchedRun{t: t, ctx: ctx, cancel: cancel, cmd: cmd, watch: watchCancel(cmd), hold: hold, canceled: make(chan struct{})}
+	signal := cmd.Cancel
+	cmd.Cancel = func() error { defer close(r.canceled); return signal() }
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// wait reaps the command in the background.
+func (r *watchedRun) wait() {
+	r.done = make(chan error, 1)
+	go func() { r.done <- r.cmd.Wait() }()
+}
+
+func (r *watchedRun) until(what string, cond func() bool) {
+	r.t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); !cond(); time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			r.t.Fatalf("command never %s", what)
+		}
+	}
+}
+
+func (r *watchedRun) awaitCancelCall() {
+	r.t.Helper()
+	select {
+	case <-r.canceled:
+	case <-time.After(5 * time.Second):
+		r.t.Fatal("the context's cancellation never reached the command")
+	}
+}
+
+// release lets the descendant holding stdout exit.
+func (r *watchedRun) release() {
+	r.t.Helper()
+	f, err := os.OpenFile(r.hold, os.O_WRONLY, 0)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	f.Close()
+}
+
+func (r *watchedRun) result() error {
+	r.t.Helper()
+	select {
+	case err := <-r.done:
+		if err == nil {
+			r.t.Fatal("the command succeeded")
+		}
+		return err
+	case <-time.After(10 * time.Second):
+		r.t.Fatal("the command was never reaped")
+		return nil
 	}
 }

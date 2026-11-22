@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
-	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -39,32 +39,30 @@ func jobLoginListable(ctx context.Context, name, dsclPath string) error {
 	return nil
 }
 
-// cancelWatch records whether cmd's context cancellation killed it.
-type cancelWatch struct {
-	cmd    *exec.Cmd
-	killed atomic.Bool
-}
+// cancelSignal is the signal a context cancellation sends a watched command
+// (watchCancel). Nothing else sends it to these commands, so a wait status
+// reporting it identifies the cancellation; dscl's default action for it is
+// to terminate (checked on the Studio, 2026-11-22).
+const cancelSignal = syscall.SIGUSR2
 
-// watchCancel makes cmd's context cancellation observable; call it before
-// cmd starts. exec calls Cancel only when the context ends before the
-// process is reaped, never during the drain of its output afterwards.
+// cancelWatch tells whether cmd's context cancellation ended it.
+type cancelWatch struct{ cmd *exec.Cmd }
+
+// watchCancel makes cmd's context cancellation identifiable by its wait
+// status: the cancellation sends cancelSignal instead of SIGKILL; call it
+// before cmd starts. A command that ignores the signal is killed by exec
+// after WaitDelay and is then judged as any other failure.
 func watchCancel(cmd *exec.Cmd) *cancelWatch {
-	w := &cancelWatch{cmd: cmd}
-	cmd.Cancel = func() error {
-		err := cmd.Process.Kill()
-		if err == nil {
-			w.killed.Store(true)
-		}
-		return err
-	}
-	return w
+	cmd.Cancel = func() error { return cmd.Process.Signal(cancelSignal) }
+	return &cancelWatch{cmd: cmd}
 }
 
 // cutShort reports whether the context, not the command, ended cmd, which
-// failed with err: ctx kept it from starting, or ctx's cancellation killed
-// it while it ran. A command reaped before its context ended (an exit with
-// any status, or a signal from anyone else) is a result, even if ctx expired
-// while its output was still drained (#219 review).
+// failed with err: ctx kept it from starting, or ctx's cancellation
+// terminated it (its wait status reports cancelSignal). A command that
+// ended any other way (an exit with any status, or another signal from
+// anyone, before or after the context ended) is a result, even if ctx
+// expired while its output was still drained (#219 review).
 func (w *cancelWatch) cutShort(ctx context.Context, err error) bool {
 	if err == nil || ctx.Err() == nil {
 		return false
@@ -72,5 +70,9 @@ func (w *cancelWatch) cutShort(ctx context.Context, err error) bool {
 	if w.cmd.Process == nil {
 		return errors.Is(err, ctx.Err())
 	}
-	return w.killed.Load() && (w.cmd.ProcessState == nil || !w.cmd.ProcessState.Exited())
+	if w.cmd.ProcessState == nil {
+		return false
+	}
+	status, ok := w.cmd.ProcessState.Sys().(syscall.WaitStatus)
+	return ok && status.Signaled() && status.Signal() == cancelSignal
 }
