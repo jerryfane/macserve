@@ -29,6 +29,16 @@ const censusBudget = 120 * time.Second
 // census's mount and special-file checks in published health.
 const censusMaxAge = 150 * time.Second
 
+// censusInterval is the least time between the starts of two byte censuses
+// while the latest one is usable. Started at every probe, the full walk of
+// the workspaces and job home (~73 GB) ran back to back and cost the daemon
+// about one CPU core around the clock, competing with the jobs it guards
+// (Studio 2026-11-22, #215). A census taking R now leaves accounted bytes at
+// most censusInterval + R old instead of R, still within censusMaxAge while
+// R stays under censusMaxAge - censusInterval; a slower one leaves probes
+// inconclusive as before, never a finding.
+const censusInterval = 60 * time.Second
+
 // guiBaselineBudget bounds one background GUI-baseline observation (see
 // guiBaselineTracker). With three simulators booting on the Studio (#108) it
 // outlasted every 8 s probe for more than 40 s; unloaded it takes 2-3 s.

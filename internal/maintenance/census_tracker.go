@@ -34,7 +34,7 @@ type censusBytes struct{ total, products int64 }
 
 func newCensusTracker(parent context.Context) *censusTracker {
 	return &censusTracker{
-		tracker: tracker[censusKey, censusBytes]{name: "mutable census", parent: parent, now: time.Now, budget: censusBudget, maxAge: censusMaxAge, reserve: probeReserve, inconclusive: censusInconclusive},
+		tracker: tracker[censusKey, censusBytes]{name: "mutable census", parent: parent, now: time.Now, budget: censusBudget, maxAge: censusMaxAge, reserve: probeReserve, interval: censusInterval, inconclusive: censusInconclusive},
 		run:     accountBytes,
 	}
 }

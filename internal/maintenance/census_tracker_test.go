@@ -69,6 +69,9 @@ func newTestTracker(t *testing.T) (*censusTracker, *fakeCensus, *fakeClock) {
 	tr.run = f.run
 	tr.now = clock.Now
 	tr.reserve = 150 * time.Millisecond
+	// Tests of reuse and findings start a census at every probe; the start
+	// interval has its own test.
+	tr.interval = 0
 	return tr, f, clock
 }
 
@@ -125,6 +128,51 @@ func TestCensusFinishingWithinTheProbeIsUsedFresh(t *testing.T) {
 	if f.starts() != 2 {
 		t.Fatalf("census started %d times, want once per probe", f.starts())
 	}
+}
+
+// #215: started at every probe, the byte census ran back to back, about one
+// CPU core around the clock on the Studio. A usable census is reused until
+// censusInterval after its start; one that was not usable is retried at once.
+func TestCensusStartsAtMostOncePerInterval(t *testing.T) {
+	tr, f, clock := newTestTracker(t)
+	tr.interval = newCensusTracker(context.Background()).interval
+	if tr.interval != censusInterval || censusInterval >= censusMaxAge {
+		t.Fatalf("interval %v, censusMaxAge %v", tr.interval, censusMaxAge)
+	}
+	go func() { f.release <- censusOutcome{bytes: 100} }()
+	if got, err := probe(tr, 5*time.Second); err != nil || got != 100 {
+		t.Fatalf("first probe: %d, %v", got, err)
+	}
+	for elapsed := 10 * time.Second; elapsed < censusInterval; elapsed += 10 * time.Second {
+		clock.advance(10 * time.Second)
+		if got, err := probe(tr, 10*time.Millisecond); err != nil || got != 100 {
+			t.Fatalf("probe at +%v: %d, %v; want the census of +0s", elapsed, got, err)
+		}
+	}
+	if censusRunning(tr) || f.starts() != 1 {
+		t.Fatalf("a census started within %v of the last (%d starts)", censusInterval, f.starts())
+	}
+	clock.advance(10 * time.Second)
+	go func() { f.release <- censusOutcome{bytes: 200} }()
+	if got, err := probe(tr, 5*time.Second); err != nil || got != 200 || f.starts() != 2 {
+		t.Fatalf("probe at +%v: %d, %v after %d starts; want a fresh 200", censusInterval, got, err, f.starts())
+	}
+	clock.advance(censusInterval)
+	if _, err := probe(tr, 10*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	finish(t, tr, f, censusOutcome{bytes: -1, err: errAcceptedMountChanged})
+	if _, err := probe(tr, 10*time.Millisecond); err != nil || !censusRunning(tr) {
+		t.Fatalf("after an inconclusive census: %v; want the next census started at once", err)
+	}
+}
+
+// censusRunning reports whether a census is running; start records one before
+// its goroutine runs.
+func censusRunning(tr *censusTracker) bool {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	return tr.running != nil
 }
 
 // A reused census reports its products pool bytes with its total, never the
