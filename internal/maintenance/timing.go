@@ -33,10 +33,14 @@ const censusMaxAge = 150 * time.Second
 // while the latest one is usable. Started at every probe, the full walk of
 // the workspaces and job home (~73 GB) ran back to back and cost the daemon
 // about one CPU core around the clock, competing with the jobs it guards
-// (Studio 2026-11-22, #215). A census taking R now leaves accounted bytes at
-// most censusInterval + R old instead of R, still within censusMaxAge while
-// R stays under censusMaxAge - censusInterval; a slower one leaves probes
-// inconclusive as before, never a finding.
+// (Studio 2026-11-22, #215). The next census starts at the first probe after
+// censusInterval, so with the probe cadence P (10 s) and a census taking R,
+// accounted bytes are now up to about censusInterval + P + R old instead of
+// R. That stays within censusMaxAge while R stays under about 80 s; a census
+// slower than that now leaves probes inconclusive until it completes, where
+// back to back it did so only beyond censusMaxAge. Inconclusive is never a
+// finding: it blocks admission and cancels nothing within the probe outage
+// bound.
 const censusInterval = 60 * time.Second
 
 // guiBaselineBudget bounds one background GUI-baseline observation (see
