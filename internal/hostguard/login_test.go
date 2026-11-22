@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -81,18 +82,54 @@ exit "$(/bin/cat "$fixture/status")"
 // invalid health and cancelled every running job (Studio 2026-11-22 20:26Z).
 // A read cut short observed nothing: it is a deadline, which maintenance
 // counts as a probe without evidence.
-func TestJobLoginListableReadCutShortIsADeadline(t *testing.T) {
-	executable := filepath.Join(t.TempDir(), "dscl")
-	if err := os.WriteFile(executable, []byte("#!/bin/sh\nprintf 'AuthenticationAuthority: ;ShadowHash; partial'\nexec /bin/sleep 5\n"), 0700); err != nil {
+func TestJobLoginListableKilledReadIsADeadline(t *testing.T) {
+	dir := t.TempDir()
+	executable := filepath.Join(dir, "dscl")
+	// The marker is printed, then the read blocks until killed.
+	script := "#!/bin/sh\nprintf 'AuthenticationAuthority: ;ShadowHash; partial'\n: > \"${0%/*}/blocked\"\nexec /bin/sleep 5\n"
+	if err := os.WriteFile(executable, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	err := jobLoginListable(ctx, "test-job", executable)
+	if _, statErr := os.Stat(filepath.Join(dir, "blocked")); statErr != nil {
+		t.Fatalf("the read never reached its blocking phase: %v", statErr)
+	}
 	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("cut-short read: %v, want a deadline", err)
+		t.Fatalf("killed read: %v, want a deadline", err)
 	}
 	if strings.Contains(err.Error(), "ShadowHash") {
 		t.Fatalf("error discloses directory output: %v", err)
+	}
+}
+
+// Review of #219: a failed command and an expired context do not show that
+// the deadline ended the command. Its exit, whatever the status, is a result:
+// only a command ctx kept from starting or killed is cut short.
+func TestCutShortOnlyWhenTheContextEndedTheCommand(t *testing.T) {
+	done, cancel := context.WithCancel(context.Background())
+	cancel()
+	exited := exec.Command("/bin/sh", "-c", "exit 42")
+	err := exited.Run()
+	if err == nil || cutShort(done, exited, err) {
+		t.Fatalf("a command that exited 42 (%v) before its context ended was cut short", err)
+	}
+	notStarted := exec.CommandContext(done, "/bin/sh", "-c", "exit 0")
+	if err := notStarted.Run(); err == nil || !cutShort(done, notStarted, err) {
+		t.Fatalf("a command its done context kept from starting (%v) was not cut short", err)
+	}
+	live, stop := context.WithCancel(context.Background())
+	killed := exec.CommandContext(live, "/bin/sleep", "5")
+	if err := killed.Start(); err != nil {
+		t.Fatal(err)
+	}
+	stop()
+	if err := killed.Wait(); err == nil || !cutShort(live, killed, err) {
+		t.Fatalf("a command its context killed (%v) was not cut short", err)
+	}
+	running := exec.Command("/bin/sh", "-c", "exit 1")
+	if err := running.Run(); err == nil || cutShort(context.Background(), running, err) {
+		t.Fatalf("a failure with a live context (%v) was cut short", err)
 	}
 }

@@ -23,7 +23,7 @@ func jobLoginListable(ctx context.Context, name, dsclPath string) error {
 	cmd.Dir = "/"
 	cmd.WaitDelay = 100 * time.Millisecond
 	data, err := cmd.Output()
-	if err != nil && ctx.Err() != nil {
+	if err != nil && cutShort(ctx, cmd, err) {
 		// Killed at its deadline, the read observed nothing: inconclusive, not
 		// a refusal. Under job load (Studio 2026-11-22 20:26Z, #215) such a
 		// read cancelled every running job as a finding; the next probe 9 s
@@ -35,4 +35,18 @@ func jobLoginListable(ctx context.Context, name, dsclPath string) error {
 		return errors.New("job user not listable at login window")
 	}
 	return nil
+}
+
+// cutShort reports whether ctx, not the command, ended cmd, which failed with
+// err: it never started because ctx was done, or ctx's cancellation killed
+// it. A command that exited on its own completed whatever its status, even if
+// ctx expired while its output was still drained (#219 review).
+func cutShort(ctx context.Context, cmd *exec.Cmd, err error) bool {
+	if ctx.Err() == nil {
+		return false
+	}
+	if cmd.ProcessState == nil {
+		return errors.Is(err, ctx.Err())
+	}
+	return !cmd.ProcessState.Exited()
 }
