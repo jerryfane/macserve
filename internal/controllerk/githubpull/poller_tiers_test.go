@@ -2,11 +2,15 @@ package githubpull
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/jerryfane/macserve/internal/controllerk/store"
 	"github.com/jerryfane/macserve/internal/githubapi"
 	"github.com/jerryfane/macserve/internal/githubwire"
 	"github.com/jerryfane/macserve/internal/model"
@@ -152,5 +156,147 @@ func TestTiersOwnerRerunFollowsTriggers(t *testing.T) {
 	run, started, err = f.p.Rerun(ctx, matrixRepoID, "", headSHA('1'), uiTemplate, "ipad", f.options.Now())
 	if err != nil || !started || f.p.CheckName(run) != "mac-evidence/full/ipad" {
 		t.Fatalf("full rerun of a labelled draft: %+v %v %v", run, started, err)
+	}
+}
+
+// A second herdrup-like repository under the same tiered policy shape.
+const (
+	secondRepo   = "themartianapp/herdrup-two"
+	secondRepoID = int64(1318951364)
+)
+
+// tierQueue polls the tiered policy's pull requests from..to of repo in
+// turn, one poll each: pull 1 ready for review (its build, its smoke and
+// its four full shards queue), every later one a draft (its build and its
+// smoke). Pull n's head is headSHA('0'+n).
+func (f *ownerFixture) tierQueue(t *testing.T, repo string, from, to int) {
+	t.Helper()
+	for n := from; n <= to; n++ {
+		pull := matrixPull(n, headSHA(byte('0'+n)))
+		if repo == secondRepo {
+			pull.HeadRepositoryID = secondRepoID
+		}
+		pull.Draft = n > 1
+		f.pull(repo, pull, tieredConfig)
+		f.poll(t)
+	}
+}
+
+// apiJob submits a private API build of the matrix repository, as a
+// principal of the API would: no GitHub run.
+func (f *ownerFixture) apiJob(t *testing.T) model.Job {
+	t.Helper()
+	admission, err := f.p.admission(tieredPolicy(), matrixPull(9, headSHA('9')), nativeBuild, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, _, err := f.s.Enqueue(context.Background(), "api", "api-build", admission.Admission, f.options.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return job
+}
+
+// claimAll claims and ends every queued job one at a time, a second apart,
+// and names each in claim order: "<pull>:<check without mac-evidence/>" for
+// the matrix repository's runs, "two/<pull>:<check …>" for the second
+// repository's, "api" for the API job api.
+func (f *ownerFixture) claimAll(t *testing.T, api string) []string {
+	t.Helper()
+	ctx := context.Background()
+	labels := map[string]string{api: "api"}
+	for prefix, id := range map[string]int64{"": matrixRepoID, "two/": secondRepoID} {
+		runs, err := f.s.GitHubRuns(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, run := range runs {
+			labels[run.JobID] = fmt.Sprintf("%s%c:%s", prefix, run.SHA[0], strings.TrimPrefix(f.p.CheckName(run), "mac-evidence/"))
+		}
+	}
+	var order []string
+	for {
+		f.advance(time.Second)
+		job, err := f.s.Claim(ctx, "worker-epoch", f.options.Now(), 1, false)
+		if errors.Is(err, store.ErrNoJob) {
+			return order
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		order = append(order, labels[job.ID])
+		if err = f.s.Transition(ctx, job.ID, job.LeaseToken, model.Preparing, model.Finalizing, "test execution finished", f.options.Now()); err != nil {
+			t.Fatal(err)
+		}
+		if err = f.s.Finish(ctx, job.ID, job.LeaseToken, model.Succeeded, json.RawMessage(`{"exit_code":0}`), true, "test terminal", f.options.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A draft push's build and fast smoke shard are claimed ahead of another
+// pull request's full-tier shards queued before them (#193); each tier
+// keeps submission order.
+func TestTiersClaimFastAheadOfQueuedFull(t *testing.T) {
+	f := newMatrixFixture(t, tieredPolicy())
+	f.tierQueue(t, matrixRepo, 1, 2)
+	want := []string{"1:org-build-v1", "1:fast/smoke", "2:org-build-v1", "2:fast/smoke",
+		"1:full/iphone-terminal", "1:full/iphone-app", "1:full/ipad", "1:full/ipad-script"}
+	if got := f.claimAll(t, ""); !slices.Equal(got, want) {
+		t.Fatalf("claim order\n got %v\nwant %v", got, want)
+	}
+}
+
+// Fast-tier jobs pass a waiting full-tier shard at most
+// store.MaxTierPasses times; then the oldest full shard is claimed and
+// the count starts afresh.
+func TestTiersBoundFastPassesOfAFullShard(t *testing.T) {
+	f := newMatrixFixture(t, tieredPolicy())
+	f.tierQueue(t, matrixRepo, 1, 3)
+	want := []string{"1:org-build-v1", "1:fast/smoke", "2:org-build-v1", "2:fast/smoke", "3:org-build-v1",
+		"1:full/iphone-terminal", "3:fast/smoke", "1:full/iphone-app", "1:full/ipad", "1:full/ipad-script"}
+	if got := f.claimAll(t, ""); !slices.Equal(got, want) {
+		t.Fatalf("claim order\n got %v\nwant %v", got, want)
+	}
+}
+
+// An API job keeps its place relative to every job: tiered jobs queued
+// after it do not pass it, nor do those before it move behind it.
+func TestTiersLeaveAPIJobsInPlace(t *testing.T) {
+	f := newMatrixFixture(t, tieredPolicy())
+	f.tierQueue(t, matrixRepo, 1, 2)
+	api := f.apiJob(t)
+	f.tierQueue(t, matrixRepo, 3, 3)
+	want := []string{"1:org-build-v1", "1:fast/smoke", "2:org-build-v1", "2:fast/smoke",
+		"1:full/iphone-terminal", "1:full/iphone-app", "1:full/ipad", "1:full/ipad-script", "api", "3:org-build-v1", "3:fast/smoke"}
+	if got := f.claimAll(t, api.ID); !slices.Equal(got, want) {
+		t.Fatalf("claim order\n got %v\nwant %v", got, want)
+	}
+}
+
+// A repository's full-tier shard is passed at most store.MaxTierPasses
+// times however another tiered repository's claims interleave: the second
+// repository's full claims do not start the first one's count afresh.
+func TestTiersBoundPassesPerRepository(t *testing.T) {
+	second := tieredPolicy()
+	second.RepositoryID, second.Repository = secondRepoID, secondRepo
+	f, err := newOrgFixture(t, matrixTemplates(), tieredPolicy(), second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.remote.install(matrixRepo, matrixRepoID, martianID, "")
+	f.remote.install(secondRepo, secondRepoID, martianID, "")
+	f.tierQueue(t, matrixRepo, 1, 3)
+	f.tierQueue(t, secondRepo, 1, 1)
+	// Claims alternate between the repositories (the fair order). The
+	// matrix repository's builds and smokes of pulls 2 and 3 pass its full
+	// shards three times; then its oldest full shard goes, while the second
+	// repository's own full shards are claimed in between.
+	want := []string{"1:org-build-v1", "two/1:org-build-v1", "1:fast/smoke", "two/1:fast/smoke",
+		"2:org-build-v1", "two/1:full/iphone-terminal", "2:fast/smoke", "two/1:full/iphone-app",
+		"3:org-build-v1", "two/1:full/ipad", "1:full/iphone-terminal", "two/1:full/ipad-script",
+		"3:fast/smoke", "1:full/iphone-app", "1:full/ipad", "1:full/ipad-script"}
+	if got := f.claimAll(t, ""); !slices.Equal(got, want) {
+		t.Fatalf("claim order\n got %v\nwant %v", got, want)
 	}
 }

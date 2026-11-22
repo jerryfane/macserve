@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode"
@@ -58,6 +59,12 @@ type Store struct {
 	options Options
 	// cancelled is the OnCancel observer, if any.
 	cancelled atomic.Pointer[func(id, lease string)]
+	// runTiers is the SetRunTiers function, if any. tierPasses counts, by
+	// repository, Claim's early jobs taken ahead of one of its queued late
+	// jobs since one was last claimed (MaxTierPasses); guarded by passesMu.
+	runTiers   atomic.Pointer[func(TierQuery) string]
+	passesMu   sync.Mutex
+	tierPasses map[string]int
 }
 
 // OnCancel registers fn, told the id and lease of every active job whose

@@ -8,7 +8,7 @@ import (
 )
 
 // QueueView is the queue as Claim reads it, for read-only reporting: every
-// queued job in the fair order (fairOrder) and every active job, oldest claim
+// queued job in the claim order (claimOrder) and every active job, oldest claim
 // first, from one read transaction. It claims, expires and reserves nothing,
 // so a queued job past its TTL still shows until the next claim or admission
 // expires it.
@@ -28,23 +28,11 @@ func (s *Store) QueueView(ctx context.Context) (QueueView, error) {
 	if err != nil {
 		return QueueView{}, err
 	}
-	rows, err := tx.QueryContext(ctx, fairOrder)
+	fair, classes, err := s.queued(ctx, tx)
 	if err != nil {
 		return QueueView{}, err
 	}
-	defer rows.Close()
-	var queued []model.Job
-	for rows.Next() {
-		job, err := scanJob(rows)
-		if err != nil {
-			return QueueView{}, err
-		}
-		queued = append(queued, job)
-	}
-	if err := rows.Err(); err != nil {
-		return QueueView{}, err
-	}
-	return QueueView{Queued: queued, Active: active}, nil
+	return QueueView{Queued: s.claimOrder(fair, classes), Active: active}, nil
 }
 
 // QueueCounts counts the active and the queued jobs of every repository in

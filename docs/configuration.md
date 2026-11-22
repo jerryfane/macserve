@@ -39,7 +39,10 @@ Optional `signer` connects the controller to the [code signer](#code-signer).
   that has waited longest since its last claim (its newest retained job's start); a repository with no retained
   started job goes first, and ties keep submission order. A burst from one repository therefore delays another
   repository's job by at most one claim per other repository with queued jobs, and each repository's own jobs
-  keep submission order.
+  keep submission order, except that a tiered GitHub policy's fast entries and builds are claimed before its
+  full-tier shards, with a bound on how often a full shard is passed (see
+  [fast and full tiers](receipts-and-github.md#fast-and-full-tiers)). The claim order is this fair order with
+  those tiers applied.
 - `GET /v1/capabilities` and `/v1/jobs` expose authorized profiles and jobs without controller recipes or paths.
   Capabilities' `service_version` is the controller binary's build version: the release tag for a release build
   (as `macserve-controller version --json` reports it). Capabilities' `lanes_busy` (jobs holding a lane) and
@@ -59,9 +62,9 @@ Optional `signer` connects the controller to the [code signer](#code-signer).
   `waiting`, why the scheduler has not claimed it yet:
   `{"reason": "all lanes busy", "lanes_busy": 6, "lanes": 6, "position_in_repository": 2, "queued_ahead_overall": 5}`.
   `lanes_busy` counts jobs holding a lane, `lanes` the lanes claims fill (`max_concurrent_jobs`, capped by the
-  worker's), `position_in_repository` is the job's place among its repository's queued jobs in the fair order
+  worker's), `position_in_repository` is the job's place among its repository's queued jobs in the claim order
   (1 is that repository's next), and `queued_ahead_overall` counts the queued jobs of every repository that the
-  fair order claims first. Neither names another job. `reason` is the first of these that holds, checked in the
+  claim order claims first. Neither names another job. `reason` is the first of these that holds, checked in the
   scheduler's order: `service unavailable` (the controller status could not be read), `service quarantined`,
   `service paused`, `worker unavailable` (no live worker asking for work), `worker idle check` (a completion waits for
   the worker's idle check, which holds every start), `host not ready` (see `blocked_by`), `all lanes busy`,
@@ -70,9 +73,9 @@ Optional `signer` connects the controller to the [code signer](#code-signer).
   job is next`, `simulator start stagger` (the next job uses a simulator while another simulator job is starting),
   `memory budget` (the next job would exceed the 192 GiB concurrent cap), `next in line` (this job is claimed on the
   worker's next request), or `jobs ahead are starting` (a lane is free and the job ahead of it is claimed first).
-  The last five describe the fair order's head, which holds the jobs behind it too. `waiting` is advisory and
+  The last five describe the claim order's head, which holds the jobs behind it too. `waiting` is advisory and
   approximate: it is read from the queue, service state, readiness gate and controller state without claiming, a
-  claim may land a moment later, and the fair order of jobs behind the head shifts each time a repository's job
+  claim may land a moment later, and the claim order of jobs behind the head shifts each time a repository's job
   is claimed. A job no longer queued has none.
 - `/v1/jobs/{id}` provides status, `/logs`, `/logs/stream`, `/results`, `/results/junit`, `/artifacts`,
   `/artifacts/{artifact_id}`, `/receipt`, `/receipt/manifest?sha256=DIGEST`, and `POST /cancel`.

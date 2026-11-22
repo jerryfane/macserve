@@ -195,7 +195,26 @@ func New(options Options) (*Poller, error) {
 	if err := options.Store.InitializeGitHub(context.Background()); err != nil {
 		return nil, err
 	}
+	options.Store.SetRunTiers(p.runTier)
 	return p, nil
+}
+
+// runTier is the tier a queued GitHub job's run is claimed in
+// (store.SetRunTiers) under the policy it was admitted by: a matrix run's
+// entry tier (githubwire.Policy.Tier), and githubwire.TierFast for a build
+// of a tiered policy (a build-for-testing producer or not), which every head
+// of it runs; "" for a run of an untiered or no configured policy, or of an
+// entry the policy no longer has. It reads only the policies New fixed, so
+// the store may call it from any claim.
+func (p *Poller) runTier(query store.TierQuery) string {
+	policy, ok := p.runPolicy(store.GitHubRun{RepositoryID: query.RepositoryID, Repository: query.Repository})
+	if !ok || len(policy.Matrix) == 0 || policy.Matrix[0].Tier == "" {
+		return ""
+	}
+	if query.Shard == "" {
+		return githubwire.TierFast
+	}
+	return policy.Tier(query.Profile, query.Shard)
 }
 
 // ownerPolicy validates an owner-form policy: a canonical owner login and its

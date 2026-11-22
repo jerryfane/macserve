@@ -239,13 +239,15 @@ const fairOrder = `SELECT ` + jobColumns + ` FROM jobs AS queued WHERE state='qu
 // Claim holds a database write reservation from eligibility checks through lease
 // assignment. It claims only while fewer than lanes jobs are active and none of
 // them is exclusive (model.Job.Exclusive), and assigns the lowest free lane. The
-// fair head is chosen over every queued job: an exclusive head waits until no
-// job is active, and nothing behind it is claimed meanwhile. A simulator_script
+// head of the claim order (claimOrder: the fair order with fast-tier GitHub
+// work ahead of full-tier shards, #193) is chosen over every queued job: an
+// exclusive head waits until no job is active, and nothing behind it is
+// claimed meanwhile. A simulator_script
 // job whose template opts in to concurrency (model.Profile.Concurrent) is
 // claimed like a test job, but only while no other such job is active (the
 // worker attributes the simulators a script creates to the one such job
 // running); while one is, the next such job waits without blocking the jobs
-// behind it, which are claimed in the fair order. holdSimulators is set while
+// behind it, which are claimed in the claim order. holdSimulators is set while
 // another simulator job is still starting (the controller's start stagger): a
 // head that uses a simulator then waits like an exclusive head, and nothing
 // behind it is claimed meanwhile; any other head is claimed as usual. The
@@ -297,15 +299,16 @@ func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time, la
 		return model.Job{}, ErrLease
 	}
 	concurrent := slices.ContainsFunc(running, func(active model.Job) bool { return active.Profile.Concurrent() })
-	job, err := nextFair(ctx, tx, concurrent)
-	if errors.Is(err, ErrNotFound) {
+	fair, classes, err := s.queued(ctx, tx)
+	if err != nil {
+		return model.Job{}, err
+	}
+	job, ok := claimable(s.claimOrder(fair, classes), concurrent)
+	if !ok {
 		if err := tx.Commit(); err != nil {
 			return model.Job{}, err
 		}
 		return model.Job{}, ErrNoJob
-	}
-	if err != nil {
-		return model.Job{}, err
 	}
 	if job.Exclusive() && len(running) > 0 || holdSimulators && job.Request.Kind.UsesSimulator() || !memoryAdmits(running, job) {
 		if err := tx.Commit(); err != nil {
@@ -338,32 +341,8 @@ func (s *Store) Claim(ctx context.Context, workerEpoch string, now time.Time, la
 	if err := tx.Commit(); err != nil {
 		return model.Job{}, err
 	}
+	s.countPass(job, fair, classes)
 	return job, nil
-}
-
-// nextFair is the first queued job in the fair order (fairOrder), passing
-// over concurrent simulator_script jobs (model.Profile.Concurrent) when
-// skipConcurrent is set, for a claim while one such job is active;
-// ErrNotFound when there is none.
-func nextFair(ctx context.Context, tx *sql.Tx, skipConcurrent bool) (model.Job, error) {
-	rows, err := tx.QueryContext(ctx, fairOrder)
-	if err != nil {
-		return model.Job{}, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		job, err := scanJob(rows)
-		if err != nil {
-			return model.Job{}, err
-		}
-		if !skipConcurrent || !job.Profile.Concurrent() {
-			return job, nil
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return model.Job{}, err
-	}
-	return model.Job{}, ErrNotFound
 }
 
 func active(state model.State) bool {
