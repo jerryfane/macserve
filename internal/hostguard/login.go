@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os/exec"
 	"time"
 )
@@ -22,6 +23,13 @@ func jobLoginListable(ctx context.Context, name, dsclPath string) error {
 	cmd.Dir = "/"
 	cmd.WaitDelay = 100 * time.Millisecond
 	data, err := cmd.Output()
+	if err != nil && ctx.Err() != nil {
+		// Killed at its deadline, the read observed nothing: inconclusive, not
+		// a refusal. Under job load (Studio 2026-11-22 20:26Z, #215) such a
+		// read cancelled every running job as a finding; the next probe 9 s
+		// later read the account unchanged.
+		return fmt.Errorf("job user login authority read cut short: %w", ctx.Err())
+	}
 	if err != nil || !bytes.Contains(data, []byte(";ShadowHash;")) {
 		// Directory output and command errors can contain sensitive account data.
 		return errors.New("job user not listable at login window")

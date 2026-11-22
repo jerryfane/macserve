@@ -2,9 +2,12 @@ package hostguard
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestJobLoginListable(t *testing.T) {
@@ -70,5 +73,26 @@ exit "$(/bin/cat "$fixture/status")"
 				t.Fatalf("refusal must not disclose directory output or command diagnostics: %v", err)
 			}
 		})
+	}
+}
+
+// #215: under job load the maintenance probe's dscl read was killed at its
+// deadline and reported as "job user not listable", a finding that published
+// invalid health and cancelled every running job (Studio 2026-11-22 20:26Z).
+// A read cut short observed nothing: it is a deadline, which maintenance
+// counts as a probe without evidence.
+func TestJobLoginListableReadCutShortIsADeadline(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), "dscl")
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\nprintf 'AuthenticationAuthority: ;ShadowHash; partial'\nexec /bin/sleep 5\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	err := jobLoginListable(ctx, "test-job", executable)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("cut-short read: %v, want a deadline", err)
+	}
+	if strings.Contains(err.Error(), "ShadowHash") {
+		t.Fatalf("error discloses directory output: %v", err)
 	}
 }

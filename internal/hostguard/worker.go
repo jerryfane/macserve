@@ -51,6 +51,10 @@ func BrokerIdentity(jobUID, jobGID, controllerUID, ownerUID uint32) error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: jobUID, Gid: jobGID, Groups: []uint32{}}}
 	cmd.WaitDelay = 100 * time.Millisecond
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			// Killed at the deadline: no evidence either way (#215).
+			err = errors.Join(err, ctx.Err())
+		}
 		return fmt.Errorf("dedicated job GUI session unavailable: %w", err)
 	}
 	return nil
