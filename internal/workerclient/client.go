@@ -211,8 +211,10 @@ func wait(ctx context.Context, delay time.Duration) error {
 
 // laneDone is one lane's finished execution.
 type laneDone struct {
-	jobID     string
-	cleanupOK bool
+	jobID string
+	// keepEpoch is false when the job's end fenced the worker epoch at the
+	// controller (execute): a new epoch registers after Recover.
+	keepEpoch bool
 	err       error
 }
 
@@ -285,7 +287,7 @@ func (c *Client) Run(ctx context.Context) (returned error) {
 		delete(running, d.jobID)
 		delete(delivering, d.jobID)
 		fatal = errors.Join(fatal, d.err)
-		draining = draining || !d.cleanupOK
+		draining = draining || !d.keepEpoch
 	}
 	hold := func(h laneHold) {
 		delete(running, h.jobID)
@@ -446,8 +448,8 @@ func (c *Client) Run(ctx context.Context) (returned error) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				cleanupOK, err := c.execute(ctx, lease)
-				done <- laneDone{jobID: lease.Job.ID, cleanupOK: cleanupOK, err: err}
+				keepEpoch, err := c.execute(ctx, lease)
+				done <- laneDone{jobID: lease.Job.ID, keepEpoch: keepEpoch, err: err}
 			}()
 			continue
 		}
@@ -487,7 +489,11 @@ func safeID(value string) bool {
 	return true
 }
 
-func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, error) {
+// execute runs lease's job and delivers its completion. It reports whether
+// the worker keeps its epoch: false after an unverified cleanup or a refusal
+// by the draining worker, either of which fenced the epoch at the
+// controller, and after any failure to deliver.
+func (c *Client) execute(parent context.Context, lease protocol.Lease) (keepEpoch bool, err error) {
 	if !safeID(lease.Job.ID) || lease.Token == "" || lease.Job.WorkerEpoch != c.epoch || lease.Job.Deadline == nil || lease.Job.State != model.Preparing {
 		return false, errors.New("invalid controller lease")
 	}
@@ -689,7 +695,10 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 	if !result.CleanupOK {
 		log.Printf("worker job %s cleanup unverified; retrying recovery after poll", lease.Job.ID)
 	}
-	return result.CleanupOK, nil
+	// A job refused because the worker drains fenced this epoch at the
+	// controller with its requeue (#214): like an unverified cleanup, a new
+	// epoch registers only after Recover.
+	return result.CleanupOK && saved.AdmissionRefused != protocol.AdmissionWorkerDraining, nil
 }
 
 // holdHeartbeat reports a held completion to the controller and keeps its

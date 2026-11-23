@@ -44,6 +44,9 @@ type execution struct {
 	// fencing marks a lease never delivered that is being ended: it is
 	// never offered, even while c.mu is released for its source removal.
 	fencing bool
+	// returning is set, holding c.mu, while one caller of returnToQueue
+	// owns the ending of this lease.
+	returning bool
 	// readyAt is when the source became ready for delivery.
 	readyAt time.Time
 	// offeredAt is when the lease was first delivered to the worker.

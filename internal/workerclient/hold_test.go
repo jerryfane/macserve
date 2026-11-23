@@ -91,6 +91,7 @@ func (w *holdWorld) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		var reg protocol.Registration
 		json.NewDecoder(r.Body).Decode(&reg)
 		w.epochs = append(w.epochs, reg.Epoch)
+		w.events = append(w.events, fmt.Sprintf("register %d", len(slices.Compact(slices.Clone(w.epochs)))))
 		rw.WriteHeader(http.StatusNoContent)
 	case path == "/next":
 		if len(w.queue) == 0 {
@@ -349,7 +350,8 @@ func TestHeldStageRetriedUntilRecorded(t *testing.T) {
 // an unverifiable relaunch at lane admission, which the controller returns
 // to the queue instead of failing the job (#206); a job refused before it
 // started because the worker drains, which the controller returns to the
-// queue untouched (#214).
+// queue untouched and whose epoch it fences (#214): the worker registers a
+// new epoch after its idle check. The other refusals keep the epoch.
 func TestCensusAdmissionRefusalReportedAtOnce(t *testing.T) {
 	for job, want := range map[string]protocol.AdmissionRefusal{"j_refused": protocol.AdmissionACLCensusUnavailable, "j_relaunch": protocol.AdmissionRelaunchUnverified, "j_draining": protocol.AdmissionWorkerDraining} {
 		t.Run(job, func(t *testing.T) {
@@ -364,6 +366,11 @@ func TestCensusAdmissionRefusalReportedAtOnce(t *testing.T) {
 			}
 			close(w.gates["j_sib"])
 			w.wait(ctx, "complete j_sib")
+			epochs := 1
+			if want == protocol.AdmissionWorkerDraining {
+				epochs = 2
+				w.wait(ctx, "register 2")
+			}
 			cancel()
 			if err := <-done; err != nil {
 				t.Fatal(err)
@@ -377,8 +384,8 @@ func TestCensusAdmissionRefusalReportedAtOnce(t *testing.T) {
 			if w.refused["j_sib"] != "" {
 				t.Fatalf("sibling reported as refused: %q", w.refused["j_sib"])
 			}
-			if len(slices.Compact(slices.Clone(w.epochs))) != 1 {
-				t.Fatalf("refusal replaced the epoch: %v", w.epochs)
+			if got := len(slices.Compact(slices.Clone(w.epochs))); got != epochs {
+				t.Fatalf("epochs %v, want %d", w.epochs, epochs)
 			}
 		})
 	}

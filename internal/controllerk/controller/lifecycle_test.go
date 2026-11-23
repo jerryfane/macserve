@@ -183,19 +183,22 @@ func TestWorkerAdmissionRefusalEndsCancelledByService(t *testing.T) {
 // #214: a job the worker refused before it started because the worker
 // drains (another job's cleanup unverified) returns to the queue untouched:
 // queued with its lease, epoch, lane and deadline cleared, not cancelled,
-// the epoch kept and its source removed; a replay of the completion is
-// refused as gone. A job whose own cleanup failed, one the worker reported
-// running, and one whose cancellation was requested are judged as before.
+// and its source removed; its epoch is fenced (durably too), so only the
+// epoch the worker registers after its idle check claims again. A replay of
+// the completion is refused as gone. A job whose own cleanup failed (fenced
+// as before), one the worker reported running, and one whose cancellation
+// was requested are judged as before.
 func TestWorkerDrainRefusalReturnsJobToQueue(t *testing.T) {
-	const reason = "worker draining: job-account cleanup must be verified when no job runs: job j_other cleanup unverified: job refused before it started; the worker drains until the idle check"
+	const reason = "worker draining: job-account cleanup must be verified when no job runs: job j_other cleanup unverified: job never started"
 	for name, tc := range map[string]struct {
 		cleanup bool
 		running bool
 		cancel  bool
 		state   model.State
+		fenced  bool
 	}{
-		"refused":         {cleanup: true, state: model.Queued},
-		"cleanup failed":  {cleanup: false, state: model.Failed},
+		"refused":         {cleanup: true, state: model.Queued, fenced: true},
+		"cleanup failed":  {cleanup: false, state: model.Failed, fenced: true},
 		"already running": {cleanup: true, running: true, state: model.Failed},
 		"cancelled":       {cleanup: true, cancel: true, state: model.Cancelled},
 	} {
@@ -233,8 +236,8 @@ func TestWorkerDrainRefusalReturnsJobToQueue(t *testing.T) {
 			c.mu.Lock()
 			fenced, active := c.epoch != epoch, len(c.active)
 			c.mu.Unlock()
-			if fenced == tc.cleanup {
-				t.Fatalf("epoch fenced %v with cleanup_ok %v", fenced, tc.cleanup)
+			if fenced != tc.fenced {
+				t.Fatalf("epoch fenced %v, want %v", fenced, tc.fenced)
 			}
 			if active != 0 {
 				t.Fatalf("%d executions still active", active)
@@ -244,6 +247,9 @@ func TestWorkerDrainRefusalReturnsJobToQueue(t *testing.T) {
 			}
 			if job.LeaseToken != "" || job.WorkerEpoch != "" || job.Lane != 0 || job.Deadline != nil || job.StartedAt != nil || job.CancelRequested || job.CancelReason != nil || len(job.Result) != 0 {
 				t.Fatalf("requeued job kept its run: %+v", job)
+			}
+			if durable, err := f.db.EpochFenced(ctx, epoch); err != nil || !durable {
+				t.Fatalf("refusing epoch not fenced in the store: %v %v", durable, err)
 			}
 			if _, err := os.Stat(filepath.Join(f.source.directory, lease.Job.ID+".tar")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("source export was not removed: %v", err)

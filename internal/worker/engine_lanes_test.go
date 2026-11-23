@@ -290,11 +290,24 @@ func TestDrainWhileWaitingForAccountRequeuesWaitingJob(t *testing.T) {
 		<-release
 		return errors.New("simulator shutdown failed: context deadline exceeded")
 	}
+	waiting := make(chan struct{})
+	var waited sync.Once
+	engine.mu.Lock()
+	engine.enterWaiting = func(job string) {
+		if job == "job-b" {
+			waited.Do(func() { close(waiting) })
+		}
+	}
+	engine.mu.Unlock()
 	close(gate)
 	<-finalizing
 	b := runLane(engine, fixtureLaneJob(t, "job-b", model.Build), source, data)
 	// job-b waits in enter for job-a's hold on the whole account.
-	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-waiting:
+	case <-time.After(30 * time.Second):
+		t.Fatal("job-b never waited for the account")
+	}
 	close(release)
 	first := <-a
 	if first.result.CleanupOK || first.result.Concurrency == nil || first.result.Concurrency.IdleVerdict != IdleDeferred {

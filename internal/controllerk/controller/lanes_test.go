@@ -7,11 +7,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -357,6 +359,174 @@ func TestDrainRefusedLeaseWaitsForNewEpoch(t *testing.T) {
 	}
 	if code := lifecycleRequest(t, f.controller, second, "/heartbeat", struct{}{}); code != http.StatusGone {
 		t.Fatalf("refused lease heartbeat %d, want 410", code)
+	}
+}
+
+// drainRefusal is the completion a worker sends for lease's job refused
+// before it started because the worker drains (#214).
+func drainRefusal(t *testing.T, f *laneFixture, lease protocol.Lease) []byte {
+	t.Helper()
+	result := f.result(t, lease)
+	result.State, result.CleanupOK, result.ExitCode = model.Failed, true, nil
+	result.Reason = "worker draining: job j_other cleanup unverified"
+	data, err := json.Marshal(protocol.Completion{Result: result, AdmissionRefused: "worker_draining"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+// completeWith posts lease's completion, read from body, as the worker does.
+func completeWith(c *Controller, lease protocol.Lease, body io.Reader) int {
+	r := httptest.NewRequest(http.MethodPost, protocol.Prefix+"/jobs/"+lease.Job.ID+"/complete", body)
+	r = r.WithContext(context.WithValue(r.Context(), peerKey{}, true))
+	r.Header.Set(protocol.EpochHeader, lease.Job.WorkerEpoch)
+	r.Header.Set(protocol.LeaseHeader, lease.Token)
+	w := httptest.NewRecorder()
+	c.handler().ServeHTTP(w, r)
+	return w.Code
+}
+
+// gatedBody signals reading on its first Read, after the handler
+// authenticated the request, and then waits for release.
+type gatedBody struct {
+	data             *bytes.Reader
+	once             sync.Once
+	reading, release chan struct{}
+}
+
+func (b *gatedBody) Read(p []byte) (int, error) {
+	b.once.Do(func() {
+		close(b.reading)
+		<-b.release
+	})
+	return b.data.Read(p)
+}
+
+// #214 review: a drain refusal whose request was authenticated before the
+// job returned to the queue and was claimed again under a new lease is
+// bound to the lease it authenticated: it is gone (410), and the new lease,
+// its source included, is untouched.
+func TestDelayedDrainRefusalCannotEndReplacementLease(t *testing.T) {
+	f := newLanes(t, 1)
+	refused := f.enqueue(t, "one", model.Build)
+	f.register(t, "epoch-a", 1)
+	f.claim(t, "epoch-a")
+	old := f.offer(t, "epoch-a")
+	data := drainRefusal(t, f, old)
+	body := &gatedBody{data: bytes.NewReader(data), reading: make(chan struct{}), release: make(chan struct{})}
+	release := sync.OnceFunc(func() { close(body.release) })
+	t.Cleanup(release)
+	delayed := make(chan int, 1)
+	go func() { delayed <- completeWith(f.controller, old, body) }()
+	<-body.reading
+	if code := completeWith(f.controller, old, bytes.NewReader(data)); code != http.StatusNoContent {
+		t.Fatalf("drain refusal %d", code)
+	}
+	f.register(t, "epoch-b", 1)
+	f.claim(t, "epoch-b")
+	replacement := f.offer(t, "epoch-b")
+	release()
+	if code := <-delayed; code != http.StatusGone {
+		t.Fatalf("delayed refusal of the old lease %d, want 410", code)
+	}
+	if job := f.job(t, refused.ID); job.State != model.Preparing || job.LeaseToken != replacement.Token || job.WorkerEpoch != "epoch-b" {
+		t.Fatalf("replacement lease changed: %+v", job)
+	}
+	if _, err := os.Stat(filepath.Join(f.source.directory, refused.ID+".tar")); err != nil {
+		t.Fatalf("replacement source removed: %v", err)
+	}
+	if ids := f.activeIDs(); len(ids) != 1 || ids[0] != refused.ID {
+		t.Fatalf("active %v", ids)
+	}
+}
+
+// #214 review: a second delivery of a drain refusal while the first one
+// removes the lease's source owns nothing: it is refused as retryable (409)
+// without touching the source, so it cannot delete the source of the lease
+// that claims the job next; a retry after the requeue is gone (410).
+func TestOverlappingDrainRefusalsLeaveReplacementSource(t *testing.T) {
+	f := newLanes(t, 1)
+	refused := f.enqueue(t, "one", model.Build)
+	f.register(t, "epoch-a", 1)
+	f.claim(t, "epoch-a")
+	old := f.offer(t, "epoch-a")
+	data := drainRefusal(t, f, old)
+	paused, resume := make(chan struct{}), make(chan struct{})
+	release := sync.OnceFunc(func() { close(resume) })
+	t.Cleanup(release)
+	var removals atomic.Int32
+	f.source.removing = func(string) {
+		if removals.Add(1) == 1 {
+			close(paused)
+			<-resume
+		}
+	}
+	first := make(chan int, 1)
+	go func() { first <- completeWith(f.controller, old, bytes.NewReader(data)) }()
+	<-paused
+	if code := completeWith(f.controller, old, bytes.NewReader(data)); code != http.StatusConflict {
+		t.Fatalf("overlapping refusal %d, want 409", code)
+	}
+	if n := removals.Load(); n != 1 {
+		t.Fatalf("overlapping refusal removed the source: %d removals", n)
+	}
+	release()
+	if code := <-first; code != http.StatusNoContent {
+		t.Fatalf("drain refusal %d", code)
+	}
+	f.register(t, "epoch-b", 1)
+	f.claim(t, "epoch-b")
+	replacement := f.offer(t, "epoch-b")
+	if code := completeWith(f.controller, old, bytes.NewReader(data)); code != http.StatusGone {
+		t.Fatalf("retried refusal %d, want 410", code)
+	}
+	if n := removals.Load(); n != 1 {
+		t.Fatalf("retried refusal removed the source: %d removals", n)
+	}
+	if job := f.job(t, refused.ID); job.State != model.Preparing || job.LeaseToken != replacement.Token {
+		t.Fatalf("replacement lease changed: %+v", job)
+	}
+	if _, err := os.Stat(filepath.Join(f.source.directory, refused.ID+".tar")); err != nil {
+		t.Fatalf("replacement source removed: %v", err)
+	}
+}
+
+// #214 review: the refusing lane and the lane whose cleanup failed report
+// independently. A poll of the refusing epoch outstanding when the refusal
+// commits, before the failed cleanup fences the epoch, claims nothing: the
+// refusal fenced the epoch with the requeue, so the job keeps its place
+// for the epoch the worker registers after its idle check.
+func TestPollBeforeCleanupReportCannotClaimDrainRefusedJob(t *testing.T) {
+	f := newLanes(t, 3)
+	f.enqueue(t, "one", model.Build)
+	refused := f.enqueue(t, "two", model.Build)
+	later := f.enqueue(t, "later", model.Build)
+	f.register(t, "epoch-a", 3)
+	first := f.start(t, "epoch-a")
+	f.claim(t, "epoch-a", first.Job.ID)
+	second := f.offer(t, "epoch-a", first.Job.ID)
+	if code := completeWith(f.controller, second, bytes.NewReader(drainRefusal(t, f, second))); code != http.StatusNoContent {
+		t.Fatalf("drain refusal %d", code)
+	}
+	if _, err := f.controller.next(context.Background(), "epoch-a", []string{first.Job.ID}); !errors.Is(err, store.ErrLease) {
+		t.Fatalf("outstanding poll of the refusing epoch: %v", err)
+	}
+	f.controller.prep.Wait()
+	for _, id := range []string{refused.ID, later.ID} {
+		if job := f.job(t, id); job.State != model.Queued {
+			t.Fatalf("refusing epoch claimed %s: %s %s", id, job.State, job.WorkerEpoch)
+		}
+	}
+	result := f.result(t, first)
+	result.CleanupOK = false
+	if err := f.controller.complete(context.Background(), first.Job, result, buildseal.Envelope{}); err != nil {
+		t.Fatal(err)
+	}
+	f.register(t, "epoch-b", 3)
+	f.claim(t, "epoch-b")
+	if lease := f.offer(t, "epoch-b"); lease.Job.ID != refused.ID {
+		t.Fatalf("new epoch claimed %s first, want %s", lease.Job.ID, refused.ID)
 	}
 }
 

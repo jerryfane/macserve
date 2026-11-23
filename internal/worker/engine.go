@@ -47,7 +47,7 @@ var (
 	// unattributed process remains) until its idle check: nothing of the
 	// job ran, and the client reports it as a refusal that returns the job
 	// to the queue (#214).
-	ErrDrainRefusal = errors.New("job refused before it started; the worker drains until the idle check")
+	ErrDrainRefusal = errors.New("job never started: refused while the worker drains for its job-account check; the controller returns it to the queue")
 	identifier      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 	sha40           = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	sha64           = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -74,10 +74,13 @@ type Engine struct {
 	spans       []laneSpan
 	accountHeld string
 	changed     chan struct{}
-	recovering  bool
-	drain       string
-	idlePending bool
-	readyAt     time.Time
+	// enterWaiting, when set (tests only), is called each time enter
+	// waits for another job's hold on the whole account to end.
+	enterWaiting func(jobID string)
+	recovering   bool
+	drain        string
+	idlePending  bool
+	readyAt      time.Time
 	// bootsFrom is when the latest simulator boot or parallel-testing test
 	// run start of any lane happened (spaceSimulatorBoots).
 	bootsFrom time.Time

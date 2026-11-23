@@ -460,10 +460,14 @@ reported as an unverified cleanup: reason `worker draining: …`, `cleanup_ok` t
 its completion carries `admission_refused: worker_draining`. The controller returns a job still `preparing` and not
 cancelled to the queue untouched: same job, attempt and check run (the check goes back to `queued`), its place in the
 queue kept, its lease, epoch, lane and deadline cleared and its source removed. It is not cancelled, so pull mode
-records no rerun. It can only be claimed again through a valid epoch, which the worker registers after its idle check
-passes; a replay of the refused completion gets 410. The job whose cleanup failed still fails and fences its epoch, a
-job already in a lane is untouched, and a job the worker reported running or whose cancel was requested is judged as
-any completion.
+records no rerun. The requeue fences the refusing epoch in the same transaction, so no request of that epoch claims it
+again (a work request already in flight included, whatever order the refusing lane and the failed cleanup report
+in); the worker registers a new epoch after its idle check passes, like after a failed cleanup, and only that epoch
+claims. The refusal acts only on the lease its request authenticated: a delayed or replayed copy whose lease has
+ended gets 410, which the worker treats as delivered, and one that arrives while another request is still ending the
+same lease gets a retryable 409 without touching the job's source. The job whose cleanup failed still fails and
+fences its epoch, a job already in a lane is untouched, and a job the worker reported running or whose cancel was
+requested is judged as any completion.
 
 An admission or finalization inspection still cut short by its own deadline (a loaded host) observed nothing, which
 is no evidence either way (#148, #150): the registered-root ACL census after its retries, `hostguard`'s
