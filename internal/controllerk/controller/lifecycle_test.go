@@ -222,9 +222,19 @@ func TestWorkerDrainRefusalReturnsJobToQueue(t *testing.T) {
 			}
 			result := f.result(t, lease)
 			result.State, result.Reason, result.CleanupOK, result.ExitCode = model.Failed, reason, tc.cleanup, nil
-			completion := map[string]any{"result": result, "seal": buildseal.Envelope{}, "admission_refused": "worker_draining"}
-			if status := lifecycleRequest(t, c, lease, "/complete", completion); status != http.StatusNoContent {
-				t.Fatalf("completion status %d", status)
+			completion, err := json.Marshal(map[string]any{"result": result, "seal": buildseal.Envelope{}, "admission_refused": "worker_draining"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Only a requeue retires the epoch, and the worker rotates only on
+			// this answer; a refusal judged otherwise is a plain 204 (#214
+			// review: a cancel recorded first leaves the epoch valid).
+			want := answer{code: http.StatusNoContent}
+			if tc.state == model.Queued {
+				want = retiredAnswer
+			}
+			if got := completeWith(c, lease, bytes.NewReader(completion)); got != want {
+				t.Fatalf("completion answer %+v, want %+v", got, want)
 			}
 			job, err := f.db.Get(ctx, lease.Job.ID)
 			if err != nil {
@@ -254,8 +264,8 @@ func TestWorkerDrainRefusalReturnsJobToQueue(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(f.source.directory, lease.Job.ID+".tar")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("source export was not removed: %v", err)
 			}
-			if status := lifecycleRequest(t, c, lease, "/complete", completion); status != http.StatusGone {
-				t.Fatalf("replayed completion status %d, want 410", status)
+			if got := completeWith(c, lease, bytes.NewReader(completion)); got.code != http.StatusGone {
+				t.Fatalf("replayed completion %+v, want 410", got)
 			}
 			replayed, err := f.db.Get(ctx, lease.Job.ID)
 			if err != nil {

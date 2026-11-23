@@ -462,12 +462,16 @@ cancelled to the queue untouched: same job, attempt and check run (the check goe
 queue kept, its lease, epoch, lane and deadline cleared and its source removed. It is not cancelled, so pull mode
 records no rerun. The requeue fences the refusing epoch in the same transaction, so no request of that epoch claims it
 again (a work request already in flight included, whatever order the refusing lane and the failed cleanup report
-in); the worker registers a new epoch after its idle check passes, like after a failed cleanup, and only that epoch
-claims. The refusal acts only on the lease its request authenticated: a delayed or replayed copy whose lease has
-ended gets 410, which the worker treats as delivered, and one that arrives while another request is still ending the
-same lease gets a retryable 409 without touching the job's source. The job whose cleanup failed still fails and
-fences its epoch, a job already in a lane is untouched, and a job the worker reported running or whose cancel was
-requested is judged as any completion.
+in). The controller answers that completion with `{"epoch_retired": true}` (200), and the worker registers a new
+epoch after its idle check passes, like after a failed cleanup; only that epoch claims. The worker rotates on that
+answer, never on the refusal it sent: a refusal the controller judged otherwise (a cancel it recorded first, a job
+already running) is answered 204 and the epoch stays valid. A work request refused as gone (410) while lanes still
+run is not fatal at once: the worker asks for nothing more until they end, then recovers under a new epoch if one of
+them retired the epoch, and exits only if none did. The refusal acts only on the lease its request authenticated: a
+delayed or replayed copy whose lease has ended gets 410, which the worker treats as delivered, and one that arrives
+while another request is still ending the same lease gets a retryable 409 without touching the job's source. The job
+whose cleanup failed still fails and fences its epoch, a job already in a lane is untouched, and a job the worker
+reported running or whose cancel was requested is judged as any completion.
 
 An admission or finalization inspection still cut short by its own deadline (a loaded host) observed nothing, which
 is no evidence either way (#148, #150): the registered-root ACL census after its retries, `hostguard`'s

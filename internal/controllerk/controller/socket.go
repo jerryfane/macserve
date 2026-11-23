@@ -130,9 +130,15 @@ func (c *Controller) handler() http.Handler {
 			respond(w, r, nil, err)
 			return
 		}
-		handled, err := c.refusedAdmission(r.Context(), job, completion)
-		if err != nil || handled {
+		retired, err := c.refusedAdmission(r.Context(), job, completion)
+		if err != nil {
 			respond(w, r, nil, err)
+			return
+		}
+		if retired {
+			// The worker registers a new epoch after its idle check only
+			// on this answer (protocol.CompletionReply).
+			respond(w, r, protocol.CompletionReply{EpochRetired: true}, nil)
 			return
 		}
 		if err := c.stalledJob(r.Context(), job, completion); err != nil {

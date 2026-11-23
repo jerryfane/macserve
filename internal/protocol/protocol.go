@@ -87,6 +87,18 @@ type Completion struct {
 	Stalled          bool               `json:"stalled,omitempty"`
 }
 
+// CompletionReply is the controller's answer (200) to a completion whose
+// handling retired the worker's epoch: a drain refusal
+// (AdmissionWorkerDraining) whose job it returned to the queue, fencing the
+// lease's epoch in the same transaction (#214). Every other accepted
+// completion is answered 204 with no body, and the epoch stays valid unless
+// the worker's own cleanup was unverified. The worker registers a new epoch
+// after its idle check only on what the controller committed, never on the
+// refusal it sent.
+type CompletionReply struct {
+	EpochRetired bool `json:"epoch_retired"`
+}
+
 // AdmissionRefusal is why the worker refused a job's admission before it
 // ran, when the service caused the refusal; empty for any other completion.
 type AdmissionRefusal string

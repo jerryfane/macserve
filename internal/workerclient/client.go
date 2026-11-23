@@ -281,6 +281,12 @@ func (c *Client) Run(ctx context.Context) (returned error) {
 	var wg sync.WaitGroup
 	var fatal error
 	registered, draining := false, false
+	// fenced is a 410 to /next while lanes still ran: the controller had
+	// retired this epoch, which one of those lanes' ends (an unverified
+	// cleanup, or a drain refusal the controller requeued) must explain
+	// once it is collected (#214). No lease is asked for meanwhile. If no
+	// lane explains it, it is fatal like any other 410.
+	var fenced error
 	// engineDrain: the engine refused a lane until idle (logged once).
 	engineDrain := false
 	finished := func(d laneDone) {
@@ -355,15 +361,19 @@ func (c *Client) Run(ctx context.Context) (returned error) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if fenced != nil && !draining && len(running) == 0 && len(held) == 0 && len(delivering) == 0 {
+			return fenced
+		}
 		if len(running) == 0 {
 			if draining {
-				// Failed cleanup fenced the old epoch at the controller. A
+				// Failed cleanup, or a drain refusal the controller
+				// requeued, fenced the old epoch at the controller. A
 				// new epoch is registered only after Recover verifies
 				// quiescence.
 				if c.epoch, err = newEpoch(); err != nil {
 					return err
 				}
-				registered, draining = false, false
+				registered, draining, fenced = false, false, nil
 			}
 			admissionErr := c.engine.Recover(ctx)
 			if len(held) != 0 && ctx.Err() == nil {
@@ -386,7 +396,7 @@ func (c *Client) Run(ctx context.Context) (returned error) {
 		}
 		// No lease while a completion is held for, or still delivers
 		// after, the idle check.
-		if draining || len(held) != 0 || len(delivering) != 0 || len(running) == lanes {
+		if draining || fenced != nil || len(held) != 0 || len(delivering) != 0 || len(running) == lanes {
 			if err := pause(); err != nil {
 				return err
 			}
@@ -436,7 +446,10 @@ func (c *Client) Run(ctx context.Context) (returned error) {
 				return err
 			}
 			var response *HTTPError
-			if errors.As(err, &response) && response.Status >= 400 && response.Status < 500 && response.Status != 429 {
+			if errors.As(err, &response) && response.Status == http.StatusGone && len(running)+len(held)+len(delivering) != 0 {
+				log.Printf("worker epoch fenced while lanes run; waiting for them before recovery: %v", err)
+				fenced = err
+			} else if errors.As(err, &response) && response.Status >= 400 && response.Status < 500 && response.Status != 429 {
 				return err
 			}
 			registered = false
@@ -689,16 +702,21 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (keepEpoc
 	// controller's finalizing lease covers it (protocol.DeliveryTimeout).
 	finalCtx, finalCancel := context.WithTimeout(context.Background(), protocol.DeliveryTimeout)
 	defer finalCancel()
-	if err := c.deliver(finalCtx, saved); err != nil {
+	var reply protocol.CompletionReply
+	if err := c.deliverReply(finalCtx, saved, &reply); err != nil {
 		return false, err
 	}
 	if !result.CleanupOK {
 		log.Printf("worker job %s cleanup unverified; retrying recovery after poll", lease.Job.ID)
 	}
-	// A job refused because the worker drains fenced this epoch at the
-	// controller with its requeue (#214): like an unverified cleanup, a new
-	// epoch registers only after Recover.
-	return result.CleanupOK && saved.AdmissionRefused != protocol.AdmissionWorkerDraining, nil
+	// The controller retired this epoch for a drain refusal it requeued
+	// (#214): like an unverified cleanup, a new epoch registers only after
+	// Recover. A refusal it judged otherwise (a cancel recorded first, or a
+	// job already running) leaves the epoch valid.
+	if reply.EpochRetired {
+		log.Printf("worker job %s returned to the queue; the controller retired this epoch until recovery", lease.Job.ID)
+	}
+	return result.CleanupOK && !reply.EpochRetired, nil
 }
 
 // holdHeartbeat reports a held completion to the controller and keeps its
@@ -880,7 +898,14 @@ func (c *Client) loadPending(name string) (pending, error) {
 	return value, nil
 }
 
+// deliver sends saved's artifacts and completion, then acknowledges it.
 func (c *Client) deliver(ctx context.Context, saved pending) error {
+	return c.deliverReply(ctx, saved, nil)
+}
+
+// deliverReply is deliver whose non-nil reply receives the controller's
+// answer to the completion; a gone lease (410) leaves it unchanged.
+func (c *Client) deliverReply(ctx context.Context, saved pending, reply *protocol.CompletionReply) error {
 	jobID := saved.Lease.Job.ID
 	for _, artifact := range saved.Result.Artifacts {
 		if !safeID(artifact.ID) || artifact.SizeBytes < 0 {
@@ -941,7 +966,11 @@ func (c *Client) deliver(ctx context.Context, saved pending) error {
 		}
 		saved.Seal = &seal
 	}
-	status, err := c.json(ctx, http.MethodPost, "/jobs/"+jobID+"/complete", saved.Epoch, saved.Lease.Token, protocol.Completion{Result: saved.Result, Seal: *saved.Seal, AdmissionRefused: saved.AdmissionRefused, Stalled: saved.Stalled}, nil)
+	var into any
+	if reply != nil {
+		into = reply
+	}
+	status, err := c.json(ctx, http.MethodPost, "/jobs/"+jobID+"/complete", saved.Epoch, saved.Lease.Token, protocol.Completion{Result: saved.Result, Seal: *saved.Seal, AdmissionRefused: saved.AdmissionRefused, Stalled: saved.Stalled}, into)
 	if err != nil && status != http.StatusGone {
 		return err
 	}

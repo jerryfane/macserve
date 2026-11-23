@@ -47,10 +47,70 @@ type holdWorld struct {
 	window     time.Duration
 	finalizing map[string]time.Time
 	heldAcked  map[string]bool
+	// retire are jobs whose completion the controller answers as having
+	// retired the epoch (protocol.CompletionReply, #214).
+	retire map[string]bool
+	// recoverGate, when set, holds the first Recover after a completion
+	// answered as retiring the epoch until it is closed.
+	recoverGate chan struct{}
+	gateArmed   bool
+	// fence, when set, holds the first idle poll as outstanding across
+	// fence.job's completion and then refuses it as gone.
+	fence *pollFence
+	// lanes is the client's lane count (two when zero).
+	lanes int
+}
+
+// pollFence is a work request outstanding when the controller retired the
+// epoch (#214): the first poll with nothing queued waits until job's
+// completion, which itself waits for that poll, was recorded, and is then
+// refused as gone (410).
+type pollFence struct {
+	job                string
+	arrived, delivered chan struct{}
+	polled             sync.Once
+}
+
+// fenced serves the requests pollFence orders; it reports whether it
+// answered r.
+func (w *holdWorld) fenced(rw http.ResponseWriter, r *http.Request, path, id string) bool {
+	f := w.fence
+	switch {
+	case path == "/next":
+		w.mu.Lock()
+		idle := len(w.queue) == 0
+		w.mu.Unlock()
+		hold := false
+		if idle {
+			f.polled.Do(func() { hold = true })
+		}
+		if !hold {
+			return false
+		}
+		w.event("outstanding poll")
+		close(f.arrived)
+		select {
+		case <-f.delivered:
+		case <-r.Context().Done():
+		}
+		w.event("poll gone")
+		rw.WriteHeader(http.StatusGone)
+		return true
+	case id == f.job && strings.HasSuffix(path, "/complete"):
+		select {
+		case <-f.arrived:
+		case <-r.Context().Done():
+			return false
+		}
+		w.serve(rw, r, path, id)
+		close(f.delivered)
+		return true
+	}
+	return false
 }
 
 func newHoldWorld(t *testing.T, queue ...string) *holdWorld {
-	w := &holdWorld{t: t, queue: queue, deadlines: map[string]time.Time{}, complete: map[string]worker.Result{}, refused: map[string]protocol.AdmissionRefusal{}, stalled: map[string]bool{}, gates: map[string]chan struct{}{}, started: make(chan string, 8), finalizing: map[string]time.Time{}, heldAcked: map[string]bool{}}
+	w := &holdWorld{t: t, queue: queue, deadlines: map[string]time.Time{}, complete: map[string]worker.Result{}, refused: map[string]protocol.AdmissionRefusal{}, stalled: map[string]bool{}, gates: map[string]chan struct{}{}, started: make(chan string, 8), finalizing: map[string]time.Time{}, heldAcked: map[string]bool{}, retire: map[string]bool{}}
 	for _, id := range queue {
 		w.gates[id] = make(chan struct{})
 	}
@@ -84,6 +144,13 @@ func (w *holdWorld) wait(ctx context.Context, e string) {
 func (w *holdWorld) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, protocol.Prefix)
 	id := strings.Split(strings.TrimPrefix(path, "/jobs/"), "/")[0]
+	if w.fence != nil && w.fenced(rw, r, path, id) {
+		return
+	}
+	w.serve(rw, r, path, id)
+}
+
+func (w *holdWorld) serve(rw http.ResponseWriter, r *http.Request, path, id string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	switch {
@@ -135,6 +202,12 @@ func (w *holdWorld) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		w.refused[id] = completion.AdmissionRefused
 		w.stalled[id] = completion.Stalled
 		w.events = append(w.events, "complete "+id)
+		if w.retire[id] {
+			w.gateArmed = w.recoverGate != nil
+			// protocol.CompletionReply, on the wire.
+			rw.Write([]byte(`{"epoch_retired":true}`))
+			return
+		}
 		rw.WriteHeader(http.StatusNoContent)
 	case strings.HasSuffix(path, "/heartbeat"):
 		json.NewEncoder(rw).Encode(protocol.Heartbeat{Deadline: time.Now().Add(time.Minute)})
@@ -145,11 +218,22 @@ func (w *holdWorld) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 
 func (w *holdWorld) executor() *fakeExecutor {
 	return &fakeExecutor{
-		recover: func(context.Context) error {
+		recover: func(ctx context.Context) error {
 			w.mu.Lock()
 			defer w.mu.Unlock()
 			if w.live != 0 {
 				w.t.Error("Recover while a job executes")
+			}
+			if w.gateArmed {
+				w.gateArmed = false
+				w.events = append(w.events, "recover gated")
+				w.mu.Unlock()
+				select {
+				case <-w.recoverGate:
+				case <-ctx.Done():
+				}
+				w.mu.Lock()
+				w.events = append(w.events, "recovered")
 			}
 			if !w.held {
 				return nil
@@ -203,7 +287,7 @@ func (w *holdWorld) executor() *fakeExecutor {
 func (w *holdWorld) run(ctx context.Context) (<-chan error, *Client) {
 	w.t.Helper()
 	cfg, _ := unixController(w.t, w)
-	cfg.MaxConcurrentJobs = 2
+	cfg.MaxConcurrentJobs = max(w.lanes, 2)
 	client, err := NewWithChecks(cfg, w.executor(), testChecks)
 	if err != nil {
 		w.t.Fatal(err)
@@ -350,12 +434,18 @@ func TestHeldStageRetriedUntilRecorded(t *testing.T) {
 // an unverifiable relaunch at lane admission, which the controller returns
 // to the queue instead of failing the job (#206); a job refused before it
 // started because the worker drains, which the controller returns to the
-// queue untouched and whose epoch it fences (#214): the worker registers a
-// new epoch after its idle check. The other refusals keep the epoch.
+// queue untouched and whose epoch it fences (#214): answered as retiring the
+// epoch, the worker registers a new epoch only after its idle Recover. The
+// other refusals keep the epoch.
 func TestCensusAdmissionRefusalReportedAtOnce(t *testing.T) {
 	for job, want := range map[string]protocol.AdmissionRefusal{"j_refused": protocol.AdmissionACLCensusUnavailable, "j_relaunch": protocol.AdmissionRelaunchUnverified, "j_draining": protocol.AdmissionWorkerDraining} {
 		t.Run(job, func(t *testing.T) {
 			w := newHoldWorld(t, "j_sib", job)
+			draining := want == protocol.AdmissionWorkerDraining
+			if draining {
+				w.retire[job] = true
+				w.recoverGate = make(chan struct{})
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			done, _ := w.run(ctx)
@@ -367,9 +457,18 @@ func TestCensusAdmissionRefusalReportedAtOnce(t *testing.T) {
 			close(w.gates["j_sib"])
 			w.wait(ctx, "complete j_sib")
 			epochs := 1
-			if want == protocol.AdmissionWorkerDraining {
+			if draining {
 				epochs = 2
+				// No new epoch registers before the idle Recover passes.
+				w.wait(ctx, "recover gated")
+				if events := w.snapshot(); slices.Contains(events, "register 2") {
+					t.Fatalf("new epoch registered before recovery: %v", events)
+				}
+				close(w.recoverGate)
 				w.wait(ctx, "register 2")
+				if events := w.snapshot(); !before(events, "recovered", "register 2") {
+					t.Fatalf("new epoch registered before recovery: %v", events)
+				}
 			}
 			cancel()
 			if err := <-done; err != nil {
@@ -388,6 +487,80 @@ func TestCensusAdmissionRefusalReportedAtOnce(t *testing.T) {
 				t.Fatalf("epochs %v, want %d", w.epochs, epochs)
 			}
 		})
+	}
+}
+
+// #214 review: a drain refusal the controller did not requeue (a cancel it
+// recorded first, or a job already running) is answered 204 and leaves the
+// epoch valid: the worker keeps its epoch, and the job queued next is
+// leased under it, rather than rotating on the refusal it sent.
+func TestDrainRefusalJudgedOtherwiseKeepsEpoch(t *testing.T) {
+	w := newHoldWorld(t, "j_sib", "j_draining", "j_later")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	done, _ := w.run(ctx)
+	<-w.started
+	w.wait(ctx, "complete j_draining")
+	close(w.gates["j_sib"])
+	w.wait(ctx, "complete j_sib")
+	w.wait(ctx, "lease j_later")
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.refused["j_draining"] != protocol.AdmissionWorkerDraining {
+		t.Fatalf("refusal not reported: %q", w.refused["j_draining"])
+	}
+	if got := len(slices.Compact(slices.Clone(w.epochs))); got != 1 {
+		t.Fatalf("epoch replaced although the controller kept it: %v", w.epochs)
+	}
+}
+
+// #214 review: a work request outstanding when the controller retired the
+// epoch for a drain refusal is refused as gone (410) before the client has
+// collected the refusing lane's end. The client does not exit: it asks for
+// nothing more, lets the running lane finish, and registers a new epoch
+// only after its idle Recover passes.
+func TestFencedOutstandingPollRecoversAfterLanes(t *testing.T) {
+	w := newHoldWorld(t, "j_sib", "j_draining")
+	w.lanes = 3
+	w.retire["j_draining"] = true
+	w.recoverGate = make(chan struct{})
+	w.fence = &pollFence{job: "j_draining", arrived: make(chan struct{}), delivered: make(chan struct{})}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	done, _ := w.run(ctx)
+	// waitRunning waits for e while Run has not returned.
+	waitRunning := func(e string) {
+		t.Helper()
+		for !slices.Contains(w.snapshot(), e) {
+			select {
+			case err := <-done:
+				t.Fatalf("Run returned before %q: %v (events %v)", e, err, w.snapshot())
+			case <-ctx.Done():
+				t.Fatalf("no %q: %v", e, w.snapshot())
+			case <-time.After(20 * time.Millisecond):
+			}
+		}
+	}
+	<-w.started
+	waitRunning("poll gone")
+	close(w.gates["j_sib"])
+	waitRunning("complete j_sib")
+	waitRunning("recover gated")
+	if events := w.snapshot(); slices.Contains(events, "register 2") {
+		t.Fatalf("new epoch registered before recovery: %v", events)
+	}
+	close(w.recoverGate)
+	waitRunning("register 2")
+	if events := w.snapshot(); !before(events, "complete j_draining", "poll gone") || !before(events, "recovered", "register 2") {
+		t.Fatalf("order: %v", events)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 

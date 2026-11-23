@@ -41,9 +41,10 @@ func completionDigest(result worker.Result) (string, error) {
 // preparing and not cancelled, to the queue untouched (#214). Only a failed
 // result with cleanup_ok qualifies; any other completion is judged as it is,
 // and a replay of a terminal job's completion is left to complete. An
-// unknown refusal is invalid. handled reports that the completion needs no
-// judgement by complete.
-func (c *Controller) refusedAdmission(ctx context.Context, job model.Job, completion protocol.Completion) (handled bool, err error) {
+// unknown refusal is invalid. retired reports that the lease was ended here
+// and its epoch fenced (drainRefused): the completion needs no judgement by
+// complete, and the worker is told its epoch is retired.
+func (c *Controller) refusedAdmission(ctx context.Context, job model.Job, completion protocol.Completion) (retired bool, err error) {
 	refusal, result := completion.AdmissionRefused, completion.Result
 	if !refusal.Valid() {
 		return false, store.ErrInvalid
@@ -98,9 +99,10 @@ var errRefusalPending = fmt.Errorf("%w: another request is ending the lease for 
 // worker registers after its idle check passes. A job no longer preparing
 // (the worker reported it running) or whose cancellation was requested is
 // left to complete, as is one whose requeue a racing transition refused.
-// handled reports that the lease was ended here. Callers hold c.mu, which
-// is released around the source removal.
-func (c *Controller) drainRefused(ctx context.Context, a *execution, current model.Job, reason string) (handled bool, err error) {
+// retired reports that the lease was ended here, which fenced its epoch
+// (requeued, or ended for a source it could not remove). Callers hold c.mu,
+// which is released around the source removal.
+func (c *Controller) drainRefused(ctx context.Context, a *execution, current model.Job, reason string) (retired bool, err error) {
 	if current.State != model.Preparing || current.CancelRequested {
 		return false, nil
 	}

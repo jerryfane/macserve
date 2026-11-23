@@ -335,7 +335,7 @@ func TestDrainRefusedLeaseWaitsForNewEpoch(t *testing.T) {
 	refusal.State, refusal.CleanupOK, refusal.ExitCode = model.Failed, true, nil
 	refusal.Reason = "worker draining: job " + first.Job.ID + " cleanup unverified"
 	completion := protocol.Completion{Result: refusal, AdmissionRefused: "worker_draining"}
-	if code := lifecycleRequest(t, f.controller, second, "/complete", completion); code != http.StatusNoContent {
+	if code := lifecycleRequest(t, f.controller, second, "/complete", completion); code != http.StatusOK {
 		t.Fatalf("drain refusal %d", code)
 	}
 	if job := f.job(t, refused.ID); job.State != model.Queued || job.LeaseToken != "" || job.WorkerEpoch != "" {
@@ -376,15 +376,56 @@ func drainRefusal(t *testing.T, f *laneFixture, lease protocol.Lease) []byte {
 	return data
 }
 
+// answer is a completion request's status and whether its reply retired
+// the worker's epoch (protocol.CompletionReply).
+type answer struct {
+	code    int
+	retired bool
+}
+
+// retiredAnswer is the answer to a drain refusal whose job was requeued.
+var retiredAnswer = answer{http.StatusOK, true}
+
 // completeWith posts lease's completion, read from body, as the worker does.
-func completeWith(c *Controller, lease protocol.Lease, body io.Reader) int {
+func completeWith(c *Controller, lease protocol.Lease, body io.Reader) answer {
 	r := httptest.NewRequest(http.MethodPost, protocol.Prefix+"/jobs/"+lease.Job.ID+"/complete", body)
 	r = r.WithContext(context.WithValue(r.Context(), peerKey{}, true))
 	r.Header.Set(protocol.EpochHeader, lease.Job.WorkerEpoch)
 	r.Header.Set(protocol.LeaseHeader, lease.Token)
 	w := httptest.NewRecorder()
 	c.handler().ServeHTTP(w, r)
-	return w.Code
+	var reply struct {
+		EpochRetired bool `json:"epoch_retired"`
+	}
+	if w.Code == http.StatusOK {
+		_ = json.Unmarshal(w.Body.Bytes(), &reply)
+	}
+	return answer{w.Code, reply.EpochRetired}
+}
+
+// await waits for milestone while the handler answering on answered has
+// not answered; an early answer, or none within the bound, fails t.
+func await(t *testing.T, milestone <-chan struct{}, answered <-chan answer, what string) {
+	t.Helper()
+	select {
+	case <-milestone:
+	case got := <-answered:
+		t.Fatalf("handler answered %+v before %s", got, what)
+	case <-time.After(30 * time.Second):
+		t.Fatalf("no %s", what)
+	}
+}
+
+// answerOf waits, bounded, for the answer of a released handler.
+func answerOf(t *testing.T, answered <-chan answer) answer {
+	t.Helper()
+	select {
+	case got := <-answered:
+		return got
+	case <-time.After(30 * time.Second):
+		t.Fatal("released handler never answered")
+		return answer{}
+	}
 }
 
 // gatedBody signals reading on its first Read, after the handler
@@ -417,18 +458,18 @@ func TestDelayedDrainRefusalCannotEndReplacementLease(t *testing.T) {
 	body := &gatedBody{data: bytes.NewReader(data), reading: make(chan struct{}), release: make(chan struct{})}
 	release := sync.OnceFunc(func() { close(body.release) })
 	t.Cleanup(release)
-	delayed := make(chan int, 1)
+	delayed := make(chan answer, 1)
 	go func() { delayed <- completeWith(f.controller, old, body) }()
-	<-body.reading
-	if code := completeWith(f.controller, old, bytes.NewReader(data)); code != http.StatusNoContent {
-		t.Fatalf("drain refusal %d", code)
+	await(t, body.reading, delayed, "the delayed request read its body")
+	if got := completeWith(f.controller, old, bytes.NewReader(data)); got != retiredAnswer {
+		t.Fatalf("drain refusal %+v", got)
 	}
 	f.register(t, "epoch-b", 1)
 	f.claim(t, "epoch-b")
 	replacement := f.offer(t, "epoch-b")
 	release()
-	if code := <-delayed; code != http.StatusGone {
-		t.Fatalf("delayed refusal of the old lease %d, want 410", code)
+	if got := answerOf(t, delayed); got.code != http.StatusGone {
+		t.Fatalf("delayed refusal of the old lease %+v, want 410", got)
 	}
 	if job := f.job(t, refused.ID); job.State != model.Preparing || job.LeaseToken != replacement.Token || job.WorkerEpoch != "epoch-b" {
 		t.Fatalf("replacement lease changed: %+v", job)
@@ -462,24 +503,24 @@ func TestOverlappingDrainRefusalsLeaveReplacementSource(t *testing.T) {
 			<-resume
 		}
 	}
-	first := make(chan int, 1)
+	first := make(chan answer, 1)
 	go func() { first <- completeWith(f.controller, old, bytes.NewReader(data)) }()
-	<-paused
-	if code := completeWith(f.controller, old, bytes.NewReader(data)); code != http.StatusConflict {
-		t.Fatalf("overlapping refusal %d, want 409", code)
+	await(t, paused, first, "the first refusal removed the source")
+	if got := completeWith(f.controller, old, bytes.NewReader(data)); got.code != http.StatusConflict {
+		t.Fatalf("overlapping refusal %+v, want 409", got)
 	}
 	if n := removals.Load(); n != 1 {
 		t.Fatalf("overlapping refusal removed the source: %d removals", n)
 	}
 	release()
-	if code := <-first; code != http.StatusNoContent {
-		t.Fatalf("drain refusal %d", code)
+	if got := answerOf(t, first); got != retiredAnswer {
+		t.Fatalf("drain refusal %+v", got)
 	}
 	f.register(t, "epoch-b", 1)
 	f.claim(t, "epoch-b")
 	replacement := f.offer(t, "epoch-b")
-	if code := completeWith(f.controller, old, bytes.NewReader(data)); code != http.StatusGone {
-		t.Fatalf("retried refusal %d, want 410", code)
+	if got := completeWith(f.controller, old, bytes.NewReader(data)); got.code != http.StatusGone {
+		t.Fatalf("retried refusal %+v, want 410", got)
 	}
 	if n := removals.Load(); n != 1 {
 		t.Fatalf("retried refusal removed the source: %d removals", n)
@@ -506,8 +547,8 @@ func TestPollBeforeCleanupReportCannotClaimDrainRefusedJob(t *testing.T) {
 	first := f.start(t, "epoch-a")
 	f.claim(t, "epoch-a", first.Job.ID)
 	second := f.offer(t, "epoch-a", first.Job.ID)
-	if code := completeWith(f.controller, second, bytes.NewReader(drainRefusal(t, f, second))); code != http.StatusNoContent {
-		t.Fatalf("drain refusal %d", code)
+	if got := completeWith(f.controller, second, bytes.NewReader(drainRefusal(t, f, second))); got != retiredAnswer {
+		t.Fatalf("drain refusal %+v", got)
 	}
 	if _, err := f.controller.next(context.Background(), "epoch-a", []string{first.Job.ID}); !errors.Is(err, store.ErrLease) {
 		t.Fatalf("outstanding poll of the refusing epoch: %v", err)
