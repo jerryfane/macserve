@@ -137,8 +137,11 @@ func (e *Engine) enter(ctx context.Context, job model.Job) (solo bool, err error
 			e.mu.Unlock()
 			return solo, nil
 		}
-		wait := e.changed
+		wait, waiting := e.changed, e.enterWaiting
 		e.mu.Unlock()
+		if waiting != nil {
+			waiting(job.ID)
+		}
 		select {
 		case <-ctx.Done():
 			return false, ctx.Err()

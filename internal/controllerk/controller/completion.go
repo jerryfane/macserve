@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"path"
@@ -35,26 +36,41 @@ func completionDigest(result worker.Result) (string, error) {
 // of the job before it ran, for a cause of the service's own
 // (protocol.Completion.AdmissionRefused), as the controller's cancellation
 // worker_admission before complete judges it: the job ends cancelled, not
-// failed, and pull mode reruns its head (#119). Only a failed result with
-// cleanup_ok qualifies; any other completion is judged as it is, and a
-// replay of a terminal job's completion is left to complete. An unknown
-// refusal is invalid.
-func (c *Controller) refusedAdmission(ctx context.Context, job model.Job, completion protocol.Completion) error {
+// failed, and pull mode reruns its head (#119). A refusal by a draining
+// worker (protocol.AdmissionWorkerDraining) instead returns the job, still
+// preparing and not cancelled, to the queue untouched (#214). Only a failed
+// result with cleanup_ok qualifies; any other completion is judged as it is,
+// and a replay of a terminal job's completion is left to complete. An
+// unknown refusal is invalid. retired reports that the lease was ended here
+// and its epoch fenced (drainRefused): the completion needs no judgement by
+// complete, and the worker is told its epoch is retired.
+func (c *Controller) refusedAdmission(ctx context.Context, job model.Job, completion protocol.Completion) (retired bool, err error) {
 	refusal, result := completion.AdmissionRefused, completion.Result
 	if !refusal.Valid() {
-		return store.ErrInvalid
+		return false, store.ErrInvalid
 	}
 	if refusal == "" || result.State != model.Failed || !result.CleanupOK || job.State.Terminal() {
-		return nil
+		return false, nil
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if a := c.execution(job.ID); a == nil || !a.offered {
-		return store.ErrLease
+	// job is the record the request's epoch and lease authenticated
+	// (requestJob) before its body was read. The refusal acts only on that
+	// lease: the job may since have returned to the queue and been claimed
+	// again under a new lease, which a delayed request must never end.
+	a := c.execution(job.ID)
+	if a == nil || !a.offered || a.job.LeaseToken != job.LeaseToken || a.job.WorkerEpoch != job.WorkerEpoch {
+		return false, store.ErrLease
 	}
 	current, err := c.options.Store.Get(ctx, job.ID)
 	if err != nil {
-		return err
+		return false, err
+	}
+	if current.LeaseToken != job.LeaseToken || current.WorkerEpoch != job.WorkerEpoch {
+		return false, store.ErrLease
+	}
+	if refusal == protocol.AdmissionWorkerDraining {
+		return c.drainRefused(ctx, a, current, result.Reason)
 	}
 	_, err = c.cancelJob(ctx, current, "worker refused admission: "+string(refusal), model.CancelReason{Source: model.CancelWorkerAdmission, Detail: result.Reason}, c.options.Now())
 	if err == nil {
@@ -63,7 +79,52 @@ func (c *Controller) refusedAdmission(ctx context.Context, job model.Job, comple
 		// processes of an unverifiable relaunch (#206).
 		log.Printf("controller recorded worker admission refusal: job=%s refusal=%s reason=%q", job.ID, refusal, result.Reason)
 	}
-	return err
+	return false, err
+}
+
+// requeuedDraining is the reason of a job a draining worker refused before
+// it started, returned to the queue.
+const requeuedDraining = "returned to queue: the worker refused it before it started while draining"
+
+// errRefusalPending answers a second delivery of a drain refusal while
+// another request is ending the same lease: retryable (409), and its source
+// is left to the request that owns it. A retry after the lease ended is
+// refused as gone (410), which the worker treats as delivered.
+var errRefusalPending = fmt.Errorf("%w: another request is ending the lease for its drain refusal", store.ErrConflict)
+
+// drainRefused returns current, delivered as a and refused by the worker
+// before it started because the worker drains (worker.ErrDrainRefusal), to
+// the queue (returnToQueue): same job, attempt and check run. Its epoch is
+// fenced with the requeue, so it is claimed again only under the epoch the
+// worker registers after its idle check passes. A job no longer preparing
+// (the worker reported it running) or whose cancellation was requested is
+// left to complete, as is one whose requeue a racing transition refused.
+// retired reports that the lease was ended here, which fenced its epoch
+// (requeued, or ended for a source it could not remove). Callers hold c.mu,
+// which is released around the source removal.
+func (c *Controller) drainRefused(ctx context.Context, a *execution, current model.Job, reason string) (retired bool, err error) {
+	if current.State != model.Preparing || current.CancelRequested {
+		return false, nil
+	}
+	outcome, err := c.returnToQueue(ctx, a, current, requeuedDraining, c.options.Now(), true)
+	switch outcome {
+	case returnRequeued:
+		log.Printf("controller returned job refused by a draining worker to the queue: job=%s lane=%d reason=%q", current.ID, current.Lane, reason)
+		return true, nil
+	case returnEnded:
+		return true, nil
+	case returnBusy:
+		return false, errRefusalPending
+	}
+	if errors.Is(err, store.ErrTransition) {
+		log.Printf("controller drain refusal requeue refused, judging the completion: job=%s: %v", current.ID, err)
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	// The lease ended otherwise while its source was removed.
+	return false, store.ErrLease
 }
 
 // stalledJob records a completion the worker reports as its own end of the

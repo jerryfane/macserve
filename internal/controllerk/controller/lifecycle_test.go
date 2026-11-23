@@ -180,6 +180,104 @@ func TestWorkerAdmissionRefusalEndsCancelledByService(t *testing.T) {
 	}
 }
 
+// #214: a job the worker refused before it started because the worker
+// drains (another job's cleanup unverified) returns to the queue untouched:
+// queued with its lease, epoch, lane and deadline cleared, not cancelled,
+// and its source removed; its epoch is fenced (durably too), so only the
+// epoch the worker registers after its idle check claims again. A replay of
+// the completion is refused as gone. A job whose own cleanup failed (fenced
+// as before), one the worker reported running, and one whose cancellation
+// was requested are judged as before.
+func TestWorkerDrainRefusalReturnsJobToQueue(t *testing.T) {
+	const reason = "worker draining: job-account cleanup must be verified when no job runs: job j_other cleanup unverified: job never started"
+	for name, tc := range map[string]struct {
+		cleanup bool
+		running bool
+		cancel  bool
+		state   model.State
+		fenced  bool
+	}{
+		"refused":         {cleanup: true, state: model.Queued, fenced: true},
+		"cleanup failed":  {cleanup: false, state: model.Failed, fenced: true},
+		"already running": {cleanup: true, running: true, state: model.Failed},
+		"cancelled":       {cleanup: true, cancel: true, state: model.Cancelled},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newRuntime(t)
+			c := f.controller
+			ctx := context.Background()
+			lease := f.lease(t, model.Build)
+			c.mu.Lock()
+			epoch := c.epoch
+			c.mu.Unlock()
+			if tc.running {
+				if code := lifecycleRequest(t, c, lease, "/stage", protocol.Stage{State: model.Running}); code != http.StatusNoContent {
+					t.Fatalf("running stage status %d", code)
+				}
+			}
+			if tc.cancel {
+				if _, err := f.db.Cancel(ctx, lease.Job.ID, "operator", model.CancelReason{Source: model.CancelClient, Principal: "owner"}, c.options.Now()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			result := f.result(t, lease)
+			result.State, result.Reason, result.CleanupOK, result.ExitCode = model.Failed, reason, tc.cleanup, nil
+			completion, err := json.Marshal(map[string]any{"result": result, "seal": buildseal.Envelope{}, "admission_refused": "worker_draining"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Only a requeue retires the epoch, and the worker rotates only on
+			// this answer; a refusal judged otherwise is a plain 204 (#214
+			// review: a cancel recorded first leaves the epoch valid).
+			want := answer{code: http.StatusNoContent}
+			if tc.state == model.Queued {
+				want = retiredAnswer
+			}
+			if got := completeWith(c, lease, bytes.NewReader(completion)); got != want {
+				t.Fatalf("completion answer %+v, want %+v", got, want)
+			}
+			job, err := f.db.Get(ctx, lease.Job.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if job.State != tc.state {
+				t.Fatalf("job %+v, want state %s", job, tc.state)
+			}
+			c.mu.Lock()
+			fenced, active := c.epoch != epoch, len(c.active)
+			c.mu.Unlock()
+			if fenced != tc.fenced {
+				t.Fatalf("epoch fenced %v, want %v", fenced, tc.fenced)
+			}
+			if active != 0 {
+				t.Fatalf("%d executions still active", active)
+			}
+			if tc.state != model.Queued {
+				return
+			}
+			if job.LeaseToken != "" || job.WorkerEpoch != "" || job.Lane != 0 || job.Deadline != nil || job.StartedAt != nil || job.CancelRequested || job.CancelReason != nil || len(job.Result) != 0 {
+				t.Fatalf("requeued job kept its run: %+v", job)
+			}
+			if durable, err := f.db.EpochFenced(ctx, epoch); err != nil || !durable {
+				t.Fatalf("refusing epoch not fenced in the store: %v %v", durable, err)
+			}
+			if _, err := os.Stat(filepath.Join(f.source.directory, lease.Job.ID+".tar")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("source export was not removed: %v", err)
+			}
+			if got := completeWith(c, lease, bytes.NewReader(completion)); got.code != http.StatusGone {
+				t.Fatalf("replayed completion %+v, want 410", got)
+			}
+			replayed, err := f.db.Get(ctx, lease.Job.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if replayed.State != model.Queued || replayed.LeaseToken != "" || replayed.CancelRequested || len(replayed.Result) != 0 {
+				t.Fatalf("replay changed the job: %+v", replayed)
+			}
+		})
+	}
+}
+
 // #201: a completion the worker reports as its own end of a stalled job
 // ends cancelled with cancel source stalled, which pull mode reruns once,
 // and keeps the reason distinct from an operator's cancel. With its cleanup

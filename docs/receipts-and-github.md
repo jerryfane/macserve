@@ -171,6 +171,10 @@ cancelled. API jobs are never rerun. Automatic reruns are bounded at two per hea
 reruns; over the bound, or while the run's publication is in flight, the cancelled attempt stays current and
 a later poll retries.
 
+A job a draining worker refused before it started (`admission_refused: worker_draining`, #214) does not end its
+attempt: the controller returns it to the queue as the same job, so the same check run goes from `in_progress` back
+to `queued` and completes when the job runs; no rerun is recorded and no new check is created.
+
 An owner (scope `service:admin`) can request a rerun without a comment:
 `POST /v1/admin/github/rerun {"repository_id": <id>, "repo": "<owner/name>", "sha": "<40 hex>", "profile": "<id>"}`
 (either or both of `repository_id` and `repo`; add `"shard": "<name>"` for a matrix entry's run, which the

@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -259,6 +261,86 @@ func TestLaneResidueDrainsUntilIdleQuiesce(t *testing.T) {
 	}
 	if err := engine.Recover(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// #214: a job waiting in enter while another job finalizing alone holds the
+// whole account is refused when that job's cleanup fails and drains the
+// worker. Nothing of it ran, so it is refused (cleanup_ok, idle verdict
+// not_required, ErrDrainRefusal) for the controller to return to the queue,
+// instead of reported as an unverified cleanup; the job whose own cleanup
+// failed still fails it, and the drain lasts until the idle check passes.
+func TestDrainWhileWaitingForAccountRequeuesWaitingJob(t *testing.T) {
+	runner := newLaneFake()
+	engine := laneEngine(t, runner, 2)
+	source, data := sourceFixture(t)
+	gate := runner.gate("job-a")
+	a := runLane(engine, fixtureLaneJob(t, "job-a", model.Build), source, data)
+	<-runner.started
+	finalizing, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	var failing atomic.Bool
+	failing.Store(true)
+	runner.fakeRunner.quiesce = func(ctx context.Context) error {
+		runner.event("quiesce")
+		if !failing.Load() {
+			return ctx.Err()
+		}
+		once.Do(func() { close(finalizing) })
+		<-release
+		return errors.New("simulator shutdown failed: context deadline exceeded")
+	}
+	waiting := make(chan struct{})
+	var waited sync.Once
+	engine.mu.Lock()
+	engine.enterWaiting = func(job string) {
+		if job == "job-b" {
+			waited.Do(func() { close(waiting) })
+		}
+	}
+	engine.mu.Unlock()
+	close(gate)
+	<-finalizing
+	b := runLane(engine, fixtureLaneJob(t, "job-b", model.Build), source, data)
+	// job-b waits in enter for job-a's hold on the whole account.
+	select {
+	case <-waiting:
+	case <-time.After(30 * time.Second):
+		t.Fatal("job-b never waited for the account")
+	}
+	close(release)
+	first := <-a
+	if first.result.CleanupOK || first.result.Concurrency == nil || first.result.Concurrency.IdleVerdict != IdleDeferred {
+		t.Fatalf("failed cleanup: %+v %v", first.result, first.err)
+	}
+	second := <-b
+	if !errors.Is(second.err, ErrDrain) || !errors.Is(second.err, ErrDrainRefusal) {
+		t.Fatalf("waiting job error: %v", second.err)
+	}
+	if second.result.State != model.Failed || !second.result.CleanupOK || second.result.Concurrency == nil || second.result.Concurrency.IdleVerdict != IdleNotRequired || second.result.FinishedAt.IsZero() || second.result.Reason == "" {
+		t.Fatalf("waiting job not refused: %+v", second.result)
+	}
+	base := filepath.Dir(engine.options.Root)
+	if err := filepath.WalkDir(base, func(path string, _ fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if strings.Contains(filepath.Base(path), "job-b") {
+			return fmt.Errorf("refused job left %s", path)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.LaneReady(context.Background()); !errors.Is(err, ErrDrain) {
+		t.Fatalf("draining engine ready: %v", err)
+	}
+	failing.Store(false)
+	if err := engine.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.LaneReady(context.Background()); err != nil {
+		t.Fatalf("drain survived the idle check: %v", err)
 	}
 }
 

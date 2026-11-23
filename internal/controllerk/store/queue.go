@@ -390,6 +390,19 @@ func (s *Store) Transition(ctx context.Context, id, lease string, from, to model
 // would have before. Only the controller calls it, for a lease no worker
 // received, after removing the job's source.
 func (s *Store) Requeue(ctx context.Context, id, lease, reason string, now time.Time) error {
+	return s.requeue(ctx, id, lease, reason, now, false)
+}
+
+// RequeueFenced is Requeue for a delivered lease the worker refused before
+// the job started because it drains (#214): in the same transaction it
+// fences the lease's epoch permanently, so no request of that epoch, an
+// outstanding /next included, claims the job (or any other) again; only the
+// epoch the worker registers after its idle check passes does.
+func (s *Store) RequeueFenced(ctx context.Context, id, lease, reason string, now time.Time) error {
+	return s.requeue(ctx, id, lease, reason, now, true)
+}
+
+func (s *Store) requeue(ctx context.Context, id, lease, reason string, now time.Time, fence bool) error {
 	if !validReason(reason) || !validTime(now) {
 		return ErrInvalid
 	}
@@ -407,6 +420,11 @@ func (s *Store) Requeue(ctx context.Context, id, lease, reason string, now time.
 	}
 	if job.State != model.Preparing || job.CancelRequested {
 		return ErrTransition
+	}
+	if fence {
+		if _, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO invalid_epochs(epoch) VALUES(?)", job.WorkerEpoch); err != nil {
+			return err
+		}
 	}
 	_, err = tx.ExecContext(ctx, "UPDATE jobs SET state='queued',worker_epoch='',lease_token='',started_at=NULL,deadline=NULL,lane=NULL,reason=?,updated_at=? WHERE id=?", reason, now.UnixNano(), id)
 	if err != nil {

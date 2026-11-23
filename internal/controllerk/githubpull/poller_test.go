@@ -441,6 +441,44 @@ func TestHTTPFailureEnsureAndExplicitBoundedReruns(t *testing.T) {
 	}
 }
 
+// #214: a job a draining worker refused before it started returns to the
+// queue (store.Requeue), which is not the end of its attempt: the same job,
+// attempt and check run go back to queued, no new check is created and no
+// rerun is recorded, and the job's completion after its reclaim completes
+// that same check.
+func TestHTTPDrainRefusalRequeueKeepsAttemptAndCheck(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.poll(t)
+	first := f.run(t)
+	job, err := f.s.Claim(ctx, "worker-epoch", f.options.Now(), 1, false)
+	if err != nil || job.ID != first.JobID {
+		t.Fatalf("claim %s: %v", job.ID, err)
+	}
+	f.poll(t)
+	if check, _ := f.current(t); check.ID != first.CheckID || check.Status != "in_progress" {
+		t.Fatalf("claimed check: %+v", check)
+	}
+	created := f.remote.created
+	if err := f.s.Requeue(ctx, job.ID, job.LeaseToken, "returned to queue: the worker refused it before it started while draining", f.options.Now()); err != nil {
+		t.Fatal(err)
+	}
+	f.poll(t)
+	run := f.run(t)
+	check, packet := f.current(t)
+	if run.JobID != first.JobID || run.AttemptID != first.AttemptID || run.CheckID != first.CheckID || check.Status != "queued" || check.Conclusion != "" || packet.JobID != first.JobID || f.remote.created != created {
+		t.Fatalf("requeued job did not keep its attempt and check: run %+v (was %+v) check %+v creates=%d (was %d)", run, first, check, f.remote.created, created)
+	}
+	f.finish(t, model.Failed, json.RawMessage(`{}`))
+	f.poll(t)
+	f.poll(t)
+	run = f.run(t)
+	done, _ := f.current(t)
+	if run.JobID != first.JobID || run.AttemptID != first.AttemptID || done.ID != first.CheckID || done.Status != "completed" || done.Conclusion != "failure" || f.remote.created != created {
+		t.Fatalf("reclaimed completion: run %+v check %+v creates=%d", run, done, f.remote.created)
+	}
+}
+
 func TestHTTPCurrentHeadRevalidationAndPeriodicUnconditionalEnrollment(t *testing.T) {
 	f := newFixture(t)
 	f.poll(t)

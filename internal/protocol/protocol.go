@@ -72,7 +72,8 @@ const HeartbeatTimeout = 30 * time.Second
 // to the keyholder unchanged. AdmissionRefused is set only when the worker
 // refused the job before it ran for a cause of its own (a failed result
 // with cleanup_ok); the controller then ends the job cancelled by the
-// service (model.CancelWorkerAdmission). A controller from before this field
+// service (model.CancelWorkerAdmission), except AdmissionWorkerDraining,
+// which returns the job to the queue untouched. A controller from before this field
 // refuses a completion carrying it (unknown fields are refused), so the
 // worker and controller of one release ship together. Stalled is set only
 // when the worker ended the job itself because its run command's output
@@ -84,6 +85,18 @@ type Completion struct {
 	Seal             buildseal.Envelope `json:"seal"`
 	AdmissionRefused AdmissionRefusal   `json:"admission_refused,omitempty"`
 	Stalled          bool               `json:"stalled,omitempty"`
+}
+
+// CompletionReply is the controller's answer (200) to a completion whose
+// handling retired the worker's epoch: a drain refusal
+// (AdmissionWorkerDraining) whose job it returned to the queue, fencing the
+// lease's epoch in the same transaction (#214). Every other accepted
+// completion is answered 204 with no body, and the epoch stays valid unless
+// the worker's own cleanup was unverified. The worker registers a new epoch
+// after its idle check only on what the controller committed, never on the
+// refusal it sent.
+type CompletionReply struct {
+	EpochRetired bool `json:"epoch_retired"`
 }
 
 // AdmissionRefusal is why the worker refused a job's admission before it
@@ -104,6 +117,13 @@ const AdmissionACLCensusUnavailable AdmissionRefusal = "acl_census_unavailable"
 // the job is returned to the queue rather than failed (#206).
 const AdmissionRelaunchUnverified AdmissionRefusal = "relaunch_unverified"
 
+// AdmissionWorkerDraining is a job refused before it started because the
+// worker drains (another job's cleanup is unverified) until its idle check
+// (worker.ErrDrainRefusal): nothing of the job ran. The controller returns
+// it to the queue untouched (same job, attempt and check run), never
+// cancelled (#214).
+const AdmissionWorkerDraining AdmissionRefusal = "worker_draining"
+
 // DeliveryTimeout bounds the worker's delivery of a completion after its
 // finalization (worker.FinalizationTimeout), and the controller's handling
 // of one. The controller's finalizing lease budget covers both, plus its
@@ -112,5 +132,5 @@ const DeliveryTimeout = 2 * time.Minute
 
 // Valid reports whether r is empty or a known refusal.
 func (r AdmissionRefusal) Valid() bool {
-	return r == "" || r == AdmissionACLCensusUnavailable || r == AdmissionRelaunchUnverified
+	return r == "" || r == AdmissionACLCensusUnavailable || r == AdmissionRelaunchUnverified || r == AdmissionWorkerDraining
 }

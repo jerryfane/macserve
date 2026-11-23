@@ -97,7 +97,9 @@ Optional `signer` connects the controller to the [code signer](#code-signer).
   census or a membership check, cut short by its deadline on a loaded host; `relaunch_unverified`: a lane admission
   beside running jobs that could not verify an exited audited GUI process's launchd relaunch) with a failed result and
   `cleanup_ok`;
-  the job then ends `cancelled`. It records `stalled` when the worker reports that it ended the job itself because
+  the job then ends `cancelled`. A refusal `worker_draining` (the worker drains for another job's unverified cleanup
+  and refused the job before it started, #214) is not a cancellation: the job returns to the queue untouched. It
+  records `stalled` when the worker reports that it ended the job itself because
   the run command's output stopped for the template's stall limit (`stalled` in its completion; see
   `stall_seconds` below); the job then ends `cancelled` with that reason (`stalled: no job output for …`), not
   `cancellation requested`, or `failed` if its cleanup was not confirmed. Only the first request is
