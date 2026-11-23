@@ -130,7 +130,8 @@ func (c *Controller) handler() http.Handler {
 			respond(w, r, nil, err)
 			return
 		}
-		if err := c.refusedAdmission(r.Context(), job, completion); err != nil {
+		handled, err := c.refusedAdmission(r.Context(), job, completion)
+		if err != nil || handled {
 			respond(w, r, nil, err)
 			return
 		}

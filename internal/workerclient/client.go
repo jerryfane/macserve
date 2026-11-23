@@ -659,6 +659,12 @@ func (c *Client) execute(parent context.Context, lease protocol.Lease) (bool, er
 	if executed && result.State == model.Failed && result.CleanupOK && errors.Is(err, worker.ErrRelaunchRefusal) {
 		saved.AdmissionRefused = protocol.AdmissionRelaunchUnverified
 	}
+	// The engine refused the job before it started because the worker
+	// drains until its idle check (#214): the controller returns it to the
+	// queue.
+	if executed && result.State == model.Failed && result.CleanupOK && errors.Is(err, worker.ErrDrainRefusal) {
+		saved.AdmissionRefused = protocol.AdmissionWorkerDraining
+	}
 	// The engine ended the job itself because its run command's output
 	// stopped (worker.ErrStalled), and nothing else cancelled it first.
 	if executed && cause == nil && errors.Is(err, worker.ErrStalled) {

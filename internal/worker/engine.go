@@ -42,10 +42,16 @@ var (
 	// inconclusive, never contamination): the service, not the job, caused
 	// the refusal, and the client reports it as one (#206).
 	ErrRelaunchRefusal = errors.New("job refused before it ran; the worker drains until the idle check")
-	identifier         = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
-	sha40              = regexp.MustCompile(`^[0-9a-f]{40}$`)
-	sha64              = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	udidPattern        = regexp.MustCompile(`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`)
+	// ErrDrainRefusal is a job refused before it started because the
+	// worker drains (another job's cleanup is unverified, or an
+	// unattributed process remains) until its idle check: nothing of the
+	// job ran, and the client reports it as a refusal that returns the job
+	// to the queue (#214).
+	ErrDrainRefusal = errors.New("job refused before it started; the worker drains until the idle check")
+	identifier      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
+	sha40           = regexp.MustCompile(`^[0-9a-f]{40}$`)
+	sha64           = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	udidPattern     = regexp.MustCompile(`^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$`)
 )
 
 type Engine struct {

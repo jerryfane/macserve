@@ -174,6 +174,22 @@ func (e *Engine) Execute(parent context.Context, job model.Job, source Source, a
 	result = Result{State: model.Failed, Source: source, StartedAt: e.options.Now()}
 	solo, err := e.enter(parent, job)
 	if err != nil {
+		if errors.Is(err, ErrDrain) && parent.Err() == nil {
+			// enter refused the job because the worker drains (another
+			// job's cleanup is unverified, or an unattributed process
+			// remains) until its idle check. Nothing of the job exists
+			// here: no lane, manifest, workspace, simulator or command, so
+			// it has nothing of its own to clean up. It is refused
+			// (cleanup_ok, idle verdict not_required) and the controller
+			// returns it to the queue (#214). ErrBusy is excluded: it is
+			// also the duplicate-job refusal.
+			result.CleanupOK = true
+			result.Concurrency = &Concurrency{Lane: max(job.Lane, 1), MaxLanes: e.lanes(), OverlappedJobs: []Overlap{}, Attribution: AttributionLineage, IdleVerdict: IdleNotRequired}
+			err = fmt.Errorf("%w: %w", err, ErrDrainRefusal)
+			log.Printf("worker job %s refused before it started: %v", job.ID, err)
+			result.Reason = PublicReason(err)
+			result.FinishedAt = e.options.Now()
+		}
 		return result, err
 	}
 	defer e.leave(job.ID)

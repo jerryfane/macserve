@@ -158,28 +158,16 @@ func (c *Controller) workerStoppedAsking(a *execution, now time.Time) bool {
 }
 
 // requeueUndelivered returns a's prepared lease, never delivered, to the
-// queue: its source is removed and the job waits as queued, at no cost to its
-// deadline, until the worker asks again; it is then claimed in fair order
-// with a new deadline. A source that could not be removed ends the lease as
-// endUndelivered does. Callers hold c.mu, which is released around the
-// removal.
+// queue (returnToQueue): the job waits as queued, at no cost to its deadline,
+// until the worker asks again. A lease that could not return to the queue
+// ends interrupted: its source is gone, so it can no longer be delivered.
+// Callers hold c.mu, which is released around the source removal.
 func (c *Controller) requeueUndelivered(ctx context.Context, a *execution, job model.Job, now time.Time) {
-	a.fencing = true
-	c.mu.Unlock()
-	cleanupErr := c.removeSource(job.ID)
-	c.mu.Lock()
-	if !c.holds(a) || a.offered {
+	attempted, err := c.returnToQueue(ctx, a, job, requeuedUndelivered, now, false)
+	if !attempted {
 		return
 	}
-	if cleanupErr != nil {
-		if c.options.Store.FailPreparation(ctx, job.ID, job.LeaseToken, model.Interrupted, false, "undelivered lease source removal failed", now) == nil {
-			c.release(a)
-			c.epoch = ""
-		}
-		return
-	}
-	if err := c.options.Store.Requeue(ctx, job.ID, job.LeaseToken, requeuedUndelivered, now); err != nil {
-		// Its source is gone: the lease can no longer be delivered.
+	if err != nil {
 		log.Printf("controller undelivered lease requeue failed: job=%s: %v", job.ID, err)
 		if c.options.Store.FailPreparation(ctx, job.ID, job.LeaseToken, model.Interrupted, true, "undelivered lease could not return to the queue", now) == nil {
 			c.release(a)
@@ -187,7 +175,40 @@ func (c *Controller) requeueUndelivered(ctx context.Context, a *execution, job m
 		return
 	}
 	log.Printf("controller returned undelivered lease to the queue: job=%s lane=%d: no work request for %s beside a running lane", job.ID, job.Lane, undeliveredWait)
+}
+
+// returnToQueue returns a's lease of job, still preparing, to the queue: its
+// source is removed and the job waits as queued with reason, keeping its id,
+// sequence, attempt and check run, until a worker claims it in fair order
+// under a valid epoch with a new lease and deadline (Store.Requeue).
+// delivered is whether the worker received the lease. It reports whether
+// Store.Requeue was attempted, and its error: not attempted when a is no
+// longer held or its delivery changed while c.mu was released, or when its
+// source could not be removed, which ends the lease interrupted and fences
+// the epoch as endUndelivered does. A failed requeue leaves a active for the
+// caller. Callers hold c.mu, which is released around the removal.
+func (c *Controller) returnToQueue(ctx context.Context, a *execution, job model.Job, reason string, now time.Time, delivered bool) (attempted bool, err error) {
+	a.fencing = true
+	c.mu.Unlock()
+	cleanupErr := c.removeSource(job.ID)
+	c.mu.Lock()
+	if !c.holds(a) || a.offered != delivered {
+		return false, nil
+	}
+	if cleanupErr != nil {
+		if c.options.Store.FailPreparation(ctx, job.ID, job.LeaseToken, model.Interrupted, false, "lease source removal failed", now) == nil {
+			a.cancel()
+			c.release(a)
+			c.epoch = ""
+		}
+		return false, nil
+	}
+	if err := c.options.Store.Requeue(ctx, job.ID, job.LeaseToken, reason, now); err != nil {
+		return true, err
+	}
+	a.cancel()
 	c.release(a)
+	return true, nil
 }
 
 // simulatorStartGap staggers the starts of simulator jobs. A simulator job is

@@ -160,10 +160,13 @@ func (w *holdWorld) executor() *fakeExecutor {
 		},
 		execute: func(ctx context.Context, job model.Job, _ worker.Source, r io.Reader, sink worker.Sink) (worker.Result, error) {
 			io.ReadAll(r)
-			if job.ID == "j_refused" || job.ID == "j_relaunch" {
+			if job.ID == "j_refused" || job.ID == "j_relaunch" || job.ID == "j_draining" {
 				err := fmt.Errorf("lane admission: %w", worker.ErrACLCensusUnavailable)
 				if job.ID == "j_relaunch" {
 					err = fmt.Errorf("lane admission: %w: %w", worker.ErrDrain, worker.ErrRelaunchRefusal)
+				}
+				if job.ID == "j_draining" {
+					err = fmt.Errorf("%w: job j_other cleanup unverified: %w", worker.ErrDrain, worker.ErrDrainRefusal)
 				}
 				return worker.Result{State: model.Failed, Reason: err.Error(), CleanupOK: true, StartedAt: time.Now(), FinishedAt: time.Now(), Concurrency: &worker.Concurrency{Lane: 2, MaxLanes: 2, Attribution: worker.AttributionLineage, IdleVerdict: worker.IdleNotRequired}}, err
 			}
@@ -344,9 +347,11 @@ func TestHeldStageRetriedUntilRecorded(t *testing.T) {
 // beside a running sibling: it is not held for an idle check, and the
 // sibling's completion carries no refusal. An ACL census cut short (#148);
 // an unverifiable relaunch at lane admission, which the controller returns
-// to the queue instead of failing the job (#206).
+// to the queue instead of failing the job (#206); a job refused before it
+// started because the worker drains, which the controller returns to the
+// queue untouched (#214).
 func TestCensusAdmissionRefusalReportedAtOnce(t *testing.T) {
-	for job, want := range map[string]protocol.AdmissionRefusal{"j_refused": protocol.AdmissionACLCensusUnavailable, "j_relaunch": protocol.AdmissionRelaunchUnverified} {
+	for job, want := range map[string]protocol.AdmissionRefusal{"j_refused": protocol.AdmissionACLCensusUnavailable, "j_relaunch": protocol.AdmissionRelaunchUnverified, "j_draining": protocol.AdmissionWorkerDraining} {
 		t.Run(job, func(t *testing.T) {
 			w := newHoldWorld(t, "j_sib", job)
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

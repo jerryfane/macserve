@@ -453,6 +453,18 @@ start, launchd label, executable) and the unattributed ones beside them (PID, UI
 command name; never an argument or the environment), at most eight of each, in the worker's log, the drain reason and
 the job's reason, which the controller logs whole.
 
+A job whose own cleanup is unverified drains the worker the same way, and a job delivered meanwhile that is still
+waiting to start (blocked while the finalizing job holds the whole job account) is refused by that drain before it
+starts (#214). Nothing of it exists on the worker (no lane, manifest, workspace, simulator or command), so it is not
+reported as an unverified cleanup: reason `worker draining: …`, `cleanup_ok` true, idle verdict `not_required`, and
+its completion carries `admission_refused: worker_draining`. The controller returns a job still `preparing` and not
+cancelled to the queue untouched: same job, attempt and check run (the check goes back to `queued`), its place in the
+queue kept, its lease, epoch, lane and deadline cleared and its source removed. It is not cancelled, so pull mode
+records no rerun. It can only be claimed again through a valid epoch, which the worker registers after its idle check
+passes; a replay of the refused completion gets 410. The job whose cleanup failed still fails and fences its epoch, a
+job already in a lane is untouched, and a job the worker reported running or whose cancel was requested is judged as
+any completion.
+
 An admission or finalization inspection still cut short by its own deadline (a loaded host) observed nothing, which
 is no evidence either way (#148, #150): the registered-root ACL census after its retries, `hostguard`'s
 protected-input ACL inspection of the persistence authority (`cannot inspect protected input ACL: signal: killed:

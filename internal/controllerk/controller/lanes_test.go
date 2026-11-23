@@ -307,6 +307,59 @@ func TestCleanupFailureFencesClaimsWhileSiblingCompletes(t *testing.T) {
 	}
 }
 
+// #214: a delivered lease the worker refused before it started because
+// another job's cleanup left it draining returns to the queue, but the
+// epoch that job's failed cleanup fenced cannot claim it: only the new
+// epoch the worker registers after its idle check passes does, in its old
+// place and with a new lease. The refused lease is gone.
+func TestDrainRefusedLeaseWaitsForNewEpoch(t *testing.T) {
+	f := newLanes(t, 2)
+	f.enqueue(t, "one", model.Build)
+	refused := f.enqueue(t, "two", model.Build)
+	later := f.enqueue(t, "later", model.Build)
+	f.register(t, "epoch-a", 2)
+	first := f.start(t, "epoch-a")
+	f.claim(t, "epoch-a", first.Job.ID)
+	second := f.offer(t, "epoch-a", first.Job.ID)
+	if second.Job.ID != refused.ID {
+		t.Fatalf("second lease %s, want %s", second.Job.ID, refused.ID)
+	}
+	result := f.result(t, first)
+	result.CleanupOK = false
+	if err := f.controller.complete(context.Background(), first.Job, result, buildseal.Envelope{}); err != nil {
+		t.Fatal(err)
+	}
+	refusal := f.result(t, second)
+	refusal.State, refusal.CleanupOK, refusal.ExitCode = model.Failed, true, nil
+	refusal.Reason = "worker draining: job " + first.Job.ID + " cleanup unverified"
+	completion := protocol.Completion{Result: refusal, AdmissionRefused: "worker_draining"}
+	if code := lifecycleRequest(t, f.controller, second, "/complete", completion); code != http.StatusNoContent {
+		t.Fatalf("drain refusal %d", code)
+	}
+	if job := f.job(t, refused.ID); job.State != model.Queued || job.LeaseToken != "" || job.WorkerEpoch != "" {
+		t.Fatalf("refused job: %+v", job)
+	}
+	if _, err := f.controller.next(context.Background(), "epoch-a", nil); !errors.Is(err, store.ErrLease) {
+		t.Fatalf("fenced epoch asked for work: %v", err)
+	}
+	if job := f.job(t, refused.ID); job.State != model.Queued {
+		t.Fatalf("fenced epoch claimed the refused job: %s", job.State)
+	}
+	f.offset.Store(int64(time.Minute))
+	f.register(t, "epoch-b", 2)
+	f.claim(t, "epoch-b")
+	lease := f.offer(t, "epoch-b")
+	if lease.Job.ID != refused.ID || lease.Token == second.Token || lease.Job.WorkerEpoch != "epoch-b" || lease.Job.Deadline == nil || !lease.Job.Deadline.After(*second.Job.Deadline) {
+		t.Fatalf("reclaimed lease: %+v", lease.Job)
+	}
+	if job := f.job(t, later.ID); job.State != model.Queued {
+		t.Fatalf("later job claimed first: %s", job.State)
+	}
+	if code := lifecycleRequest(t, f.controller, second, "/heartbeat", struct{}{}); code != http.StatusGone {
+		t.Fatalf("refused lease heartbeat %d, want 410", code)
+	}
+}
+
 // A worker that restarts under a new epoch fences the old one: a lease the
 // old epoch claimed and prepared but never received ends as fenced before
 // delivery, its source is removed, and the new epoch registers and claims.
